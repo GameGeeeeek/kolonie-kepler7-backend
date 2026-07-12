@@ -582,6 +582,33 @@ const GALAXY_TICK_MS = 15 * 60 * 1000; // alle 15 Minuten
 const NPC_FACTION_NAMES = ['Void-Marodeure', 'Piratenflotte', 'Aschen-Kartell', 'Rote Klaue', 'Schattenbund', 'Eisenlegion'];
 const ALIEN_RACE_NAMES = ['Kryll-Schwarm', 'Xantheer-Kollektiv', 'Nomaden von Vex', 'Die Verglühten'];
 
+// ============ Geteilter galaktischer Marktplatz ============
+// Handelbare Ressourcen mit ihrem "Normalpreis" (Referenzwert in einer abstrakten Kreditwährung).
+// forschungspunkte sind bewusst NICHT handelbar (nicht als Ware gedacht). Der aktuelle Preis jeder
+// Ressource lebt in db.galaxy.market[key] und bewegt sich um diesen Normalpreis: Käufe treiben ihn
+// hoch, Verkäufe drücken ihn, und im galaxyTick driftet er langsam zum Normalwert zurück. Alle Spieler
+// teilen sich denselben Markt.
+const MARKET_RESOURCES = {
+  erz:        { basePrice: 1.0,  min: 0.35, max: 3.0 },
+  kristalle:  { basePrice: 1.6,  min: 0.55, max: 4.5 },
+  deuterium:  { basePrice: 2.4,  min: 0.85, max: 7.0 },
+  energie:    { basePrice: 1.2,  min: 0.45, max: 3.5 },
+  antimaterie:{ basePrice: 12.0, min: 4.0,  max: 40.0 }
+};
+// Wie stark eine gehandelte Menge den Preis bewegt (pro 1000 Einheiten). Käufe +, Verkäufe −.
+const MARKET_IMPACT_PER_1000 = 0.04;
+function loadOrInitMarket(g) {
+  if (!g.market) g.market = {};
+  for (const [key, info] of Object.entries(MARKET_RESOURCES)) {
+    if (typeof g.market[key] !== 'number') g.market[key] = info.basePrice;
+  }
+  return g.market;
+}
+function clampMarketPrice(key, price) {
+  const info = MARKET_RESOURCES[key];
+  return Math.max(info.min, Math.min(info.max, price));
+}
+
 function loadOrInitGalaxy() {
   if (!db.galaxy) {
     db.galaxy = {
@@ -612,6 +639,7 @@ function loadOrInitGalaxy() {
   if (db.galaxy.activeWormhole === undefined) db.galaxy.activeWormhole = null;
   if (!db.galaxy.news) db.galaxy.news = [];
   if (!db.galaxy.lastTick) db.galaxy.lastTick = Date.now();
+  loadOrInitMarket(db.galaxy);
   return db.galaxy;
 }
 function pushGalaxyNews(icon, text) {
@@ -638,6 +666,17 @@ function galaxyTick() {
   g.npcEmpireStrength = Math.min(2.5, g.npcEmpireStrength * (1 + 0.002 + Math.random() * 0.003));
   // Handelsmarkt: leichter Random Walk zwischen 0.75x und 1.30x.
   g.marketTrend = Math.max(0.75, Math.min(1.30, g.marketTrend + (Math.random() - 0.5) * 0.08));
+
+  // Geteilter Marktplatz: jeder Preis driftet pro Tick 15% des Weges zurück zu seinem Normalpreis
+  // (so erholen sich Preise nach großen Käufen/Verkäufen langsam) und bekommt etwas Rauschen, damit
+  // der Markt auch ohne Spieleraktivität leicht lebendig wirkt.
+  const market = loadOrInitMarket(g);
+  for (const [key, info] of Object.entries(MARKET_RESOURCES)) {
+    const cur = market[key];
+    const towardBase = cur + (info.basePrice - cur) * 0.15;
+    const noise = towardBase * (Math.random() - 0.5) * 0.05;
+    market[key] = clampMarketPrice(key, towardBase + noise);
+  }
 
   // Abgelaufene kollabierte Systeme wieder freigeben.
   for (const [sysId, expiresAt] of Object.entries(g.collapsedSystems)) {
@@ -706,6 +745,53 @@ galaxyTick(); // einmal sofort beim Serverstart, damit nicht 15 Min. auf den ers
 
 app.get('/api/galaxy', authMiddleware, (req, res) => {
   res.json(loadOrInitGalaxy());
+});
+
+// Aktuelle Marktpreise abrufen (inkl. Normalpreis, damit das Frontend "teuer/billig" anzeigen kann).
+app.get('/api/market', authMiddleware, (req, res) => {
+  const g = loadOrInitGalaxy();
+  const market = loadOrInitMarket(g);
+  const out = {};
+  for (const key of Object.keys(MARKET_RESOURCES)) {
+    out[key] = { price: market[key], basePrice: MARKET_RESOURCES[key].basePrice };
+  }
+  res.json({ market: out });
+});
+
+// Handeln auf dem geteilten Markt. Body: { action:'buy'|'sell', resource, amount }.
+// Der Server ist die Autorität über den PREIS (verhindert manipulierte Preise vom Client), rechnet die
+// Kreditkosten/-erlöse aus, bewegt den Preis nach Angebot/Nachfrage und gibt das Ergebnis zurück. Die
+// eigentlichen Ressourcen-/Kredit-Bestände des Spielers liegen im clientseitigen Speicherstand; der
+// Client bucht sie nach einer erfolgreichen Antwort. Amount wird serverseitig begrenzt.
+app.post('/api/market/trade', authMiddleware, async (req, res) => {
+  const { action, resource, amount } = req.body || {};
+  if (action !== 'buy' && action !== 'sell') return res.status(400).json({ error: 'ungültige Aktion' });
+  if (!MARKET_RESOURCES[resource]) return res.status(400).json({ error: 'nicht handelbare Ressource' });
+  const amt = Math.floor(Number(amount));
+  if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: 'ungültige Menge' });
+  if (amt > 1000000) return res.status(400).json({ error: 'Menge zu groß (max. 1.000.000)' });
+
+  const g = loadOrInitGalaxy();
+  const market = loadOrInitMarket(g);
+  const priceBefore = market[resource];
+  // Durchschnittspreis über die gehandelte Menge (der Preis bewegt sich WÄHREND des Handels linear,
+  // große Trades bekommen dadurch einen spürbar schlechteren Schnitt – realistische Slippage).
+  const impact = (amt / 1000) * MARKET_IMPACT_PER_1000 * MARKET_RESOURCES[resource].basePrice;
+  const priceAfterRaw = action === 'buy' ? priceBefore + impact : priceBefore - impact;
+  const priceAfter = clampMarketPrice(resource, priceAfterRaw);
+  const avgPrice = (priceBefore + priceAfter) / 2;
+  const credits = Math.round(avgPrice * amt);
+
+  market[resource] = priceAfter;
+  saveDb();
+
+  res.json({
+    ok: true,
+    action, resource, amount: amt,
+    credits,                 // beim Kauf: Kosten; beim Verkauf: Erlös
+    avgPrice,
+    priceBefore, priceAfter
+  });
 });
 
 // ============ GitHub-Deploy-Webhook: sofortiges Update statt Warten auf den Cron-Job ============

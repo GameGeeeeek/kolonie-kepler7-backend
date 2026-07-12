@@ -570,3 +570,108 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
 app.listen(PORT, () => {
   console.log('Kepler-7 Server läuft auf Port ' + PORT);
 });
+
+// ============ Lebendige Galaxie: gemeinsame Hintergrund-Simulation ============
+// Läuft permanent im Backend-Prozess (setInterval), unabhängig davon ob gerade ein Spieler online
+// ist. Alle Spieler sehen denselben Zustand über GET /api/galaxy. Persistiert in db.galaxy, über
+// dieselbe saveDb()-Mechanik wie alles andere.
+const GALAXY_TICK_MS = 15 * 60 * 1000; // alle 15 Minuten
+const NPC_FACTION_NAMES = ['Void-Marodeure', 'Piratenflotte', 'Aschen-Kartell', 'Rote Klaue', 'Schattenbund', 'Eisenlegion'];
+const ALIEN_RACE_NAMES = ['Kryll-Schwarm', 'Xantheer-Kollektiv', 'Nomaden von Vex', 'Die Verglühten'];
+
+function loadOrInitGalaxy() {
+  if (!db.galaxy) {
+    db.galaxy = {
+      npcEmpireStrength: 1.0,
+      marketTrend: 1.0,
+      activePirateFaction: NPC_FACTION_NAMES[0],
+      unlockedAlienRaces: [],
+      collapsedSystems: {},
+      activeWormhole: null,
+      news: [],
+      lastTick: Date.now()
+    };
+  }
+  // Migration für Bestandsdaten (falls das Feld aus einer älteren Version noch fehlt)
+  if (db.galaxy.npcEmpireStrength === undefined) db.galaxy.npcEmpireStrength = 1.0;
+  if (db.galaxy.marketTrend === undefined) db.galaxy.marketTrend = 1.0;
+  if (!db.galaxy.activePirateFaction) db.galaxy.activePirateFaction = NPC_FACTION_NAMES[0];
+  if (!db.galaxy.unlockedAlienRaces) db.galaxy.unlockedAlienRaces = [];
+  if (!db.galaxy.collapsedSystems) db.galaxy.collapsedSystems = {};
+  if (db.galaxy.activeWormhole === undefined) db.galaxy.activeWormhole = null;
+  if (!db.galaxy.news) db.galaxy.news = [];
+  if (!db.galaxy.lastTick) db.galaxy.lastTick = Date.now();
+  return db.galaxy;
+}
+function pushGalaxyNews(icon, text) {
+  const g = loadOrInitGalaxy();
+  g.news.unshift({ id: crypto.randomUUID(), time: Date.now(), icon, text });
+  g.news = g.news.slice(0, 40);
+}
+// Nie ein System zerstören, in dem tatsächlich ein Spieler zuhause ist.
+function occupiedSystems() {
+  return new Set(Object.values(db.users).filter(u => u.homeSystem).map(u => u.homeSystem));
+}
+function galaxyTick() {
+  const g = loadOrInitGalaxy();
+  g.lastTick = Date.now();
+
+  // NPC-Reiche wachsen langsam, gedeckelt bei 2.5x, damit es nicht unendlich eskaliert.
+  g.npcEmpireStrength = Math.min(2.5, g.npcEmpireStrength * (1 + 0.002 + Math.random() * 0.003));
+  // Handelsmarkt: leichter Random Walk zwischen 0.75x und 1.30x.
+  g.marketTrend = Math.max(0.75, Math.min(1.30, g.marketTrend + (Math.random() - 0.5) * 0.08));
+
+  // Abgelaufene kollabierte Systeme wieder freigeben.
+  for (const [sysId, expiresAt] of Object.entries(g.collapsedSystems)) {
+    if (expiresAt < Date.now()) {
+      delete g.collapsedSystems[sysId];
+      pushGalaxyNews('ti-sun', 'Das System ' + sysId + ' hat sich nach dem Supernova-Kollaps stabilisiert.');
+    }
+  }
+  // Abgelaufenes Wurmloch schließen.
+  if (g.activeWormhole && g.activeWormhole.expiresAt < Date.now()) {
+    pushGalaxyNews('ti-infinity', 'Das Wurmloch nach ' + g.activeWormhole.to + ' hat sich wieder geschlossen.');
+    g.activeWormhole = null;
+  }
+
+  // Zufällige galaktische Ereignisse, jeweils unabhängige Chance pro Tick (alle 15 Min.).
+  if (Math.random() < 0.12) {
+    const a = NPC_FACTION_NAMES[Math.floor(Math.random() * NPC_FACTION_NAMES.length)];
+    let b = NPC_FACTION_NAMES[Math.floor(Math.random() * NPC_FACTION_NAMES.length)];
+    if (b === a) b = NPC_FACTION_NAMES[(NPC_FACTION_NAMES.indexOf(a) + 1) % NPC_FACTION_NAMES.length];
+    pushGalaxyNews('ti-sword', 'Krieg ausgebrochen: ' + a + ' und ' + b + ' liefern sich Gefechte um umkämpfte Sektoren.');
+  }
+  if (Math.random() < 0.06 && g.unlockedAlienRaces.length < ALIEN_RACE_NAMES.length) {
+    const next = ALIEN_RACE_NAMES[g.unlockedAlienRaces.length];
+    g.unlockedAlienRaces.push(next);
+    pushGalaxyNews('ti-alien', 'Ein neues Volk wurde entdeckt: die ' + next + ' treten erstmals in Erscheinung.');
+  }
+  if (Math.random() < 0.10) {
+    const candidates = NPC_FACTION_NAMES.filter(n => n !== g.activePirateFaction);
+    g.activePirateFaction = candidates[Math.floor(Math.random() * candidates.length)];
+    pushGalaxyNews('ti-skull', g.activePirateFaction + ' gründet eine neue Operationsbasis am Rand der Galaxie.');
+  }
+  if (Math.random() < 0.04) {
+    const occupied = occupiedSystems();
+    const free = SYSTEMS.filter(s => !occupied.has(s) && !g.collapsedSystems[s]);
+    if (free.length) {
+      const target = free[Math.floor(Math.random() * free.length)];
+      g.collapsedSystems[target] = Date.now() + 48 * 3600 * 1000;
+      pushGalaxyNews('ti-sun', 'Supernova! Das unbesiedelte System ' + target + ' ist kollabiert und für 48 Stunden unzugänglich.');
+    }
+  }
+  if (Math.random() < 0.06 && !g.activeWormhole) {
+    const options = SYSTEMS.filter(s => s !== 'kepler');
+    const to = options[Math.floor(Math.random() * options.length)];
+    g.activeWormhole = { from: 'kepler', to, expiresAt: Date.now() + 12 * 3600 * 1000 };
+    pushGalaxyNews('ti-infinity', 'Ein neues Wurmloch ist entstanden: Kepler-System ↔ ' + to + ' (für 12 Stunden geöffnet).');
+  }
+
+  saveDb();
+}
+setInterval(galaxyTick, GALAXY_TICK_MS);
+galaxyTick(); // einmal sofort beim Serverstart, damit nicht 15 Min. auf den ersten Zustand gewartet wird
+
+app.get('/api/galaxy', authMiddleware, (req, res) => {
+  res.json(loadOrInitGalaxy());
+});

@@ -56,7 +56,10 @@ function saveDb() {
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+// verify-Callback speichert den ROHEN Body zusätzlich (req.rawBody) - wird für die
+// GitHub-Webhook-Signaturprüfung gebraucht, da express.json() den Body normalerweise nur geparst
+// bereitstellt. Für alle anderen Routen ändert sich dadurch nichts.
+app.use(express.json({ limit: '2mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 
 function authMiddleware(req, res, next) {
   const header = req.headers.authorization || '';
@@ -674,4 +677,48 @@ galaxyTick(); // einmal sofort beim Serverstart, damit nicht 15 Min. auf den ers
 
 app.get('/api/galaxy', authMiddleware, (req, res) => {
   res.json(loadOrInitGalaxy());
+});
+
+// ============ GitHub-Deploy-Webhook: sofortiges Update statt Warten auf den Cron-Job ============
+// GitHub ruft diese URL direkt nach einem Push auf. Sicherheit über HMAC-SHA256-Signaturprüfung
+// (GITHUB_WEBHOOK_SECRET muss identisch in den GitHub-Repo-Einstellungen UND hier als
+// Umgebungsvariable hinterlegt sein). WICHTIG: Die auszuführenden Befehle sind fest verdrahtet
+// (DEPLOY_TARGETS) und werden NIEMALS aus dem Request-Body übernommen - nur der Repo-NAME aus dem
+// GitHub-Payload entscheidet, welcher der zwei festen Befehle läuft. Das verhindert Command-
+// Injection über einen manipulierten Payload, selbst wenn die Signaturprüfung umgangen würde.
+const { exec } = require('child_process');
+const DEPLOY_WEBHOOK_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
+const DEPLOY_TARGETS = {
+  'kolonie-kepler7': 'cd /deploy/kolonie-kepler7 && git pull -q && cp weltraum_kolonie.html /deploy/web/',
+  'kolonie-kepler7-backend': 'cd /app && git pull -q'
+};
+function verifyGithubSignature(req) {
+  if (!DEPLOY_WEBHOOK_SECRET) return false;
+  const sig = req.headers['x-hub-signature-256'];
+  if (!sig || !req.rawBody) return false;
+  const hmac = crypto.createHmac('sha256', DEPLOY_WEBHOOK_SECRET);
+  const digest = 'sha256=' + hmac.update(req.rawBody).digest('hex');
+  try {
+    const a = Buffer.from(sig), b = Buffer.from(digest);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch (e) { return false; }
+}
+app.post('/api/deploy-webhook', (req, res) => {
+  if (!verifyGithubSignature(req)) {
+    console.warn('Deploy-Webhook: ungültige oder fehlende Signatur, Anfrage abgelehnt.');
+    return res.status(401).json({ error: 'invalid signature' });
+  }
+  const repoName = req.body && req.body.repository && req.body.repository.name;
+  const command = DEPLOY_TARGETS[repoName];
+  if (!command) {
+    console.warn('Deploy-Webhook: unbekanntes Repo im Payload:', repoName);
+    return res.status(400).json({ error: 'unknown repo' });
+  }
+  // Sofort antworten, git pull läuft asynchron im Hintergrund weiter - GitHub erwartet eine
+  // schnelle Antwort und markiert den Webhook sonst als fehlgeschlagen.
+  res.json({ ok: true, repo: repoName });
+  exec(command, { timeout: 30000 }, (err, stdout, stderr) => {
+    if (err) console.error('Deploy-Webhook Fehler für ' + repoName + ':', err.message);
+    else console.log('Deploy-Webhook erfolgreich für ' + repoName + ':', stdout.trim() || '(keine Änderungen)');
+  });
 });

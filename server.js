@@ -697,6 +697,7 @@ function loadOrInitGalaxy() {
   if (db.galaxy.activeWormhole === undefined) db.galaxy.activeWormhole = null;
   if (!db.galaxy.news) db.galaxy.news = [];
   if (!db.galaxy.lastTick) db.galaxy.lastTick = Date.now();
+  if (!db.galaxy.controlledSystems) db.galaxy.controlledSystems = {}; // systemId -> userId (vom Spieler eroberte Systeme)
   loadOrInitMarket(db.galaxy);
   loadOrInitFactions(db.galaxy);
   return db.galaxy;
@@ -847,6 +848,9 @@ function galaxyTick() {
   // Heimatsysteme sind immer tabu. Ergebnisse werden als Galaxie-Nachrichten gemeldet.
   const factions = loadOrInitFactions(g);
   const occupiedByPlayers = occupiedSystems();
+  const controlled = g.controlledSystems || {};
+  // Vom Spieler eroberte Systeme sind für Fraktionen ebenfalls tabu (wie Heimatsysteme).
+  const playerBlocked = new Set([...occupiedByPlayers, ...Object.keys(controlled)]);
   for (const f of Object.values(factions)) {
     // Stärke wächst langsam, skaliert leicht mit Territoriumsgröße (größere Reiche werden stärker).
     f.strength = Math.min(6.0, f.strength * (1 + 0.01 + Math.random() * 0.02) + f.systems.length * 0.002);
@@ -861,7 +865,7 @@ function galaxyTick() {
     for (const sys of f.systems) {
       for (const nb of (SYSTEM_NEIGHBORS[sys] || [])) {
         if (f.systems.includes(nb)) continue;
-        if (occupiedByPlayers.has(nb)) continue;          // Spielersysteme tabu
+        if (playerBlocked.has(nb)) continue;              // Spieler-Heimat & eroberte Systeme tabu
         if (g.collapsedSystems[nb]) continue;             // kollabierte Systeme überspringen
         frontier.add(nb);
       }
@@ -945,6 +949,62 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
     avgPrice,
     priceBefore, priceAfter
   });
+});
+
+// Spieler greift ein NPC-Fraktionssystem an. Der Server ist autoritativ: er prüft die Flotte des
+// Angreifers gegen die Militärstärke der besitzenden Fraktion, würfelt den Ausgang, und bei Erfolg
+// wechselt das System in den Besitz des Spielers (controlledSystems). Bei Misserfolg verliert der
+// Angreifer einen Teil seiner Flotte (Verluste werden in seinen Spielstand geschrieben).
+app.post('/api/faction/attack', authMiddleware, async (req, res) => {
+  const { systemId } = req.body || {};
+  if (!systemId || !SYSTEMS.includes(systemId)) return res.status(400).json({ error: 'Ungültiges Zielsystem.' });
+
+  const g = loadOrInitGalaxy();
+  const factions = loadOrInitFactions(g);
+  // Welche Fraktion besitzt das System?
+  let owner = null;
+  for (const f of Object.values(factions)) { if (f.systems.includes(systemId)) { owner = f; break; } }
+  if (!owner) return res.status(400).json({ error: 'Dieses System gehört keiner Fraktion.' });
+
+  const attackerRaw = getSaveValue(req.userId);
+  if (!attackerRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let attacker;
+  try { attacker = JSON.parse(attackerRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+
+  // Angriffskraft des Spielers vs. Verteidigungskraft der Fraktion (skaliert mit ihrer Militärstärke
+  // und der Größe ihres Reiches, damit große Fraktionen härtere Ziele sind).
+  const attackPower = computeAttackPower(attacker, null);
+  const factionDefense = Math.round(1500 * owner.strength * (1 + owner.systems.length * 0.05));
+  const chance = Math.max(0.08, Math.min(0.92, attackPower / (attackPower + factionDefense)));
+  const success = Math.random() < chance;
+
+  if (success) {
+    // System der Fraktion entziehen und dem Spieler zuschreiben.
+    owner.systems = owner.systems.filter(s => s !== systemId);
+    g.controlledSystems[systemId] = req.userId;
+    attacker.battlePoints = (attacker.battlePoints || 0) + 40;
+    // Beute: Kredite + etwas Ressourcen als Eroberungsbelohnung.
+    const creditReward = 500 + Math.floor(Math.random() * 500);
+    attacker.credits = (attacker.credits || 0) + creditReward;
+    setSaveValue(req.userId, JSON.stringify(attacker));
+    pushGalaxyNews('ti-flag', (req.username || 'Ein Kommandant') + ' hat ' + systemId + ' von den ' + owner.name + ' erobert!');
+    await saveDb();
+    return res.json({ success: true, systemId, attackPower, factionDefense, creditReward, factionName: owner.name });
+  } else {
+    // Misserfolg: Flottenverluste (10-25% jeder Schiffsart der Heimatflotte).
+    const lossPct = 0.10 + Math.random() * 0.15;
+    const lost = {};
+    const fleet = attacker.fleet || {};
+    for (const [k, v] of Object.entries(fleet)) {
+      if (k === 'missions' || typeof v !== 'number' || v <= 0) continue;
+      const l = Math.floor(v * lossPct);
+      if (l > 0) { lost[k] = l; fleet[k] = v - l; }
+    }
+    attacker.battlePoints = (attacker.battlePoints || 0) + 5;
+    setSaveValue(req.userId, JSON.stringify(attacker));
+    await saveDb();
+    return res.json({ success: false, systemId, attackPower, factionDefense, lost, factionName: owner.name });
+  }
 });
 
 // ============ GitHub-Deploy-Webhook: sofortiges Update statt Warten auf den Cron-Job ============

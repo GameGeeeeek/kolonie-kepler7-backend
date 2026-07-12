@@ -1,0 +1,20 @@
+{
+  "name": "kepler7-server",
+  "version": "1.0.0",
+  "description": "Backend für Kolonie Kepler-7: Login, Sessions und geteilter Speicher (Bestenliste, Allianzen)",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}

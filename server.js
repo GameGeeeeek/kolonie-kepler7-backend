@@ -309,7 +309,56 @@ app.delete('/api/reports', authMiddleware, async (req, res) => {
 });
 
 // ============ Echtes PvP: serverseitige Kampfberechnung ============
-const DEFENSE_VALUES = { turm: 15, schild: 30, laser: 25, plasma: 50, raketen: 40, gauss: 65, festung: 150 };
+// WICHTIG: Diese Formeln MÜSSEN mit den Formeln in weltraum_kolonie.html (Frontend) übereinstimmen,
+// sonst rechnet echtes PvP über den Server nach anderen Regeln als alles andere im Spiel. Stand:
+// 12.07.2026, synchron zu Frontend v7.64.0 (Kontersystem, Taktik-Haltung, Heimatbasis-Bonus,
+// Mega-Flotten-Grenznutzen, Anti-Farming). Bekannte, noch NICHT synchronisierte Frontend-Boni, die
+// hier bewusst fehlen (vorbestehende Lücke, nicht neu): Doktrin, Prestige-Perks, Skill-Baum,
+// Allianzforschung, Buffs, Planeten-Rollen, Mega-Projekte, Artefakt-Bonus. Ebenfalls fehlend: die
+// Verteidigungsanlage "flak" taucht im Frontend auf, war hier nie in DEFENSE_VALUES enthalten.
+const DEFENSE_VALUES = { turm: 15, flak: 20, schild: 30, laser: 25, plasma: 50, raketen: 40, gauss: 65, festung: 150 };
+
+// Schiffs-Kontersystem (Schere-Stein-Papier) – identisch zum Frontend. Bei echtem PvP sind BEIDE
+// Flottenzusammensetzungen bekannt (anders als bei NPC-Kämpfen), wirkt hier also immer.
+const SHIP_COUNTERS = {
+  jaeger: { strongVs: ['bomber'], weakVs: ['cruisers', 'destroyers'] },
+  bomber: { strongVs: ['cruisers', 'destroyers'], weakVs: ['jaeger'] },
+  cruisers: { strongVs: ['jaeger'], weakVs: ['bomber'] },
+  destroyers: { strongVs: ['jaeger'], weakVs: ['bomber'] }
+};
+const COUNTER_BONUS = 0.25, COUNTER_MALUS = 0.15;
+function counterMultiplier(ownFleet, enemyFleet) {
+  if (!ownFleet || !enemyFleet) return 1;
+  const enemyTotal = Object.values(enemyFleet).reduce((a, b) => a + (typeof b === 'number' && b > 0 ? b : 0), 0);
+  if (!enemyTotal) return 1;
+  let weightedMult = 0, ownTotal = 0;
+  for (const [k, v] of Object.entries(ownFleet)) {
+    if (!(typeof v === 'number' && v > 0)) continue;
+    const rule = SHIP_COUNTERS[k];
+    let mult = 1;
+    if (rule) {
+      const strongShare = rule.strongVs.reduce((a, t) => a + (enemyFleet[t] || 0), 0) / enemyTotal;
+      const weakShare = rule.weakVs.reduce((a, t) => a + (enemyFleet[t] || 0), 0) / enemyTotal;
+      mult = 1 + strongShare * COUNTER_BONUS - weakShare * COUNTER_MALUS;
+    }
+    weightedMult += mult * v;
+    ownTotal += v;
+  }
+  return ownTotal > 0 ? weightedMult / ownTotal : 1;
+}
+
+// Abnehmender Grenznutzen bei Mega-Einzelflotten – identisch zum Frontend.
+const MEGA_FLEET_THRESHOLD = 300, MEGA_FLEET_DIMINISH_RATE = 0.5;
+function diminishingShipCount(count) {
+  if (count <= MEGA_FLEET_THRESHOLD) return count;
+  return MEGA_FLEET_THRESHOLD + (count - MEGA_FLEET_THRESHOLD) * MEGA_FLEET_DIMINISH_RATE;
+}
+
+// Taktik-Haltung – identisch zum Frontend.
+const COMBAT_STANCES = { aggressiv: { atkMult: 1.10, defMult: 0.90 }, ausgewogen: { atkMult: 1.00, defMult: 1.00 }, defensiv: { atkMult: 0.90, defMult: 1.15 } };
+function stanceOf(save) { return COMBAT_STANCES[save.combatStance || 'ausgewogen'] || COMBAT_STANCES.ausgewogen; }
+
+const HOME_DEFENSE_BONUS = 1.20;
 
 function allFleetsOf(save) {
   const list = [save.fleet].filter(Boolean);
@@ -321,30 +370,67 @@ function allBuildingsOf(save) {
   for (const c of Object.values(save.colonies || {})) if (c && c.buildings) list.push(c.buildings);
   return list;
 }
-function computeAttackPower(save) {
+// Rohe Flottenkraft EINES Flottenobjekts, mit Grenznutzen-Deckel, aber OHNE Taktik-Haltung/Konter –
+// wird für den Verteidigungsbeitrag der eigenen Flotte gebraucht (analog Frontend attackPowerRaw),
+// damit Taktik-Haltung dort nicht doppelt bzw. falsch (Angriffs- statt Verteidigungsmultiplikator)
+// einfließt.
+function rawFleetPower(f) {
+  if (!f) return 0;
+  return diminishingShipCount(f.cruisers || 0) * 20 + diminishingShipCount(f.destroyers || 0) * 45 + diminishingShipCount(f.ships || 0) * 5 +
+    diminishingShipCount(f.jaeger || 0) * 10 + diminishingShipCount(f.bomber || 0) * 60 + diminishingShipCount(f.schlachtschiff || 0) * 90 +
+    diminishingShipCount(f.carrier || 0) * 15 + diminishingShipCount(f.superschlachtschiff || 0) * 220;
+}
+// enemyFleetForCounter: die GESAMTE gegnerische Flotte (fleetSummary), optional – nur bei echtem PvP
+// bekannt und übergeben, macht das Kontersystem wirksam.
+function computeAttackPower(save, enemyFleetForCounter) {
   const research = save.research || {};
   let power = 0;
   for (const f of allFleetsOf(save)) {
-    power += (f.cruisers || 0) * 20 + (f.destroyers || 0) * 45 + (f.ships || 0) * 5 +
-      (f.jaeger || 0) * 10 + (f.bomber || 0) * 60 + (f.schlachtschiff || 0) * 90 +
-      (f.carrier || 0) * 15 + (f.superschlachtschiff || 0) * 220;
+    let fp = rawFleetPower(f);
+    if (enemyFleetForCounter) fp *= counterMultiplier(f, enemyFleetForCounter);
+    power += fp;
   }
   const k = research.rkampf || 0, k2 = research.rkampf2 || 0;
   if (k) power *= (1 + k * 0.02);
   if (k2) power *= (1 + k2 * 0.02);
+  power *= stanceOf(save).atkMult;
   return Math.round(power);
 }
 function computeDefensePower(save) {
   const research = save.research || {};
   let power = 0;
-  for (const b of allBuildingsOf(save)) {
-    for (const [k, v] of Object.entries(DEFENSE_VALUES)) power += (b[k] || 0) * v;
+  // Heimatbasis (save.buildings/save.fleet) bekommt +20% ggü. Kolonien - getrennt behandeln.
+  const homeBuildings = save.buildings || {};
+  let homeBuildingSub = 0;
+  for (const [k, v] of Object.entries(DEFENSE_VALUES)) homeBuildingSub += (homeBuildings[k] || 0) * v;
+  power += homeBuildingSub * HOME_DEFENSE_BONUS;
+  for (const c of Object.values(save.colonies || {})) {
+    if (!c || !c.buildings) continue;
+    for (const [k, v] of Object.entries(DEFENSE_VALUES)) power += (c.buildings[k] || 0) * v;
   }
-  for (const f of allFleetsOf(save)) power += Math.round(computeAttackPower({ fleet: f, colonies: {} }) * 0.4);
+  power += Math.round(rawFleetPower(save.fleet) * 0.4) * HOME_DEFENSE_BONUS;
+  for (const c of Object.values(save.colonies || {})) {
+    if (!c || !c.fleet) continue;
+    power += Math.round(rawFleetPower(c.fleet) * 0.4);
+  }
   const p = research.rpanzer || 0, s = research.rschildmatrix || 0;
   if (p) power *= (1 + p * 0.02);
   if (s) power *= (1 + s * 0.02);
+  power *= stanceOf(save).defMult;
   return Math.round(power);
+}
+// Anti-Farming: Punktestand aus der Bestenliste lesen, für die Beute-Reduktion bei großem Gefälle.
+function scoreOf(userId) {
+  try {
+    const lb = db.shared['leaderboard:' + userId];
+    if (lb) return (JSON.parse(lb).score) || 0;
+  } catch (e) {}
+  return 0;
+}
+function farmingPenaltyFor(attackerUserId, targetUserId) {
+  const myScore = scoreOf(attackerUserId), targetScore = scoreOf(targetUserId);
+  const ratio = targetScore > 0 ? myScore / targetScore : 1;
+  return ratio > 3 ? Math.max(0.3, 1 - (ratio - 3) * 0.1) : 1;
 }
 function defenseBreakdown(save) {
   const totals = {};
@@ -374,19 +460,24 @@ app.post('/api/attack', authMiddleware, async (req, res) => {
   catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
 
   const targetUser = findUserById(targetUserId);
-  const attackPower = computeAttackPower(attacker);
+  const attackerFleetSummary = fleetSummary(attacker);
+  const targetFleetSummary = fleetSummary(target);
+  // Kontersystem: die Zusammensetzung der Angreifer-Flotte gegen die des Ziels bestimmt einen
+  // Bonus/Malus. Bei echtem PvP sind (anders als bei NPC-Kämpfen) beide Flotten bekannt.
+  const attackPower = computeAttackPower(attacker, targetFleetSummary);
   const defensePower = computeDefensePower(target);
   const chance = Math.max(0.1, Math.min(0.9, attackPower / (attackPower + defensePower)));
   const success = Math.random() < chance;
 
-  const attackerFleetSummary = fleetSummary(attacker);
   const defenseBefore = defenseBreakdown(target);
 
   if (success) {
     const lootPct = 0.12 + Math.random() * 0.13; // 12-25%
+    // Anti-Farming: deutlich stärkere Angreifer bekommen anteilig weniger Beute (nie unter 30%).
+    const farmPenalty = farmingPenaltyFor(req.userId, targetUserId);
     const stolen = {};
     for (const [r, amt] of Object.entries(target.resources || {})) {
-      const take = Math.floor((amt || 0) * lootPct);
+      const take = Math.floor((amt || 0) * lootPct * farmPenalty);
       if (take > 0) {
         stolen[r] = take;
         target.resources[r] = Math.max(0, (target.resources[r] || 0) - take);

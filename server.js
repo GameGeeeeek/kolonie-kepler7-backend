@@ -188,19 +188,71 @@ app.post('/api/register', async (req, res) => {
   if (String(password).length < 6) return res.status(400).json({ error: 'Passwort muss mindestens 6 Zeichen haben.' });
   const key = cleanName.toLowerCase();
   if (db.users[key]) return res.status(409).json({ error: 'Dieser Name ist schon vergeben.' });
-  const cleanEmail = email ? String(email).trim().toLowerCase() : '';
-  if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+  // E-Mail ist seit dem Double-Opt-In PFLICHT: der Account wird erst nutzbar, nachdem der
+  // Bestätigungslink aus der E-Mail geklickt wurde. Bestandskonten (ohne emailVerified-Feld)
+  // sind davon nicht betroffen und bleiben normal nutzbar.
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail) return res.status(400).json({ error: 'E-Mail-Adresse ist erforderlich (für die Konto-Bestätigung).' });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
     return res.status(400).json({ error: 'E-Mail-Adresse sieht ungültig aus.' });
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
   const userId = crypto.randomUUID();
   const home = assignHomeSlot();
-  db.users[key] = { userId, username: cleanName, passwordHash, email: cleanEmail, createdAt: Date.now(), homeSystem: home.system, homeSlot: home.slot };
+  db.users[key] = { userId, username: cleanName, passwordHash, email: cleanEmail, emailVerified: false, createdAt: Date.now(), homeSystem: home.system, homeSlot: home.slot };
+
+  if (!db.verifyTokens) db.verifyTokens = {};
+  const verifyToken = crypto.randomBytes(32).toString('hex');
+  db.verifyTokens[verifyToken] = { userId, expires: Date.now() + 24 * 60 * 60 * 1000 };
   await saveDb();
 
-  const token = jwt.sign({ userId, username: cleanName }, JWT_SECRET, { expiresIn: '180d' });
-  res.status(201).json({ token, userId, username: cleanName, homeSystem: home.system, homeSlot: home.slot });
+  const link = PUBLIC_URL + '/?verify=' + verifyToken;
+  try {
+    await sendEmail(cleanEmail, 'Konto bestätigen – Kolonie Kepler-7',
+      `Hallo ${cleanName},\n\nwillkommen bei Kolonie Kepler-7! Bitte bestätige dein Konto, indem du auf den folgenden Link klickst (24 Stunden gültig):\n\n${link}\n\nErst danach kannst du dich anmelden. Wenn du dich nicht registriert hast, kannst du diese E-Mail ignorieren.`);
+  } catch (e) {
+    console.error('Bestätigungsmail fehlgeschlagen:', e.message);
+    // Konto trotzdem angelegt lassen - der Spieler kann über "erneut senden" einen neuen Versuch starten.
+  }
+  // Bewusst KEIN Token: der Account ist erst nach der E-Mail-Bestätigung nutzbar.
+  res.status(201).json({ ok: true, needsVerification: true, username: cleanName });
+});
+
+// Konto über den Link aus der Bestätigungs-E-Mail freischalten.
+app.post('/api/verify-email', async (req, res) => {
+  const { token } = req.body || {};
+  if (!db.verifyTokens) db.verifyTokens = {};
+  const entry = db.verifyTokens[String(token || '')];
+  if (!entry || entry.expires < Date.now()) return res.status(400).json({ error: 'Bestätigungslink ungültig oder abgelaufen. Fordere über den Login-Bildschirm einen neuen an.' });
+  const user = findUserById(entry.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+  user.emailVerified = true;
+  delete db.verifyTokens[token];
+  await saveDb();
+  res.json({ ok: true, username: user.username });
+});
+
+// Bestätigungs-E-Mail erneut senden. Braucht Name UND Passwort, damit niemand fremde Postfächer
+// mit Mails fluten kann.
+app.post('/api/resend-verification', async (req, res) => {
+  const { username, password } = req.body || {};
+  const key = String(username || '').trim().toLowerCase();
+  const user = db.users[key];
+  if (!user) return res.json({ ok: true }); // keine Namens-Enumeration ermöglichen
+  const valid = await bcrypt.compare(String(password || ''), user.passwordHash);
+  if (!valid) return res.status(401).json({ error: 'Falsches Passwort.' });
+  if (user.emailVerified !== false) return res.json({ ok: true, alreadyVerified: true });
+  if (!db.verifyTokens) db.verifyTokens = {};
+  const verifyToken = crypto.randomBytes(32).toString('hex');
+  db.verifyTokens[verifyToken] = { userId: user.userId, expires: Date.now() + 24 * 60 * 60 * 1000 };
+  await saveDb();
+  const link = PUBLIC_URL + '/?verify=' + verifyToken;
+  try {
+    await sendEmail(user.email, 'Konto bestätigen – Kolonie Kepler-7',
+      `Hallo ${user.username},\n\nhier ist dein neuer Bestätigungslink (24 Stunden gültig):\n\n${link}`);
+  } catch (e) { console.error('Bestätigungsmail fehlgeschlagen:', e.message); }
+  res.json({ ok: true });
 });
 
 // --- Anmeldung ---
@@ -212,6 +264,11 @@ app.post('/api/login', async (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unbekannter Name oder falsches Passwort.' });
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) return res.status(401).json({ error: 'Unbekannter Name oder falsches Passwort.' });
+  // Double-Opt-In: neue Konten (emailVerified === false) sind erst nach Klick auf den
+  // Bestätigungslink nutzbar. Bestandskonten haben das Feld nicht und sind nicht betroffen.
+  if (user.emailVerified === false) {
+    return res.status(403).json({ error: 'Konto noch nicht bestätigt. Bitte klicke auf den Link in der Bestätigungs-E-Mail.', needsVerification: true });
+  }
 
   const token = jwt.sign({ userId: user.userId, username: user.username }, JWT_SECRET, { expiresIn: '180d' });
   res.json({ token, userId: user.userId, username: user.username });

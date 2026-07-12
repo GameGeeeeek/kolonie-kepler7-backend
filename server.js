@@ -587,19 +587,27 @@ function loadOrInitGalaxy() {
     db.galaxy = {
       npcEmpireStrength: 1.0,
       marketTrend: 1.0,
-      activePirateFaction: NPC_FACTION_NAMES[0],
+      activePirateFaction: { name: NPC_FACTION_NAMES[0], system: pickRandomFreeSystem() },
       unlockedAlienRaces: [],
+      activeWar: null,
       collapsedSystems: {},
       activeWormhole: null,
       news: [],
       lastTick: Date.now()
     };
   }
-  // Migration für Bestandsdaten (falls das Feld aus einer älteren Version noch fehlt)
+  // Migration für Bestandsdaten (falls Felder aus einer älteren Version fehlen oder noch das alte,
+  // ortlose Format haben - activePirateFaction/unlockedAlienRaces waren zuerst nur Namen ohne Ort).
   if (db.galaxy.npcEmpireStrength === undefined) db.galaxy.npcEmpireStrength = 1.0;
   if (db.galaxy.marketTrend === undefined) db.galaxy.marketTrend = 1.0;
-  if (!db.galaxy.activePirateFaction) db.galaxy.activePirateFaction = NPC_FACTION_NAMES[0];
+  if (typeof db.galaxy.activePirateFaction === 'string') {
+    db.galaxy.activePirateFaction = { name: db.galaxy.activePirateFaction, system: pickRandomFreeSystem() };
+  } else if (!db.galaxy.activePirateFaction) {
+    db.galaxy.activePirateFaction = { name: NPC_FACTION_NAMES[0], system: pickRandomFreeSystem() };
+  }
   if (!db.galaxy.unlockedAlienRaces) db.galaxy.unlockedAlienRaces = [];
+  db.galaxy.unlockedAlienRaces = db.galaxy.unlockedAlienRaces.map(r => typeof r === 'string' ? { name: r, system: pickRandomFreeSystem() } : r);
+  if (db.galaxy.activeWar === undefined) db.galaxy.activeWar = null;
   if (!db.galaxy.collapsedSystems) db.galaxy.collapsedSystems = {};
   if (db.galaxy.activeWormhole === undefined) db.galaxy.activeWormhole = null;
   if (!db.galaxy.news) db.galaxy.news = [];
@@ -611,9 +619,16 @@ function pushGalaxyNews(icon, text) {
   g.news.unshift({ id: crypto.randomUUID(), time: Date.now(), icon, text });
   g.news = g.news.slice(0, 40);
 }
-// Nie ein System zerstören, in dem tatsächlich ein Spieler zuhause ist.
+// Nie ein System zerstören/besetzen, in dem tatsächlich ein Spieler zuhause ist - gilt für ALLE
+// ortsgebundenen Ereignisse (nicht nur Supernova), damit kein Spieler den Eindruck bekommt, sein
+// eigenes Heimatsystem sei plötzlich "Piratengebiet" o.ä.
 function occupiedSystems() {
   return new Set(Object.values(db.users).filter(u => u.homeSystem).map(u => u.homeSystem));
+}
+function pickRandomFreeSystem() {
+  const occupied = occupiedSystems();
+  const free = SYSTEMS.filter(s => !occupied.has(s));
+  return free.length ? free[Math.floor(Math.random()*free.length)] : SYSTEMS[Math.floor(Math.random()*SYSTEMS.length)];
 }
 function galaxyTick() {
   const g = loadOrInitGalaxy();
@@ -636,23 +651,34 @@ function galaxyTick() {
     pushGalaxyNews('ti-infinity', 'Das Wurmloch nach ' + g.activeWormhole.to + ' hat sich wieder geschlossen.');
     g.activeWormhole = null;
   }
+  // Abgelaufenen Krieg beilegen.
+  if (g.activeWar && g.activeWar.expiresAt < Date.now()) {
+    pushGalaxyNews('ti-flag', 'Der Krieg um ' + g.activeWar.system + ' ist beigelegt.');
+    g.activeWar = null;
+  }
 
-  // Zufällige galaktische Ereignisse, jeweils unabhängige Chance pro Tick (alle 15 Min.).
-  if (Math.random() < 0.12) {
+  // Zufällige galaktische Ereignisse, jeweils unabhängige Chance pro Tick (alle 15 Min.). Jedes
+  // ortsgebundene Ereignis bekommt jetzt ein echtes, freies (unbesiedeltes) System zugewiesen, damit
+  // es auf der Sektorkarte sichtbar gemacht werden kann.
+  if (Math.random() < 0.12 && !g.activeWar) {
     const a = NPC_FACTION_NAMES[Math.floor(Math.random() * NPC_FACTION_NAMES.length)];
     let b = NPC_FACTION_NAMES[Math.floor(Math.random() * NPC_FACTION_NAMES.length)];
     if (b === a) b = NPC_FACTION_NAMES[(NPC_FACTION_NAMES.indexOf(a) + 1) % NPC_FACTION_NAMES.length];
-    pushGalaxyNews('ti-sword', 'Krieg ausgebrochen: ' + a + ' und ' + b + ' liefern sich Gefechte um umkämpfte Sektoren.');
+    const sys = pickRandomFreeSystem();
+    g.activeWar = { factionA: a, factionB: b, system: sys, expiresAt: Date.now() + 36 * 3600 * 1000 };
+    pushGalaxyNews('ti-sword', 'Krieg ausgebrochen: ' + a + ' und ' + b + ' liefern sich Gefechte um ' + sys + '.');
   }
   if (Math.random() < 0.06 && g.unlockedAlienRaces.length < ALIEN_RACE_NAMES.length) {
     const next = ALIEN_RACE_NAMES[g.unlockedAlienRaces.length];
-    g.unlockedAlienRaces.push(next);
-    pushGalaxyNews('ti-alien', 'Ein neues Volk wurde entdeckt: die ' + next + ' treten erstmals in Erscheinung.');
+    const sys = pickRandomFreeSystem();
+    g.unlockedAlienRaces.push({ name: next, system: sys, unlockedAt: Date.now() });
+    pushGalaxyNews('ti-alien', 'Ein neues Volk wurde entdeckt: die ' + next + ' treten erstmals bei ' + sys + ' in Erscheinung.');
   }
   if (Math.random() < 0.10) {
-    const candidates = NPC_FACTION_NAMES.filter(n => n !== g.activePirateFaction);
-    g.activePirateFaction = candidates[Math.floor(Math.random() * candidates.length)];
-    pushGalaxyNews('ti-skull', g.activePirateFaction + ' gründet eine neue Operationsbasis am Rand der Galaxie.');
+    const candidates = NPC_FACTION_NAMES.filter(n => n !== g.activePirateFaction.name);
+    const sys = pickRandomFreeSystem();
+    g.activePirateFaction = { name: candidates[Math.floor(Math.random() * candidates.length)], system: sys };
+    pushGalaxyNews('ti-skull', g.activePirateFaction.name + ' gründet eine neue Operationsbasis bei ' + sys + '.');
   }
   if (Math.random() < 0.04) {
     const occupied = occupiedSystems();
@@ -664,10 +690,13 @@ function galaxyTick() {
     }
   }
   if (Math.random() < 0.06 && !g.activeWormhole) {
-    const options = SYSTEMS.filter(s => s !== 'kepler');
-    const to = options[Math.floor(Math.random() * options.length)];
-    g.activeWormhole = { from: 'kepler', to, expiresAt: Date.now() + 12 * 3600 * 1000 };
-    pushGalaxyNews('ti-infinity', 'Ein neues Wurmloch ist entstanden: Kepler-System ↔ ' + to + ' (für 12 Stunden geöffnet).');
+    const occupiedForWormhole = occupiedSystems();
+    const options = SYSTEMS.filter(s => s !== 'kepler' && !occupiedForWormhole.has(s));
+    if (options.length) {
+      const to = options[Math.floor(Math.random() * options.length)];
+      g.activeWormhole = { from: 'kepler', to, expiresAt: Date.now() + 12 * 3600 * 1000 };
+      pushGalaxyNews('ti-infinity', 'Ein neues Wurmloch ist entstanden: Kepler-System ↔ ' + to + ' (für 12 Stunden geöffnet).');
+    }
   }
 
   saveDb();

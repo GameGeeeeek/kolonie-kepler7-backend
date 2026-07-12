@@ -895,6 +895,34 @@ function galaxyTick() {
     }
   }
 
+  // ===== Rückeroberung: Fraktionen versuchen, verlorene Systeme vom Spieler zurückzuholen =====
+  // Nur Systeme, die direkt an das Territorium der Fraktion grenzen, sind gefährdet. Die Erfolgschance
+  // hängt von der Fraktionsstärke gegen die GESAMTVERTEIDIGUNG des besitzenden Spielers ab (wer stark
+  // verteidigt, verliert praktisch nie) und ist bei 50% gedeckelt. Versuche sind selten (15% pro
+  // Fraktion pro Tick), damit kontrollierte Systeme nicht zur Frust-Quelle werden. Heimatsysteme sind
+  // hiervon NICHT betroffen (nur eroberte Fraktionssysteme).
+  for (const f of factionOrder) {
+    if (Math.random() > 0.15) continue;
+    const retakeTargets = Object.keys(g.controlledSystems).filter(sys =>
+      (SYSTEM_NEIGHBORS[sys] || []).some(nb => f.systems.includes(nb)) && !g.collapsedSystems[sys]
+    );
+    if (!retakeTargets.length) continue;
+    const target = retakeTargets[Math.floor(Math.random() * retakeTargets.length)];
+    const ownerId = g.controlledSystems[target];
+    let defense = 500;
+    const saveRaw = getSaveValue(ownerId);
+    if (saveRaw) { try { defense = Math.max(200, computeDefensePower(JSON.parse(saveRaw))); } catch (e) {} }
+    const atk = 1200 * f.strength;
+    const chance = Math.min(0.5, Math.max(0.05, atk / (atk + defense)) * 0.6);
+    if (Math.random() < chance) {
+      delete g.controlledSystems[target];
+      f.systems.push(target);
+      pushGalaxyNews('ti-sword', f.name + ' hat das System ' + target + ' vom bisherigen Besitzer zurückerobert!');
+    } else {
+      pushGalaxyNews('ti-shield', 'Ein Rückeroberungsversuch der ' + f.name + ' auf ' + target + ' wurde abgewehrt.');
+    }
+  }
+
   saveDb();
 }
 setInterval(galaxyTick, GALAXY_TICK_MS);

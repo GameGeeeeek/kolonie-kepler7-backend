@@ -93,7 +93,65 @@ function setSaveValue(userId, jsonString) {
 
 // --- Zufalls-Spawn für neue Spieler ---
 // Muss zur STAR_SYSTEMS-Liste im Frontend (weltraum_kolonie.html) passen.
-const SYSTEMS = ['kepler', 'vega', 'orion', 'nebel', 'rand', 'krux', 'aether', 'vortex', 'chronos', 'solmark', 'drachenmark', 'abyss', 'nyra', 'pulsar', 'sigma'];
+// Vollständige Systemliste mit Karten-Koordinaten (identisch zu STAR_SYSTEMS im Frontend), damit die
+// NPC-Territorium-Simulation Nachbarschaften über die tatsächliche Kartenposition berechnen kann.
+const SYSTEM_COORDS = [
+  { id: 'kepler', gx: 510.2, gy: 242.9 },
+  { id: 'vega', gx: 518.3, gy: 276.5 },
+  { id: 'orion', gx: 455.8, gy: 296.2 },
+  { id: 'nebel', gx: 348.6, gy: 270.0 },
+  { id: 'rand', gx: 309.1, gy: 181.4 },
+  { id: 'krux', gx: 462.3, gy: 272.0 },
+  { id: 'aether', gx: 395.9, gy: 244.7 },
+  { id: 'vortex', gx: 393.1, gy: 211.1 },
+  { id: 'chronos', gx: 477.5, gy: 144.9 },
+  { id: 'solmark', gx: 635.0, gy: 153.5 },
+  { id: 'drachenmark', gx: 457.9, gy: 207.4 },
+  { id: 'abyss', gx: 505.0, gy: 192.9 },
+  { id: 'nyra', gx: 599.5, gy: 218.5 },
+  { id: 'pulsar', gx: 593.8, gy: 304.9 },
+  { id: 'sigma', gx: 466.2, gy: 355.9 },
+  { id: 'sys_corvus_weite', gx: 688.4, gy: 236.9 },
+  { id: 'sys_halcyon_feld', gx: 669.7, gy: 350.1 },
+  { id: 'sys_meridian_bogen', gx: 500.0, gy: 416.3 },
+  { id: 'sys_thule_reichweite', gx: 295.4, gy: 412.2 },
+  { id: 'sys_oort_schleuse', gx: 142.3, gy: 282.3 },
+  { id: 'sys_xerxes_zone', gx: 152.5, gy: 112.5 },
+  { id: 'sys_ashen_grat', gx: 493.4, gy: 359.0 },
+  { id: 'sys_ilyra_strom', gx: 321.5, gy: 342.1 },
+  { id: 'sys_kessel_anomalie', gx: 206.6, gy: 274.6 },
+  { id: 'sys_vantar_riff', gx: 215.0, gy: 145.2 },
+  { id: 'sys_quorin_passage', gx: 377.6, gy: 35.1 },
+  { id: 'sys_ember_reichweite', gx: 651.5, gy: 24.5 },
+  { id: 'sys_silberbach', gx: 280.9, gy: 255.9 },
+  { id: 'sys_nachtsegel_zone', gx: 292.5, gy: 145.9 },
+  { id: 'sys_grendel_feld', gx: 426.9, gy: 73.3 },
+  { id: 'sys_aurelia_bogen', gx: 660.0, gy: 91.3 },
+  { id: 'sys_marek_schneise', gx: 832.0, gy: 175.7 },
+  { id: 'sys_talon_ring', gx: 826.1, gy: 352.3 },
+  { id: 'sys_wispern_nebel', gx: 448.8, gy: 100.5 },
+  { id: 'sys_cinder_reichweite', gx: 602.4, gy: 98.3 },
+  { id: 'sys_obsidian_guertel', gx: 760.4, gy: 181.7 },
+  { id: 'sys_halvar_weite', gx: 757.8, gy: 322.9 },
+  { id: 'sys_sernova_feld', gx: 628.0, gy: 429.2 },
+  { id: 'sys_dunwich_passage', gx: 352.7, gy: 470.5 },
+  { id: 'zenith', gx: 671.2, gy: 219.1 },
+  { id: 'tiefsee', gx: 279.1, gy: 230.3 }
+];
+const SYSTEMS = SYSTEM_COORDS.map(s => s.id);
+// Nachbarn eines Systems: die k nächstgelegenen anderen Systeme (euklidische Distanz auf der Karte).
+// Wird für Fraktions-Expansion (nur in benachbarte Systeme) genutzt.
+const SYSTEM_NEIGHBORS = {};
+(function computeNeighbors() {
+  const K = 4;
+  for (const s of SYSTEM_COORDS) {
+    const dists = SYSTEM_COORDS
+      .filter(o => o.id !== s.id)
+      .map(o => ({ id: o.id, d: Math.hypot(o.gx - s.gx, o.gy - s.gy) }))
+      .sort((a, b) => a.d - b.d);
+    SYSTEM_NEIGHBORS[s.id] = dists.slice(0, K).map(x => x.id);
+  }
+})();
 const HOME_SLOTS_PER_SYSTEM = 8;
 function assignHomeSlot() {
   const taken = new Set(Object.values(db.users).filter(u => u.homeSystem).map(u => u.homeSystem + ':' + u.homeSlot));
@@ -640,7 +698,52 @@ function loadOrInitGalaxy() {
   if (!db.galaxy.news) db.galaxy.news = [];
   if (!db.galaxy.lastTick) db.galaxy.lastTick = Date.now();
   loadOrInitMarket(db.galaxy);
+  loadOrInitFactions(db.galaxy);
   return db.galaxy;
+}
+
+// ============ NPC-Fraktionen mit echtem Territorium ============
+// Vier Fraktionen besitzen jeweils eine Menge Systeme, haben eine Militärstärke und expandieren im
+// galaxyTick in freie Nachbarsysteme bzw. erobern schwächeren Nachbarn Grenzsysteme ab. Spieler-
+// Heimatsysteme sind tabu (werden nie erobert). Der Zustand liegt in db.galaxy.factions.
+const FACTION_DEFS = [
+  { id: 'void', name: 'Void-Marodeure', color: '#e24b4a' },
+  { id: 'kartell', name: 'Aschen-Kartell', color: '#fac775' },
+  { id: 'legion', name: 'Eisenlegion', color: '#85b7eb' },
+  { id: 'schatten', name: 'Schattenbund', color: '#af7ce6' }
+];
+function loadOrInitFactions(g) {
+  if (!g.factions) {
+    const occupied = occupiedSystems();
+    // Startsysteme: für jede Fraktion ein freies System als Hauptwelt, möglichst weit gestreut.
+    const free = SYSTEMS.filter(s => !occupied.has(s));
+    // Deterministisch streuen: nach Kartenposition sortieren und gleichmäßig verteilen.
+    const spread = free.slice();
+    g.factions = {};
+    FACTION_DEFS.forEach((def, i) => {
+      const capital = spread.length ? spread[Math.floor(i * spread.length / FACTION_DEFS.length)] : null;
+      g.factions[def.id] = {
+        id: def.id, name: def.name, color: def.color,
+        systems: capital ? [capital] : [],
+        strength: 1.0 + Math.random() * 0.5
+      };
+    });
+  }
+  // Migration: fehlende Felder auffüllen.
+  for (const def of FACTION_DEFS) {
+    if (!g.factions[def.id]) g.factions[def.id] = { id: def.id, name: def.name, color: def.color, systems: [], strength: 1.0 };
+    if (!Array.isArray(g.factions[def.id].systems)) g.factions[def.id].systems = [];
+    if (typeof g.factions[def.id].strength !== 'number') g.factions[def.id].strength = 1.0;
+  }
+  return g.factions;
+}
+// Map: systemId -> factionId (welche Fraktion besitzt welches System). Spieler-Heimatsysteme kommen NICHT vor.
+function systemOwnershipMap(g) {
+  const map = {};
+  for (const f of Object.values(g.factions || {})) {
+    for (const sys of f.systems) map[sys] = f.id;
+  }
+  return map;
 }
 function pushGalaxyNews(icon, text) {
   const g = loadOrInitGalaxy();
@@ -735,6 +838,56 @@ function galaxyTick() {
       const to = options[Math.floor(Math.random() * options.length)];
       g.activeWormhole = { from: 'kepler', to, expiresAt: Date.now() + 12 * 3600 * 1000 };
       pushGalaxyNews('ti-infinity', 'Ein neues Wurmloch ist entstanden: Kepler-System ↔ ' + to + ' (für 12 Stunden geöffnet).');
+    }
+  }
+
+  // ===== NPC-Fraktionen: Territorium-Simulation =====
+  // Jede Fraktion wächst in ihrer Militärstärke und versucht pro Tick zu expandieren: bevorzugt in ein
+  // freies Nachbarsystem, sonst greift sie ein schwächer gehaltenes Nachbar-Fraktionssystem an. Spieler-
+  // Heimatsysteme sind immer tabu. Ergebnisse werden als Galaxie-Nachrichten gemeldet.
+  const factions = loadOrInitFactions(g);
+  const occupiedByPlayers = occupiedSystems();
+  for (const f of Object.values(factions)) {
+    // Stärke wächst langsam, skaliert leicht mit Territoriumsgröße (größere Reiche werden stärker).
+    f.strength = Math.min(6.0, f.strength * (1 + 0.01 + Math.random() * 0.02) + f.systems.length * 0.002);
+  }
+  // Expansions-Reihenfolge zufällig, damit nicht immer dieselbe Fraktion zuerst zieht.
+  const factionOrder = Object.values(factions).sort(() => Math.random() - 0.5);
+  for (const f of factionOrder) {
+    if (Math.random() > 0.5) continue; // nicht jede Fraktion expandiert jeden Tick
+    const ownership = systemOwnershipMap(g);
+    // Alle Nachbarsysteme des eigenen Territoriums sammeln.
+    const frontier = new Set();
+    for (const sys of f.systems) {
+      for (const nb of (SYSTEM_NEIGHBORS[sys] || [])) {
+        if (f.systems.includes(nb)) continue;
+        if (occupiedByPlayers.has(nb)) continue;          // Spielersysteme tabu
+        if (g.collapsedSystems[nb]) continue;             // kollabierte Systeme überspringen
+        frontier.add(nb);
+      }
+    }
+    if (!frontier.size) continue;
+    const frontierArr = [...frontier];
+    // Freie (herrenlose) Nachbarn bevorzugen.
+    const freeTargets = frontierArr.filter(s => !ownership[s]);
+    if (freeTargets.length) {
+      const target = freeTargets[Math.floor(Math.random() * freeTargets.length)];
+      f.systems.push(target);
+      pushGalaxyNews('ti-flag', f.name + ' hat das System ' + target + ' besetzt und dehnt sein Gebiet aus.');
+    } else {
+      // Sonst ein Nachbar-Fraktionssystem angreifen, wenn wir stärker sind.
+      const enemyTargets = frontierArr.filter(s => ownership[s] && ownership[s] !== f.id);
+      if (!enemyTargets.length) continue;
+      const target = enemyTargets[Math.floor(Math.random() * enemyTargets.length)];
+      const defender = factions[ownership[target]];
+      if (!defender) continue;
+      // Angriffschance steigt mit Stärkeverhältnis.
+      const ratio = f.strength / (defender.strength || 1);
+      if (Math.random() < Math.min(0.85, ratio * 0.4)) {
+        defender.systems = defender.systems.filter(s => s !== target);
+        f.systems.push(target);
+        pushGalaxyNews('ti-sword', f.name + ' hat ' + target + ' im Kampf von ' + defender.name + ' erobert!');
+      }
     }
   }
 

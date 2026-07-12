@@ -698,9 +698,33 @@ function loadOrInitGalaxy() {
   if (!db.galaxy.news) db.galaxy.news = [];
   if (!db.galaxy.lastTick) db.galaxy.lastTick = Date.now();
   if (!db.galaxy.controlledSystems) db.galaxy.controlledSystems = {}; // systemId -> userId (vom Spieler eroberte Systeme)
+  if (db.galaxy.worldBoss === undefined) db.galaxy.worldBoss = null;
   loadOrInitMarket(db.galaxy);
   loadOrInitFactions(db.galaxy);
   return db.galaxy;
+}
+
+// ============ Galaktischer Weltboss ============
+// Ein gemeinsamer Server-Gegner für ALLE Spieler: er hat einen geteilten HP-Pool, jeder kann ihn (mit
+// Abklingzeit) angreifen, jeder Angriff zieht echte HP ab. Wer den Todesstoß setzt, bekommt die große
+// Belohnung; jeder Angriff gibt eine kleine. Belohnungen werden nur für den ANFRAGENDEN Spieler in
+// dessen Spielstand geschrieben (keine Schreibzugriffe auf fremde Spielstände - die würden mit dem
+// Autosave online spielender Nutzer kollidieren).
+const WORLD_BOSS_NAMES = ['Leviathan der Leere', 'Chronos-Verschlinger', 'Die Singularität', 'Wächter des Abgrunds', 'Nova-Titan'];
+const WORLD_BOSS_ATTACK_COOLDOWN_MS = 30 * 60 * 1000;
+function spawnWorldBoss(g) {
+  const users = Math.max(1, Object.keys(db.users).length);
+  const maxHp = Math.round(40000 * (1 + users * 0.4));
+  g.worldBoss = {
+    id: crypto.randomUUID(),
+    name: WORLD_BOSS_NAMES[Math.floor(Math.random() * WORLD_BOSS_NAMES.length)],
+    maxHp, hp: maxHp,
+    system: pickRandomFreeSystem(),
+    expiresAt: Date.now() + 72 * 3600 * 1000,
+    participants: {},   // userId -> Gesamtschaden (für die Bestenliste)
+    lastAttack: {}      // userId -> Zeitstempel des letzten Angriffs (Abklingzeit)
+  };
+  pushGalaxyNews('ti-alien', 'WELTBOSS: ' + g.worldBoss.name + ' ist bei ' + g.worldBoss.system + ' erschienen! Alle Kommandanten können ihn gemeinsam bekämpfen (' + maxHp.toLocaleString('de-DE') + ' HP).');
 }
 
 // ============ NPC-Fraktionen mit echtem Territorium ============
@@ -923,6 +947,13 @@ function galaxyTick() {
     }
   }
 
+  // ===== Weltboss: spawnen, wenn keiner aktiv; abgelaufene entfernen =====
+  if (g.worldBoss && g.worldBoss.expiresAt < Date.now()) {
+    pushGalaxyNews('ti-alien', g.worldBoss.name + ' hat sich zurückgezogen, ohne besiegt zu werden (' + Math.round((1 - g.worldBoss.hp / g.worldBoss.maxHp) * 100) + '% Schaden erlitten).');
+    g.worldBoss = null;
+  }
+  if (!g.worldBoss && Math.random() < 0.10) spawnWorldBoss(g);
+
   saveDb();
 }
 setInterval(galaxyTick, GALAXY_TICK_MS);
@@ -977,6 +1008,48 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
     avgPrice,
     priceBefore, priceAfter
   });
+});
+
+// Weltboss angreifen. Abklingzeit 30 Min. pro Spieler, Schaden = Angriffskraft des Spielers mit
+// leichter Streuung. Jeder Angriff gibt eine kleine Belohnung, der Todesstoß eine große. Belohnungen
+// werden NUR in den Spielstand des Anfragenden geschrieben (keine fremden Spielstände anfassen).
+app.post('/api/worldboss/attack', authMiddleware, async (req, res) => {
+  const g = loadOrInitGalaxy();
+  const boss = g.worldBoss;
+  if (!boss || boss.hp <= 0) return res.status(400).json({ error: 'Kein aktiver Weltboss.' });
+  const last = boss.lastAttack[req.userId] || 0;
+  const cooldownLeft = last + WORLD_BOSS_ATTACK_COOLDOWN_MS - Date.now();
+  if (cooldownLeft > 0) return res.status(429).json({ error: 'Abklingzeit aktiv.', cooldownLeftMs: cooldownLeft });
+
+  const attackerRaw = getSaveValue(req.userId);
+  if (!attackerRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let attacker;
+  try { attacker = JSON.parse(attackerRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+
+  const power = computeAttackPower(attacker, null);
+  const damage = Math.max(50, Math.round(power * (0.8 + Math.random() * 0.4)));
+  boss.hp = Math.max(0, boss.hp - damage);
+  boss.participants[req.userId] = (boss.participants[req.userId] || 0) + damage;
+  boss.lastAttack[req.userId] = Date.now();
+
+  const killed = boss.hp <= 0;
+  // Kleine Belohnung pro Angriff, große für den Todesstoß.
+  const bpGain = killed ? 100 : 8;
+  const creditGain = killed ? 1000 : 40;
+  attacker.battlePoints = (attacker.battlePoints || 0) + bpGain;
+  attacker.credits = (attacker.credits || 0) + creditGain;
+  setSaveValue(req.userId, JSON.stringify(attacker));
+
+  let topDamage = null;
+  if (killed) {
+    const entries = Object.entries(boss.participants).sort((a, b) => b[1] - a[1]);
+    const topUser = entries.length ? findUserById(entries[0][0]) : null;
+    topDamage = entries.slice(0, 3).map(([uid, dmg]) => { const u = findUserById(uid); return { name: u ? u.username : 'Unbekannt', damage: dmg }; });
+    pushGalaxyNews('ti-alien', boss.name + ' wurde BESIEGT! Todesstoß: ' + (req.username || 'Unbekannt') + '. Meister Schaden: ' + (topUser ? topUser.username : 'Unbekannt') + '.');
+    g.worldBoss = null;
+  }
+  await saveDb();
+  res.json({ ok: true, damage, bossHp: killed ? 0 : boss.hp, bossMaxHp: boss.maxHp, killed, bpGain, creditGain, topDamage });
 });
 
 // Spieler greift ein NPC-Fraktionssystem an. Der Server ist autoritativ: er prüft die Flotte des

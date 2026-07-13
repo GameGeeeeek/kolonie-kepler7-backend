@@ -79,6 +79,94 @@ function authMiddleware(req, res, next) {
 function findUserById(userId) {
   return Object.values(db.users).find(u => u.userId === userId) || null;
 }
+
+// --- Server-Ereignis-Benachrichtigungen (Vorstufe für Push) ---
+// Der generische Key-Value-Speicher (storage/:key) bleibt unverändert die Quelle der Wahrheit für
+// Pakte und Weltboss - der Server liest hier bei jedem SHARED-Schreibvorgang bewusstungsvoll mit,
+// um daraus Benachrichtigungs-Ereignisse für betroffene Spieler abzuleiten. Kein Client-Code muss
+// dafür geändert werden. Überfälle laufen anders (rein lokal beim Spieler) und bekommen einen
+// eigenen, expliziten "Erinnere mich"-Endpunkt weiter unten.
+function getNotifPrefs(user) {
+  const p = (user && user.notifPrefs) || {};
+  return {
+    enabled: p.enabled !== false,
+    messages: p.messages !== false,
+    pact: p.pact !== false,
+    weltboss: p.weltboss !== false,
+    raid: p.raid !== false,
+    patchnotes: p.patchnotes !== false
+  };
+}
+function pushNotificationEvent(userId, type, payload) {
+  if (!userId) return;
+  if (!db.private[userId]) db.private[userId] = {};
+  const list = db.private[userId].__notificationEvents || [];
+  list.unshift({ id: crypto.randomUUID(), type, time: Date.now(), payload });
+  db.private[userId].__notificationEvents = list.slice(0, 30);
+}
+function handleSharedStorageWrite(key, prevRaw, newRaw) {
+  try {
+    if (key.startsWith('pact:')) {
+      let prev = null, next = null;
+      try { prev = prevRaw ? JSON.parse(prevRaw) : null; } catch (e) {}
+      try { next = JSON.parse(newRaw); } catch (e) { return; }
+      if (!next || !next.a || !next.b) return;
+      const wasOffered = prev && prev.status === 'offered';
+      if (next.status === 'offered' && !wasOffered) {
+        const targetId = next.offeredBy === next.a ? next.b : next.a;
+        const targetUser = findUserById(targetId);
+        if (targetUser) {
+          const prefs = getNotifPrefs(targetUser);
+          if (prefs.enabled && prefs.pact) {
+            const fromName = (next.names && next.names[next.offeredBy]) || 'Ein Spieler';
+            pushNotificationEvent(targetId, 'pact-offer', { fromName });
+          }
+        }
+      }
+    } else if (key === 'worldboss:current') {
+      let prev = null, next = null;
+      try { prev = prevRaw ? JSON.parse(prevRaw) : null; } catch (e) {}
+      try { next = JSON.parse(newRaw); } catch (e) { return; }
+      if (!next) return;
+      const wasDefeated = prev && prev.defeatedAt;
+      if (next.defeatedAt && !wasDefeated) {
+        const contributions = next.contributions || {};
+        const total = Object.values(contributions).reduce((a, x) => a + (x.dmg || 0), 0) || 1;
+        for (const [contribUserId, contrib] of Object.entries(contributions)) {
+          const user = findUserById(contribUserId);
+          if (!user) continue;
+          const prefs = getNotifPrefs(user);
+          if (!prefs.enabled || !prefs.weltboss) continue;
+          const share = Math.round(((contrib.dmg || 0) / total) * 100);
+          pushNotificationEvent(contribUserId, 'weltboss-kill', { level: next.level || 1, share });
+        }
+      }
+    }
+  } catch (e) { console.error('Benachrichtigungs-Ableitung fehlgeschlagen (Speicherwrite selbst war ok):', e.message); }
+}
+// Periodischer Sweep für geplante Überfall-Erinnerungen (Client meldet fireAt aktiv, siehe
+// /api/schedule-raid-alert weiter unten - eine lokale NPC-Bedrohung, von der der Server sonst nie
+// erfährt). Alle 30s geprüft, damit ein Server-Neustart nichts Endgültiges verpasst.
+setInterval(async () => {
+  try {
+    let changed = false;
+    const now = Date.now();
+    for (const [userId, bucket] of Object.entries(db.private)) {
+      const alert = bucket && bucket.__raidAlert;
+      if (alert && alert.fireAt && alert.fireAt <= now) {
+        const user = findUserById(userId);
+        const prefs = getNotifPrefs(user || {});
+        if (user && prefs.enabled && prefs.raid) {
+          pushNotificationEvent(userId, 'raid-incoming', { planet: alert.planet || null });
+          changed = true;
+        }
+        delete bucket.__raidAlert;
+        changed = true;
+      }
+    }
+    if (changed) await saveDb();
+  } catch (e) { console.error('Überfall-Erinnerungs-Sweep fehlgeschlagen:', e.message); }
+}, 30000);
 const SAVE_KEY = 'kepler7-save-v3';
 function getSaveValue(userId) {
   const entry = db.private[userId] && db.private[userId][SAVE_KEY];
@@ -463,7 +551,9 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   const expectedVersion = req.body ? req.body.expectedVersion : undefined;
 
   if (shared) {
+    const prevValue = db.shared[key];
     db.shared[key] = value;
+    handleSharedStorageWrite(key, prevValue, value);
     await saveDb();
     return res.json({ key, value, shared });
   }
@@ -829,6 +919,50 @@ app.post('/api/feedback', authMiddleware, async (req, res) => {
       await sendEmail(FEEDBACK_EMAIL, subject, html + (mailAttachment ? '<p><em>Screenshot im Anhang.</em></p>' : ''), label + ' von ' + req.username + ':\n\n' + cleanText, mailAttachment ? [mailAttachment] : null);
     } catch (e) { console.error('Feedback-Mail fehlgeschlagen (Eintrag ist gespeichert):', e.message); }
   }
+  res.json({ ok: true });
+});
+
+// --- Server-Ereignis-Benachrichtigungen: Einstellungen, Postfach, Überfall-Terminierung ---
+app.get('/api/notification-prefs', authMiddleware, (req, res) => {
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+  res.json(getNotifPrefs(user));
+});
+app.post('/api/notification-prefs', authMiddleware, async (req, res) => {
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+  const b = req.body || {};
+  user.notifPrefs = {
+    enabled: b.enabled !== false,
+    messages: b.messages !== false,
+    pact: b.pact !== false,
+    weltboss: b.weltboss !== false,
+    raid: b.raid !== false,
+    patchnotes: b.patchnotes !== false
+  };
+  await saveDb();
+  res.json(getNotifPrefs(user));
+});
+app.get('/api/notifications', authMiddleware, (req, res) => {
+  const list = (db.private[req.userId] && db.private[req.userId].__notificationEvents) || [];
+  res.json({ notifications: list });
+});
+app.post('/api/notifications/dismiss', authMiddleware, async (req, res) => {
+  const ids = Array.isArray((req.body || {}).ids) ? req.body.ids : [];
+  if (db.private[req.userId] && db.private[req.userId].__notificationEvents) {
+    db.private[req.userId].__notificationEvents = db.private[req.userId].__notificationEvents.filter(n => !ids.includes(n.id));
+  }
+  await saveDb();
+  res.json({ ok: true });
+});
+// Client meldet eine bevorstehende NPC-Überfall-Erkennung an (rein lokal berechnet, der Server
+// bekäme sonst nie etwas davon mit). Ein aktiver Alarm je Spieler, überschreibt einen alten.
+app.post('/api/schedule-raid-alert', authMiddleware, async (req, res) => {
+  const fireAt = Number((req.body || {}).fireAt);
+  if (!fireAt || fireAt < Date.now()) return res.status(400).json({ error: 'Ungültiger Zeitpunkt.' });
+  if (!db.private[req.userId]) db.private[req.userId] = {};
+  db.private[req.userId].__raidAlert = { fireAt, planet: (req.body || {}).planet || null };
+  await saveDb();
   res.json({ ok: true });
 });
 

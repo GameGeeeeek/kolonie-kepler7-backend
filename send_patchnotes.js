@@ -46,7 +46,7 @@ function parseArgs(argv){
 }
 
 async function main(){
-  const { version, changes, dryRun } = parseArgs(process.argv);
+  const { version, changes, dryRun, push } = parseArgs(process.argv);
   if (!version || !changes.length){
     console.error('Nutzung: node send_patchnotes.js --version X.Y.Z --changes "Punkt 1" "Punkt 2" [...] [--dry-run] [--push]');
     process.exit(1);
@@ -92,7 +92,7 @@ async function main(){
   }
   console.log('Fertig: '+ok+' Mails versendet, '+failed+' fehlgeschlagen.');
 
-  if (!args.push) return;
+  if (!push) return;
 
   // --push: zusätzlich Web-Push an alle Spieler mit aktivierter Patchnotes-Kategorie und
   // mindestens einem registrierten Gerät. Nutzt dieselbe db.json und dieselben VAPID-Schlüssel

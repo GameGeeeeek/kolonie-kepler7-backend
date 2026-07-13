@@ -17,12 +17,17 @@ const path = require('path');
 const webpush = require('web-push');
 const { sendEmail, buildPatchnotesEmail } = require('./mailer');
 
+// Dieselbe Pfad-Ermittlung wie server.js und thank_bugreporter.js: respektiert DB_FILE, falls der
+// Container/Prozess damit gestartet wird (z.B. wenn db.json auf einem separaten Docker-Volume
+// liegt), sonst Fallback auf db.json direkt neben diesem Skript.
+const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'db.json');
+
 // VAPID-Schlüssel für den optionalen Push-Broadcast - dieselben Dateien, die der laufende Server
 // beim ersten Start erzeugt hat (siehe server.js). Ohne laufenden Server zuvor gäbe es sie nicht;
 // das Skript bricht den Push-Teil dann einfach sauber ab, die Mail-Versendung bleibt unberührt.
 function loadVapidKeysIfPresent() {
-  const pubFile = path.join(__dirname, 'vapid-public.txt');
-  const privFile = path.join(__dirname, 'vapid-private.txt');
+  const pubFile = process.env.VAPID_PUBLIC_FILE || path.join(__dirname, 'vapid-public.txt');
+  const privFile = process.env.VAPID_PRIVATE_FILE || path.join(__dirname, 'vapid-private.txt');
   if (!fs.existsSync(pubFile) || !fs.existsSync(privFile)) return null;
   return { publicKey: fs.readFileSync(pubFile, 'utf8').trim(), privateKey: fs.readFileSync(privFile, 'utf8').trim() };
 }
@@ -51,9 +56,9 @@ async function main(){
     process.exit(1);
   }
 
-  const dbPath = path.join(__dirname, 'db.json');
+  const dbPath = DB_FILE;
   if (!fs.existsSync(dbPath)){
-    console.error('db.json nicht gefunden - bitte im Backend-Ordner ausführen.');
+    console.error('db.json nicht gefunden unter: ' + dbPath + ' - läuft das Skript im richtigen Container/Ordner?');
     process.exit(1);
   }
   const db = JSON.parse(fs.readFileSync(dbPath, 'utf8'));

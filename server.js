@@ -18,7 +18,7 @@ const SECRET_FILE = process.env.SECRET_FILE || path.join(__dirname, 'jwt-secret.
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const MAIL_FROM = process.env.MAIL_FROM || 'Kolonie Kepler-7 <onboarding@resend.dev>';
 const PUBLIC_URL = process.env.PUBLIC_URL || 'https://gamegeeeeek.de';
-const FEEDBACK_EMAIL = process.env.FEEDBACK_EMAIL || ''; // Empfänger für Bug-Reports & Vorschläge aus dem Spiel
+const FEEDBACK_EMAIL = process.env.FEEDBACK_EMAIL || 'gamegeeeeek@outlook.de'; // Empfänger für Bug-Reports & Vorschläge aus dem Spiel (per .env überschreibbar)
 
 for (const f of [DB_FILE, SECRET_FILE]) {
   const dir = path.dirname(f);

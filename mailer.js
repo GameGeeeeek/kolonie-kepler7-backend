@@ -7,10 +7,11 @@ const PUBLIC_URL = process.env.PUBLIC_URL || 'https://gamegeeeeek.de';
 
 // Sendet eine E-Mail über Resend. html ist Pflicht, text ein Klartext-Fallback für Clients, die kein
 // HTML rendern (Resend verschickt dann eine Multipart-Mail mit beiden Varianten).
-async function sendEmail(to, subject, html, text) {
+async function sendEmail(to, subject, html, text, attachments) {
   if (!RESEND_API_KEY) throw new Error('RESEND_API_KEY nicht gesetzt - siehe ANLEITUNG.md');
   const body = { from: MAIL_FROM, to: [to], subject, html };
   if (text) body.text = text;
+  if (attachments && attachments.length) body.attachments = attachments; // [{ filename, content: base64 }]
   const resp = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' },

@@ -788,8 +788,9 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
 // --- Feedback aus dem Spiel: Bugs & Vorschläge ---
 // Wird in der DB gesichert (db.feedback, letzte 500) und - falls FEEDBACK_EMAIL gesetzt ist - per
 // E-Mail an den Entwickler geschickt. Sanftes Limit: max. 10 Einsendungen pro Spieler und Tag.
+const FEEDBACK_IMG_DIR = process.env.FEEDBACK_IMG_DIR || path.join(__dirname, 'feedback-images');
 app.post('/api/feedback', authMiddleware, async (req, res) => {
-  const { type, text, version } = req.body || {};
+  const { type, text, version, image } = req.body || {};
   const cleanType = type === 'idee' ? 'idee' : 'bug';
   const cleanText = String(text || '').trim().slice(0, 2000);
   if (cleanText.length < 5) return res.status(400).json({ error: 'Bitte beschreibe dein Anliegen etwas ausführlicher.' });
@@ -798,6 +799,22 @@ app.post('/api/feedback', authMiddleware, async (req, res) => {
   const recent = db.feedback.filter(f => f.userId === req.userId && f.time > dayAgo).length;
   if (recent >= 10) return res.status(429).json({ error: 'Limit erreicht: maximal 10 Einsendungen pro Tag - danke für dein Engagement!' });
   const entry = { id: crypto.randomUUID(), time: Date.now(), userId: req.userId, username: req.username, type: cleanType, text: cleanText, version: String(version || '').slice(0, 20) };
+  // Optionaler Screenshot: kommt als Daten-URL (jpeg/png, vom Client bereits verkleinert). Wird auf
+  // Platte gesichert (nicht in db.json - die bliebe sonst nicht schlank) und an die Mail angehängt.
+  let mailAttachment = null;
+  if (typeof image === 'string' && image.length > 0) {
+    const match = image.match(/^data:image\/(jpeg|png);base64,([A-Za-z0-9+/=]+)$/);
+    if (!match) return res.status(400).json({ error: 'Screenshot-Format nicht erkannt (nur JPG/PNG).' });
+    if (match[2].length > 1600000) return res.status(400).json({ error: 'Screenshot zu groß - bitte einen kleineren Ausschnitt anhängen.' });
+    const ext = match[1] === 'png' ? 'png' : 'jpg';
+    const fileName = entry.id + '.' + ext;
+    try {
+      if (!fs.existsSync(FEEDBACK_IMG_DIR)) fs.mkdirSync(FEEDBACK_IMG_DIR, { recursive: true });
+      fs.writeFileSync(path.join(FEEDBACK_IMG_DIR, fileName), Buffer.from(match[2], 'base64'));
+      entry.imageFile = fileName;
+    } catch (e) { console.error('Screenshot konnte nicht gespeichert werden:', e.message); }
+    mailAttachment = { filename: 'screenshot.' + ext, content: match[2] };
+  }
   db.feedback.unshift(entry);
   db.feedback = db.feedback.slice(0, 500);
   await saveDb();
@@ -809,7 +826,7 @@ app.post('/api/feedback', authMiddleware, async (req, res) => {
       const html = '<h2>' + label + ' aus Kolonie Kepler-7</h2>'
         + '<p><strong>Spieler:</strong> ' + req.username + '<br><strong>Version:</strong> ' + (entry.version || 'unbekannt') + '<br><strong>Zeit:</strong> ' + new Date(entry.time).toLocaleString('de-DE') + '</p>'
         + '<p style="white-space:pre-wrap; border-left:3px solid #7f77dd; padding-left:12px;">' + safeText + '</p>';
-      await sendEmail(FEEDBACK_EMAIL, subject, html, label + ' von ' + req.username + ':\n\n' + cleanText);
+      await sendEmail(FEEDBACK_EMAIL, subject, html + (mailAttachment ? '<p><em>Screenshot im Anhang.</em></p>' : ''), label + ' von ' + req.username + ':\n\n' + cleanText, mailAttachment ? [mailAttachment] : null);
     } catch (e) { console.error('Feedback-Mail fehlgeschlagen (Eintrag ist gespeichert):', e.message); }
   }
   res.json({ ok: true });

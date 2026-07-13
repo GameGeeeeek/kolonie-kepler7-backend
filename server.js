@@ -956,6 +956,29 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
   res.json({ ok: true });
 });
 
+// --- Ausstehende Belohnungen (z.B. Bugfix-Dankeschön) ---
+// Bewusst NICHT direkt in den Spielstand (SAVE_KEY) geschrieben: Wäre der Spieler gerade online,
+// würde sein nächster normaler Auto-Save (alle 15s, mit dem alten Client-Stand) die Gutschrift
+// wieder überschreiben (siehe saveGameStateVersioned-Konfliktlogik weiter unten). Stattdessen liegt
+// die Belohnung hier in einer kleinen Warteschlange und wird vom Client selbst beim nächsten Laden
+// abgeholt und ganz normal in seinen eigenen state.credits + regulären Speichervorgang eingebaut.
+app.get('/api/pending-rewards', authMiddleware, (req, res) => {
+  const list = (db.private[req.userId] && db.private[req.userId].__pendingRewards) || [];
+  res.json({ rewards: list });
+});
+
+// Holt genau eine ausstehende Belohnung ab und entfernt sie dabei sofort aus der Warteschlange
+// (atomar innerhalb dieses einen Requests) - dadurch kann derselbe Eintrag nie doppelt geclaimt
+// werden, selbst wenn der Client aus irgendeinem Grund zweimal hintereinander abfragt.
+app.post('/api/pending-rewards/claim', authMiddleware, async (req, res) => {
+  const list = (db.private[req.userId] && db.private[req.userId].__pendingRewards) || [];
+  if (!list.length) return res.json({ reward: null });
+  const reward = list.shift();
+  db.private[req.userId].__pendingRewards = list;
+  await saveDb();
+  res.json({ reward });
+});
+
 // --- Feedback aus dem Spiel: Bugs & Vorschläge ---
 // Wird in der DB gesichert (db.feedback, letzte 500) und - falls FEEDBACK_EMAIL gesetzt ist - per
 // E-Mail an den Entwickler geschickt. Sanftes Limit: max. 10 Einsendungen pro Spieler und Tag.

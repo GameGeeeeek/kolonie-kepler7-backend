@@ -75,6 +75,30 @@ function saveDb() {
 
 const app = express();
 app.use(cors());
+// --- Automatische Backups ---
+// Alle Spielstände liegen in einer einzigen db.json - ein Bug, ein versehentliches Überschreiben
+// oder eine Beschädigung würde ALLE Spieler gleichzeitig treffen (siehe Vorfall vom 13.07.2026,
+// als ein Frontend-Bug fälschlich wie kompletter Datenverlust aussah). Backups sichern gegen genau
+// dieses Szenario ab: alle 30 Minuten + einmal beim Serverstart eine Kopie im selben persistenten
+// Volume, älteste Backups über dem Limit werden automatisch gelöscht.
+const BACKUP_DIR = path.join(path.dirname(DB_FILE), 'backups');
+const BACKUP_RETENTION = 48; // ca. 1 Tag bei 30-Minuten-Takt
+if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+function backupDb() {
+  try {
+    if (!fs.existsSync(DB_FILE)) return; // beim allerersten Start evtl. noch keine DB vorhanden
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const dest = path.join(BACKUP_DIR, `db-${ts}.json`);
+    fs.copyFileSync(DB_FILE, dest);
+    const files = fs.readdirSync(BACKUP_DIR).filter(f => f.startsWith('db-') && f.endsWith('.json')).sort();
+    while (files.length > BACKUP_RETENTION) {
+      const oldest = files.shift();
+      fs.unlinkSync(path.join(BACKUP_DIR, oldest));
+    }
+  } catch (e) { console.error('Backup fehlgeschlagen:', e); }
+}
+backupDb();
+setInterval(backupDb, 30 * 60 * 1000);
 // verify-Callback speichert den ROHEN Body zusätzlich (req.rawBody) - wird für die
 // GitHub-Webhook-Signaturprüfung gebraucht, da express.json() den Body normalerweise nur geparst
 // bereitstellt. Für alle anderen Routen ändert sich dadurch nichts.

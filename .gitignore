@@ -1,5 +1,6 @@
 node_modules/
 db.json
+backups/
 jwt-secret.txt
 vapid-public.txt
 vapid-private.txt

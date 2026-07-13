@@ -33,6 +33,24 @@ function loadOrCreateSecret() {
 }
 const JWT_SECRET = loadOrCreateSecret();
 
+// --- Push-Benachrichtigungen (Web Push / VAPID) ---
+// Schlüsselpaar wird beim allerersten Start automatisch erzeugt und dauerhaft gespeichert (gleiches
+// Muster wie das JWT-Secret oben) - kein manueller Schritt auf dem Server nötig.
+const webpush = require('web-push');
+const VAPID_PUBLIC_FILE = process.env.VAPID_PUBLIC_FILE || path.join(__dirname, 'vapid-public.txt');
+const VAPID_PRIVATE_FILE = process.env.VAPID_PRIVATE_FILE || path.join(__dirname, 'vapid-private.txt');
+function loadOrCreateVapidKeys() {
+  if (fs.existsSync(VAPID_PUBLIC_FILE) && fs.existsSync(VAPID_PRIVATE_FILE)) {
+    return { publicKey: fs.readFileSync(VAPID_PUBLIC_FILE, 'utf8').trim(), privateKey: fs.readFileSync(VAPID_PRIVATE_FILE, 'utf8').trim() };
+  }
+  const keys = webpush.generateVAPIDKeys();
+  fs.writeFileSync(VAPID_PUBLIC_FILE, keys.publicKey, { mode: 0o600 });
+  fs.writeFileSync(VAPID_PRIVATE_FILE, keys.privateKey, { mode: 0o600 });
+  return keys;
+}
+const VAPID_KEYS = loadOrCreateVapidKeys();
+webpush.setVapidDetails('mailto:' + FEEDBACK_EMAIL, VAPID_KEYS.publicKey, VAPID_KEYS.privateKey);
+
 function loadDb() {
   if (!fs.existsSync(DB_FILE)) return { users: {}, private: {}, shared: {}, resetTokens: {} };
   try {
@@ -103,6 +121,40 @@ function pushNotificationEvent(userId, type, payload) {
   const list = db.private[userId].__notificationEvents || [];
   list.unshift({ id: crypto.randomUUID(), type, time: Date.now(), payload });
   db.private[userId].__notificationEvents = list.slice(0, 30);
+  sendWebPushToUser(userId, type, payload); // schluckt eigene Fehler, blockiert nie den Aufrufer
+}
+// Lesbarer Titel/Text je Ereignistyp für die eigentliche Push-Nachricht (Postfach-Anzeige im
+// Client hat ihre eigene, leicht andere Formulierung - hier bewusst kompakter fürs Benachrichtigungsfenster).
+function pushNotificationText(type, payload) {
+  if (type === 'pact-offer') return { title: 'Neues Pakt-Angebot', body: (payload.fromName || 'Ein Spieler') + ' bietet dir einen Nichtangriffspakt an.' };
+  if (type === 'weltboss-kill') return { title: 'Weltboss besiegt!', body: 'Leviathan Stufe ' + (payload.level || 1) + ' erlegt - dein Beitrag: ' + (payload.share || 0) + '%.' };
+  if (type === 'raid-incoming') return { title: 'Überfall!', body: 'Eine feindliche Flotte greift deine Kolonie an.' };
+  if (type === 'message') return { title: 'Neue Nachricht', body: (payload.fromName || 'Ein Spieler') + ' hat dir geschrieben.' };
+  if (type === 'patchnotes') return { title: 'Kolonie Kepler-7 aktualisiert', body: 'Version ' + (payload.version || '') + ' ist da - tippen für die Neuigkeiten.' };
+  return { title: 'Kolonie Kepler-7', body: 'Es gibt Neuigkeiten.' };
+}
+// Verschickt eine echte Push-Benachrichtigung an ALLE registrierten Geräte eines Spielers. Abgelaufene
+// Abos (Browser deinstalliert, Berechtigung entzogen - erkennbar an HTTP 404/410 vom Push-Dienst)
+// werden automatisch aus der DB entfernt, damit die Liste nicht endlos mit toten Einträgen wächst.
+async function sendWebPushToUser(userId, type, payload) {
+  try {
+    const subs = (db.private[userId] && db.private[userId].__pushSubscriptions) || [];
+    if (!subs.length) return;
+    const { title, body } = pushNotificationText(type, payload);
+    const message = JSON.stringify({ title, body, type, payload, time: Date.now() });
+    let changed = false;
+    const survivors = [];
+    for (const sub of subs) {
+      try {
+        await webpush.sendNotification(sub, message);
+        survivors.push(sub);
+      } catch (e) {
+        if (e.statusCode === 404 || e.statusCode === 410) { changed = true; /* Abo verworfen */ }
+        else survivors.push(sub); // anderer Fehler (z.B. kurzzeitig offline) - Abo behalten
+      }
+    }
+    if (changed) { db.private[userId].__pushSubscriptions = survivors; await saveDb(); }
+  } catch (e) { console.error('Web-Push fehlgeschlagen:', e.message); }
 }
 function handleSharedStorageWrite(key, prevRaw, newRaw) {
   try {
@@ -872,6 +924,11 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
   list.unshift({ id: crypto.randomUUID(), time: Date.now(), fromUserId: req.userId, fromName: req.username, text: cleanText });
   db.private[toUserId].__messages = list.slice(0, 60);
   await saveDb();
+  const targetUser = findUserById(toUserId);
+  if (targetUser) {
+    const prefs = getNotifPrefs(targetUser);
+    if (prefs.enabled && prefs.messages) pushNotificationEvent(toUserId, 'message', { fromName: req.username });
+  }
   res.json({ ok: true });
 });
 
@@ -962,6 +1019,32 @@ app.post('/api/schedule-raid-alert', authMiddleware, async (req, res) => {
   if (!fireAt || fireAt < Date.now()) return res.status(400).json({ error: 'Ungültiger Zeitpunkt.' });
   if (!db.private[req.userId]) db.private[req.userId] = {};
   db.private[req.userId].__raidAlert = { fireAt, planet: (req.body || {}).planet || null };
+  await saveDb();
+  res.json({ ok: true });
+});
+
+app.get('/api/push/public-key', (req, res) => {
+  res.json({ publicKey: VAPID_KEYS.publicKey });
+});
+app.post('/api/push/subscribe', authMiddleware, async (req, res) => {
+  const sub = req.body || {};
+  if (!sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+    return res.status(400).json({ error: 'Ungültiges Push-Abonnement.' });
+  }
+  if (!db.private[req.userId]) db.private[req.userId] = {};
+  const subs = db.private[req.userId].__pushSubscriptions || [];
+  // Dedupe über den Endpoint (ein Browser/Gerät kann sich mehrfach registrieren, z.B. nach Neuladen).
+  const filtered = subs.filter(s => s.endpoint !== sub.endpoint);
+  filtered.push({ endpoint: sub.endpoint, keys: sub.keys, addedAt: Date.now() });
+  db.private[req.userId].__pushSubscriptions = filtered.slice(-10); // max 10 Geräte je Spieler
+  await saveDb();
+  res.json({ ok: true });
+});
+app.post('/api/push/unsubscribe', authMiddleware, async (req, res) => {
+  const endpoint = (req.body || {}).endpoint;
+  if (db.private[req.userId] && db.private[req.userId].__pushSubscriptions) {
+    db.private[req.userId].__pushSubscriptions = db.private[req.userId].__pushSubscriptions.filter(s => s.endpoint !== endpoint);
+  }
   await saveDb();
   res.json({ ok: true });
 });

@@ -14,13 +14,25 @@
 
 const fs = require('fs');
 const path = require('path');
+const webpush = require('web-push');
 const { sendEmail, buildPatchnotesEmail } = require('./mailer');
 
+// VAPID-Schlüssel für den optionalen Push-Broadcast - dieselben Dateien, die der laufende Server
+// beim ersten Start erzeugt hat (siehe server.js). Ohne laufenden Server zuvor gäbe es sie nicht;
+// das Skript bricht den Push-Teil dann einfach sauber ab, die Mail-Versendung bleibt unberührt.
+function loadVapidKeysIfPresent() {
+  const pubFile = path.join(__dirname, 'vapid-public.txt');
+  const privFile = path.join(__dirname, 'vapid-private.txt');
+  if (!fs.existsSync(pubFile) || !fs.existsSync(privFile)) return null;
+  return { publicKey: fs.readFileSync(pubFile, 'utf8').trim(), privateKey: fs.readFileSync(privFile, 'utf8').trim() };
+}
+
 function parseArgs(argv){
-  const args = { version: null, changes: [], dryRun: false };
+  const args = { version: null, changes: [], dryRun: false, push: false };
   for (let i = 2; i < argv.length; i++){
     if (argv[i] === '--version'){ args.version = argv[++i]; }
     else if (argv[i] === '--dry-run'){ args.dryRun = true; }
+    else if (argv[i] === '--push'){ args.push = true; }
     else if (argv[i] === '--changes'){
       while (i+1 < argv.length && !argv[i+1].startsWith('--')) args.changes.push(argv[++i]);
     }
@@ -31,7 +43,7 @@ function parseArgs(argv){
 async function main(){
   const { version, changes, dryRun } = parseArgs(process.argv);
   if (!version || !changes.length){
-    console.error('Nutzung: node send_patchnotes.js --version X.Y.Z --changes "Punkt 1" "Punkt 2" [...] [--dry-run]');
+    console.error('Nutzung: node send_patchnotes.js --version X.Y.Z --changes "Punkt 1" "Punkt 2" [...] [--dry-run] [--push]');
     process.exit(1);
   }
   if (!process.env.RESEND_API_KEY && !dryRun){
@@ -73,7 +85,34 @@ async function main(){
     // Kleine Pause zwischen den Mails, um Resend-Rate-Limits nicht zu reizen.
     await new Promise(r => setTimeout(r, 600));
   }
-  console.log('Fertig: '+ok+' versendet, '+failed+' fehlgeschlagen.');
+  console.log('Fertig: '+ok+' Mails versendet, '+failed+' fehlgeschlagen.');
+
+  if (!args.push) return;
+
+  // --push: zusätzlich Web-Push an alle Spieler mit aktivierter Patchnotes-Kategorie und
+  // mindestens einem registrierten Gerät. Nutzt dieselbe db.json und dieselben VAPID-Schlüssel
+  // wie der laufende Server - kein separates Setup nötig.
+  const vapid = loadVapidKeysIfPresent();
+  if (!vapid) {
+    console.log('Kein Push-Versand: VAPID-Schlüssel nicht gefunden (Server muss mindestens einmal gelaufen sein).');
+    return;
+  }
+  webpush.setVapidDetails('mailto:' + (process.env.FEEDBACK_EMAIL || 'gamegeeeeek@outlook.de'), vapid.publicKey, vapid.privateKey);
+  const priv = db.private || {};
+  let pushOk = 0, pushFailed = 0, pushSkipped = 0;
+  for (const [userId, bucket] of Object.entries(priv)) {
+    const user = Object.values(db.users || {}).find(u => u.userId === userId);
+    const prefs = (user && user.notifPrefs) || {};
+    const wantsPatchPush = prefs.enabled !== false && prefs.patchnotes !== false;
+    const subs = bucket.__pushSubscriptions || [];
+    if (!wantsPatchPush || !subs.length) { pushSkipped++; continue; }
+    const message = JSON.stringify({ title: 'Kolonie Kepler-7 aktualisiert', body: 'Version '+version+' ist da - tippen für die Neuigkeiten.', type: 'patchnotes', payload: { version }, time: Date.now() });
+    for (const sub of subs) {
+      try { await webpush.sendNotification(sub, message); pushOk++; }
+      catch (e) { pushFailed++; }
+    }
+  }
+  console.log('Push: '+pushOk+' Geräte benachrichtigt, '+pushFailed+' fehlgeschlagen, '+pushSkipped+' Spieler ohne Push-Abo/Opt-out übersprungen.');
 }
 
 main().catch(e => { console.error('Abbruch:', e.message); process.exit(1); });

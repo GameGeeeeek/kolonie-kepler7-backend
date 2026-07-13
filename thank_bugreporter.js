@@ -20,6 +20,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+// Dieselbe Pfad-Ermittlung wie server.js: respektiert DB_FILE, falls der Container/Prozess damit
+// gestartet wird (z.B. wenn db.json auf einem separaten Docker-Volume liegt), sonst Fallback auf
+// db.json direkt neben diesem Skript.
+const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'db.json');
+
 function parseArgs(argv) {
   const args = { username: null, version: null, bug: '', credits: 300, dryRun: false, force: false };
   for (let i = 2; i < argv.length; i++) {
@@ -44,9 +49,9 @@ function main() {
     process.exit(1);
   }
 
-  const dbPath = path.join(__dirname, 'db.json');
+  const dbPath = DB_FILE;
   if (!fs.existsSync(dbPath)) {
-    console.error('db.json nicht gefunden - bitte im Backend-Ordner ausführen.');
+    console.error('db.json nicht gefunden unter: ' + dbPath + ' - läuft das Skript im richtigen Container/Ordner?');
     process.exit(1);
   }
   const db = JSON.parse(fs.readFileSync(dbPath, 'utf8'));

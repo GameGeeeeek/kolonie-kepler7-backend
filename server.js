@@ -122,6 +122,84 @@ function findUserById(userId) {
   return Object.values(db.users).find(u => u.userId === userId) || null;
 }
 
+// --- Allianz-Berechtigungen ---
+// Das Allianz-System läuft komplett über den generischen geteilten Speicher (alliance:<TAG>:...) -
+// der lief bisher OHNE jede serverseitige Rechte-Prüfung, jedes eingeloggte Konto konnte JEDEN
+// geteilten Schlüssel lesen/schreiben (die Admin-Beschränkung im Frontend war rein kosmetisch und
+// z.B. über die Browser-Konsole trivial umgehbar - Bug-Report 13.07.2026: jedes Mitglied konnte den
+// Allianz-Banner ändern). Die folgenden Funktionen kapseln die Prüfung an einer Stelle und werden
+// unten in GET/PUT /api/storage/:key sowie GET /api/storage-list für alliance:-Schlüssel angewendet.
+// Bewusst NICHT auf alle alliance:-Unterressourcen ausgeweitet (z.B. Chat/Beiträge/Kriege bleiben wie
+// bisher offen für alle Mitglieder) - nur die tatsächlich gemeldeten/sicherheitsrelevanten Fälle:
+// info (u.a. Beitrittsmodus), banner (Farbe), role (Mitgliederverwaltung), applications (Bewerbungen).
+function allianceRoleOf(tag, userId) {
+  const raw = db.shared['alliance:' + tag + ':role:' + userId];
+  if (typeof raw !== 'string') return null;
+  try {
+    const r = JSON.parse(raw);
+    return (r.role && r.role !== 'left') ? r.role : null;
+  } catch (e) { return null; }
+}
+function allianceHasAdmin(tag) {
+  const prefix = 'alliance:' + tag + ':role:';
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix)) continue;
+    try { if (JSON.parse(db.shared[k]).role === 'admin') return true; } catch (e) {}
+  }
+  return false;
+}
+// Gibt bei erlaubtem Zugriff null zurück, sonst einen Fehlertext für die 403-Antwort.
+function checkAllianceKeyPermission(req, key, isWrite) {
+  const m = key.match(/^alliance:([^:]+):(.+)$/);
+  if (!m) return null; // kein Allianz-Schlüssel, keine Sonderregel
+  const tag = m[1];
+  const rest = m[2];
+  const isAdmin = allianceRoleOf(tag, req.userId) === 'admin';
+
+  if (rest === 'banner') {
+    return (isWrite && !isAdmin) ? 'Nur Admins dürfen den Allianz-Banner ändern.' : null;
+  }
+  if (rest === 'info') {
+    if (!isWrite) return null; // Lesen bleibt für alle offen (z.B. Allianzliste)
+    const exists = db.shared[key] !== undefined;
+    if (!exists) return null; // Gründung: Tag existiert noch nicht, jeder darf anlegen
+    return isAdmin ? null : 'Nur Admins dürfen die Allianz-Einstellungen ändern.';
+  }
+  if (rest.startsWith('role:')) {
+    const targetId = rest.slice('role:'.length);
+    if (!isWrite) return null;
+    if (targetId === req.userId) {
+      // Eigene Rolle: Beitreten/Verlassen bleibt selbstständig möglich, aber keine Selbst-Beförderung
+      // zum Admin - außer man ist laut info.creatorId der tatsächliche Gründer UND es gibt noch
+      // KEINEN Admin für diese Allianz (echte Gründung in zwei Schritten: erst info anlegen, dann
+      // die eigene Rolle setzen - beim zweiten Schritt existiert info bereits, deshalb reicht die
+      // reine Existenzprüfung nicht, es muss die tatsächliche Gründer-ID geprüft werden).
+      let requestedRole = null;
+      try { requestedRole = JSON.parse(req.body && req.body.value).role; } catch (e) {}
+      if (requestedRole === 'admin' && !isAdmin) {
+        let isFounder = false;
+        try {
+          const infoRaw = db.shared['alliance:' + tag + ':info'];
+          if (infoRaw) isFounder = JSON.parse(infoRaw).creatorId === req.userId;
+        } catch (e) {}
+        if (!isFounder || allianceHasAdmin(tag)) return 'Du kannst dich nicht selbst zum Admin machen.';
+      }
+      return null;
+    }
+    return isAdmin ? null : 'Nur Admins dürfen die Rolle anderer Mitglieder ändern.';
+  }
+  if (rest.startsWith('applications:')) {
+    const targetId = rest.slice('applications:'.length);
+    if (isWrite) {
+      if (targetId === req.userId) return null; // eigene Bewerbung einreichen/zurückziehen
+      return isAdmin ? null : 'Nur Admins dürfen über Bewerbungen entscheiden.';
+    }
+    // Lesen einer einzelnen Bewerbung: nur Admin der Allianz oder die bewerbende Person selbst
+    return (isAdmin || targetId === req.userId) ? null : 'Keine Berechtigung, diese Bewerbung zu sehen.';
+  }
+  return null; // andere alliance:-Unterressourcen (Chat, Beiträge, Kriege, ...) bleiben wie bisher offen
+}
+
 // --- Server-Ereignis-Benachrichtigungen (Vorstufe für Push) ---
 // Der generische Key-Value-Speicher (storage/:key) bleibt unverändert die Quelle der Wahrheit für
 // Pakte und Weltboss - der Server liest hier bei jedem SHARED-Schreibvorgang bewusstungsvoll mit,
@@ -613,6 +691,10 @@ const { sendEmail, voidSignalEmail, voidSignalPlainText, buildPatchnotesEmail } 
 app.get('/api/storage/:key', authMiddleware, (req, res) => {
   const shared = req.query.shared === 'true';
   const key = req.params.key;
+  if (shared) {
+    const denyReason = checkAllianceKeyPermission(req, key, false);
+    if (denyReason) return res.status(403).json({ error: denyReason });
+  }
   const store = shared ? db.shared : (db.private[req.userId] || {});
   const entry = store[key];
   if (entry === undefined) return res.status(404).json({ error: 'not found' });
@@ -627,6 +709,8 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   const expectedVersion = req.body ? req.body.expectedVersion : undefined;
 
   if (shared) {
+    const denyReason = checkAllianceKeyPermission(req, key, true);
+    if (denyReason) return res.status(403).json({ error: denyReason });
     const prevValue = db.shared[key];
     db.shared[key] = value;
     handleSharedStorageWrite(key, prevValue, value);
@@ -654,6 +738,16 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
 
 app.get('/api/storage-list', authMiddleware, (req, res) => {
   const prefix = req.query.prefix || '';
+  // Bewerbungslisten sind wie einzelne Bewerbungen geschützt (siehe checkAllianceKeyPermission) -
+  // ohne diese Prüfung könnte jeder per Präfix-Auflistung alle Bewerbernamen fremder Allianzen sehen,
+  // selbst wenn das Lesen einer einzelnen Bewerbung schon korrekt blockiert wäre.
+  const appMatch = prefix.match(/^alliance:([^:]+):applications:$/);
+  if (appMatch) {
+    const tag = appMatch[1];
+    if (allianceRoleOf(tag, req.userId) !== 'admin') {
+      return res.status(403).json({ error: 'Nur Admins dürfen Bewerbungen einsehen.' });
+    }
+  }
   const keys = Object.keys(db.shared).filter(k => k.startsWith(prefix));
   res.json({ keys });
 });

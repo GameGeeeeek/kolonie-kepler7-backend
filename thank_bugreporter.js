@@ -1,15 +1,17 @@
 #!/usr/bin/env node
-// ============ Bugfix-Danke (Standalone) ============
-// Schickt einem Spieler, der einen Bug gemeldet hat, nach dessen Behebung eine System-Nachricht
-// und legt ihm eine einmalige kleine Kredit-Belohnung in die "ausstehende Belohnungen"-Warteschlange
-// (siehe /api/pending-rewards in server.js). Bewusst KEIN Server-Endpunkt (wie send_patchnotes.js):
-// nur wer SSH-Zugriff auf diesen Rechner hat, kann das auslösen - kein Admin-Secret nötig, keine
-// öffentliche Angriffsfläche.
+// ============ Feedback-Danke (Standalone) ============
+// Schickt einem Spieler, der einen Bug gemeldet ODER einen Vorschlag eingereicht hat, nach dessen
+// Umsetzung eine System-Nachricht und legt ihm eine einmalige kleine Kredit-Belohnung in die
+// "ausstehende Belohnungen"-Warteschlange (siehe /api/pending-rewards in server.js). Bewusst KEIN
+// Server-Endpunkt (wie send_patchnotes.js): nur wer SSH-Zugriff auf diesen Rechner hat, kann das
+// auslösen - kein Admin-Secret nötig, keine öffentliche Angriffsfläche.
 //
 // Aufruf (im Backend-Ordner, damit db.json stimmt):
 //   node thank_bugreporter.js --username holyhenning --version 8.20.4 --credits 500 --bug "Habitat-Kuppel ueber Maximalstufe ausbaubar"
+//   node thank_bugreporter.js --username holyhenning --version 8.21.1 --credits 500 --type vorschlag --bug "Feste Platzhalter-Slots fuer die Warteschlange"
 //
 // Optionen:
+//   --type bug|vorschlag   Art des Feedbacks - bestimmt nur den Nachrichtentext (Standard: bug)
 //   --credits N     Anzahl Kredite (Standard: 300)
 //   --dry-run       zeigt nur an, was passieren würde, ohne etwas zu speichern
 //   --force         erlaubt eine zweite Belohnung für denselben Spieler+Version (sonst blockiert,
@@ -26,7 +28,7 @@ const crypto = require('crypto');
 const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'db.json');
 
 function parseArgs(argv) {
-  const args = { username: null, version: null, bug: '', credits: 300, dryRun: false, force: false };
+  const args = { username: null, version: null, bug: '', credits: 300, dryRun: false, force: false, type: 'bug' };
   for (let i = 2; i < argv.length; i++) {
     if (argv[i] === '--username') args.username = argv[++i];
     else if (argv[i] === '--version') args.version = argv[++i];
@@ -34,6 +36,7 @@ function parseArgs(argv) {
     else if (argv[i] === '--credits') args.credits = parseInt(argv[++i], 10);
     else if (argv[i] === '--dry-run') args.dryRun = true;
     else if (argv[i] === '--force') args.force = true;
+    else if (argv[i] === '--type') args.type = argv[++i];
   }
   return args;
 }
@@ -46,6 +49,10 @@ function main() {
   }
   if (!Number.isFinite(args.credits) || args.credits <= 0) {
     console.error('Ungültiger --credits Wert.');
+    process.exit(1);
+  }
+  if (args.type !== 'bug' && args.type !== 'vorschlag') {
+    console.error('Ungültiger --type Wert (erlaubt: bug, vorschlag).');
     process.exit(1);
   }
 
@@ -76,11 +83,14 @@ function main() {
     process.exit(1);
   }
 
-  const bugLine = args.bug ? (' ("' + args.bug + '")') : '';
-  const messageText =
-    'Danke für deinen Bug-Report' + bugLine + '! Er wurde in Version ' + args.version +
-    ' behoben. Als kleines Dankeschön warten ' + args.credits + ' Kredite auf dich, sobald du dich ' +
-    'das nächste Mal einloggst - schönes Spielen! - Das Kolonie Kepler-7 Team';
+  const noteLine = args.bug ? (' ("' + args.bug + '")') : '';
+  const messageText = args.type === 'vorschlag'
+    ? 'Danke für deinen Vorschlag' + noteLine + '! Er wurde in Version ' + args.version +
+      ' umgesetzt. Als kleines Dankeschön warten ' + args.credits + ' Kredite auf dich, sobald du ' +
+      'dich das nächste Mal einloggst - schönes Spielen! - Das Kolonie Kepler-7 Team'
+    : 'Danke für deinen Bug-Report' + noteLine + '! Er wurde in Version ' + args.version +
+      ' behoben. Als kleines Dankeschön warten ' + args.credits + ' Kredite auf dich, sobald du dich ' +
+      'das nächste Mal einloggst - schönes Spielen! - Das Kolonie Kepler-7 Team';
 
   console.log('Spieler: ' + user.username + ' (userId: ' + user.userId + ')');
   console.log('Nachricht: ' + messageText);
@@ -114,7 +124,7 @@ function main() {
     id: crypto.randomUUID(),
     time: Date.now(),
     credits: args.credits,
-    reason: 'bugfix',
+    reason: args.type,
     version: args.version,
     bug: args.bug || null
   });
@@ -124,6 +134,7 @@ function main() {
     version: args.version,
     time: Date.now(),
     credits: args.credits,
+    type: args.type,
     bug: args.bug || null
   }]);
 

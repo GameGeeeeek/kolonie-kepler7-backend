@@ -129,9 +129,12 @@ function findUserById(userId) {
 // z.B. über die Browser-Konsole trivial umgehbar - Bug-Report 13.07.2026: jedes Mitglied konnte den
 // Allianz-Banner ändern). Die folgenden Funktionen kapseln die Prüfung an einer Stelle und werden
 // unten in GET/PUT /api/storage/:key sowie GET /api/storage-list für alliance:-Schlüssel angewendet.
-// Bewusst NICHT auf alle alliance:-Unterressourcen ausgeweitet (z.B. Chat/Beiträge/Kriege bleiben wie
-// bisher offen für alle Mitglieder) - nur die tatsächlich gemeldeten/sicherheitsrelevanten Fälle:
-// info (u.a. Beitrittsmodus), banner (Farbe), role (Mitgliederverwaltung), applications (Bewerbungen).
+// Abgedeckt: info (u.a. Beitrittsmodus), banner (Farbe), role (Mitgliederverwaltung), applications
+// (Bewerbungen), wars/warscore/warcontrib (Kriegserklärung/-punkte - Folgefund 13.07.2026: ohne
+// Prüfung konnte jeder eingeloggte Client per direktem API-Aufruf beliebigen Allianzen einen Krieg
+// erklären/beenden oder den Kriegspunktestand beliebig hochsetzen, unabhängig von der eigenen Rolle).
+// Weiterhin bewusst NICHT geprüft: Chat/Tech-Beiträge (kein Sicherheits-, nur ein Fairness-Aspekt,
+// vergleichbar mit dem generell client-autoritativen Punktestand des restlichen Spiels).
 function allianceRoleOf(tag, userId) {
   const raw = db.shared['alliance:' + tag + ':role:' + userId];
   if (typeof raw !== 'string') return null;
@@ -197,7 +200,48 @@ function checkAllianceKeyPermission(req, key, isWrite) {
     // Lesen einer einzelnen Bewerbung: nur Admin der Allianz oder die bewerbende Person selbst
     return (isAdmin || targetId === req.userId) ? null : 'Keine Berechtigung, diese Bewerbung zu sehen.';
   }
-  return null; // andere alliance:-Unterressourcen (Chat, Beiträge, Kriege, ...) bleiben wie bisher offen
+  if (rest === 'wars') {
+    if (!isWrite) return null; // Lesen bleibt offen (Kriegsliste ist für alle sichtbar)
+    if (isAdmin) return null; // Admin verwaltet die Kriegsliste der eigenen Allianz
+    // declareWar()/makePeace() im Frontend tragen einen Krieg GEGENSEITIG in beide Kriegslisten ein -
+    // ein Admin von Allianz E schreibt dafür auch in alliance:<TAG>:wars (TAG = die von ihm bekriegte
+    // Allianz). Das ist gewollt, aber nur erlaubt, wenn genau E's eigener Tag hinzugefügt/entfernt wird
+    // - keine andere Änderung an dieser fremden Liste.
+    let requesterTag = null;
+    for (const k of Object.keys(db.shared)) {
+      const rm = k.match(/^alliance:([^:]+):role:(.+)$/);
+      if (!rm || rm[2] !== req.userId) continue;
+      try { if (JSON.parse(db.shared[k]).role === 'admin') { requesterTag = rm[1]; break; } } catch (e) {}
+    }
+    if (!requesterTag) return 'Nur Admins dürfen Kriegs-Listen ändern.';
+    let prevEnemies = [], nextEnemies = [];
+    try { const pr = db.shared[key]; if (pr) prevEnemies = JSON.parse(pr).enemies || []; } catch (e) {}
+    try { nextEnemies = JSON.parse(req.body && req.body.value).enemies || []; } catch (e) { return 'Ungültiges Format.'; }
+    const diff = prevEnemies.filter(e => !nextEnemies.includes(e)).concat(nextEnemies.filter(e => !prevEnemies.includes(e)));
+    return (diff.length === 1 && diff[0] === requesterTag) ? null : 'Nur Admins dürfen Kriegs-Listen ändern.';
+  }
+  if (rest.startsWith('warscore:') || rest.startsWith('warcontrib:')) {
+    if (!isWrite) return null; // Kriegspunktestand ist für beide Kriegsparteien sichtbar
+    if (rest.startsWith('warcontrib:')) {
+      // Format: warcontrib:<enemyTag>:<userId> - jeder trägt nur seinen EIGENEN Beitrag ein.
+      const parts = rest.slice('warcontrib:'.length).split(':');
+      const ownerId = parts[1];
+      if (ownerId !== req.userId) return 'Der eigene Kriegsbeitrag kann nur von einem selbst geschrieben werden.';
+    }
+    if (!allianceRoleOf(tag, req.userId)) return 'Nur Allianzmitglieder dürfen Kriegspunkte eintragen.';
+    // Plausibilisierung statt harter Cap: der Punktestand darf sich pro Schreibvorgang nur um einen
+    // Betrag ändern, der zu einem einzelnen Kampfergebnis passt (reguläre Kampfpunkte-Boni liegen im
+    // niedrigen zwei- bis dreistelligen Bereich je Sieg) - verhindert, dass sich jemand per direktem
+    // API-Aufruf beliebig hohe Kriegspunkte gutschreibt.
+    let prevScore = 0, nextScore = 0;
+    try { const pr = db.shared[key]; if (pr) prevScore = JSON.parse(pr).score || 0; } catch (e) {}
+    try { nextScore = JSON.parse(req.body && req.body.value).score; } catch (e) { return 'Ungültiges Format.'; }
+    if (typeof nextScore !== 'number' || !isFinite(nextScore) || nextScore < prevScore || nextScore - prevScore > 1000) {
+      return 'Ungültige Kriegspunkte-Änderung.';
+    }
+    return null;
+  }
+  return null; // andere alliance:-Unterressourcen (Chat, Tech-Beiträge, ...) bleiben wie bisher offen
 }
 
 // --- Server-Ereignis-Benachrichtigungen (Vorstufe für Push) ---

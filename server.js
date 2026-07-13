@@ -238,13 +238,20 @@ app.post('/api/verify-email', async (req, res) => {
   const { token } = req.body || {};
   if (!db.verifyTokens) db.verifyTokens = {};
   const entry = db.verifyTokens[String(token || '')];
-  if (!entry || entry.expires < Date.now()) return res.status(400).json({ error: 'Bestätigungslink ungültig oder abgelaufen. Fordere über den Login-Bildschirm einen neuen an.' });
+  if (!entry || entry.expires < Date.now()) return res.status(400).json({ error: 'Bestätigungslink ungültig oder abgelaufen. Fordere über den Login-Bildschirm bzw. die Kontoeinstellungen einen neuen an.' });
   const user = findUserById(entry.userId);
   if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
-  user.emailVerified = true;
+  let type = 'signup';
+  if (entry.type === 'change') {
+    type = 'change';
+    if (user.pendingEmail) { user.email = user.pendingEmail; delete user.pendingEmail; }
+    user.emailVerified = true; // eine bestätigte neue Adresse zählt auch als bestätigtes Konto
+  } else {
+    user.emailVerified = true;
+  }
   delete db.verifyTokens[token];
   await saveDb();
-  res.json({ ok: true, username: user.username });
+  res.json({ ok: true, username: user.username, type, email: user.email });
 });
 
 // Bestätigungs-E-Mail erneut senden. Braucht Name UND Passwort, damit niemand fremde Postfächer
@@ -305,21 +312,79 @@ app.post('/api/login', async (req, res) => {
 // jede Anmeldung erzeugt ein unabhängiges, gültiges Token. Man kann sich also auf beliebig
 // vielen Geräten gleichzeitig einloggen, ohne dass sich die Geräte gegenseitig ausloggen.
 
+// Maskiert eine E-Mail für die Anzeige im Frontend (z.B. "an***@example.com"), damit sie nicht im
+// Klartext über die API rausgeht, aber trotzdem wiedererkennbar bleibt.
+function maskEmail(email) {
+  if (!email) return '';
+  const [local, domain] = email.split('@');
+  if (!domain) return email;
+  const visible = local.slice(0, Math.min(2, local.length));
+  return visible + '***@' + domain;
+}
 app.get('/api/me', authMiddleware, (req, res) => {
   const user = findUserById(req.userId);
-  res.json({ userId: req.userId, username: req.username, hasEmail: !!(user && user.email), homeSystem: user && user.homeSystem, homeSlot: user && user.homeSlot });
+  res.json({
+    userId: req.userId, username: req.username,
+    hasEmail: !!(user && user.email),
+    maskedEmail: user ? maskEmail(user.email) : '',
+    pendingEmail: user && user.pendingEmail ? maskEmail(user.pendingEmail) : null,
+    wantsPatchnotes: user ? (user.wantsPatchnotes !== false) : true,
+    homeSystem: user && user.homeSystem, homeSlot: user && user.homeSlot
+  });
 });
 
-// --- E-Mail nachträglich hinterlegen (für bereits registrierte Accounts) ---
+// --- E-Mail hinterlegen oder ändern (mit Bestätigung auf der NEUEN Adresse + Passwort-Check) ---
+// Die neue Adresse wird erst nach Klick auf den Bestätigungslink aktiv (verhindert Tippfehler und dass
+// ein gekaperter Login allein reicht, um Passwort-Reset-Mails auf eine fremde Adresse umzuleiten).
 app.post('/api/update-email', authMiddleware, async (req, res) => {
-  const { email } = req.body || {};
+  const { email, password } = req.body || {};
   const cleanEmail = String(email || '').trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) return res.status(400).json({ error: 'E-Mail-Adresse sieht ungültig aus.' });
   const user = findUserById(req.userId);
   if (!user) return res.status(404).json({ error: 'Account nicht gefunden.' });
-  user.email = cleanEmail;
+  const valid = await bcrypt.compare(String(password || ''), user.passwordHash);
+  if (!valid) return res.status(401).json({ error: 'Falsches Passwort.' });
+  if (cleanEmail === user.email) return res.status(400).json({ error: 'Das ist bereits deine hinterlegte E-Mail-Adresse.' });
+
+  user.pendingEmail = cleanEmail;
+  if (!db.verifyTokens) db.verifyTokens = {};
+  const changeToken = crypto.randomBytes(32).toString('hex');
+  db.verifyTokens[changeToken] = { userId: user.userId, type: 'change', expires: Date.now() + 24 * 60 * 60 * 1000 };
   await saveDb();
-  res.json({ ok: true });
+
+  const link = PUBLIC_URL + '/?verify=' + changeToken;
+  try {
+    const html = voidSignalEmail({
+      eyebrow: 'E-Mail-Wechsel',
+      username: user.username,
+      statusLabel: 'Neue Adresse bestätigen',
+      statusColor: '#5dcaa5',
+      bodyHtml: 'Für dein Kommandozentrum wurde diese Adresse als neuer Kommunikationskanal hinterlegt. Bestätige sie, damit sie aktiv wird.',
+      ctaLabel: 'Neue E-Mail bestätigen',
+      ctaUrl: link,
+      footerNote: 'Gültig für 24 Stunden.<br>Diese Änderung nicht angefordert? Ignoriere diese Nachricht — an deinem Konto ändert sich nichts, bis der Link geklickt wird.'
+    });
+    const text = voidSignalPlainText({
+      username: user.username, statusLabel: 'Neue Adresse bestätigen',
+      plainBody: 'Bitte bestätige deine neue E-Mail-Adresse für dein Kommandozentrum über den folgenden Link (24 Stunden gültig).',
+      ctaUrl: link
+    });
+    await sendEmail(cleanEmail, 'Neue E-Mail bestätigen – Kolonie Kepler-7', html, text);
+  } catch (e) {
+    console.error('Bestätigungsmail (E-Mail-Wechsel) fehlgeschlagen:', e.message);
+    return res.status(502).json({ error: 'Bestätigungsmail konnte nicht versendet werden. Bitte später erneut versuchen.' });
+  }
+  res.json({ ok: true, pending: true });
+});
+
+// --- Mail-Präferenzen (z.B. Patchnotes-Abo) ---
+app.post('/api/email-preferences', authMiddleware, async (req, res) => {
+  const { wantsPatchnotes } = req.body || {};
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Account nicht gefunden.' });
+  user.wantsPatchnotes = !!wantsPatchnotes;
+  await saveDb();
+  res.json({ ok: true, wantsPatchnotes: user.wantsPatchnotes });
 });
 
 // --- Passwort-Reset anfordern ---

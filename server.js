@@ -18,6 +18,7 @@ const SECRET_FILE = process.env.SECRET_FILE || path.join(__dirname, 'jwt-secret.
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const MAIL_FROM = process.env.MAIL_FROM || 'Kolonie Kepler-7 <onboarding@resend.dev>';
 const PUBLIC_URL = process.env.PUBLIC_URL || 'https://gamegeeeeek.de';
+const FEEDBACK_EMAIL = process.env.FEEDBACK_EMAIL || ''; // Empfänger für Bug-Reports & Vorschläge aus dem Spiel
 
 for (const f of [DB_FILE, SECRET_FILE]) {
   const dir = path.dirname(f);
@@ -183,7 +184,7 @@ app.post('/api/register', async (req, res) => {
   if (!username || !password) return res.status(400).json({ error: 'Name und Passwort erforderlich.' });
   const cleanName = String(username).trim();
   if (!/^[a-zA-Z0-9_\-äöüÄÖÜß]{3,18}$/.test(cleanName)) {
-    return res.status(400).json({ error: 'Name muss 3-18 Zeichen lang sein (Buchstaben, Zahlen, _ und -).' });
+    return res.status(400).json({ error: cleanName.includes('@') ? 'Das erste Feld ist dein Spielername (kein @-Zeichen) - deine E-Mail-Adresse gehört ins E-Mail-Feld darunter. Beispiel-Name: Sternenjäger_7' : 'Bitte wähle einen Spielernamen mit 3 bis 18 Zeichen. Erlaubt sind Buchstaben, Zahlen sowie _ und - (keine Leer- oder Sonderzeichen). Beispiel: Sternenjäger_7' });
   }
   if (String(password).length < 6) return res.status(400).json({ error: 'Passwort muss mindestens 6 Zeichen haben.' });
   const key = cleanName.toLowerCase();
@@ -781,6 +782,36 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
   list.unshift({ id: crypto.randomUUID(), time: Date.now(), fromUserId: req.userId, fromName: req.username, text: cleanText });
   db.private[toUserId].__messages = list.slice(0, 60);
   await saveDb();
+  res.json({ ok: true });
+});
+
+// --- Feedback aus dem Spiel: Bugs & Vorschläge ---
+// Wird in der DB gesichert (db.feedback, letzte 500) und - falls FEEDBACK_EMAIL gesetzt ist - per
+// E-Mail an den Entwickler geschickt. Sanftes Limit: max. 10 Einsendungen pro Spieler und Tag.
+app.post('/api/feedback', authMiddleware, async (req, res) => {
+  const { type, text, version } = req.body || {};
+  const cleanType = type === 'idee' ? 'idee' : 'bug';
+  const cleanText = String(text || '').trim().slice(0, 2000);
+  if (cleanText.length < 5) return res.status(400).json({ error: 'Bitte beschreibe dein Anliegen etwas ausführlicher.' });
+  if (!db.feedback) db.feedback = [];
+  const dayAgo = Date.now() - 24*3600*1000;
+  const recent = db.feedback.filter(f => f.userId === req.userId && f.time > dayAgo).length;
+  if (recent >= 10) return res.status(429).json({ error: 'Limit erreicht: maximal 10 Einsendungen pro Tag - danke für dein Engagement!' });
+  const entry = { id: crypto.randomUUID(), time: Date.now(), userId: req.userId, username: req.username, type: cleanType, text: cleanText, version: String(version || '').slice(0, 20) };
+  db.feedback.unshift(entry);
+  db.feedback = db.feedback.slice(0, 500);
+  await saveDb();
+  if (FEEDBACK_EMAIL) {
+    try {
+      const label = cleanType === 'bug' ? 'Bug-Report' : 'Vorschlag';
+      const subject = '[Kepler-7 ' + label + '] von ' + req.username + (entry.version ? ' (v' + entry.version + ')' : '');
+      const safeText = cleanText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+      const html = '<h2>' + label + ' aus Kolonie Kepler-7</h2>'
+        + '<p><strong>Spieler:</strong> ' + req.username + '<br><strong>Version:</strong> ' + (entry.version || 'unbekannt') + '<br><strong>Zeit:</strong> ' + new Date(entry.time).toLocaleString('de-DE') + '</p>'
+        + '<p style="white-space:pre-wrap; border-left:3px solid #7f77dd; padding-left:12px;">' + safeText + '</p>';
+      await sendEmail(FEEDBACK_EMAIL, subject, html, label + ' von ' + req.username + ':\n\n' + cleanText);
+    } catch (e) { console.error('Feedback-Mail fehlgeschlagen (Eintrag ist gespeichert):', e.message); }
+  }
   res.json({ ok: true });
 });
 

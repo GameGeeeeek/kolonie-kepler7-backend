@@ -1322,7 +1322,7 @@ app.post('/api/faction/attack', authMiddleware, async (req, res) => {
 const { exec } = require('child_process');
 const DEPLOY_WEBHOOK_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
 const DEPLOY_TARGETS = {
-  'kolonie-kepler7': 'cd /deploy/kolonie-kepler7 && git pull -q && cp weltraum_kolonie.html /deploy/web/',
+  'kolonie-kepler7': 'cd /deploy/kolonie-kepler7 && git pull -q && cp weltraum_kolonie.html /deploy/web/ && (cp manifest.json /deploy/web/ || true) && (cp icon-*.png /deploy/web/ || true) && (cp apple-touch-icon.png /deploy/web/ || true)',
   'kolonie-kepler7-backend': 'cd /app && git pull -q'
 };
 function verifyGithubSignature(req) {

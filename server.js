@@ -129,9 +129,10 @@ function findUserById(userId) {
 // z.B. über die Browser-Konsole trivial umgehbar - Bug-Report 13.07.2026: jedes Mitglied konnte den
 // Allianz-Banner ändern). Die folgenden Funktionen kapseln die Prüfung an einer Stelle und werden
 // unten in GET/PUT /api/storage/:key sowie GET /api/storage-list für alliance:-Schlüssel angewendet.
-// Bewusst NICHT auf alle alliance:-Unterressourcen ausgeweitet (z.B. Chat/Beiträge/Kriege bleiben wie
-// bisher offen für alle Mitglieder) - nur die tatsächlich gemeldeten/sicherheitsrelevanten Fälle:
-// info (u.a. Beitrittsmodus), banner (Farbe), role (Mitgliederverwaltung), applications (Bewerbungen).
+// Rollen: 'admin' (Gründer, alle Rechte) > 'officer' (alles außer Allianz-Einstellungen und
+// Admin/Offizier-Ernennung/-Entfernung) > 'member'. Bewusst NICHT auf alle alliance:-Unterressourcen
+// ausgeweitet (z.B. Chat/Beiträge/Kriege bleiben wie bisher offen für alle Mitglieder) - nur die
+// tatsächlich sicherheitsrelevanten: info, banner, role, applications, auditlog.
 function allianceRoleOf(tag, userId) {
   const raw = db.shared['alliance:' + tag + ':role:' + userId];
   if (typeof raw !== 'string') return null;
@@ -148,54 +149,134 @@ function allianceHasAdmin(tag) {
   }
   return false;
 }
+// Aktive Mitglieder zählen (jede Rolle außer 'left') - für das Mitgliederlimit.
+function allianceMemberCount(tag) {
+  const prefix = 'alliance:' + tag + ':role:';
+  let n = 0;
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix)) continue;
+    try { const r = JSON.parse(db.shared[k]); if (r.role && r.role !== 'left') n++; } catch (e) {}
+  }
+  return n;
+}
+// userIds aller Admins/Offiziere einer Allianz - für die Bewerbungs-Push-Benachrichtigung.
+function allianceAdminsAndOfficers(tag) {
+  const prefix = 'alliance:' + tag + ':role:';
+  const out = [];
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix)) continue;
+    try {
+      const r = JSON.parse(db.shared[k]);
+      if (r.role === 'admin' || r.role === 'officer') out.push(k.slice(prefix.length));
+    } catch (e) {}
+  }
+  return out;
+}
+function allianceInfoOf(tag) {
+  const raw = db.shared['alliance:' + tag + ':info'];
+  if (typeof raw !== 'string') return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+// Rauswurf-Sperrfrist: wer von einem Admin/Offizier explizit entfernt wurde (kickedAt gesetzt,
+// anders als freiwilliges Verlassen ohne dieses Feld), kann 24h lang weder erneut beitreten noch
+// sich bewerben. Gibt bei aktiver Sperre einen Hinweistext zurück, sonst null.
+function checkKickCooldown(tag, userId) {
+  const raw = db.shared['alliance:' + tag + ':role:' + userId];
+  if (!raw) return null;
+  try {
+    const r = JSON.parse(raw);
+    if (r.role === 'left' && r.kickedAt) {
+      const KICK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+      const remain = r.kickedAt + KICK_COOLDOWN_MS - Date.now();
+      if (remain > 0) {
+        const hours = Math.ceil(remain / 3600000);
+        return 'Du wurdest aus dieser Allianz entfernt und kannst erst in ' + hours + ' Stunde' + (hours === 1 ? '' : 'n') + ' wieder beitreten oder dich bewerben.';
+      }
+    }
+  } catch (e) {}
+  return null;
+}
 // Gibt bei erlaubtem Zugriff null zurück, sonst einen Fehlertext für die 403-Antwort.
 function checkAllianceKeyPermission(req, key, isWrite) {
   const m = key.match(/^alliance:([^:]+):(.+)$/);
   if (!m) return null; // kein Allianz-Schlüssel, keine Sonderregel
   const tag = m[1];
   const rest = m[2];
-  const isAdmin = allianceRoleOf(tag, req.userId) === 'admin';
+  const myRole = allianceRoleOf(tag, req.userId);
+  const isAdmin = myRole === 'admin';
+  const isOfficerPlus = myRole === 'admin' || myRole === 'officer';
 
   if (rest === 'banner') {
-    return (isWrite && !isAdmin) ? 'Nur Admins dürfen den Allianz-Banner ändern.' : null;
+    return (isWrite && !isOfficerPlus) ? 'Nur Admins/Offiziere dürfen den Allianz-Banner ändern.' : null;
   }
   if (rest === 'info') {
     if (!isWrite) return null; // Lesen bleibt für alle offen (z.B. Allianzliste)
-    const exists = db.shared[key] !== undefined;
-    if (!exists) return null; // Gründung: Tag existiert noch nicht, jeder darf anlegen
+    const existing = allianceInfoOf(tag);
+    const foundable = !existing || existing.disbanded === true; // neu ODER aufgelöst -> Neugründung erlaubt
+    if (foundable) return null;
     return isAdmin ? null : 'Nur Admins dürfen die Allianz-Einstellungen ändern.';
   }
   if (rest.startsWith('role:')) {
     const targetId = rest.slice('role:'.length);
     if (!isWrite) return null;
+    let requestedRole = null;
+    try { requestedRole = JSON.parse(req.body && req.body.value).role; } catch (e) {}
     if (targetId === req.userId) {
       // Eigene Rolle: Beitreten/Verlassen bleibt selbstständig möglich, aber keine Selbst-Beförderung
       // zum Admin - außer man ist laut info.creatorId der tatsächliche Gründer UND es gibt noch
       // KEINEN Admin für diese Allianz (echte Gründung in zwei Schritten: erst info anlegen, dann
-      // die eigene Rolle setzen - beim zweiten Schritt existiert info bereits, deshalb reicht die
-      // reine Existenzprüfung nicht, es muss die tatsächliche Gründer-ID geprüft werden).
-      let requestedRole = null;
-      try { requestedRole = JSON.parse(req.body && req.body.value).role; } catch (e) {}
+      // die eigene Rolle setzen). Ebenso keine Selbst-Beförderung zum Offizier.
       if (requestedRole === 'admin' && !isAdmin) {
         let isFounder = false;
         try {
-          const infoRaw = db.shared['alliance:' + tag + ':info'];
-          if (infoRaw) isFounder = JSON.parse(infoRaw).creatorId === req.userId;
+          const info = allianceInfoOf(tag);
+          if (info) isFounder = info.creatorId === req.userId && !info.disbanded;
         } catch (e) {}
         if (!isFounder || allianceHasAdmin(tag)) return 'Du kannst dich nicht selbst zum Admin machen.';
       }
+      if (requestedRole === 'officer' && myRole !== 'officer') {
+        return 'Du kannst dich nicht selbst zum Offizier machen.';
+      }
+      // Beitreten (member) als noch-nicht-aktives Mitglied: Rauswurf-Sperrfrist + Mitgliederlimit
+      // prüfen. Kein erneuter Check, wenn man ohnehin schon aktives Mitglied ist (z.B. Klient
+      // schreibt denselben Zustand nochmal).
+      if (requestedRole === 'member' && !myRole) {
+        const cooldownMsg = checkKickCooldown(tag, req.userId);
+        if (cooldownMsg) return cooldownMsg;
+        const info = allianceInfoOf(tag);
+        const limit = (info && info.memberLimit) || 20;
+        if (allianceMemberCount(tag) >= limit) return 'Diese Allianz hat ihr Mitgliederlimit erreicht.';
+      }
       return null;
     }
-    return isAdmin ? null : 'Nur Admins dürfen die Rolle anderer Mitglieder ändern.';
+    // Rolle eines ANDEREN Spielers ändern:
+    if (requestedRole === 'admin' || requestedRole === 'officer') {
+      return isAdmin ? null : 'Nur Admins dürfen jemanden zum Admin oder Offizier machen.';
+    }
+    // Entfernen/Herabstufen zu 'member' oder 'left':
+    if (isAdmin) return null;
+    const targetRole = allianceRoleOf(tag, targetId);
+    if (myRole === 'officer' && (!targetRole || targetRole === 'member')) return null;
+    return 'Keine Berechtigung, diese Rolle zu ändern.';
   }
   if (rest.startsWith('applications:')) {
     const targetId = rest.slice('applications:'.length);
     if (isWrite) {
-      if (targetId === req.userId) return null; // eigene Bewerbung einreichen/zurückziehen
-      return isAdmin ? null : 'Nur Admins dürfen über Bewerbungen entscheiden.';
+      if (targetId === req.userId) {
+        const cooldownMsg = checkKickCooldown(tag, req.userId);
+        if (cooldownMsg) return cooldownMsg;
+        return null; // eigene Bewerbung einreichen/zurückziehen
+      }
+      return isOfficerPlus ? null : 'Nur Admins/Offiziere dürfen über Bewerbungen entscheiden.';
     }
-    // Lesen einer einzelnen Bewerbung: nur Admin der Allianz oder die bewerbende Person selbst
-    return (isAdmin || targetId === req.userId) ? null : 'Keine Berechtigung, diese Bewerbung zu sehen.';
+    // Lesen einer einzelnen Bewerbung: nur Admin/Offizier der Allianz oder die bewerbende Person selbst
+    return (isOfficerPlus || targetId === req.userId) ? null : 'Keine Berechtigung, diese Bewerbung zu sehen.';
+  }
+  if (rest.startsWith('auditlog')) {
+    // Aktivitätsprotokoll: nur Admins/Offiziere schreiben (führen die auditierbaren Aktionen aus)
+    // und lesen (interne Angelegenheit der Allianzleitung).
+    if (isOfficerPlus) return null;
+    return isWrite ? 'Nur Admins/Offiziere dürfen Protokolleinträge schreiben.' : 'Nur Admins/Offiziere dürfen das Protokoll einsehen.';
   }
   return null; // andere alliance:-Unterressourcen (Chat, Beiträge, Kriege, ...) bleiben wie bisher offen
 }
@@ -214,7 +295,8 @@ function getNotifPrefs(user) {
     pact: p.pact !== false,
     weltboss: p.weltboss !== false,
     raid: p.raid !== false,
-    patchnotes: p.patchnotes !== false
+    patchnotes: p.patchnotes !== false,
+    application: p.application !== false
   };
 }
 function pushNotificationEvent(userId, type, payload) {
@@ -233,6 +315,7 @@ function pushNotificationText(type, payload) {
   if (type === 'raid-incoming') return { title: 'Überfall!', body: 'Eine feindliche Flotte greift deine Kolonie an.' };
   if (type === 'message') return { title: 'Neue Nachricht', body: (payload.fromName || 'Ein Spieler') + ' hat dir geschrieben.' };
   if (type === 'patchnotes') return { title: 'Kolonie Kepler-7 aktualisiert', body: 'Version ' + (payload.version || '') + ' ist da - tippen für die Neuigkeiten.' };
+  if (type === 'alliance-application') return { title: 'Neue Bewerbung', body: (payload.name || 'Ein Spieler') + ' möchte [' + (payload.tag || '') + '] beitreten.' };
   return { title: 'Kolonie Kepler-7', body: 'Es gibt Neuigkeiten.' };
 }
 // Verschickt eine echte Push-Benachrichtigung an ALLE registrierten Geräte eines Spielers. Abgelaufene
@@ -293,6 +376,30 @@ function handleSharedStorageWrite(key, prevRaw, newRaw) {
           if (!prefs.enabled || !prefs.weltboss) continue;
           const share = Math.round(((contrib.dmg || 0) / total) * 100);
           pushNotificationEvent(contribUserId, 'weltboss-kill', { level: next.level || 1, share });
+        }
+      }
+    } else {
+      // alliance:<TAG>:applications:<playerId> - neue (oder erneute nach Ablehnung) Bewerbung
+      // benachrichtigt alle Admins/Offiziere dieser Allianz. "Neu" heißt: Status wechselt zu
+      // 'pending', während er es vorher nicht war (deckt sowohl Erstbewerbung als auch eine erneute
+      // Bewerbung nach vorheriger Ablehnung ab).
+      const appMatch = key.match(/^alliance:([^:]+):applications:/);
+      if (appMatch) {
+        let prev = null, next = null;
+        try { prev = prevRaw ? JSON.parse(prevRaw) : null; } catch (e) {}
+        try { next = JSON.parse(newRaw); } catch (e) { return; }
+        if (!next) return;
+        const wasPending = prev && prev.status === 'pending';
+        if (next.status === 'pending' && !wasPending) {
+          const tag = appMatch[1];
+          for (const adminId of allianceAdminsAndOfficers(tag)) {
+            const user = findUserById(adminId);
+            if (!user) continue;
+            const prefs = getNotifPrefs(user);
+            if (prefs.enabled && prefs.application) {
+              pushNotificationEvent(adminId, 'alliance-application', { name: next.name || 'Ein Spieler', tag });
+            }
+          }
         }
       }
     }
@@ -738,14 +845,18 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
 
 app.get('/api/storage-list', authMiddleware, (req, res) => {
   const prefix = req.query.prefix || '';
-  // Bewerbungslisten sind wie einzelne Bewerbungen geschützt (siehe checkAllianceKeyPermission) -
-  // ohne diese Prüfung könnte jeder per Präfix-Auflistung alle Bewerbernamen fremder Allianzen sehen,
-  // selbst wenn das Lesen einer einzelnen Bewerbung schon korrekt blockiert wäre.
+  // Bewerbungs- und Protokolllisten sind wie einzelne Einträge geschützt (siehe
+  // checkAllianceKeyPermission) - ohne diese Prüfung könnte jeder per Präfix-Auflistung alle
+  // Bewerbernamen bzw. das Aktivitätsprotokoll fremder Allianzen sehen, selbst wenn das Lesen eines
+  // einzelnen Eintrags schon korrekt blockiert wäre.
   const appMatch = prefix.match(/^alliance:([^:]+):applications:$/);
-  if (appMatch) {
-    const tag = appMatch[1];
-    if (allianceRoleOf(tag, req.userId) !== 'admin') {
-      return res.status(403).json({ error: 'Nur Admins dürfen Bewerbungen einsehen.' });
+  const logMatch = prefix.match(/^alliance:([^:]+):auditlog/);
+  const guarded = appMatch || logMatch;
+  if (guarded) {
+    const tag = guarded[1];
+    const role = allianceRoleOf(tag, req.userId);
+    if (role !== 'admin' && role !== 'officer') {
+      return res.status(403).json({ error: 'Nur Admins/Offiziere dürfen das einsehen.' });
     }
   }
   const keys = Object.keys(db.shared).filter(k => k.startsWith(prefix));

@@ -1247,7 +1247,8 @@ app.post('/api/notification-prefs', authMiddleware, async (req, res) => {
     pact: b.pact !== false,
     weltboss: b.weltboss !== false,
     raid: b.raid !== false,
-    patchnotes: b.patchnotes !== false
+    patchnotes: b.patchnotes !== false,
+    application: b.application !== false
   };
   await saveDb();
   res.json(getNotifPrefs(user));

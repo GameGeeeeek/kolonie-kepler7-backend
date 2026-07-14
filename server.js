@@ -177,6 +177,23 @@ function allianceInfoOf(tag) {
   if (typeof raw !== 'string') return null;
   try { return JSON.parse(raw); } catch (e) { return null; }
 }
+// Mitgliederlimit ist an die "Allianz-Expansion"-Forschungskette gekoppelt (siehe ALLIANCE_TECH_DEFS
+// im Frontend) - Basis 10, jede freigeschaltete Stufe erhöht das erlaubte Maximum. Liest den
+// geteilten "unlocked"-Datensatz derselben Allianz. Das vom Admin gesetzte info.memberLimit darf
+// dieses Maximum nie überschreiten (siehe checkAllianceKeyPermission unten) - sonst würde die ganze
+// Kopplung an Forschung nichts bringen, ein Admin könnte das Limit sonst einfach manuell umgehen.
+const ALLIANCE_EXPANSION_BONUSES = { a_expand1:5, a_expand2:5, a_expand3:8, a_expand4:8, a_expand5:14 };
+function allianceMemberLimitMax(tag) {
+  let limit = 10;
+  try {
+    const raw = db.shared['alliance:' + tag + ':unlocked'];
+    if (raw) {
+      const unlocked = JSON.parse(raw);
+      for (const [k, bonus] of Object.entries(ALLIANCE_EXPANSION_BONUSES)) if (unlocked[k]) limit += bonus;
+    }
+  } catch (e) {}
+  return limit;
+}
 // Rauswurf-Sperrfrist: wer von einem Admin/Offizier explizit entfernt wurde (kickedAt gesetzt,
 // anders als freiwilliges Verlassen ohne dieses Feld), kann 24h lang weder erneut beitreten noch
 // sich bewerben. Gibt bei aktiver Sperre einen Hinweistext zurück, sonst null.
@@ -244,7 +261,7 @@ function checkAllianceKeyPermission(req, key, isWrite) {
         const cooldownMsg = checkKickCooldown(tag, req.userId);
         if (cooldownMsg) return cooldownMsg;
         const info = allianceInfoOf(tag);
-        const limit = (info && info.memberLimit) || 20;
+        const limit = Math.min((info && info.memberLimit) || 10, allianceMemberLimitMax(tag));
         if (allianceMemberCount(tag) >= limit) return 'Diese Allianz hat ihr Mitgliederlimit erreicht.';
       }
       return null;
@@ -271,6 +288,23 @@ function checkAllianceKeyPermission(req, key, isWrite) {
     }
     // Lesen einer einzelnen Bewerbung: nur Admin/Offizier der Allianz oder die bewerbende Person selbst
     return (isOfficerPlus || targetId === req.userId) ? null : 'Keine Berechtigung, diese Bewerbung zu sehen.';
+  }
+  if (rest.startsWith('contrib:')) {
+    // Beiträge zu Allianz-Forschung/-Gebäuden: nur echte Mitglieder dürfen schreiben, und jeder nur
+    // seinen EIGENEN Beitrags-Datensatz (sonst könnte man beliebige Fantasiebeträge für andere
+    // eintragen und so künstlich Fortschritt vortäuschen). Lesen bleibt offen (Gesamtsumme wird
+    // clientseitig aus allen Beiträgen aufsummiert, siehe loadAllianceTechData im Frontend).
+    if (!isWrite) return null;
+    const targetId = rest.slice('contrib:'.length);
+    if (targetId !== req.userId) return 'Du kannst nur deinen eigenen Beitrag eintragen.';
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen beitragen.';
+  }
+  if (rest === 'unlocked') {
+    // Wird geschrieben, sobald ein Client feststellt, dass die Summe aller Beiträge die Kosten
+    // erreicht hat (siehe loadAllianceTechData) - nur echte Mitglieder dürfen das auslösen, sonst
+    // könnte jeder Beliebige jede Technologie/jedes Gebäude ohne jeden Beitrag als "freigeschaltet"
+    // markieren und so auch das an Forschung gekoppelte Mitgliederlimit umgehen.
+    return (!isWrite || myRole) ? null : 'Nur Mitglieder dieser Allianz dürfen Freischaltungen auslösen.';
   }
   if (rest.startsWith('auditlog')) {
     // Aktivitätsprotokoll: nur Admins/Offiziere schreiben (führen die auditierbaren Aktionen aus)

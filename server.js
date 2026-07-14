@@ -149,6 +149,18 @@ function allianceHasAdmin(tag) {
   }
   return false;
 }
+// Wie allianceHasAdmin, aber schließt eine bestimmte Person aus - genutzt, um zu prüfen, ob JEMAND
+// ANDERES außer dem gerade austretenden/zurücktretenden Admin noch die Führung übernehmen kann.
+function allianceHasOtherAdmin(tag, excludeUserId) {
+  const prefix = 'alliance:' + tag + ':role:';
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix)) continue;
+    const userId = k.slice(prefix.length);
+    if (userId === excludeUserId) continue;
+    try { if (JSON.parse(db.shared[k]).role === 'admin') return true; } catch (e) {}
+  }
+  return false;
+}
 // Aktive Mitglieder zählen (jede Rolle außer 'left') - für das Mitgliederlimit.
 function allianceMemberCount(tag) {
   const prefix = 'alliance:' + tag + ':role:';
@@ -169,6 +181,72 @@ function allianceAdminsAndOfficers(tag) {
       const r = JSON.parse(db.shared[k]);
       if (r.role === 'admin' || r.role === 'officer') out.push(k.slice(prefix.length));
     } catch (e) {}
+  }
+  return out;
+}
+// Minimale Kopie der Kostendaten aus ALLIANCE_TECH_DEFS/ALLIANCE_BUILDING_DEFS im Frontend - nur die
+// für die Validierung nötigen Zahlen (Namen/Beschreibungen bleiben reine Frontend-Sache). MUSS bei
+// Kostenänderungen im Frontend mitgepflegt werden, sonst lehnt der Server sonst legitime
+// Freischaltungen ab (bzw. lässt bei veralteten, zu niedrigen Werten hier zu viel durch).
+const ALLIANCE_STRUCTURE_COSTS = {
+  a_prod:{cost:32000,costMult:2.0,maxLevel:20}, a_def:{cost:24000,costMult:2.0,maxLevel:20},
+  a_atk:{cost:28000,costMult:2.0,maxLevel:20}, a_res:{cost:36000,costMult:2.0,maxLevel:20},
+  a_trade:{cost:20000,costMult:2.0,maxLevel:20}, a_storage:{cost:24000,costMult:2.0,maxLevel:20},
+  a_speed:{cost:34000,costMult:2.0,maxLevel:20}, a_scanner:{cost:40000,costMult:2.0,maxLevel:20},
+  a_atk2:{cost:75000,costMult:2.0,maxLevel:20,requires:'a_atk'}, a_def2:{cost:70000,costMult:2.0,maxLevel:20,requires:'a_def'},
+  a_expand1:{cost:60000}, a_expand2:{cost:150000,requires:'a_expand1'}, a_expand3:{cost:350000,requires:'a_expand2'},
+  a_expand4:{cost:800000,requires:'a_expand3'}, a_expand5:{cost:2500000,requires:'a_expand4'},
+  ab_hq:{cost:40000,costMult:2.0,maxLevel:20}, ab_werft:{cost:48000,costMult:2.0,maxLevel:20},
+  ab_bollwerk:{cost:36000,costMult:2.0,maxLevel:20}, ab_lager:{cost:32000,costMult:2.0,maxLevel:20},
+  ab_expedition:{cost:44000,costMult:2.0,maxLevel:20},
+  ab_forschungszentrum:{cost:80000,costMult:2.0,maxLevel:20,requires:'ab_hq'},
+  ab_flotte2:{cost:90000,costMult:2.0,maxLevel:20,requires:'ab_werft'}
+};
+function allianceContribTotals(tag) {
+  const prefix = 'alliance:' + tag + ':contrib:';
+  const totals = {};
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix)) continue;
+    try {
+      const doc = JSON.parse(db.shared[k]);
+      for (const [techKey, amt] of Object.entries(doc)) totals[techKey] = (totals[techKey] || 0) + (Number(amt) || 0);
+    } catch (e) {}
+  }
+  return totals;
+}
+// Errechnet denselben "korrekten" unlocked-Zustand wie loadAllianceTechData() im Frontend, rein aus
+// den tatsächlichen (server-eigenen) Beitragssummen - Grundlage, um einen geschriebenen Wert zu
+// validieren, statt ihn blind zu übernehmen.
+function allianceCorrectUnlocked(tag) {
+  const totals = allianceContribTotals(tag);
+  const out = {};
+  // Reihenfolge wichtig: Voraussetzungen (z.B. a_atk vor a_atk2) müssen VOR der abhängigen Tech
+  // berechnet sein. Object.entries behält Einfügereihenfolge, und ALLIANCE_STRUCTURE_COSTS ist
+  // bereits so sortiert (Tier-1 vor Tier-2), das hier trotzdem defensiv nochmal geprüft statt
+  // blind vorausgesetzt.
+  for (const [key, def] of Object.entries(ALLIANCE_STRUCTURE_COSTS)) {
+    // Bug behoben (13.07.2026): Voraussetzung wurde bisher nur beim Rendern im Frontend geprüft
+    // (versteckte den Beitrags-Button), nicht aber bei der tatsächlichen Stufen-/Freischaltungs-
+    // Berechnung selbst - ein direkt eingetragener Beitrag zu z.B. "Elite-Flottendoktrin" hätte
+    // sofort gewirkt, auch wenn "Vereinte Flottendoktrin" noch gar nicht erforscht war.
+    if (def.requires){
+      const reqDef = ALLIANCE_STRUCTURE_COSTS[def.requires];
+      const reqMet = reqDef && reqDef.maxLevel ? (out[def.requires]||0) > 0 : !!out[def.requires];
+      if (!reqMet){ out[key] = def.maxLevel ? 0 : false; continue; }
+    }
+    const total = totals[key] || 0;
+    if (def.maxLevel) {
+      let lvl = 0, cumulative = 0, levelCost = def.cost;
+      while (lvl < def.maxLevel) {
+        cumulative += levelCost;
+        if (total < cumulative) break;
+        lvl++;
+        levelCost = Math.round(levelCost * def.costMult);
+      }
+      out[key] = lvl;
+    } else {
+      out[key] = total >= def.cost;
+    }
   }
   return out;
 }
@@ -254,6 +332,15 @@ function checkAllianceKeyPermission(req, key, isWrite) {
       if (requestedRole === 'officer' && myRole !== 'officer') {
         return 'Du kannst dich nicht selbst zum Offizier machen.';
       }
+      // Bug behoben (13.07.2026): der letzte Admin konnte die Allianz jederzeit über den normalen
+      // "Verlassen"-Weg (role:'left' für sich selbst) dauerhaft führungslos zurücklassen - niemand
+      // hätte je wieder befördern, Einstellungen ändern oder Bewerbungen entscheiden können (außer
+      // zufällig der ursprüngliche Gründer kehrt zurück, die einzige eingebaute Notfall-Klausel).
+      // Blockiert das jetzt, WENN noch andere Mitglieder da sind (bei einer Ein-Personen-Allianz
+      // richtet Verlassen keinen Schaden an, das bleibt erlaubt).
+      if (isAdmin && requestedRole !== 'admin' && !allianceHasOtherAdmin(tag, req.userId) && allianceMemberCount(tag) > 1) {
+        return 'Du bist der einzige Admin - befördere zuerst jemanden, bevor du gehst oder zurücktrittst, oder löse die Allianz stattdessen auf.';
+      }
       // Beitreten (member) als noch-nicht-aktives Mitglied: Rauswurf-Sperrfrist + Mitgliederlimit
       // prüfen. Kein erneuter Check, wenn man ohnehin schon aktives Mitglied ist (z.B. Klient
       // schreibt denselben Zustand nochmal).
@@ -301,10 +388,28 @@ function checkAllianceKeyPermission(req, key, isWrite) {
   }
   if (rest === 'unlocked') {
     // Wird geschrieben, sobald ein Client feststellt, dass die Summe aller Beiträge die Kosten
-    // erreicht hat (siehe loadAllianceTechData) - nur echte Mitglieder dürfen das auslösen, sonst
-    // könnte jeder Beliebige jede Technologie/jedes Gebäude ohne jeden Beitrag als "freigeschaltet"
-    // markieren und so auch das an Forschung gekoppelte Mitgliederlimit umgehen.
-    return (!isWrite || myRole) ? null : 'Nur Mitglieder dieser Allianz dürfen Freischaltungen auslösen.';
+    // erreicht hat (siehe loadAllianceTechData) - nur echte Mitglieder dürfen das auslösen. Zusätzlich
+    // (Bug behoben 13.07.2026): der geschriebene Wert wird gegen die serverseitig aus den echten
+    // contrib-Datensätzen berechnete korrekte Stufe geprüft - vorher konnte jedes Mitglied per
+    // direktem API-Aufruf (z.B. Browser-Konsole) JEDE Technologie auf JEDE Stufe setzen, ganz ohne
+    // jeden Beitrag geleistet zu haben. Ein Wert DARF niedriger sein als korrekt (z.B. während ein
+    // anderer Client noch nicht das Update mitbekommen hat), aber nie höher.
+    if (!isWrite) return null;
+    if (!myRole) return 'Nur Mitglieder dieser Allianz dürfen Freischaltungen auslösen.';
+    let claimed = null;
+    try { claimed = JSON.parse(req.body && req.body.value); } catch (e) { return 'Ungültiges Format.'; }
+    if (!claimed || typeof claimed !== 'object') return 'Ungültiges Format.';
+    const correct = allianceCorrectUnlocked(tag);
+    for (const [key, val] of Object.entries(claimed)) {
+      const def = ALLIANCE_STRUCTURE_COSTS[key];
+      if (!def) continue; // unbekannter Schlüssel - ignorieren statt hart abzulehnen (Vorwärtskompatibilität)
+      if (def.maxLevel) {
+        if ((Number(val) || 0) > (correct[key] || 0)) return 'Stufe übersteigt die tatsächlichen Beiträge für "' + key + '".';
+      } else {
+        if (val && !correct[key]) return 'Freischaltung übersteigt die tatsächlichen Beiträge für "' + key + '".';
+      }
+    }
+    return null;
   }
   if (rest.startsWith('auditlog')) {
     // Aktivitätsprotokoll: nur Admins/Offiziere schreiben (führen die auditierbaren Aktionen aus)

@@ -1124,6 +1124,30 @@ function computeAttackPower(save, enemyFleetForCounter) {
   power *= stanceOf(save).atkMult;
   return Math.round(power);
 }
+// Wie computeAttackPower, aber zählt nur die Flotten der übergebenen Planeten-Schlüssel ('home' für
+// die Heimatbasis, sonst der jeweilige Kolonie-Schlüssel) - für Angriffe, bei denen der Spieler
+// selbst auswählen darf, welche Planeten beitragen (z.B. Weltboss). Ohne gültige Auswahl (leer/nicht
+// vorhanden) fällt es auf ALLE Flotten zurück (Rückwärtskompatibilität, gleich wie computeAttackPower).
+function computeAttackPowerFromPlanets(save, planetKeys) {
+  const research = save.research || {};
+  let fleets;
+  if (Array.isArray(planetKeys) && planetKeys.length) {
+    fleets = [];
+    for (const pk of planetKeys) {
+      if (pk === 'home') { if (save.fleet) fleets.push(save.fleet); }
+      else if (save.colonies && save.colonies[pk] && save.colonies[pk].fleet) fleets.push(save.colonies[pk].fleet);
+    }
+  } else {
+    fleets = allFleetsOf(save);
+  }
+  let power = 0;
+  for (const f of fleets) power += rawFleetPower(f);
+  const k = research.rkampf || 0, k2 = research.rkampf2 || 0;
+  if (k) power *= (1 + k * 0.02);
+  if (k2) power *= (1 + k2 * 0.02);
+  power *= stanceOf(save).atkMult;
+  return Math.round(power);
+}
 function computeDefensePower(save) {
   const research = save.research || {};
   let power = 0;
@@ -1524,7 +1548,7 @@ function loadOrInitGalaxy() {
 // dessen Spielstand geschrieben (keine Schreibzugriffe auf fremde Spielstände - die würden mit dem
 // Autosave online spielender Nutzer kollidieren).
 const WORLD_BOSS_NAMES = ['Leviathan der Leere', 'Chronos-Verschlinger', 'Die Singularität', 'Wächter des Abgrunds', 'Nova-Titan'];
-const WORLD_BOSS_ATTACK_COOLDOWN_MS = 30 * 60 * 1000;
+const WORLD_BOSS_ATTACK_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 1x pro Tag statt bisher alle 30 Min.
 function spawnWorldBoss(g) {
   const users = Math.max(1, Object.keys(db.users).length);
   const maxHp = Math.round(40000 * (1 + users * 0.4));
@@ -1839,7 +1863,12 @@ app.post('/api/worldboss/attack', authMiddleware, async (req, res) => {
   let attacker;
   try { attacker = JSON.parse(attackerRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
 
-  const power = computeAttackPower(attacker, null);
+  // planets: optionale Liste von Planeten-Schlüsseln ('home' + Kolonie-Schlüssel), die der Spieler
+  // selbst ausgewählt hat - lässt ihn entscheiden, welche seiner Flotten am Angriff teilnehmen,
+  // statt immer automatisch alle einzusetzen (z.B. um eine Kolonie ungeschwächt zur Verteidigung zu
+  // behalten). Leer/fehlend = wie bisher alle Flotten (siehe computeAttackPowerFromPlanets).
+  const planets = Array.isArray(req.body && req.body.planets) ? req.body.planets : null;
+  const power = computeAttackPowerFromPlanets(attacker, planets);
   const damage = Math.max(50, Math.round(power * (0.8 + Math.random() * 0.4)));
   boss.hp = Math.max(0, boss.hp - damage);
   boss.participants[req.userId] = (boss.participants[req.userId] || 0) + damage;

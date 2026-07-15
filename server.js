@@ -536,6 +536,10 @@ function pushNotificationText(type, payload) {
   if (type === 'message') return { title: 'Neue Nachricht', body: (payload.fromName || 'Ein Spieler') + ' hat dir geschrieben.' };
   if (type === 'patchnotes') return { title: 'Kolonie Kepler-7 aktualisiert', body: 'Version ' + (payload.version || '') + ' ist da - tippen für die Neuigkeiten.' };
   if (type === 'alliance-application') return { title: 'Neue Bewerbung', body: (payload.name || 'Ein Spieler') + ' möchte [' + (payload.tag || '') + '] beitreten.' };
+  if (type === 'feedback-received') {
+    const label = payload.type === 'idee' ? 'Verbesserungsvorschlag' : 'Bug-Report';
+    return { title: 'Neuer ' + label, body: (payload.username || 'Ein Spieler') + ': ' + (payload.text || '') };
+  }
   return { title: 'Kolonie Kepler-7', body: 'Es gibt Neuigkeiten.' };
 }
 // Verschickt eine echte Push-Benachrichtigung an ALLE registrierten Geräte eines Spielers. Abgelaufene
@@ -1509,6 +1513,14 @@ app.post('/api/feedback', authMiddleware, async (req, res) => {
   }
   db.feedback.unshift(entry);
   db.feedback = db.feedback.slice(0, 500);
+  // Push-Benachrichtigung NUR an den eigenen Account (GameGeeeeek) - andere Spieler/Admins bekommen
+  // bei Feedback-Einsendungen keine Push-Nachricht, das ist bewusst kein allianzweites Ereignis.
+  // Muss VOR saveDb() passieren, sonst wird die Benachrichtigung nur im Arbeitsspeicher geschrieben
+  // und nie tatsächlich persistiert (Bug beim ersten Test hier gefunden und behoben).
+  try {
+    const devUser = db.users['gamegeeeeek'];
+    if (devUser) pushNotificationEvent(devUser.userId, 'feedback-received', { username: req.username, type: cleanType, text: cleanText.slice(0, 150) });
+  } catch (e) { console.error('Feedback-Push fehlgeschlagen (Eintrag ist gespeichert):', e.message); }
   await saveDb();
   if (FEEDBACK_EMAIL) {
     try {

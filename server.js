@@ -1264,7 +1264,31 @@ function rawFleetPower(f) {
   if (!f) return 0;
   return diminishingShipCount(f.cruisers || 0) * 20 + diminishingShipCount(f.destroyers || 0) * 45 + diminishingShipCount(f.ships || 0) * 5 +
     diminishingShipCount(f.jaeger || 0) * 10 + diminishingShipCount(f.bomber || 0) * 60 + diminishingShipCount(f.schlachtschiff || 0) * 90 +
-    diminishingShipCount(f.carrier || 0) * 15 + diminishingShipCount(f.superschlachtschiff || 0) * 220;
+    diminishingShipCount(f.carrier || 0) * 15 + diminishingShipCount(f.superschlachtschiff || 0) * 220 + diminishingShipCount(f.waechter || 0) * 8;
+}
+// Verteidigungsspezialisierung (13.07.2026) - defWeight-Gewichte identisch zum Frontend (SHIP_DEFS),
+// wirken NUR hier auf die Verteidigung, nie auf die Angriffskraft. Keine Schilde hier (der Backend-
+// Ansatz kennt generell keine Schilde, vorbestehende Vereinfachung gegenüber dem Frontend).
+const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3 };
+const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8 };
+function weightedFleetDefensePower(f) {
+  if (!f) return 0;
+  let sum = 0;
+  for (const [k, atk] of Object.entries(SHIP_ATK_VALUES)) {
+    const count = f[k] || 0;
+    if (!count) continue;
+    sum += diminishingShipCount(count) * atk * (SHIP_DEF_WEIGHTS[k] !== undefined ? SHIP_DEF_WEIGHTS[k] : 1);
+  }
+  return sum;
+}
+// Flotten-Diversitäts-Bonus - identisch zum Frontend (fleetDiversityMult).
+const FLEET_DIVERSITY_COMBAT_KEYS = ['jaeger','cruisers','destroyers','bomber','schlachtschiff','superschlachtschiff','carrier','waechter'];
+const FLEET_DIVERSITY_BONUS_PER_TYPE = 0.02, FLEET_DIVERSITY_MAX_TYPES = 5;
+function fleetDiversityMult(fleet) {
+  if (!fleet) return 1;
+  const distinctTypes = FLEET_DIVERSITY_COMBAT_KEYS.filter(k => (fleet[k] || 0) > 0).length;
+  const bonusTypes = Math.max(0, Math.min(FLEET_DIVERSITY_MAX_TYPES, distinctTypes) - 1);
+  return 1 + bonusTypes * FLEET_DIVERSITY_BONUS_PER_TYPE;
 }
 // enemyFleetForCounter: die GESAMTE gegnerische Flotte (fleetSummary), optional – nur bei echtem PvP
 // bekannt und übergeben, macht das Kontersystem wirksam.
@@ -1272,7 +1296,7 @@ function computeAttackPower(save, enemyFleetForCounter) {
   const research = save.research || {};
   let power = 0;
   for (const f of allFleetsOf(save)) {
-    let fp = rawFleetPower(f);
+    let fp = rawFleetPower(f) * fleetDiversityMult(f);
     if (enemyFleetForCounter) fp *= counterMultiplier(f, enemyFleetForCounter);
     power += fp;
   }
@@ -1294,10 +1318,10 @@ function computeDefensePower(save) {
     if (!c || !c.buildings) continue;
     for (const [k, v] of Object.entries(DEFENSE_VALUES)) power += (c.buildings[k] || 0) * v;
   }
-  power += Math.round(rawFleetPower(save.fleet) * 0.4) * HOME_DEFENSE_BONUS;
+  power += Math.round(weightedFleetDefensePower(save.fleet) * fleetDiversityMult(save.fleet) * 0.4) * HOME_DEFENSE_BONUS;
   for (const c of Object.values(save.colonies || {})) {
     if (!c || !c.fleet) continue;
-    power += Math.round(rawFleetPower(c.fleet) * 0.4);
+    power += Math.round(weightedFleetDefensePower(c.fleet) * fleetDiversityMult(c.fleet) * 0.4);
   }
   const p = research.rpanzer || 0, s = research.rschildmatrix || 0;
   if (p) power *= (1 + p * 0.02);
@@ -2071,13 +2095,24 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
 // Verluste/Belohnungen serverseitig an und entfernt die Mission sofort aus der Liste (verhindert
 // Mehrfachauflösung derselben Mission durch Doppelklick, Netzwerk-Retry oder Missbrauch).
 const WORLDBOSS_KEY = 'worldboss:current';
-function computeAttackPowerFromComposition(save, composition) {
+// Rotierende Weltboss-Schwäche je Level (13.07.2026, Feature-Wunsch: Kontersystem auf mehr Kontexte
+// ausweiten) - identisch zum Frontend (siehe pirateLairWeakness/WORLDBOSS_WEAKNESS dort). +25%
+// Schaden bei passendem Schiffstyp in der Zusammensetzung.
+const WORLDBOSS_WEAKNESS = ['jaeger','cruiser','bomber','destroyer','jaeger','schlachtschiff','cruiser','bomber','destroyer','jaeger'];
+function worldBossWeakness(level) { return WORLDBOSS_WEAKNESS[(Math.max(1,level)-1) % WORLDBOSS_WEAKNESS.length]; }
+function fleetHasShipType(fleet, type) {
+  if (!fleet) return false;
+  const fleetKey = { jaeger:'jaeger', bomber:'bomber', cruiser:'cruisers', destroyer:'destroyers', schlachtschiff:'schlachtschiff' }[type] || type;
+  return (fleet[fleetKey] || 0) > 0;
+}
+function computeAttackPowerFromComposition(save, composition, bossLevel) {
   const research = save.research || {};
-  let power = rawFleetPower(composition);
+  let power = rawFleetPower(composition) * fleetDiversityMult(composition);
   const k = research.rkampf || 0, k2 = research.rkampf2 || 0;
   if (k) power *= (1 + k * 0.02);
   if (k2) power *= (1 + k2 * 0.02);
   power *= stanceOf(save).atkMult;
+  if (bossLevel && fleetHasShipType(composition, worldBossWeakness(bossLevel))) power *= 1.25;
   return Math.round(power);
 }
 app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
@@ -2114,7 +2149,9 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
 
   const bLevel = mission.bossLevel || 1;
   const composition = mission.composition || {};
-  const power = computeAttackPowerFromComposition(save, composition);
+  const power = computeAttackPowerFromComposition(save, composition, bLevel);
+  const bossWeakness = worldBossWeakness(bLevel);
+  const bossHasWeakness = fleetHasShipType(composition, bossWeakness);
   const dmg = Math.round(power * (0.8 + Math.random() * 0.4));
 
   const bossRaw = db.shared[WORLDBOSS_KEY];
@@ -2142,7 +2179,7 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
     // Verluste (8+Stufe% bis 15+Stufe%, gedeckelt bei 50%) - Prozentsatz aus der beim Start
     // eingefrorenen Zusammensetzung, angewendet auf die AKTUELLE Flotte am Standort.
     const lossPct = Math.min(0.5, (0.08 + bLevel * 0.01) + Math.random() * 0.07);
-    for (const k of ['jaeger','cruisers','destroyers','bomber','schlachtschiff','carrier','superschlachtschiff','frachter','waechter']) {
+    for (const k of ['jaeger','cruisers','destroyers','bomber','schlachtschiff','carrier','superschlachtschiff','frachter','frachtergross','waechter']) {
       const sentCount = composition[k] || 0;
       if (sentCount <= 0) continue;
       const loseNow = Math.min(fleetObj[k] || 0, Math.round(sentCount * lossPct));
@@ -2157,6 +2194,7 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
   res.json({
     ok: true, arrivedTooLate, killed, damage: dmg,
     bossHp: bossHpAfter, bossMaxHp, lostShips,
+    hasWeakness: bossHasWeakness, weaknessType: bossWeakness,
     saveVersion: mySaveVersion,
     newCredits: save.credits, newBattlePoints: save.battlePoints
   });

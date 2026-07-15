@@ -540,6 +540,7 @@ function pushNotificationText(type, payload) {
     const label = payload.type === 'idee' ? 'Verbesserungsvorschlag' : 'Bug-Report';
     return { title: 'Neuer ' + label, body: (payload.username || 'Ein Spieler') + ': ' + (payload.text || '') };
   }
+  if (type === 'referral-redeemed') return { title: 'Einladungs-Bonus erhalten', body: (payload.username || 'Ein Spieler') + ' hat deinen Einladungscode eingelöst - +50 Kredite für dich!' };
   return { title: 'Kolonie Kepler-7', body: 'Es gibt Neuigkeiten.' };
 }
 // Verschickt eine echte Push-Benachrichtigung an ALLE registrierten Geräte eines Spielers. Abgelaufene
@@ -1558,6 +1559,55 @@ app.post('/api/feedback', authMiddleware, async (req, res) => {
     } catch (e) { console.error('Feedback-Mail fehlgeschlagen (Eintrag ist gespeichert):', e.message); }
   }
   res.json({ ok: true });
+});
+
+// --- Freunde einladen (13.07.2026, Feature-Wunsch) ---
+// Einfaches Referral-System: nutzt den bestehenden Benutzernamen als "Einladungscode" statt eine
+// eigene Code-Generierung einzuführen. Einmalig einlösbar pro Konto (save.referralRedeemed), kein
+// Eigen-Referral möglich. Muss serverseitig laufen, da hier der Spielstand eines ANDEREN Nutzers
+// (des Einladenden) verändert wird - das kann kein Client-seitiger Code manipulationssicher tun.
+app.post('/api/referral/redeem', authMiddleware, async (req, res) => {
+  const { referrerUsername } = req.body || {};
+  const cleanName = String(referrerUsername || '').trim();
+  if (!cleanName) return res.status(400).json({ error: 'Name des Einladenden erforderlich.' });
+
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save;
+  try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+
+  if (save.referralRedeemed) return res.status(400).json({ error: 'Du hast bereits einen Einladungs-Bonus eingelöst.' });
+
+  const referrer = db.users[cleanName.toLowerCase()];
+  if (!referrer) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  if (referrer.userId === req.userId) return res.status(400).json({ error: 'Du kannst dich nicht selbst einladen.' });
+
+  // Bonus für den neuen Spieler (aktueller Nutzer): 500 Erz + 500 Kristalle.
+  save.resources = save.resources || {};
+  save.resources.erz = (save.resources.erz || 0) + 500;
+  save.resources.kristalle = (save.resources.kristalle || 0) + 500;
+  save.referralRedeemed = true;
+  save.referredBy = referrer.username;
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+
+  // Bonus für den Einladenden: 50 Kredite. Eigener Spielstand, muss separat geladen/gespeichert
+  // werden - schlägt der Lade-/Parse-Vorgang fehl, bekommt der neue Spieler seinen Bonus trotzdem
+  // (besser als beide Boni an einem fremden, evtl. beschädigten Spielstand scheitern zu lassen).
+  const referrerSaveRaw = getSaveValue(referrer.userId);
+  if (referrerSaveRaw) {
+    try {
+      const referrerSave = JSON.parse(referrerSaveRaw);
+      referrerSave.credits = (referrerSave.credits || 0) + 50;
+      referrerSave.referralCount = (referrerSave.referralCount || 0) + 1;
+      setSaveValue(referrer.userId, JSON.stringify(referrerSave));
+      try {
+        pushNotificationEvent(referrer.userId, 'referral-redeemed', { username: req.username });
+      } catch (e) {}
+    } catch (e) { console.error('Einladungs-Bonus für Einladenden fehlgeschlagen:', e.message); }
+  }
+
+  await saveDb();
+  res.json({ ok: true, referrerName: referrer.username, newResources: save.resources, saveVersion: mySaveVersion });
 });
 
 // --- Server-Ereignis-Benachrichtigungen: Einstellungen, Postfach, Überfall-Terminierung ---

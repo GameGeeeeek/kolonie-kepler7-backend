@@ -533,8 +533,13 @@ function handleSharedStorageWrite(key, prevRaw, newRaw) {
         if (isRefound) {
           const tag = infoMatch[1];
           const contribPrefix = 'alliance:' + tag + ':contrib:';
+          const appPrefix = 'alliance:' + tag + ':applications:';
+          const auditPrefix = 'alliance:' + tag + ':auditlog:';
           db.shared['alliance:' + tag + ':unlocked'] = '{}';
-          for (const k of Object.keys(db.shared)) if (k.startsWith(contribPrefix)) db.shared[k] = '{}';
+          for (const k of Object.keys(db.shared)) {
+            if (k.startsWith(contribPrefix) || k.startsWith(appPrefix) || k.startsWith(auditPrefix)) db.shared[k] = '{}';
+          }
+          delete db.shared['alliance:' + tag + ':banner'];
         }
         return;
       }

@@ -685,7 +685,9 @@ function setSaveValue(userId, jsonString) {
   db.private[userId] = db.private[userId] || {};
   const existing = db.private[userId][SAVE_KEY];
   const existingVersion = existing === undefined ? -1 : (typeof existing === 'string' ? 0 : (existing.version || 0));
-  db.private[userId][SAVE_KEY] = { value: jsonString, version: existingVersion + 1 };
+  const newVersion = existingVersion + 1;
+  db.private[userId][SAVE_KEY] = { value: jsonString, version: newVersion };
+  return newVersion;
 }
 
 // --- Zufalls-Spawn für neue Spieler ---
@@ -1375,7 +1377,7 @@ app.post('/api/attack', authMiddleware, async (req, res) => {
     }
     attacker.battlePoints = (attacker.battlePoints || 0) + 25;
 
-    setSaveValue(req.userId, JSON.stringify(attacker));
+    const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     setSaveValue(targetUserId, JSON.stringify(target));
 
     addReport(req.userId, {
@@ -1387,10 +1389,10 @@ app.post('/api/attack', authMiddleware, async (req, res) => {
       attackPower, defensePower, stolen, destroyedBuilding, defenseBefore, fleet: attackerFleetSummary
     });
     await saveDb();
-    return res.json({ success: true, stolen, destroyedBuilding, attackPower, defensePower });
+    return res.json({ success: true, stolen, destroyedBuilding, attackPower, defensePower, saveVersion: mySaveVersion });
   } else {
     attacker.battlePoints = (attacker.battlePoints || 0) + 3;
-    setSaveValue(req.userId, JSON.stringify(attacker));
+    const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
 
     addReport(req.userId, {
       type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt',
@@ -1401,7 +1403,7 @@ app.post('/api/attack', authMiddleware, async (req, res) => {
       attackPower, defensePower, defenseBefore, fleet: attackerFleetSummary
     });
     await saveDb();
-    return res.json({ success: false, attackPower, defensePower });
+    return res.json({ success: false, attackPower, defensePower, saveVersion: mySaveVersion });
   }
 });
 
@@ -2030,7 +2032,7 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
   }
 
   market[resource] = priceAfter;
-  setSaveValue(req.userId, JSON.stringify(save));
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
   saveDb();
 
   res.json({
@@ -2040,6 +2042,7 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
     discount,
     avgPrice,
     priceBefore, priceAfter,
+    saveVersion: mySaveVersion,
     newCredits: save.credits,
     newResourceAmount: save.resources[resource]
   });
@@ -2091,9 +2094,9 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
   const cdLeft = Math.max(0, (save.worldBossLastAttack || 0) + 24 * 60 * 60 * 1000 - Date.now());
   if (cdLeft > 0) {
     save.credits = (save.credits || 0) + 50;
-    setSaveValue(req.userId, JSON.stringify(save));
+    const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
     await saveDb();
-    return res.json({ ok: true, arrivedTooLate: true, onCooldown: true, killed: false, damage: 0, bossHp: null, bossMaxHp: null, lostShips: {}, newCredits: save.credits, newBattlePoints: save.battlePoints });
+    return res.json({ ok: true, arrivedTooLate: true, onCooldown: true, killed: false, damage: 0, bossHp: null, bossMaxHp: null, lostShips: {}, saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
   }
   save.worldBossLastAttack = Date.now();
 
@@ -2136,12 +2139,13 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
     save.battlePoints = (save.battlePoints || 0) + 3 + bLevel;
   }
 
-  setSaveValue(req.userId, JSON.stringify(save));
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
   await saveDb();
 
   res.json({
     ok: true, arrivedTooLate, killed, damage: dmg,
     bossHp: bossHpAfter, bossMaxHp, lostShips,
+    saveVersion: mySaveVersion,
     newCredits: save.credits, newBattlePoints: save.battlePoints
   });
 });
@@ -2181,10 +2185,10 @@ app.post('/api/faction/attack', authMiddleware, async (req, res) => {
     // Beute: Kredite + etwas Ressourcen als Eroberungsbelohnung.
     const creditReward = 500 + Math.floor(Math.random() * 500);
     attacker.credits = (attacker.credits || 0) + creditReward;
-    setSaveValue(req.userId, JSON.stringify(attacker));
+    const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     pushGalaxyNews('ti-flag', (req.username || 'Ein Kommandant') + ' hat ' + systemId + ' von den ' + owner.name + ' erobert!');
     await saveDb();
-    return res.json({ success: true, systemId, attackPower, factionDefense, creditReward, factionName: owner.name });
+    return res.json({ success: true, systemId, attackPower, factionDefense, creditReward, factionName: owner.name, saveVersion: mySaveVersion });
   } else {
     // Misserfolg: Flottenverluste (10-25% jeder Schiffsart der Heimatflotte).
     const lossPct = 0.10 + Math.random() * 0.15;
@@ -2196,9 +2200,9 @@ app.post('/api/faction/attack', authMiddleware, async (req, res) => {
       if (l > 0) { lost[k] = l; fleet[k] = v - l; }
     }
     attacker.battlePoints = (attacker.battlePoints || 0) + 5;
-    setSaveValue(req.userId, JSON.stringify(attacker));
+    const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     await saveDb();
-    return res.json({ success: false, systemId, attackPower, factionDefense, lost, factionName: owner.name });
+    return res.json({ success: false, systemId, attackPower, factionDefense, lost, factionName: owner.name, saveVersion: mySaveVersion });
   }
 });
 

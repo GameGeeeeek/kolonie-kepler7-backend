@@ -316,6 +316,50 @@ function checkPactKeyPermission(req, key, isWrite) {
   }
   return null;
 }
+// Globaler Chat: reine Identitätsprüfung (Bug behoben 13.07.2026) - authorId wurde bisher vom
+// Client mitgeschickt und ungeprüft übernommen, jeder hätte sich in fremdem Namen ausgeben können.
+function checkChatKeyPermission(req, key, isWrite) {
+  if (!key.startsWith('globalchat:msg:')) return null;
+  if (!isWrite) return null;
+  let submitted = null;
+  try { submitted = JSON.parse(req.body && req.body.value); } catch (e) { return 'Ungültiges Format.'; }
+  if (!submitted || submitted.authorId !== req.userId) return 'Du kannst nur Nachrichten in deinem eigenen Namen senden.';
+  return null;
+}
+// Ruhmeshalle: rein kosmetisch (kein direkter Belohnungswert), aber gehärtet (13.07.2026) - war
+// komplett offen beschreibbar, jeder hätte sich für einen beliebigen Monat als Champion mit
+// beliebigem Score eintragen können. Vergangene Monate dürfen nicht mehr verändert werden, der
+// aktuelle Monat darf nie über dem tatsächlichen Bestenlisten-Höchstwert liegen (dieser ist seit dem
+// Bestenlisten-Fix bereits serverseitig garantiert korrekt).
+function checkHallOfFamePermission(req, key, isWrite) {
+  if (key !== 'halloffame:records') return null;
+  if (!isWrite) return null;
+  let submitted = null;
+  try { submitted = JSON.parse(req.body && req.body.value); } catch (e) { return 'Ungültiges Format.'; }
+  if (!Array.isArray(submitted)) return 'Ungültiges Format.';
+  let prevRecords = [];
+  try { const raw = db.shared[key]; prevRecords = raw ? JSON.parse(raw) : []; } catch (e) {}
+  const prevByMonth = {};
+  for (const r of prevRecords) if (r && r.month) prevByMonth[r.month] = r;
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  for (const r of submitted) {
+    if (!r || !r.month || r.month === thisMonth) continue;
+    const prev = prevByMonth[r.month];
+    if (!prev || prev.score !== r.score || prev.name !== r.name || prev.allianceTag !== r.allianceTag) {
+      return 'Vergangene Monate der Ruhmeshalle können nicht verändert werden.';
+    }
+  }
+  const curEntry = submitted.find(r => r && r.month === thisMonth);
+  if (curEntry) {
+    let maxScore = 0;
+    for (const k of Object.keys(db.shared)) {
+      if (!k.startsWith('leaderboard:')) continue;
+      try { const v = JSON.parse(db.shared[k]); if ((v.score || 0) > maxScore) maxScore = v.score || 0; } catch (e) {}
+    }
+    if ((curEntry.score || 0) > maxScore) return 'Ruhmeshallen-Eintrag übersteigt den tatsächlichen Bestenlisten-Höchstwert.';
+  }
+  return null;
+}
 // Gibt bei erlaubtem Zugriff null zurück, sonst einen Fehlertext für die 403-Antwort.
 function checkAllianceKeyPermission(req, key, isWrite) {
   const m = key.match(/^alliance:([^:]+):(.+)$/);
@@ -441,7 +485,20 @@ function checkAllianceKeyPermission(req, key, isWrite) {
     if (isOfficerPlus) return null;
     return isWrite ? 'Nur Admins/Offiziere dürfen Protokolleinträge schreiben.' : 'Nur Admins/Offiziere dürfen das Protokoll einsehen.';
   }
-  return null; // andere alliance:-Unterressourcen (Chat, Beiträge, Kriege, ...) bleiben wie bisher offen
+  if (rest.startsWith('warscore:') || rest.startsWith('warcontrib:')) {
+    // Allianz-Kriegspunkte: rein kosmetisch (keine direkte Kredit-/Ressourcen-Belohnung daran
+    // gebunden), aber aus Konsistenz zu den übrigen Allianz-Ressourcen gehärtet (13.07.2026) - nur
+    // echte Mitglieder der Allianz dürfen schreiben, warcontrib zusätzlich nur den eigenen Beitrag.
+    if (!isWrite) return null;
+    if (!myRole) return 'Nur Mitglieder dieser Allianz dürfen Kriegspunkte eintragen.';
+    if (rest.startsWith('warcontrib:')) {
+      const parts = rest.split(':'); // warcontrib:<enemyTag>:<playerId>
+      const targetId = parts[2];
+      if (targetId && targetId !== req.userId) return 'Du kannst nur deinen eigenen Kriegsbeitrag eintragen.';
+    }
+    return null;
+  }
+  return null; // andere alliance:-Unterressourcen (Chat existiert separat als globalchat:, nicht hier) bleiben wie bisher offen
 }
 
 // --- Server-Ereignis-Benachrichtigungen (Vorstufe für Push) ---
@@ -989,7 +1046,7 @@ app.get('/api/storage/:key', authMiddleware, (req, res) => {
   const shared = req.query.shared === 'true';
   const key = req.params.key;
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false);
+    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false) || checkChatKeyPermission(req, key, false) || checkHallOfFamePermission(req, key, false);
     if (denyReason) return res.status(403).json({ error: denyReason });
   }
   const store = shared ? db.shared : (db.private[req.userId] || {});
@@ -1006,7 +1063,7 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   const expectedVersion = req.body ? req.body.expectedVersion : undefined;
 
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true);
+    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
     // Bestenlisten-Eintrag: nur der eigene, und Score/Wochen-Score werden IMMER serverseitig aus dem
     // echten Spielstand nachgerechnet und überschrieben - der vom Client mitgeschickte Wert wird nur

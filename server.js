@@ -1185,7 +1185,7 @@ const DEFENSE_VALUES = { turm: 15, flak: 20, schild: 30, laser: 25, plasma: 50, 
 const SHIP_SCORE_WEIGHTS = {
   ships:15, cruisers:25, jaeger:12, destroyers:35, bomber:45,
   schlachtschiff:70, carrier:30, superschlachtschiff:180, waechter:20,
-  forscher:20, frachter:10, spaeher:15, spionageschiff:22, colonyShips:5, recycler:12
+  forscher:20, frachter:10, frachtergross:40, spaeher:15, spionageschiff:22, colonyShips:5, recycler:12
 };
 // Bug/Sicherheitslücke behoben (13.07.2026, danke an Sascha für den Hinweis): der Bestenlisten-Score
 // wurde bisher komplett clientseitig berechnet und ungeprüft übernommen - jeder hätte sich per

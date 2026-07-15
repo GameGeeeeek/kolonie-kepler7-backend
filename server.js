@@ -290,6 +290,32 @@ function checkKickCooldown(tag, userId) {
   } catch (e) {}
   return null;
 }
+// Nichtangriffspakt-Schlüssel (Format: pact:<idA>_<idB>, sortiert) - waren bisher komplett offen
+// beschreibbar (Bug behoben 13.07.2026): jeder hätte sich einen fingierten "aktiven" Pakt mit einer
+// beliebigen (auch nicht zustimmenden) ID eintragen können, für den Friedensdividende-Produktions-
+// bonus (+5%/Pakt, gedeckelt bei +10%). Nur die zwei tatsächlich im Schlüssel genannten Parteien
+// dürfen jetzt schreiben, ein Angebot muss vom Schreibenden selbst stammen, und "annehmen" (Wechsel
+// zu 'active') erfordert ein echtes, noch offenes Angebot der JEWEILS ANDEREN Partei - kein direktes
+// Selbst-Eintragen eines "aktiven" Pakts mehr möglich.
+function checkPactKeyPermission(req, key, isWrite) {
+  if (!key.startsWith('pact:')) return null;
+  if (!isWrite) return null; // Lesen bleibt offen (nichts Sensibles, nötig für beide Seiten zur Anzeige)
+  const parts = key.slice('pact:'.length).split('_');
+  if (parts.length !== 2) return 'Ungültiger Pakt-Schlüssel.';
+  const [idA, idB] = parts;
+  if (req.userId !== idA && req.userId !== idB) return 'Du bist nicht Teil dieses Pakts.';
+  let submitted = null;
+  try { submitted = JSON.parse(req.body && req.body.value); } catch (e) { return 'Ungültiges Format.'; }
+  if (!submitted || [submitted.a, submitted.b].sort().join('_') !== idA + '_' + idB) return 'Pakt-Parteien stimmen nicht mit dem Schlüssel überein.';
+  if (submitted.status === 'offered' && submitted.offeredBy !== req.userId) return 'Du kannst nur selbst ein Angebot machen.';
+  if (submitted.status === 'active') {
+    let existing = null;
+    try { const raw = db.shared[key]; existing = raw ? JSON.parse(raw) : null; } catch (e) {}
+    if (!existing || existing.status !== 'offered') return 'Kein offenes Angebot zum Annehmen vorhanden.';
+    if (existing.offeredBy === req.userId) return 'Du kannst dein eigenes Angebot nicht selbst annehmen.';
+  }
+  return null;
+}
 // Gibt bei erlaubtem Zugriff null zurück, sonst einen Fehlertext für die 403-Antwort.
 function checkAllianceKeyPermission(req, key, isWrite) {
   const m = key.match(/^alliance:([^:]+):(.+)$/);
@@ -963,7 +989,7 @@ app.get('/api/storage/:key', authMiddleware, (req, res) => {
   const shared = req.query.shared === 'true';
   const key = req.params.key;
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, false);
+    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false);
     if (denyReason) return res.status(403).json({ error: denyReason });
   }
   const store = shared ? db.shared : (db.private[req.userId] || {});
@@ -980,7 +1006,7 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   const expectedVersion = req.body ? req.body.expectedVersion : undefined;
 
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, true);
+    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
     // Bestenlisten-Eintrag: nur der eigene, und Score/Wochen-Score werden IMMER serverseitig aus dem
     // echten Spielstand nachgerechnet und überschrieben - der vom Client mitgeschickte Wert wird nur

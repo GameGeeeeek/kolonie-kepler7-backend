@@ -1483,14 +1483,21 @@ const ALIEN_RACE_NAMES = ['Kryll-Schwarm', 'Xantheer-Kollektiv', 'Nomaden von Ve
 // Ressource lebt in db.galaxy.market[key] und bewegt sich um diesen Normalpreis: Käufe treiben ihn
 // hoch, Verkäufe drücken ihn, und im galaxyTick driftet er langsam zum Normalwert zurück. Alle Spieler
 // teilen sich denselben Markt.
+// Balance-Wunsch 13.07.2026: Basispreise verdoppelt (Markt war zu günstig). Die Preisbewegung
+// (Slippage) selbst war entgegen meiner ersten (fehlerhaften) Einschätzung bereits gut kalibriert -
+// die Formel unten multipliziert MARKET_IMPACT_PER_1000 zusätzlich mit dem Basispreis der Ressource,
+// das hatte ich bei meiner ersten Abschätzung übersehen. Ein 50.000-Einheiten-Trade bewegte den Preis
+// mit dem ursprünglichen Wert bereits um ~75% der gesamten Spanne - spürbare Reibung, kein "fast
+// kostenloses" Großhandeln. Deshalb NICHT verändert, nur die Basispreise wurden angepasst.
 const MARKET_RESOURCES = {
-  erz:        { basePrice: 1.0,  min: 0.35, max: 3.0 },
-  kristalle:  { basePrice: 1.6,  min: 0.55, max: 4.5 },
-  deuterium:  { basePrice: 2.4,  min: 0.85, max: 7.0 },
-  energie:    { basePrice: 1.2,  min: 0.45, max: 3.5 },
-  antimaterie:{ basePrice: 12.0, min: 4.0,  max: 40.0 }
+  erz:        { basePrice: 2.0,  min: 0.7,  max: 6.0 },
+  kristalle:  { basePrice: 3.2,  min: 1.1,  max: 9.0 },
+  deuterium:  { basePrice: 4.8,  min: 1.7,  max: 14.0 },
+  energie:    { basePrice: 2.4,  min: 0.9,  max: 7.0 },
+  antimaterie:{ basePrice: 24.0, min: 8.0,  max: 80.0 }
 };
-// Wie stark eine gehandelte Menge den Preis bewegt (pro 1000 Einheiten). Käufe +, Verkäufe −.
+// Wie stark eine gehandelte Menge den Preis bewegt (pro 1000 Einheiten, zusätzlich mit dem
+// Basispreis der Ressource multipliziert - siehe Formel im Handels-Endpunkt). Käufe +, Verkäufe −.
 const MARKET_IMPACT_PER_1000 = 0.04;
 function loadOrInitMarket(g) {
   if (!g.market) g.market = {};

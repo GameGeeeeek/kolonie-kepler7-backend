@@ -158,6 +158,12 @@ function authMiddleware(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Nicht angemeldet.' });
   try {
     const payload = jwt.verify(token, JWT_SECRET);
+    // Sperr-Prüfung (13.07.2026, Feature-Wunsch: Moderation vorbereiten) - läuft bei JEDER
+    // authentifizierten Anfrage, nicht nur beim Login: ein bereits ausgestelltes Token (180 Tage
+    // gültig, wird sonst nie serverseitig invalidiert - siehe Kommentar bei /api/login) würde eine
+    // Sperrung sonst erst beim nächsten Login-Versuch wirksam werden lassen, nicht sofort.
+    const user = findUserById(payload.userId);
+    if (user && user.banned) return res.status(403).json({ error: 'Dieses Konto wurde gesperrt.' });
     req.userId = payload.userId;
     req.username = payload.username;
     next();
@@ -168,6 +174,25 @@ function authMiddleware(req, res, next) {
 
 function findUserById(userId) {
   return Object.values(db.users).find(u => u.userId === userId) || null;
+}
+
+// --- Wortfilter (13.07.2026, Feature-Wunsch: Moderation vorbereiten) ---
+// Moderate Liste eindeutig unangemessener Begriffe (gängige Beleidigungen, bekannte Hassbegriffe,
+// NS-Bezug) für Spieler-/Allianznamen. Bewusst kein Anspruch auf Vollständigkeit oder Perfektion -
+// ein einfacher Wortfilter lässt sich immer mit Sonderzeichen/Zahlen umgehen, das Ziel ist ein
+// Deterrent gegen offensichtlich unangemessene Namen, kein umfassender Moderationsersatz (dafür gibt
+// es die Melde-Funktion). Normalisiert Groß-/Kleinschreibung sowie gängige Leetspeak-Ersetzungen
+// (0→o, 1→i, 3→e, 4→a, 5→s, @→a) vor dem Vergleich.
+const BANNED_TERMS = [
+  'hurensohn', 'wichser', 'fotze', 'nazi', 'hitler', 'ss-', 'kanake', 'neger', 'nigger',
+  'schwuchtel', 'missgeburt', 'untermensch', 'fuck', 'nutte', 'bimbo', 'zigeuner'
+];
+function containsBannedTerm(text) {
+  if (!text) return false;
+  const normalized = String(text).toLowerCase()
+    .replace(/0/g, 'o').replace(/1/g, 'i').replace(/3/g, 'e').replace(/4/g, 'a').replace(/5/g, 's').replace(/@/g, 'a')
+    .replace(/[^a-zäöüß]/g, '');
+  return BANNED_TERMS.some(term => normalized.includes(term));
 }
 
 // --- Allianz-Berechtigungen ---
@@ -589,6 +614,7 @@ function pushNotificationText(type, payload) {
     return { title: 'Neuer ' + label, body: (payload.username || 'Ein Spieler') + ': ' + (payload.text || '') };
   }
   if (type === 'referral-redeemed') return { title: 'Einladungs-Bonus erhalten', body: (payload.username || 'Ein Spieler') + ' hat deinen Einladungscode eingelöst - +50 Kredite für dich!' };
+  if (type === 'player-reported') return { title: 'Spieler gemeldet', body: (payload.reporterName||'Jemand') + ' hat ' + (payload.targetName||'einen Spieler') + ' gemeldet: ' + (payload.reason||'') };
   return { title: 'Kolonie Kepler-7', body: 'Es gibt Neuigkeiten.' };
 }
 // Verschickt eine echte Push-Benachrichtigung an ALLE registrierten Geräte eines Spielers. Abgelaufene
@@ -838,6 +864,7 @@ app.post('/api/register', authRateLimit, async (req, res) => {
     return res.status(400).json({ error: cleanName.includes('@') ? 'Das erste Feld ist dein Spielername (kein @-Zeichen) - deine E-Mail-Adresse gehört ins E-Mail-Feld darunter. Beispiel-Name: Sternenjäger_7' : 'Bitte wähle einen Spielernamen mit 3 bis 18 Zeichen. Erlaubt sind Buchstaben, Zahlen sowie _ und - (keine Leer- oder Sonderzeichen). Beispiel: Sternenjäger_7' });
   }
   if (String(password).length < 6) return res.status(400).json({ error: 'Passwort muss mindestens 6 Zeichen haben.' });
+  if (containsBannedTerm(cleanName)) return res.status(400).json({ error: 'Dieser Spielername ist nicht erlaubt. Bitte wähle einen anderen.' });
   const key = cleanName.toLowerCase();
   if (db.users[key]) return res.status(409).json({ error: 'Dieser Name ist schon vergeben.' });
   // E-Mail ist seit dem Double-Opt-In PFLICHT: der Account wird erst nutzbar, nachdem der
@@ -950,6 +977,7 @@ app.post('/api/login', authRateLimit, async (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unbekannter Name oder falsches Passwort.' });
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) return res.status(401).json({ error: 'Unbekannter Name oder falsches Passwort.' });
+  if (user.banned) return res.status(403).json({ error: 'Dieses Konto wurde gesperrt.' });
   // Double-Opt-In: neue Konten (emailVerified === false) sind erst nach Klick auf den
   // Bestätigungslink nutzbar. Bestandskonten haben das Feld nicht und sind nicht betroffen.
   if (user.emailVerified === false) {
@@ -1120,6 +1148,17 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   if (shared) {
     const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
+    // Wortfilter (13.07.2026, Feature-Wunsch: Moderation vorbereiten) - Allianz-Tag (aus dem
+    // Schlüssel) und -Name (aus dem Wert) auf unangemessene Begriffe prüfen, bevor eine Gründung/
+    // Umbenennung überhaupt gespeichert wird.
+    const allianceInfoMatch = key.match(/^alliance:([^:]+):info$/);
+    if (allianceInfoMatch) {
+      if (containsBannedTerm(allianceInfoMatch[1])) return res.status(400).json({ error: 'Dieser Allianz-Tag ist nicht erlaubt.' });
+      try {
+        const parsedInfo = JSON.parse(value);
+        if (parsedInfo && containsBannedTerm(parsedInfo.name)) return res.status(400).json({ error: 'Dieser Allianz-Name ist nicht erlaubt.' });
+      } catch (e) {}
+    }
     // Bestenlisten-Eintrag: nur der eigene, und Score/Wochen-Score werden IMMER serverseitig aus dem
     // echten Spielstand nachgerechnet und überschrieben - der vom Client mitgeschickte Wert wird nur
     // für die übrigen (kosmetischen) Felder wie Name/Avatar/Online-Zeitstempel übernommen.
@@ -1607,6 +1646,52 @@ app.post('/api/feedback', authMiddleware, async (req, res) => {
     } catch (e) { console.error('Feedback-Mail fehlgeschlagen (Eintrag ist gespeichert):', e.message); }
   }
   res.json({ ok: true });
+});
+
+// --- Spieler melden + Admin-Moderation (13.07.2026, Feature-Wunsch: Moderation vorbereiten) ---
+// Admin-Zugriff ist fest auf das eigene Konto beschränkt (analog zum bestehenden Muster bei
+// Feedback-Push-Benachrichtigungen an 'gamegeeeeek') - kein eigenes Rollensystem, da es bewusst nur
+// einen Admin gibt.
+function isAdmin(req) {
+  const devUser = db.users['gamegeeeeek'];
+  return !!(devUser && req.userId === devUser.userId);
+}
+app.post('/api/report-player', authMiddleware, async (req, res) => {
+  const { targetUsername, reason } = req.body || {};
+  const cleanTarget = String(targetUsername || '').trim();
+  const cleanReason = String(reason || '').trim().slice(0, 500);
+  if (!cleanTarget) return res.status(400).json({ error: 'Zielspieler erforderlich.' });
+  if (cleanReason.length < 3) return res.status(400).json({ error: 'Bitte kurz begründen, worum es geht.' });
+  const target = db.users[cleanTarget.toLowerCase()];
+  if (!target) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  if (!db.playerReports) db.playerReports = [];
+  db.playerReports.unshift({
+    id: crypto.randomUUID(), time: Date.now(),
+    reporterUserId: req.userId, reporterName: req.username,
+    targetUserId: target.userId, targetName: target.username,
+    reason: cleanReason
+  });
+  db.playerReports = db.playerReports.slice(0, 500);
+  try {
+    const devUser = db.users['gamegeeeeek'];
+    if (devUser) pushNotificationEvent(devUser.userId, 'player-reported', { reporterName: req.username, targetName: target.username, reason: cleanReason.slice(0, 150) });
+  } catch (e) { console.error('Melde-Push fehlgeschlagen (Meldung ist gespeichert):', e.message); }
+  await saveDb();
+  res.json({ ok: true });
+});
+app.get('/api/admin/reports', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  res.json({ reports: (db.playerReports || []).slice(0, 200) });
+});
+app.post('/api/admin/set-banned', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const { targetUsername, banned } = req.body || {};
+  const key = String(targetUsername || '').trim().toLowerCase();
+  const target = db.users[key];
+  if (!target) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  target.banned = !!banned;
+  await saveDb();
+  res.json({ ok: true, username: target.username, banned: target.banned });
 });
 
 // --- Freunde einladen (13.07.2026, Feature-Wunsch) ---

@@ -257,9 +257,8 @@ function allianceInfoOf(tag) {
 }
 // Mitgliederlimit ist an die "Allianz-Expansion"-Forschungskette gekoppelt (siehe ALLIANCE_TECH_DEFS
 // im Frontend) - Basis 10, jede freigeschaltete Stufe erhöht das erlaubte Maximum. Liest den
-// geteilten "unlocked"-Datensatz derselben Allianz. Das vom Admin gesetzte info.memberLimit darf
-// dieses Maximum nie überschreiten (siehe checkAllianceKeyPermission unten) - sonst würde die ganze
-// Kopplung an Forschung nichts bringen, ein Admin könnte das Limit sonst einfach manuell umgehen.
+// geteilten "unlocked"-Datensatz derselben Allianz. Kein manuelles Admin-Limit mehr (13.07.2026
+// entfernt) - der Wert hier IST das tatsächliche Limit, ohne weiteren Vergleich.
 const ALLIANCE_EXPANSION_BONUSES = { a_expand1:5, a_expand2:5, a_expand3:8, a_expand4:8, a_expand5:14 };
 function allianceMemberLimitMax(tag) {
   let limit = 10;
@@ -347,8 +346,7 @@ function checkAllianceKeyPermission(req, key, isWrite) {
       if (requestedRole === 'member' && !myRole) {
         const cooldownMsg = checkKickCooldown(tag, req.userId);
         if (cooldownMsg) return cooldownMsg;
-        const info = allianceInfoOf(tag);
-        const limit = Math.min((info && info.memberLimit) || 10, allianceMemberLimitMax(tag));
+        const limit = allianceMemberLimitMax(tag);
         if (allianceMemberCount(tag) >= limit) return 'Diese Allianz hat ihr Mitgliederlimit erreicht.';
       }
       return null;

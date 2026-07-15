@@ -74,7 +74,54 @@ function saveDb() {
 }
 
 const app = express();
+// WICHTIG hinter nginx (Reverse Proxy): ohne trust proxy würde req.ip für ALLE Spieler dieselbe
+// interne nginx-Adresse zeigen statt der echten Client-IP - ein IP-basierter Rate-Limiter würde dann
+// alle Spieler faelschlich als eine einzige Quelle behandeln und sich gegenseitig aussperren lassen.
+// "1" = nur dem unmittelbaren ersten Hop (nginx) vertrauen, nicht beliebig vielen dahinterliegenden -
+// setzt voraus, dass nginx den X-Forwarded-For-Header korrekt weiterreicht (Standard-Verhalten bei
+// proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; - im vorhandenen nginx-Setup bitte
+// einmal gegenpruefen, falls Rate-Limiting nicht wie erwartet greift).
+app.set('trust proxy', 1);
 app.use(cors());
+// --- Rate-Limiting (13.07.2026, Feature-Wunsch: Vorbereitung auf plötzlichen Ansturm/TikTok-viral) ---
+// Bewusst ohne zusätzliche npm-Abhängigkeit (express-rate-limit) - ein einfacher In-Memory-Zähler
+// pro IP reicht für einen einzelnen Server voll aus und erspart einen zusätzlichen npm-install-
+// Schritt beim Deploy. NICHT für einen Multi-Server-Betrieb hinter einem Load-Balancer gedacht (dort
+// bräuchte es einen geteilten Speicher wie Redis) - für den aktuellen Ein-Server-Aufbau passend.
+const rateLimitBuckets = new Map();
+// Räumt abgelaufene Einträge regelmäßig auf, damit die Map nicht unbegrenzt wächst (jede neue IP
+// erzeugt sonst dauerhaft einen Eintrag, auch nach Ablauf des Zeitfensters).
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of rateLimitBuckets.entries()) if (now > bucket.resetAt) rateLimitBuckets.delete(key);
+}, 5 * 60 * 1000);
+function rateLimit(windowMs, max, message) {
+  return (req, res, next) => {
+    const key = req.ip + ':' + (req.rateLimitScope || req.path);
+    const now = Date.now();
+    let bucket = rateLimitBuckets.get(key);
+    if (!bucket || now > bucket.resetAt) {
+      bucket = { count: 0, resetAt: now + windowMs };
+      rateLimitBuckets.set(key, bucket);
+    }
+    bucket.count++;
+    if (bucket.count > max) {
+      const retryAfterSec = Math.ceil((bucket.resetAt - now) / 1000);
+      res.set('Retry-After', String(retryAfterSec));
+      return res.status(429).json({ error: message || 'Zu viele Anfragen - bitte kurz warten.' });
+    }
+    next();
+  };
+}
+// Strenger Login-/Registrierungs-Limiter: verhindert Brute-Force-Passwortraten und Massen-
+// Account-Erstellung durch Bots, ohne normale Spieler (die sich vielleicht 2-3x vertippen) zu stören.
+const authRateLimit = rateLimit(15 * 60 * 1000, 15, 'Zu viele Versuche - bitte in ein paar Minuten erneut versuchen.');
+// Moderater Angriffs-Limiter: ein Mensch klickt realistisch nicht öfter als alle paar Sekunden auf
+// "Angreifen", ein Bot/Skript könnte das aber in einer Schleife tun.
+const attackRateLimit = rateLimit(60 * 1000, 20, 'Zu viele Angriffe in kurzer Zeit - bitte kurz warten.');
+// Großzügiger, globaler Auffang-Limiter über ALLE API-Routen - greift nur bei echtem Flood/DoS-
+// Verhalten, nicht bei normaler Nutzung (auch nicht beim schnellen Wechseln zwischen Tabs).
+const globalApiRateLimit = rateLimit(60 * 1000, 240, 'Zu viele Anfragen von dieser Verbindung - bitte kurz warten.');
 // --- Automatische Backups ---
 // Alle Spielstände liegen in einer einzigen db.json - ein Bug, ein versehentliches Überschreiben
 // oder eine Beschädigung würde ALLE Spieler gleichzeitig treffen (siehe Vorfall vom 13.07.2026,
@@ -103,6 +150,7 @@ setInterval(backupDb, 30 * 60 * 1000);
 // GitHub-Webhook-Signaturprüfung gebraucht, da express.json() den Body normalerweise nur geparst
 // bereitstellt. Für alle anderen Routen ändert sich dadurch nichts.
 app.use(express.json({ limit: '2mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
+app.use('/api', globalApiRateLimit);
 
 function authMiddleware(req, res, next) {
   const header = req.headers.authorization || '';
@@ -782,7 +830,7 @@ function assignHomeSlot() {
 })();
 
 // --- Registrierung (E-Mail optional, aber nötig für Passwort-Reset) ---
-app.post('/api/register', async (req, res) => {
+app.post('/api/register', authRateLimit, async (req, res) => {
   const { username, password, email } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Name und Passwort erforderlich.' });
   const cleanName = String(username).trim();
@@ -860,7 +908,7 @@ app.post('/api/verify-email', async (req, res) => {
 
 // Bestätigungs-E-Mail erneut senden. Braucht Name UND Passwort, damit niemand fremde Postfächer
 // mit Mails fluten kann.
-app.post('/api/resend-verification', async (req, res) => {
+app.post('/api/resend-verification', authRateLimit, async (req, res) => {
   const { username, password } = req.body || {};
   const key = String(username || '').trim().toLowerCase();
   const user = db.users[key];
@@ -894,7 +942,7 @@ app.post('/api/resend-verification', async (req, res) => {
 });
 
 // --- Anmeldung ---
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', authRateLimit, async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Name und Passwort erforderlich.' });
   const key = String(username).trim().toLowerCase();
@@ -992,7 +1040,7 @@ app.post('/api/email-preferences', authMiddleware, async (req, res) => {
 });
 
 // --- Passwort-Reset anfordern ---
-app.post('/api/request-password-reset', async (req, res) => {
+app.post('/api/request-password-reset', authRateLimit, async (req, res) => {
   const { username } = req.body || {};
   const key = String(username || '').trim().toLowerCase();
   const user = db.users[key];
@@ -1029,7 +1077,7 @@ app.post('/api/request-password-reset', async (req, res) => {
 });
 
 // --- Neues Passwort mit Token setzen ---
-app.post('/api/reset-password', async (req, res) => {
+app.post('/api/reset-password', authRateLimit, async (req, res) => {
   const { token, newPassword } = req.body || {};
   const entry = db.resetTokens[token];
   if (!entry || entry.expires < Date.now()) return res.status(400).json({ error: 'Link ist ungültig oder abgelaufen. Fordere einen neuen an.' });
@@ -1358,7 +1406,7 @@ function fleetSummary(save) {
   return totals;
 }
 
-app.post('/api/attack', authMiddleware, async (req, res) => {
+app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   const { targetUserId } = req.body || {};
   if (!targetUserId || targetUserId === req.userId) return res.status(400).json({ error: 'Ungültiges Ziel.' });
 
@@ -1679,6 +1727,19 @@ app.post('/api/push/unsubscribe', authMiddleware, async (req, res) => {
   }
   await saveDb();
   res.json({ ok: true });
+});
+
+// --- Healthcheck (13.07.2026, Feature-Wunsch: Vorbereitung auf plötzlichen Ansturm) ---
+// Bewusst AUSSERHALB von /api (kein Rate-Limiting, keine Authentifizierung) und ohne teure
+// Verarbeitung (kein JSON.parse der ganzen DB) - für externe Monitoring-Dienste wie UptimeRobot
+// gedacht, die diesen Endpunkt alle paar Minuten anfragen und bei Ausfall (kein 200 OK / Timeout)
+// automatisch benachrichtigen. Prüft nur, ob der Prozess antwortet und die DB-Datei grundsätzlich
+// existiert/lesbar ist.
+app.get('/health', (req, res) => {
+  let dbOk = false;
+  try { dbOk = fs.existsSync(DB_FILE) && fs.statSync(DB_FILE).size > 0; } catch (e) {}
+  const status = dbOk ? 200 : 503;
+  res.status(status).json({ ok: dbOk, uptimeSec: Math.round(process.uptime()), time: new Date().toISOString() });
 });
 
 app.listen(PORT, () => {

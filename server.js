@@ -516,6 +516,28 @@ function handleSharedStorageWrite(key, prevRaw, newRaw) {
         }
       }
     } else {
+      // alliance:<TAG>:info - erkennt den Übergang "aufgelöst" -> "aktiv" (Neugründung unter
+      // demselben, freigewordenen Tag) und setzt dabei automatisch den kompletten Forschungs-/
+      // Gebäude-Fortschritt zurück. Bug behoben (13.07.2026): vorher blieben "unlocked" und alle
+      // "contrib:"-Beiträge nach einer Auflösung unangetastet bestehen - eine brandneue Allianz unter
+      // demselben Tag hätte den alten Fortschritt (inkl. der für das Mitgliederlimit relevanten
+      // Allianz-Expansion-Stufen) komplett kostenlos geerbt, ohne dass ein einziges neues Mitglied
+      // je etwas beigetragen hätte.
+      const infoMatch = key.match(/^alliance:([^:]+):info$/);
+      if (infoMatch) {
+        let prev = null, next = null;
+        try { prev = prevRaw ? JSON.parse(prevRaw) : null; } catch (e) {}
+        try { next = JSON.parse(newRaw); } catch (e) { return; }
+        const wasDisbanded = prev && prev.disbanded === true;
+        const isRefound = wasDisbanded && next && next.disbanded !== true;
+        if (isRefound) {
+          const tag = infoMatch[1];
+          const contribPrefix = 'alliance:' + tag + ':contrib:';
+          db.shared['alliance:' + tag + ':unlocked'] = '{}';
+          for (const k of Object.keys(db.shared)) if (k.startsWith(contribPrefix)) db.shared[k] = '{}';
+        }
+        return;
+      }
       // alliance:<TAG>:applications:<playerId> - neue (oder erneute nach Ablehnung) Bewerbung
       // benachrichtigt alle Admins/Offiziere dieser Allianz. "Neu" heißt: Status wechselt zu
       // 'pending', während er es vorher nicht war (deckt sowohl Erstbewerbung als auch eine erneute

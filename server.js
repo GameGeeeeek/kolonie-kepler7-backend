@@ -1489,12 +1489,14 @@ const ALIEN_RACE_NAMES = ['Kryll-Schwarm', 'Xantheer-Kollektiv', 'Nomaden von Ve
 // das hatte ich bei meiner ersten Abschätzung übersehen. Ein 50.000-Einheiten-Trade bewegte den Preis
 // mit dem ursprünglichen Wert bereits um ~75% der gesamten Spanne - spürbare Reibung, kein "fast
 // kostenloses" Großhandeln. Deshalb NICHT verändert, nur die Basispreise wurden angepasst.
+// Weiterer Balance-Wunsch (13.07.2026): Minimum-Preise deutlich tiefer gesetzt (~15% des Basispreises
+// statt ~35%) - wer zu viel verkauft, soll den Preis richtig weit drücken können, nicht nur moderat.
 const MARKET_RESOURCES = {
-  erz:        { basePrice: 2.0,  min: 0.7,  max: 6.0 },
-  kristalle:  { basePrice: 3.2,  min: 1.1,  max: 9.0 },
-  deuterium:  { basePrice: 4.8,  min: 1.7,  max: 14.0 },
-  energie:    { basePrice: 2.4,  min: 0.9,  max: 7.0 },
-  antimaterie:{ basePrice: 24.0, min: 8.0,  max: 80.0 }
+  erz:        { basePrice: 2.0,  min: 0.3,  max: 6.0 },
+  kristalle:  { basePrice: 3.2,  min: 0.5,  max: 9.0 },
+  deuterium:  { basePrice: 4.8,  min: 0.7,  max: 14.0 },
+  energie:    { basePrice: 2.4,  min: 0.35, max: 7.0 },
+  antimaterie:{ basePrice: 24.0, min: 3.5,  max: 80.0 }
 };
 // Wie stark eine gehandelte Menge den Preis bewegt (pro 1000 Einheiten, zusätzlich mit dem
 // Basispreis der Ressource multipliziert - siehe Formel im Handels-Endpunkt). Käufe +, Verkäufe −.
@@ -1645,10 +1647,12 @@ function galaxyTick() {
   // gleich schnell (15%/Tick, nach ~4-6h fast komplett zurück) - ein Spieler konnte einen durch
   // Massenverkauf gedrückten Preis einfach aussitzen und dann erneut nahe am Normalpreis verkaufen,
   // beliebig oft, da die eigene Produktion laufend neue Ware nachliefert. Ein gedrückter Preis (unter
-  // Normalpreis, durch Verkäufe) erholt sich jetzt viel langsamer (4%/Tick, ~24h bis fast vollständig
-  // erholt) - ein erhöhter Preis (über Normalpreis, durch Käufe) unverändert bei 15%/Tick, da das
-  // Problem gezielt beim Verkaufen liegt, nicht beim Kaufen.
-  const MARKET_SELL_RECOVERY_RATE = 0.04;
+  // Normalpreis, durch Verkäufe) erholt sich viel langsamer als ein erhöhter Preis (über Normalpreis,
+  // durch Käufe, unverändert 15%/Tick) - Problem liegt gezielt beim Verkaufen, nicht beim Kaufen.
+  // Weiter verlangsamt (13.07.2026, war zunächst 4%/Tick = ~1 Tag): wer zu viel verkauft, soll eine
+  // SEHR lange Erholungszeit spüren, nicht nur einen Tag - jetzt ~1,5%/Tick, mehrere Tage bis zur
+  // fast vollständigen Erholung.
+  const MARKET_SELL_RECOVERY_RATE = 0.015;
   const MARKET_BUY_RECOVERY_RATE = 0.15;
   const market = loadOrInitMarket(g);
   for (const [key, info] of Object.entries(MARKET_RESOURCES)) {

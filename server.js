@@ -1681,7 +1681,11 @@ app.post('/api/report-player', authMiddleware, async (req, res) => {
 });
 app.get('/api/admin/reports', authMiddleware, (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
-  res.json({ reports: (db.playerReports || []).slice(0, 200) });
+  const reports = (db.playerReports || []).slice(0, 200).map(r => {
+    const target = findUserById(r.targetUserId);
+    return { ...r, targetBanned: !!(target && target.banned) };
+  });
+  res.json({ reports });
 });
 app.post('/api/admin/set-banned', authMiddleware, async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
@@ -1692,6 +1696,13 @@ app.post('/api/admin/set-banned', authMiddleware, async (req, res) => {
   target.banned = !!banned;
   await saveDb();
   res.json({ ok: true, username: target.username, banned: target.banned });
+});
+app.post('/api/admin/dismiss-report', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const { reportId } = req.body || {};
+  db.playerReports = (db.playerReports || []).filter(r => r.id !== reportId);
+  await saveDb();
+  res.json({ ok: true });
 });
 
 // --- Freunde einladen (13.07.2026, Feature-Wunsch) ---

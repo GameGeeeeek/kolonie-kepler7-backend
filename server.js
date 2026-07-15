@@ -1639,13 +1639,22 @@ function galaxyTick() {
   // Handelsmarkt: leichter Random Walk zwischen 0.75x und 1.30x.
   g.marketTrend = Math.max(0.75, Math.min(1.30, g.marketTrend + (Math.random() - 0.5) * 0.08));
 
-  // Geteilter Marktplatz: jeder Preis driftet pro Tick 15% des Weges zurück zu seinem Normalpreis
-  // (so erholen sich Preise nach großen Käufen/Verkäufen langsam) und bekommt etwas Rauschen, damit
-  // der Markt auch ohne Spieleraktivität leicht lebendig wirkt.
+  // Geteilter Marktplatz: Preise driften pro Tick zurück zum Normalpreis (etwas Rauschen dazu, damit
+  // der Markt auch ohne Spieleraktivität leicht lebendig wirkt).
+  // Balance-Wunsch 13.07.2026: Erholung ist jetzt ASYMMETRISCH. Vorher erholte sich JEDE Abweichung
+  // gleich schnell (15%/Tick, nach ~4-6h fast komplett zurück) - ein Spieler konnte einen durch
+  // Massenverkauf gedrückten Preis einfach aussitzen und dann erneut nahe am Normalpreis verkaufen,
+  // beliebig oft, da die eigene Produktion laufend neue Ware nachliefert. Ein gedrückter Preis (unter
+  // Normalpreis, durch Verkäufe) erholt sich jetzt viel langsamer (4%/Tick, ~24h bis fast vollständig
+  // erholt) - ein erhöhter Preis (über Normalpreis, durch Käufe) unverändert bei 15%/Tick, da das
+  // Problem gezielt beim Verkaufen liegt, nicht beim Kaufen.
+  const MARKET_SELL_RECOVERY_RATE = 0.04;
+  const MARKET_BUY_RECOVERY_RATE = 0.15;
   const market = loadOrInitMarket(g);
   for (const [key, info] of Object.entries(MARKET_RESOURCES)) {
     const cur = market[key];
-    const towardBase = cur + (info.basePrice - cur) * 0.15;
+    const recoverRate = cur < info.basePrice ? MARKET_SELL_RECOVERY_RATE : MARKET_BUY_RECOVERY_RATE;
+    const towardBase = cur + (info.basePrice - cur) * recoverRate;
     const noise = towardBase * (Math.random() - 0.5) * 0.05;
     market[key] = clampMarketPrice(key, towardBase + noise);
   }

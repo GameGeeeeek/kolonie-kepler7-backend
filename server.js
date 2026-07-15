@@ -1219,30 +1219,6 @@ function computeAttackPower(save, enemyFleetForCounter) {
   power *= stanceOf(save).atkMult;
   return Math.round(power);
 }
-// Wie computeAttackPower, aber zählt nur die Flotten der übergebenen Planeten-Schlüssel ('home' für
-// die Heimatbasis, sonst der jeweilige Kolonie-Schlüssel) - für Angriffe, bei denen der Spieler
-// selbst auswählen darf, welche Planeten beitragen (z.B. Weltboss). Ohne gültige Auswahl (leer/nicht
-// vorhanden) fällt es auf ALLE Flotten zurück (Rückwärtskompatibilität, gleich wie computeAttackPower).
-function computeAttackPowerFromPlanets(save, planetKeys) {
-  const research = save.research || {};
-  let fleets;
-  if (Array.isArray(planetKeys) && planetKeys.length) {
-    fleets = [];
-    for (const pk of planetKeys) {
-      if (pk === 'home') { if (save.fleet) fleets.push(save.fleet); }
-      else if (save.colonies && save.colonies[pk] && save.colonies[pk].fleet) fleets.push(save.colonies[pk].fleet);
-    }
-  } else {
-    fleets = allFleetsOf(save);
-  }
-  let power = 0;
-  for (const f of fleets) power += rawFleetPower(f);
-  const k = research.rkampf || 0, k2 = research.rkampf2 || 0;
-  if (k) power *= (1 + k * 0.02);
-  if (k2) power *= (1 + k2 * 0.02);
-  power *= stanceOf(save).atkMult;
-  return Math.round(power);
-}
 function computeDefensePower(save) {
   const research = save.research || {};
   let power = 0;
@@ -1652,7 +1628,6 @@ function loadOrInitGalaxy() {
 // dessen Spielstand geschrieben (keine Schreibzugriffe auf fremde Spielstände - die würden mit dem
 // Autosave online spielender Nutzer kollidieren).
 const WORLD_BOSS_NAMES = ['Leviathan der Leere', 'Chronos-Verschlinger', 'Die Singularität', 'Wächter des Abgrunds', 'Nova-Titan'];
-const WORLD_BOSS_ATTACK_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 1x pro Tag statt bisher alle 30 Min.
 function spawnWorldBoss(g) {
   const users = Math.max(1, Object.keys(db.users).length);
   const maxHp = Math.round(40000 * (1 + users * 0.4));
@@ -2013,51 +1988,105 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
   });
 });
 
-// Weltboss angreifen. Abklingzeit 30 Min. pro Spieler, Schaden = Angriffskraft des Spielers mit
-// leichter Streuung. Jeder Angriff gibt eine kleine Belohnung, der Todesstoß eine große. Belohnungen
-// werden NUR in den Spielstand des Anfragenden geschrieben (keine fremden Spielstände anfassen).
-app.post('/api/worldboss/attack', authMiddleware, async (req, res) => {
-  const g = loadOrInitGalaxy();
-  const boss = g.worldBoss;
-  if (!boss || boss.hp <= 0) return res.status(400).json({ error: 'Kein aktiver Weltboss.' });
-  const last = boss.lastAttack[req.userId] || 0;
-  const cooldownLeft = last + WORLD_BOSS_ATTACK_COOLDOWN_MS - Date.now();
-  if (cooldownLeft > 0) return res.status(429).json({ error: 'Abklingzeit aktiv.', cooldownLeftMs: cooldownLeft });
+// Löst eine abgeschlossene Weltboss-Mission serverseitig auf. Bug/Sicherheitslücke behoben
+// (13.07.2026): der komplette Schaden (inkl. "Tötung" des gemeinsamen Bosses) wurde bisher rein
+// clientseitig berechnet und ungeprüft in den geteilten Speicher (worldboss:current) geschrieben -
+// jeder hätte den Boss beliebig manipulieren (sofort töten, gefälschte Beitragswerte für sich selbst
+// eintragen) und sich dabei echte, dauerhafte Kredite/Kampfpunkte verschaffen können. Der Server
+// liest jetzt die tatsächliche, bereits gespeicherte Mission aus dem echten Spielstand, würfelt den
+// Schaden selbst (aus der beim Missionsstart eingefrorenen Flottenzusammensetzung, nicht der
+// aktuellen - sonst könnte man mit wenig Flotte starten und während der Flugzeit aufrüsten), wendet
+// Verluste/Belohnungen serverseitig an und entfernt die Mission sofort aus der Liste (verhindert
+// Mehrfachauflösung derselben Mission durch Doppelklick, Netzwerk-Retry oder Missbrauch).
+const WORLDBOSS_KEY = 'worldboss:current';
+function computeAttackPowerFromComposition(save, composition) {
+  const research = save.research || {};
+  let power = rawFleetPower(composition);
+  const k = research.rkampf || 0, k2 = research.rkampf2 || 0;
+  if (k) power *= (1 + k * 0.02);
+  if (k2) power *= (1 + k2 * 0.02);
+  power *= stanceOf(save).atkMult;
+  return Math.round(power);
+}
+app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
+  const { missionId, planetKey } = req.body || {};
+  if (!missionId || !planetKey) return res.status(400).json({ error: 'missionId und planetKey erforderlich.' });
 
-  const attackerRaw = getSaveValue(req.userId);
-  if (!attackerRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
-  let attacker;
-  try { attacker = JSON.parse(attackerRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save;
+  try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
 
-  // planets: optionale Liste von Planeten-Schlüsseln ('home' + Kolonie-Schlüssel), die der Spieler
-  // selbst ausgewählt hat - lässt ihn entscheiden, welche seiner Flotten am Angriff teilnehmen,
-  // statt immer automatisch alle einzusetzen (z.B. um eine Kolonie ungeschwächt zur Verteidigung zu
-  // behalten). Leer/fehlend = wie bisher alle Flotten (siehe computeAttackPowerFromPlanets).
-  const planets = Array.isArray(req.body && req.body.planets) ? req.body.planets : null;
-  const power = computeAttackPowerFromPlanets(attacker, planets);
-  const damage = Math.max(50, Math.round(power * (0.8 + Math.random() * 0.4)));
-  boss.hp = Math.max(0, boss.hp - damage);
-  boss.participants[req.userId] = (boss.participants[req.userId] || 0) + damage;
-  boss.lastAttack[req.userId] = Date.now();
+  const fleetObj = planetKey === 'home' ? save.fleet : (save.colonies && save.colonies[planetKey] && save.colonies[planetKey].fleet);
+  if (!fleetObj || !Array.isArray(fleetObj.missions)) return res.status(404).json({ error: 'Kein Flottenstandort gefunden.' });
+  const missionIdx = fleetObj.missions.findIndex(m => m.id === missionId && m.type === 'worldboss');
+  if (missionIdx === -1) return res.status(404).json({ error: 'Mission nicht gefunden (evtl. bereits aufgelöst).' });
+  const mission = fleetObj.missions[missionIdx];
+  if (Date.now() < (mission.endTime || 0)) return res.status(400).json({ error: 'Mission ist noch nicht angekommen.' });
 
-  const killed = boss.hp <= 0;
-  // Kleine Belohnung pro Angriff, große für den Todesstoß.
-  const bpGain = killed ? 100 : 8;
-  const creditGain = killed ? 1000 : 40;
-  attacker.battlePoints = (attacker.battlePoints || 0) + bpGain;
-  attacker.credits = (attacker.credits || 0) + creditGain;
-  setSaveValue(req.userId, JSON.stringify(attacker));
+  fleetObj.missions.splice(missionIdx, 1);
 
-  let topDamage = null;
-  if (killed) {
-    const entries = Object.entries(boss.participants).sort((a, b) => b[1] - a[1]);
-    const topUser = entries.length ? findUserById(entries[0][0]) : null;
-    topDamage = entries.slice(0, 3).map(([uid, dmg]) => { const u = findUserById(uid); return { name: u ? u.username : 'Unbekannt', damage: dmg }; });
-    pushGalaxyNews('ti-alien', boss.name + ' wurde BESIEGT! Todesstoß: ' + (req.username || 'Unbekannt') + '. Meister Schaden: ' + (topUser ? topUser.username : 'Unbekannt') + '.');
-    g.worldBoss = null;
+  // 24h-Cooldown serverseitig durchgesetzt (nicht nur clientseitig beim Missionsstart geprüft) - im
+  // eigenen Spielstand gespeichert (nicht am Boss-Objekt), damit die Sperre auch über einen
+  // Boss-Respawn hinweg bestehen bleibt. Ohne diese Prüfung hier könnte man die Sperre umgehen, indem
+  // man eine bereits "angekommene" Mission direkt im Spielstand präpariert und diesen Endpoint beliebig
+  // oft aufruft.
+  const cdLeft = Math.max(0, (save.worldBossLastAttack || 0) + 24 * 60 * 60 * 1000 - Date.now());
+  if (cdLeft > 0) {
+    save.credits = (save.credits || 0) + 50;
+    setSaveValue(req.userId, JSON.stringify(save));
+    await saveDb();
+    return res.json({ ok: true, arrivedTooLate: true, onCooldown: true, killed: false, damage: 0, bossHp: null, bossMaxHp: null, lostShips: {}, newCredits: save.credits, newBattlePoints: save.battlePoints });
   }
+  save.worldBossLastAttack = Date.now();
+
+  const bLevel = mission.bossLevel || 1;
+  const composition = mission.composition || {};
+  const power = computeAttackPowerFromComposition(save, composition);
+  const dmg = Math.round(power * (0.8 + Math.random() * 0.4));
+
+  const bossRaw = db.shared[WORLDBOSS_KEY];
+  let boss = null;
+  try { boss = bossRaw ? JSON.parse(bossRaw) : null; } catch (e) {}
+
+  let killed = false, bossHpAfter = null, bossMaxHp = null, arrivedTooLate = false;
+  const lostShips = {};
+  if (!boss || boss.bossId !== mission.targetId || boss.defeatedAt) {
+    arrivedTooLate = true;
+    save.credits = (save.credits || 0) + 50;
+  } else {
+    boss.hp = Math.max(0, (boss.hp || 0) - dmg);
+    boss.contributions = boss.contributions || {};
+    const me = boss.contributions[req.userId] || { name: req.username || 'Kommandant', dmg: 0 };
+    me.dmg = (me.dmg || 0) + dmg;
+    me.name = req.username || me.name;
+    boss.contributions[req.userId] = me;
+    killed = boss.hp <= 0;
+    if (killed) boss.defeatedAt = Date.now();
+    bossHpAfter = boss.hp;
+    bossMaxHp = boss.maxHp;
+    db.shared[WORLDBOSS_KEY] = JSON.stringify(boss);
+
+    // Verluste (8+Stufe% bis 15+Stufe%, gedeckelt bei 50%) - Prozentsatz aus der beim Start
+    // eingefrorenen Zusammensetzung, angewendet auf die AKTUELLE Flotte am Standort.
+    const lossPct = Math.min(0.5, (0.08 + bLevel * 0.01) + Math.random() * 0.07);
+    for (const k of ['jaeger','cruisers','destroyers','bomber','schlachtschiff','carrier','superschlachtschiff','frachter','waechter']) {
+      const sentCount = composition[k] || 0;
+      if (sentCount <= 0) continue;
+      const loseNow = Math.min(fleetObj[k] || 0, Math.round(sentCount * lossPct));
+      if (loseNow > 0) { fleetObj[k] = Math.max(0, (fleetObj[k] || 0) - loseNow); lostShips[k] = loseNow; }
+    }
+    save.battlePoints = (save.battlePoints || 0) + 3 + bLevel;
+  }
+
+  setSaveValue(req.userId, JSON.stringify(save));
   await saveDb();
-  res.json({ ok: true, damage, bossHp: killed ? 0 : boss.hp, bossMaxHp: boss.maxHp, killed, bpGain, creditGain, topDamage });
+
+  res.json({
+    ok: true, arrivedTooLate, killed, damage: dmg,
+    bossHp: bossHpAfter, bossMaxHp, lostShips,
+    newCredits: save.credits, newBattlePoints: save.battlePoints
+  });
 });
 
 // Spieler greift ein NPC-Fraktionssystem an. Der Server ist autoritativ: er prüft die Flotte des

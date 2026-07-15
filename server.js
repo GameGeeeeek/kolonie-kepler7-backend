@@ -957,11 +957,31 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   if (shared) {
     const denyReason = checkAllianceKeyPermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
+    // Bestenlisten-Eintrag: nur der eigene, und Score/Wochen-Score werden IMMER serverseitig aus dem
+    // echten Spielstand nachgerechnet und überschrieben - der vom Client mitgeschickte Wert wird nur
+    // für die übrigen (kosmetischen) Felder wie Name/Avatar/Online-Zeitstempel übernommen.
+    let finalValue = value;
+    if (key.startsWith('leaderboard:')) {
+      const targetId = key.slice('leaderboard:'.length);
+      if (targetId !== req.userId) return res.status(403).json({ error: 'Du kannst nur deinen eigenen Bestenlisten-Eintrag schreiben.' });
+      const mySaveRaw = getSaveValue(req.userId);
+      if (mySaveRaw) {
+        try {
+          const mySave = JSON.parse(mySaveRaw);
+          const correctScore = computeScoreServer(mySave);
+          const correctWeekScore = Math.max(0, correctScore - ((mySave.weeklyLeague && mySave.weeklyLeague.startScore) || 0));
+          const submitted = JSON.parse(value);
+          submitted.score = correctScore;
+          submitted.weekScore = correctWeekScore;
+          finalValue = JSON.stringify(submitted);
+        } catch (e) { /* Spielstand/Wert kaputt - unverändert durchreichen, kein Absturz */ }
+      }
+    }
     const prevValue = db.shared[key];
-    db.shared[key] = value;
-    handleSharedStorageWrite(key, prevValue, value);
+    db.shared[key] = finalValue;
+    handleSharedStorageWrite(key, prevValue, finalValue);
     await saveDb();
-    return res.json({ key, value, shared });
+    return res.json({ key, value: finalValue, shared });
   }
 
   db.private[req.userId] = db.private[req.userId] || {};
@@ -1045,6 +1065,30 @@ app.delete('/api/reports', authMiddleware, async (req, res) => {
 // Allianzforschung, Buffs, Planeten-Rollen, Mega-Projekte, Artefakt-Bonus. Ebenfalls fehlend: die
 // Verteidigungsanlage "flak" taucht im Frontend auf, war hier nie in DEFENSE_VALUES enthalten.
 const DEFENSE_VALUES = { turm: 15, flak: 20, schild: 30, laser: 25, plasma: 50, raketen: 40, gauss: 65, festung: 150 };
+// Muss exakt synchron zu SHIP_SCORE_WEIGHTS im Frontend bleiben (dort die eigentliche Quelle für
+// computeScore()) - bei Änderungen dort immer auch hier nachpflegen, sonst weicht der serverseitig
+// validierte Score vom eigentlich beabsichtigten Wert ab.
+const SHIP_SCORE_WEIGHTS = {
+  ships:15, cruisers:25, jaeger:12, destroyers:35, bomber:45,
+  schlachtschiff:70, carrier:30, superschlachtschiff:180, waechter:20,
+  forscher:20, frachter:10, spaeher:15, spionageschiff:22, colonyShips:5, recycler:12
+};
+// Bug/Sicherheitslücke behoben (13.07.2026, danke an Sascha für den Hinweis): der Bestenlisten-Score
+// wurde bisher komplett clientseitig berechnet und ungeprüft übernommen - jeder hätte sich per
+// Browser-Entwicklertools einen beliebigen Score eintragen und sich damit auch die wöchentliche
+// Liga-Einstufung (samt echter Belohnung) erschummeln können. Rechnet jetzt exakt dieselbe Formel wie
+// computeScore() im Frontend nach, aber aus dem tatsächlichen gespeicherten Spielstand.
+function computeScoreServer(save) {
+  const buildLvl = allBuildingsOf(save).reduce((sum, b) => sum + Object.values(b).reduce((a, v) => a + (Number(v) || 0), 0), 0);
+  let shipScore = 0;
+  for (const f of allFleetsOf(save)) for (const [key, weight] of Object.entries(SHIP_SCORE_WEIGHTS)) shipScore += (f[key] || 0) * weight;
+  const researchScore = Object.values(save.research || {}).reduce((a, lvl) => a + (Number(lvl) || 0), 0) * 8;
+  const colonyKeys = Object.keys(save.colonies || {});
+  const moonCount = colonyKeys.filter(k => typeof k === 'string' && k.indexOf('moon_') === 0).length;
+  const colonyCount = colonyKeys.length - moonCount;
+  const expansionScore = colonyCount * 200 + moonCount * 150;
+  return Math.floor(buildLvl * 10 + shipScore + researchScore + expansionScore + (save.battlePoints || 0) * 3 + (save.prestige || 0) * 500 + ((save.ascension && save.ascension.count) || 0) * 5000);
+}
 
 // Schiffs-Kontersystem (Schere-Stein-Papier) – identisch zum Frontend. Bei echtem PvP sind BEIDE
 // Flottenzusammensetzungen bekannt (anders als bei NPC-Kämpfen), wirkt hier also immer.

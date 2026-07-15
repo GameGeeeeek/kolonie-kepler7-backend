@@ -1831,11 +1831,37 @@ app.get('/api/market', authMiddleware, (req, res) => {
   res.json({ market: out });
 });
 
+// Ermittelt den Markt-Rabatt (Kartell-Ruf + Allianz-Handelsabkommen) SERVERSEITIG aus dem echten
+// Spielstand bzw. den geteilten Allianz-Daten - Bug/Sicherheitslücke behoben (13.07.2026): vorher
+// berechnete der CLIENT diesen Rabatt selbst und wendete ihn selbst auf die (ebenfalls clientseitig
+// geführten) Kredit-/Ressourcen-Bestände an. Jeder mit Browser-Entwicklertools hätte sich dadurch
+// einen beliebigen "Rabatt" (auch über 100%, auch negativ = Gratis-Ressourcen) selbst eintragen
+// können, unabhängig davon, wie oft die Preisformel selbst nachgeschärft wird. Gleichzeitig
+// Rabattdeckel von 20% auf 12% gesenkt (Balance-Wunsch).
+const MARKET_DISCOUNT_CAP = 0.12;
+function marketDiscountPctFor(save) {
+  const rep = Math.max(-100, Math.min(100, (save.factionRep && save.factionRep.kartell) || 0));
+  let pct = rep >= 70 ? 0.10 : (rep >= 30 ? 0.05 : 0);
+  const tag = ((save.player && save.player.allianceTag) || '').trim().toUpperCase();
+  if (tag) {
+    try {
+      const raw = db.shared['alliance:' + tag + ':unlocked'];
+      if (raw) {
+        const unlocked = JSON.parse(raw);
+        const lvl = Number(unlocked.a_trade) || 0;
+        const maxLevel = (ALLIANCE_STRUCTURE_COSTS.a_trade && ALLIANCE_STRUCTURE_COSTS.a_trade.maxLevel) || 20;
+        pct += 0.08 * (lvl / maxLevel);
+      }
+    } catch (e) {}
+  }
+  return Math.min(MARKET_DISCOUNT_CAP, pct);
+}
+
 // Handeln auf dem geteilten Markt. Body: { action:'buy'|'sell', resource, amount }.
-// Der Server ist die Autorität über den PREIS (verhindert manipulierte Preise vom Client), rechnet die
-// Kreditkosten/-erlöse aus, bewegt den Preis nach Angebot/Nachfrage und gibt das Ergebnis zurück. Die
-// eigentlichen Ressourcen-/Kredit-Bestände des Spielers liegen im clientseitigen Speicherstand; der
-// Client bucht sie nach einer erfolgreichen Antwort. Amount wird serverseitig begrenzt.
+// Server ist jetzt vollständig autoritativ: liest den echten Spielstand, prüft Kredite/Ressourcen
+// dort, berechnet Preis UND Rabatt selbst, schreibt das Ergebnis direkt in den Spielstand zurück und
+// gibt nur die neuen Gesamtwerte zurück - der Client übernimmt sie nur noch, rechnet nichts mehr
+// selbst nach (siehe Kommentar bei marketDiscountPctFor für den Grund dieses Umbaus).
 app.post('/api/market/trade', authMiddleware, async (req, res) => {
   const { action, resource, amount } = req.body || {};
   if (action !== 'buy' && action !== 'sell') return res.status(400).json({ error: 'ungültige Aktion' });
@@ -1843,6 +1869,12 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
   const amt = Math.floor(Number(amount));
   if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: 'ungültige Menge' });
   if (amt > 1000000) return res.status(400).json({ error: 'Menge zu groß (max. 1.000.000)' });
+
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save;
+  try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  save.resources = save.resources || {};
 
   const g = loadOrInitGalaxy();
   const market = loadOrInitMarket(g);
@@ -1853,21 +1885,36 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
   const priceAfterRaw = action === 'buy' ? priceBefore + impact : priceBefore - impact;
   const priceAfter = clampMarketPrice(resource, priceAfterRaw);
   const avgPrice = (priceBefore + priceAfter) / 2;
-  // Balance-Wunsch 13.07.2026: Verkaufserlös um 20% reduziert (realistischer Geld-Brief-Spread -
-  // Verkaufen bringt jetzt spürbar weniger als der reine Durchschnittspreis, Kaufen bleibt
-  // unverändert beim vollen Durchschnittspreis).
+  const discount = marketDiscountPctFor(save);
+  // Verkaufserlös zusätzlich um 20% reduziert (realistischer Geld-Brief-Spread), Kartell-/Allianz-
+  // Rabatt wirkt beim Verkauf als Bonus obendrauf, beim Kauf als Abzug von den Kosten.
   const MARKET_SELL_SPREAD = 0.80;
-  const credits = action === 'sell' ? Math.round(avgPrice * amt * MARKET_SELL_SPREAD) : Math.round(avgPrice * amt);
+  let credits;
+  if (action === 'sell') {
+    if ((save.resources[resource] || 0) < amt) return res.status(400).json({ error: 'Nicht genug ' + resource + ' zum Verkaufen.' });
+    credits = Math.round(avgPrice * amt * MARKET_SELL_SPREAD * (1 + discount));
+    save.resources[resource] -= amt;
+    save.credits = (save.credits || 0) + credits;
+  } else {
+    credits = Math.round(avgPrice * amt * (1 - discount));
+    if ((save.credits || 0) < credits) return res.status(400).json({ error: 'Nicht genug Kredite.' });
+    save.credits -= credits;
+    save.resources[resource] = (save.resources[resource] || 0) + amt;
+  }
 
   market[resource] = priceAfter;
+  setSaveValue(req.userId, JSON.stringify(save));
   saveDb();
 
   res.json({
     ok: true,
     action, resource, amount: amt,
-    credits,                 // beim Kauf: Kosten; beim Verkauf: Erlös
+    credits,                 // beim Kauf: Kosten; beim Verkauf: Erlös (Rabatt bereits eingerechnet)
+    discount,
     avgPrice,
-    priceBefore, priceAfter
+    priceBefore, priceAfter,
+    newCredits: save.credits,
+    newResourceAmount: save.resources[resource]
   });
 });
 

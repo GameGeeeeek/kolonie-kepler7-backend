@@ -2261,3 +2261,53 @@ app.post('/api/deploy-webhook', (req, res) => {
     else console.log('Deploy-Webhook erfolgreich für ' + repoName + ':', stdout.trim() || '(keine Änderungen)');
   });
 });
+
+// ===== Ko-fi-Spenden: Top-Unterstützer im Spiel anzeigen =====
+// Ko-fi schickt bei jeder Zahlung einen Webhook als application/x-www-form-urlencoded mit einem
+// Feld "data", das JSON als String enthält - braucht deshalb eine eigene, auf diese Route
+// beschränkte urlencoded-Middleware (die App nutzt global sonst nur express.json()). Der
+// verification_token im Payload (aus ko-fi.com/manage/webhooks, Bereich "Advanced") wird zeitkonstant
+// gegen KOFI_VERIFICATION_TOKEN geprüft - ohne gültigen, passenden Token wird jede Anfrage verworfen,
+// damit niemand gefälschte Spenden einschleusen und sich so an die Spitze der Rangliste schummeln
+// kann. Anonyme Spenden (is_public:false) zählen zur Gesamtsumme, werden aber NIE mit Namen
+// gespeichert oder angezeigt - respektiert die Anonymitäts-Wahl der Spender aus Ko-fi.
+const KOFI_VERIFICATION_TOKEN = process.env.KOFI_VERIFICATION_TOKEN || '';
+function verifyKofiToken(given) {
+  if (!KOFI_VERIFICATION_TOKEN) return false;
+  const a = Buffer.from(String(given || ''));
+  const b = Buffer.from(KOFI_VERIFICATION_TOKEN);
+  try { return a.length === b.length && crypto.timingSafeEqual(a, b); } catch (e) { return false; }
+}
+app.post('/api/kofi-webhook', express.urlencoded({ extended: true, limit: '256kb' }), (req, res) => {
+  // Sofort antworten, wie beim Deploy-Webhook - Ko-fi erwartet eine schnelle Antwort und markiert
+  // den Webhook sonst als fehlgeschlagen. Die eigentliche Verarbeitung läuft danach.
+  res.json({ ok: true });
+  try {
+    if (!req.body || !req.body.data) return;
+    const payload = JSON.parse(req.body.data);
+    if (!verifyKofiToken(payload.verification_token)) {
+      console.warn('Ko-fi-Webhook: ungültiger oder fehlender verification_token, Anfrage verworfen.');
+      return;
+    }
+    const amount = parseFloat(payload.amount);
+    if (!isFinite(amount) || amount <= 0) return;
+    if (!db.kofiSupporters) db.kofiSupporters = {};
+    if (payload.is_public && payload.from_name) {
+      const name = String(payload.from_name).trim().slice(0, 60) || 'Anonym';
+      db.kofiSupporters[name] = (db.kofiSupporters[name] || 0) + amount;
+    } else {
+      db.kofiSupportersAnonymousTotal = (db.kofiSupportersAnonymousTotal || 0) + amount;
+    }
+    saveDb();
+    console.log('Ko-fi-Webhook verarbeitet: ' + (payload.type || 'Zahlung') + ' über ' + amount + ' ' + (payload.currency || '') + (payload.is_public ? ' von ' + payload.from_name : ' (anonym)'));
+  } catch (e) { console.error('Ko-fi-Webhook Fehler:', e.message); }
+});
+// Öffentlicher, unauthentifizierter Endpunkt - liefert NUR den Namen und Gesamtbetrag des aktuellen
+// Top-Unterstützers, keine sensiblen Daten wie E-Mail oder einzelne Zahlungen.
+app.get('/api/kofi-top-supporter', (req, res) => {
+  const supporters = db.kofiSupporters || {};
+  const entries = Object.entries(supporters).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return res.json({ topSupporter: null });
+  const [name, total] = entries[0];
+  res.json({ topSupporter: { name, total: Math.round(total * 100) / 100 } });
+});

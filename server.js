@@ -1840,7 +1840,11 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
   const priceAfterRaw = action === 'buy' ? priceBefore + impact : priceBefore - impact;
   const priceAfter = clampMarketPrice(resource, priceAfterRaw);
   const avgPrice = (priceBefore + priceAfter) / 2;
-  const credits = Math.round(avgPrice * amt);
+  // Balance-Wunsch 13.07.2026: Verkaufserlös um 20% reduziert (realistischer Geld-Brief-Spread -
+  // Verkaufen bringt jetzt spürbar weniger als der reine Durchschnittspreis, Kaufen bleibt
+  // unverändert beim vollen Durchschnittspreis).
+  const MARKET_SELL_SPREAD = 0.80;
+  const credits = action === 'sell' ? Math.round(avgPrice * amt * MARKET_SELL_SPREAD) : Math.round(avgPrice * amt);
 
   market[resource] = priceAfter;
   saveDb();

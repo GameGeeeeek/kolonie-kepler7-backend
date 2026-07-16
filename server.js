@@ -175,6 +175,12 @@ function authMiddleware(req, res, next) {
 function findUserById(userId) {
   return Object.values(db.users).find(u => u.userId === userId) || null;
 }
+// Muss exakt der Frontend-Formel commanderLevel(xp) entsprechen (siehe weltraum_kolonie.html) -
+// wird für die Level-5-Schwelle beim verzögerten Freunde-einladen-Bonus gebraucht.
+function commanderLevelFromXp(xp) {
+  return Math.floor(Math.sqrt((xp || 0) / 50));
+}
+const REFERRAL_LEVEL_THRESHOLD = 5;
 
 // --- Wortfilter (13.07.2026, Feature-Wunsch: Moderation vorbereiten) ---
 // Moderate Liste eindeutig unangemessener Begriffe (gängige Beleidigungen, bekannte Hassbegriffe,
@@ -1713,7 +1719,6 @@ app.post('/api/admin/dismiss-report', authMiddleware, async (req, res) => {
 app.post('/api/referral/redeem', authMiddleware, async (req, res) => {
   const { referrerUsername } = req.body || {};
   const cleanName = String(referrerUsername || '').trim();
-  if (!cleanName) return res.status(400).json({ error: 'Name des Einladenden erforderlich.' });
 
   const saveRaw = getSaveValue(req.userId);
   if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
@@ -1722,16 +1727,33 @@ app.post('/api/referral/redeem', authMiddleware, async (req, res) => {
 
   if (save.referralRedeemed) return res.status(400).json({ error: 'Du hast bereits einen Einladungs-Bonus eingelöst.' });
 
-  const referrer = db.users[cleanName.toLowerCase()];
-  if (!referrer) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
-  if (referrer.userId === req.userId) return res.status(400).json({ error: 'Du kannst dich nicht selbst einladen.' });
+  let referrer;
+  if (save.referredBy) {
+    // Bereits verknüpft (aus einem früheren Aufruf) - Verknüpfung ist fest, referrerUsername aus
+    // dieser Anfrage wird ignoriert. Das hier ist ein erneuter Versuch nach einem Level-Aufstieg.
+    referrer = db.users[save.referredBy.toLowerCase()];
+    if (!referrer) return res.status(404).json({ error: 'Der verknüpfte Einladende existiert nicht mehr.' });
+  } else {
+    if (!cleanName) return res.status(400).json({ error: 'Name des Einladenden erforderlich.' });
+    referrer = db.users[cleanName.toLowerCase()];
+    if (!referrer) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+    if (referrer.userId === req.userId) return res.status(400).json({ error: 'Du kannst dich nicht selbst einladen.' });
+    // Verknüpfung fest speichern - unabhängig davon, ob die Levelschwelle schon erreicht ist.
+    save.referredBy = referrer.username;
+    setSaveValue(req.userId, JSON.stringify(save));
+  }
 
-  // Bonus für den neuen Spieler (aktueller Nutzer): 500 Erz + 500 Kristalle.
+  const myLevel = commanderLevelFromXp(save.xp || 0);
+  if (myLevel < REFERRAL_LEVEL_THRESHOLD) {
+    await saveDb();
+    return res.json({ ok: true, status: 'pending', referrerName: referrer.username, levelNeeded: REFERRAL_LEVEL_THRESHOLD, currentLevel: myLevel });
+  }
+
+  // Levelschwelle erreicht - jetzt tatsächlich auszahlen.
   save.resources = save.resources || {};
   save.resources.erz = (save.resources.erz || 0) + 500;
   save.resources.kristalle = (save.resources.kristalle || 0) + 500;
   save.referralRedeemed = true;
-  save.referredBy = referrer.username;
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
 
   // Bonus für den Einladenden: 50 Kredite. Eigener Spielstand, muss separat geladen/gespeichert
@@ -1751,7 +1773,7 @@ app.post('/api/referral/redeem', authMiddleware, async (req, res) => {
   }
 
   await saveDb();
-  res.json({ ok: true, referrerName: referrer.username, newResources: save.resources, saveVersion: mySaveVersion });
+  res.json({ ok: true, status: 'paid', referrerName: referrer.username, newResources: save.resources, saveVersion: mySaveVersion });
 });
 
 // --- Server-Ereignis-Benachrichtigungen: Einstellungen, Postfach, Überfall-Terminierung ---

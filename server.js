@@ -1660,22 +1660,44 @@ app.post('/api/feedback', authMiddleware, async (req, res) => {
 // eigenen Server. Reine TAGES-AGGREGATE (Zähler pro Ereignistyp + Liste der an diesem Tag aktiven
 // User-IDs für die Unique-Zählung) - KEINE Einzelverfolgung von "User X hat um Uhrzeit Y Aktion Z
 // gemacht". Automatische Bereinigung nach 60 Tagen, damit die db.json nicht unbegrenzt wächst.
+//
+// Erweiterung (16.07.2026, Feature-Wunsch: echte 24h-Ansicht im Analytics-Dashboard): zusätzlich zu
+// den Tages-Aggregaten jetzt auch STUNDEN-Aggregate (gleiche Struktur, nur feinere Bucket-Größe) -
+// bewusst getrennt aufbewahrt statt die Tages-Aggregate abzulösen, da für 7/30-Tage-Ansichten die
+// grobe Tages-Auflösung völlig ausreicht und deutlich weniger Speicherplatz braucht. Stunden-Daten
+// werden viel aggressiver bereinigt (72 Std. statt 60 Tage) - das reicht für eine 24h-Ansicht plus
+// Puffer, hält den zusätzlichen Speicherbedarf aber gering (kein unbegrenztes Wachstum). Prinzip
+// bleibt identisch: reine Aggregate, keine Einzelverfolgung einzelner Nutzeraktionen mit Zeitstempel.
 function analyticsDateKey(d) { return (d || new Date()).toISOString().slice(0, 10); }
+function analyticsHourKey(d) { return (d || new Date()).toISOString().slice(0, 13); } // z.B. "2026-07-16T14"
 function pruneOldAnalytics() {
-  if (!db.analytics || !db.analytics.daily) return;
-  const cutoff = Date.now() - 60 * 86400000;
-  for (const key of Object.keys(db.analytics.daily)) {
-    if (new Date(key + 'T00:00:00Z').getTime() < cutoff) delete db.analytics.daily[key];
+  if (db.analytics && db.analytics.daily) {
+    const cutoffDay = Date.now() - 60 * 86400000;
+    for (const key of Object.keys(db.analytics.daily)) {
+      if (new Date(key + 'T00:00:00Z').getTime() < cutoffDay) delete db.analytics.daily[key];
+    }
+  }
+  if (db.analytics && db.analytics.hourly) {
+    const cutoffHour = Date.now() - 72 * 3600000;
+    for (const key of Object.keys(db.analytics.hourly)) {
+      if (new Date(key + ':00:00Z').getTime() < cutoffHour) delete db.analytics.hourly[key];
+    }
   }
 }
 function recordAnalyticsEvent(userId, eventName) {
-  if (!db.analytics) db.analytics = { daily: {} };
+  if (!db.analytics) db.analytics = { daily: {}, hourly: {} };
   if (!db.analytics.daily) db.analytics.daily = {};
-  const key = analyticsDateKey();
-  if (!db.analytics.daily[key]) db.analytics.daily[key] = { events: {}, uniqueUsers: [] };
-  const day = db.analytics.daily[key];
+  if (!db.analytics.hourly) db.analytics.hourly = {};
+  const dayKey = analyticsDateKey();
+  const hourKey = analyticsHourKey();
+  if (!db.analytics.daily[dayKey]) db.analytics.daily[dayKey] = { events: {}, uniqueUsers: [] };
+  if (!db.analytics.hourly[hourKey]) db.analytics.hourly[hourKey] = { events: {}, uniqueUsers: [] };
+  const day = db.analytics.daily[dayKey];
+  const hour = db.analytics.hourly[hourKey];
   day.events[eventName] = (day.events[eventName] || 0) + 1;
+  hour.events[eventName] = (hour.events[eventName] || 0) + 1;
   if (userId && !day.uniqueUsers.includes(userId)) day.uniqueUsers.push(userId);
+  if (userId && !hour.uniqueUsers.includes(userId)) hour.uniqueUsers.push(userId);
   pruneOldAnalytics();
 }
 // Absichtlich KEIN await saveDb() bei jedem einzelnen Ereignis - Analytics sind bei einem Server-
@@ -1690,17 +1712,32 @@ app.post('/api/analytics/event', authMiddleware, (req, res) => {
   recordAnalyticsEvent(req.userId, cleanEvent);
   res.json({ ok: true });
 });
+// Zeitraum-Parameter ersetzt das bisherige starre "days" (13.07.2026-Version) - unterstützt jetzt
+// 24h (Stunden-Auflösung, siehe oben), 7d/30d (Tages-Auflösung wie bisher) und all (alles, was noch
+// nicht bereinigt wurde, faktisch bis zu 60 Tage zurück). "granularity" im Response sagt dem Frontend,
+// ob "label" eine Stunde oder ein Datum ist, ohne dass es range erneut selbst auswerten müsste.
 app.get('/api/admin/analytics', authMiddleware, (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
-  const days = Math.min(60, Math.max(1, parseInt(req.query.days, 10) || 14));
-  const result = [];
+  const range = ['24h', '7d', '30d', 'all'].includes(req.query.range) ? req.query.range : '7d';
+  if (range === '24h') {
+    const hourly = (db.analytics && db.analytics.hourly) || {};
+    const result = [];
+    for (let i = 23; i >= 0; i--) {
+      const key = analyticsHourKey(new Date(Date.now() - i * 3600000));
+      const hour = hourly[key] || { events: {}, uniqueUsers: [] };
+      result.push({ label: key, uniqueUsers: hour.uniqueUsers.length, events: hour.events });
+    }
+    return res.json({ granularity: 'hour', points: result });
+  }
+  const days = range === '30d' ? 30 : range === 'all' ? 60 : 7;
   const daily = (db.analytics && db.analytics.daily) || {};
+  const result = [];
   for (let i = days - 1; i >= 0; i--) {
     const key = analyticsDateKey(new Date(Date.now() - i * 86400000));
     const day = daily[key] || { events: {}, uniqueUsers: [] };
-    result.push({ date: key, uniqueUsers: day.uniqueUsers.length, events: day.events });
+    result.push({ label: key, uniqueUsers: day.uniqueUsers.length, events: day.events });
   }
-  res.json({ days: result });
+  res.json({ granularity: 'day', points: result });
 });
 
 // --- Spieler melden + Admin-Moderation (13.07.2026, Feature-Wunsch: Moderation vorbereiten) ---

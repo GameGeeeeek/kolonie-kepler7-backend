@@ -146,6 +146,7 @@ function backupDb() {
 }
 backupDb();
 setInterval(backupDb, 30 * 60 * 1000);
+setInterval(() => { saveDb(); }, 5 * 60 * 1000);
 // verify-Callback speichert den ROHEN Body zusätzlich (req.rawBody) - wird für die
 // GitHub-Webhook-Signaturprüfung gebraucht, da express.json() den Body normalerweise nur geparst
 // bereitstellt. Für alle anderen Routen ändert sich dadurch nichts.
@@ -1652,6 +1653,54 @@ app.post('/api/feedback', authMiddleware, async (req, res) => {
     } catch (e) { console.error('Feedback-Mail fehlgeschlagen (Eintrag ist gespeichert):', e.message); }
   }
   res.json({ ok: true });
+});
+
+// --- Analytics (13.07.2026, Feature-Wunsch: echte Nutzungsdaten statt reiner Code-Vermutung) ---
+// Bewusst selbst gehostet statt Drittanbieter (Google Analytics o.ä.) - keine Daten verlassen den
+// eigenen Server. Reine TAGES-AGGREGATE (Zähler pro Ereignistyp + Liste der an diesem Tag aktiven
+// User-IDs für die Unique-Zählung) - KEINE Einzelverfolgung von "User X hat um Uhrzeit Y Aktion Z
+// gemacht". Automatische Bereinigung nach 60 Tagen, damit die db.json nicht unbegrenzt wächst.
+function analyticsDateKey(d) { return (d || new Date()).toISOString().slice(0, 10); }
+function pruneOldAnalytics() {
+  if (!db.analytics || !db.analytics.daily) return;
+  const cutoff = Date.now() - 60 * 86400000;
+  for (const key of Object.keys(db.analytics.daily)) {
+    if (new Date(key + 'T00:00:00Z').getTime() < cutoff) delete db.analytics.daily[key];
+  }
+}
+function recordAnalyticsEvent(userId, eventName) {
+  if (!db.analytics) db.analytics = { daily: {} };
+  if (!db.analytics.daily) db.analytics.daily = {};
+  const key = analyticsDateKey();
+  if (!db.analytics.daily[key]) db.analytics.daily[key] = { events: {}, uniqueUsers: [] };
+  const day = db.analytics.daily[key];
+  day.events[eventName] = (day.events[eventName] || 0) + 1;
+  if (userId && !day.uniqueUsers.includes(userId)) day.uniqueUsers.push(userId);
+  pruneOldAnalytics();
+}
+// Absichtlich KEIN await saveDb() bei jedem einzelnen Ereignis - Analytics sind bei einem Server-
+// Neustart verschmerzbar zu verlieren (anders als Spielstände), ein Schreibzugriff auf die Festplatte
+// bei JEDEM Tab-Wechsel wäre unnötig teuer. Läuft im Speicher mit, wird beim naechsten ohnehin
+// anfallenden saveDb() (z.B. durch eine andere Aktion) automatisch mitgespeichert; zusätzlich alle 5
+// Minuten ein eigener Sicherungs-Speicherpunkt (siehe setInterval weiter unten).
+app.post('/api/analytics/event', authMiddleware, (req, res) => {
+  const { event } = req.body || {};
+  const cleanEvent = String(event || '').slice(0, 60).replace(/[^a-zA-Z0-9_:.-]/g, '');
+  if (!cleanEvent) return res.status(400).json({ error: 'Ereignisname erforderlich.' });
+  recordAnalyticsEvent(req.userId, cleanEvent);
+  res.json({ ok: true });
+});
+app.get('/api/admin/analytics', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const days = Math.min(60, Math.max(1, parseInt(req.query.days, 10) || 14));
+  const result = [];
+  const daily = (db.analytics && db.analytics.daily) || {};
+  for (let i = days - 1; i >= 0; i--) {
+    const key = analyticsDateKey(new Date(Date.now() - i * 86400000));
+    const day = daily[key] || { events: {}, uniqueUsers: [] };
+    result.push({ date: key, uniqueUsers: day.uniqueUsers.length, events: day.events });
+  }
+  res.json({ days: result });
 });
 
 // --- Spieler melden + Admin-Moderation (13.07.2026, Feature-Wunsch: Moderation vorbereiten) ---

@@ -241,6 +241,21 @@ function allianceHasOtherAdmin(tag, excludeUserId) {
   }
   return false;
 }
+// Den Allianz-Tag finden, in dem diese Person Admin ist (es gibt für jeden Account höchstens einen -
+// man kann nur einer Allianz gleichzeitig angehören). Für die wars-Berechtigungsprüfung unten: wenn
+// ein Admin einen Krieg erklärt/beendet, schreibt der Client GEGENSEITIG in beide Kriegslisten (siehe
+// declareWar()/makePeace() im Frontend), man muss also unabhängig vom Tag der Ziel-Kriegsliste
+// herausfinden können, welcher Allianz der schreibende Account selbst vorsteht.
+function allianceTagWhereAdmin(userId) {
+  const suffix = ':role:' + userId;
+  for (const k of Object.keys(db.shared)) {
+    if (!k.endsWith(suffix)) continue;
+    const m = k.match(/^alliance:([^:]+):role:/);
+    if (!m) continue;
+    try { if (JSON.parse(db.shared[k]).role === 'admin') return m[1]; } catch (e) {}
+  }
+  return null;
+}
 // Aktive Mitglieder zählen (jede Rolle außer 'left') - für das Mitgliederlimit.
 function allianceMemberCount(tag) {
   const prefix = 'alliance:' + tag + ':role:';
@@ -564,6 +579,25 @@ function checkAllianceKeyPermission(req, key, isWrite) {
     // und lesen (interne Angelegenheit der Allianzleitung).
     if (isOfficerPlus) return null;
     return isWrite ? 'Nur Admins/Offiziere dürfen Protokolleinträge schreiben.' : 'Nur Admins/Offiziere dürfen das Protokoll einsehen.';
+  }
+  if (rest === 'wars') {
+    // Bug behoben (Fund vom 13.07.2026, bisher nie gemerged): alliance:<TAG>:wars lief komplett ohne
+    // Berechtigungsprüfung - jeder eingeloggte Client konnte per direktem API-Aufruf für eine
+    // beliebige fremde Allianz einen Krieg erklären/beenden, unabhängig von der eigenen Rolle.
+    if (!isWrite) return null; // Lesen bleibt offen (Kriegsliste ist für alle sichtbar)
+    if (isAdmin) return null; // Admin verwaltet die Kriegsliste der eigenen Allianz direkt
+    // declareWar()/makePeace() im Frontend tragen einen Krieg GEGENSEITIG in beide Kriegslisten ein -
+    // der Admin der bekriegenden/befriedenden Allianz schreibt dafür auch in die FREMDE Kriegsliste
+    // alliance:<TAG>:wars (TAG = die von ihm bekriegte Allianz, nicht die eigene). Das ist gewollt,
+    // aber nur erlaubt, wenn genau die eigene Allianz im enemies-Array hinzugefügt/entfernt wird -
+    // keine andere Änderung an dieser fremden Liste.
+    const requesterTag = allianceTagWhereAdmin(req.userId);
+    if (!requesterTag) return 'Nur Admins dürfen Kriegs-Listen ändern.';
+    let prevEnemies = [], nextEnemies = [];
+    try { const pr = db.shared[key]; if (pr) prevEnemies = JSON.parse(pr).enemies || []; } catch (e) {}
+    try { nextEnemies = JSON.parse(req.body && req.body.value).enemies || []; } catch (e) { return 'Ungültiges Format.'; }
+    const diff = prevEnemies.filter(e => !nextEnemies.includes(e)).concat(nextEnemies.filter(e => !prevEnemies.includes(e)));
+    return (diff.length === 1 && diff[0] === requesterTag) ? null : 'Nur Admins dürfen Kriegs-Listen ändern.';
   }
   if (rest.startsWith('warscore:') || rest.startsWith('warcontrib:')) {
     // Allianz-Kriegspunkte: rein kosmetisch (keine direkte Kredit-/Ressourcen-Belohnung daran

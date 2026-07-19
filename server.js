@@ -620,6 +620,70 @@ function checkAllianceKeyPermission(req, key, isWrite) {
     // schreibt. Ohne diese Sperre wäre die gesamte Härtung der neuen Endpunkte wirkungslos.
     return isWrite ? 'Allianz-Raid-Daten werden nur über die dedizierten Endpunkte geschrieben.' : null;
   }
+  // Ab hier (19.07.2026, Fund beim Allianz-Raid-Audit): eine ganze Reihe von alliance:-
+  // Unterressourcen lief bisher komplett ohne Sonderregel - schreibbar für JEDEN eingeloggten
+  // Nutzer, nicht nur Mitglieder der jeweiligen Allianz. Für die meisten reicht hier (vorerst) ein
+  // reiner Mitgliedschafts-/Eigentums-Check (analog contrib:/warscore:/warcontrib: oben) - er
+  // verhindert Vandalismus durch fremde Accounts, verhindert aber NICHT, dass ein böswilliges
+  // EIGENES Mitglied sich selbst einen erfundenen Wert einträgt (gleiches akzeptiertes Restrisiko
+  // wie bei contrib:). musterattack/musterjoin/basewar/incomingmuster bleiben hier bewusst NUR
+  // mitgliedschafts-, nicht wertgeprüft - eine vollständige Härtung (serverseitig berechnete
+  // Angriffskraft/Schadensauflösung wie beim Allianz-Raid) ist als eigenes, größeres Vorhaben
+  // vorgesehen und würde diese Zwischenregel dann ersetzen.
+  if (rest === 'base') {
+    // Allianzbasis-Dokument (Gründung/Ausbaustufen-Freigabe): granuläre Prüfung "Stufe deckt sich
+    // mit echten Beiträgen" wäre wünschenswert (analog unlocked oben), fehlt hier aber noch (eigene
+    // Kostentabelle allianceBaseCumCost ist bisher nicht serverseitig gespiegelt) - vorerst
+    // zumindest kein Zugriff für Nicht-Mitglieder.
+    if (!isWrite) return null;
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen die Allianzbasis ändern.';
+  }
+  if (rest.startsWith('basedef:')) {
+    if (!isWrite) return null;
+    const targetId = rest.slice('basedef:'.length);
+    if (targetId !== req.userId) return 'Du kannst nur deine eigene Basisverteidigung eintragen.';
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen Schiffe zur Basisverteidigung melden.';
+  }
+  if (rest === 'buildready' || rest === 'points' || rest === 'endgameactive' || rest === 'worldactive' || rest === 'paradebest') {
+    if (!isWrite) return null;
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen das ändern.';
+  }
+  if (rest.startsWith('donation:')) {
+    if (!isWrite) return null;
+    const parts = rest.split(':'); // donation:<weekKey>:<playerId>
+    const targetId = parts[2];
+    if (targetId && targetId !== req.userId) return 'Du kannst nur deine eigene Spende eintragen.';
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen Spenden eintragen.';
+  }
+  if (rest.startsWith('dominance:')) {
+    if (!isWrite) return null;
+    const targetId = rest.slice('dominance:'.length);
+    if (targetId !== req.userId) return 'Du kannst nur deinen eigenen Dominanz-Wert eintragen.';
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen das eintragen.';
+  }
+  if (rest.startsWith('paradesnapshot:')) {
+    if (!isWrite) return null;
+    const targetId = rest.slice('paradesnapshot:'.length);
+    if (targetId !== req.userId) return 'Du kannst nur deine eigene Flotte melden.';
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen ihre Flotte für die Parade melden.';
+  }
+  if (rest === 'msg' || rest.startsWith('msg:')) {
+    // Allianz-Chat/System-Neuigkeiten: wird immer nur in die EIGENE Allianz geschrieben (auch die
+    // automatischen "Allianzbasis"/"Spendenwertung"-Systemnachrichten laufen über die eigene
+    // myAllianceTag()) - kein legitimer Fall, in dem ein Nicht-Mitglied hier schreiben müsste.
+    if (!isWrite) return null;
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen hier schreiben.';
+  }
+  if (rest === 'musterattack' || rest.startsWith('musterjoin:') || rest === 'basewar' || rest === 'incomingmuster') {
+    // Koordinierter Allianz-Angriff (19.07.2026, vollständige Härtung wie beim Allianz-Raid): Lesen
+    // bleibt offen (Sammelphase-Anzeige/Teilnehmerliste/Kriegsbericht), Schreiben nur noch über die
+    // dedizierten /api/musterattack/*-Endpunkte. basewar/incomingmuster gehörten VORHER hierher NICHT
+    // (der Angreifer schrieb legitim direkt in den Namensraum der angegriffenen fremden Allianz -
+    // kein einfacher Mitgliedschafts-Check möglich) - jetzt schreibt dort ausschließlich der Server
+    // selbst (innerhalb von /api/musterattack/checkdispatch bzw. /resolve), der generische
+    // Speicher-Endpunkt ist für beide komplett gesperrt.
+    return isWrite ? 'Musterangriff-Daten werden nur über die dedizierten Endpunkte geschrieben.' : null;
+  }
   return null; // andere alliance:-Unterressourcen (Chat existiert separat als globalchat:, nicht hier) bleiben wie bisher offen
 }
 
@@ -2950,6 +3014,412 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
     ok: true, missedWave: false, destroyed: res_.destroyed, isTop, share: Math.round(share * 100),
     credits, battlePoints: bp, xp: res_.destroyed ? 20 : 12, lostShips,
     saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints
+  });
+});
+
+// ===== Koordinierter Allianz-Angriff auf eine fremde Allianzbasis ("Musterangriff") - Härtung =====
+// (19.07.2026, Fortsetzung der Allianz-Raid-Härtung): lief bisher komplett clientseitig - Client
+// berechnete Angriffskraft/Kampfausgang/Belohnung selbst und schrieb sie direkt in geteilte
+// Dokumente, auch in den Namensraum der ANGEGRIFFENEN (fremden) Allianz (basewar/incomingmuster).
+// Nach demselben Muster wie beim Allianz-Raid jetzt server-autoritativ: create/join/cancel/
+// checkdispatch/resolve machen dasselbe wie dort (siehe deren Kommentare), claim übernimmt wieder
+// das "jeder holt seine eigene Belohnung selbst ab"-Prinzip.
+//
+// Bewusst NICHT vollständig gehärtet (siehe Taskliste, eigenes Vorhaben): die Ausbaustufe der
+// ZIEL-Allianzbasis (allianceMusterBaseLevel unten) und deren stationierte Verteidigung
+// (allianceMusterDefenseApprox) werden zwar aus echten geteilten Dokumenten (contrib:/base/basedef:)
+// berechnet, aber diese Dokumente selbst könnten von einem böswilligen MITGLIED der VERTEIDIGENDEN
+// Allianz noch mit Fantasiewerten befüllt sein (gleiches akzeptiertes Restrisiko wie bei contrib:
+// oben) - das betrifft nur die eigene Verteidigungsstärke einer Allianz, nicht die Fähigkeit eines
+// Angreifers, sich selbst unbegrenzt Kredite/Forschungspunkte/Kampfpunkte zu erschleichen (DAS ist
+// hier geschlossen). Verteidigung nutzt außerdem eine vereinfachte Formel (40% der rohen
+// Flottenangriffskraft, ohne das volle defWeight-/Hülle-/Schild-Modulsystem des Frontends) - analog
+// zur bereits akzeptierten Vereinfachung von computeAllianceRaidPower (ohne Doktrin/Gebäude-/
+// Offiziers-Kampfbonus/Buffs).
+const ALLIANCE_MUSTER_DURATIONS = [30 * 60, 60 * 60, 120 * 60];
+const ALLIANCE_MUSTER_COOLDOWN_MS = 24 * 3600 * 1000;
+const ALLIANCE_MUSTER_TEST_MODE = process.env.ALLIANCE_RAID_TEST_MODE === '1'; // gleicher Schalter wie beim Raid
+const ALLIANCE_MUSTER_TEST_DISPATCH_SEC = 2;
+const ALLIANCE_BASE_MAX_LEVEL = 10;
+const ALLIANCE_BASE_BASE_COST = { energie: 2000000, erz: 2000000, kristalle: 1200000, deuterium: 600000, antimaterie: 60000 };
+const ALLIANCE_BASE_COST_MULT = 2.2;
+const ALLIANCE_BASE_BUILD_H_L1 = 8;
+const ALLIANCE_BASE_BUILD_MULT = 1.5;
+const ALLIANCE_BASE_HP_PER_LEVEL = 12000;
+const ALLIANCE_BASE_DEF_PER_LEVEL = 600;
+const ALLIANCE_BASE_DAMAGE_DECAY_PER_H = 0.03;
+
+function allianceBaseLevelCost(level) {
+  const f = Math.pow(ALLIANCE_BASE_COST_MULT, level - 1);
+  const c = {};
+  for (const [r, a] of Object.entries(ALLIANCE_BASE_BASE_COST)) c[r] = Math.round(a * f);
+  return c;
+}
+function allianceBaseCumCost(level) {
+  const c = { energie: 0, erz: 0, kristalle: 0, deuterium: 0, antimaterie: 0 };
+  for (let l = 1; l <= level; l++) { const lc = allianceBaseLevelCost(l); for (const r of Object.keys(c)) c[r] += lc[r]; }
+  return c;
+}
+function allianceBaseLevelBuildSeconds(level) { return Math.round(ALLIANCE_BASE_BUILD_H_L1 * 3600 * Math.pow(ALLIANCE_BASE_BUILD_MULT, level - 1)); }
+// Exakte Portierung von allianceBaseProgress()/allianceBaseLevelFromDoc() im Frontend (siehe deren
+// ausführlichen Kommentar dort zur sequentiellen Bauzeit-Kette) - Sammelsumme aller "base_"-
+// präfixierten contrib:-Einträge der Allianz gegen die Kosten-/Bauzeit-Tabelle geprüft.
+function allianceMusterBaseLevel(tag) {
+  const baseRaw = db.shared['alliance:' + tag + ':base'];
+  let base = null; try { base = baseRaw ? JSON.parse(baseRaw) : null; } catch (e) {}
+  if (!base || !base.foundedAt) return 0;
+  const prefix = 'alliance:' + tag + ':contrib:';
+  const tot = { energie: 0, erz: 0, kristalle: 0, deuterium: 0, antimaterie: 0 };
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix)) continue;
+    try { const d = JSON.parse(db.shared[k]); for (const rk of Object.keys(tot)) tot[rk] += d['base_' + rk] || 0; } catch (e) {}
+  }
+  const readyAtByLevel = base.readyAtByLevel || {};
+  let completedAt = 0, lvl = 0;
+  for (let l = 1; l <= ALLIANCE_BASE_MAX_LEVEL; l++) {
+    const cum = allianceBaseCumCost(l);
+    const resOk = Object.entries(cum).every(([r, a]) => (tot[r] || 0) >= a);
+    const readyAt = readyAtByLevel[l];
+    if (!resOk || !readyAt) return lvl;
+    const buildStart = Math.max(readyAt, completedAt);
+    const buildComplete = buildStart + allianceBaseLevelBuildSeconds(l) * 1000;
+    if (Date.now() >= buildComplete) { lvl = l; completedAt = buildComplete; } else return lvl;
+  }
+  return lvl;
+}
+function allianceBaseMaxHp(level) { return ALLIANCE_BASE_HP_PER_LEVEL * Math.max(1, level); }
+function allianceBaseEffDamage(warDoc, level) {
+  if (!warDoc || !warDoc.damage) return 0;
+  if (warDoc.destroyedAt) return allianceBaseMaxHp(level);
+  const hSince = Math.max(0, (Date.now() - (warDoc.lastDamageAt || 0)) / 3600000);
+  return Math.max(0, warDoc.damage - allianceBaseMaxHp(level) * ALLIANCE_BASE_DAMAGE_DECAY_PER_H * hSince);
+}
+// Vereinfachte Verteidigungssumme (siehe Kommentar oben): 40% der rohen Angriffskraft aller
+// gemeldeten basedef:-Flotten, ohne das volle defWeight-/Modulsystem des Frontends.
+function allianceMusterDefenseApprox(tag) {
+  const prefix = 'alliance:' + tag + ':basedef:';
+  const combined = {};
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix)) continue;
+    try { const d = JSON.parse(db.shared[k]); for (const [sk, v] of Object.entries(d)) if (typeof v === 'number' && v > 0) combined[sk] = (combined[sk] || 0) + v; } catch (e) {}
+  }
+  return Math.round(rawFleetPower(combined) * 0.4);
+}
+function getMusterAttackDoc(tag) {
+  const raw = db.shared['alliance:' + tag + ':musterattack'];
+  if (typeof raw !== 'string') return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+function setMusterAttackDoc(tag, doc) { db.shared['alliance:' + tag + ':musterattack'] = JSON.stringify(doc); }
+function listMusterJoins(tag, musterAttackId) {
+  const prefix = 'alliance:' + tag + ':musterjoin:' + musterAttackId + ':';
+  const out = [];
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix)) continue;
+    try { const doc = JSON.parse(db.shared[k]); if (doc && !doc.cancelled) out.push(Object.assign({ playerId: k.slice(prefix.length) }, doc)); } catch (e) {}
+  }
+  return out;
+}
+
+app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
+  const { tag, targetTag: targetTagRaw, gatherSeconds, message } = req.body || {};
+  const targetTag = String(targetTagRaw || '').trim().toUpperCase();
+  const gatherOk = ALLIANCE_MUSTER_DURATIONS.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
+  if (!tag || !targetTag || targetTag === tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  const myRole = allianceRoleOf(tag, req.userId);
+  if (myRole !== 'admin' && myRole !== 'officer') return res.status(403).json({ error: 'Nur Admins/Offiziere können einen koordinierten Angriff starten.' });
+
+  const mine = getMusterAttackDoc(tag);
+  if (mine && (mine.phase === 'gathering' || mine.phase === 'enroute')) return res.status(409).json({ error: 'Es läuft bereits ein koordinierter Angriff eurer Allianz (gegen [' + mine.targetTag + ']).' });
+
+  const targetBaseRaw = db.shared['alliance:' + targetTag + ':base'];
+  let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
+  if (!targetBase || !targetBase.foundedAt) return res.status(404).json({ error: 'Die Allianz [' + targetTag + '] hat keine (auffindbare) Allianzbasis.' });
+
+  const incomingRaw = db.shared['alliance:' + targetTag + ':incomingmuster'];
+  let incoming = null; try { incoming = incomingRaw ? JSON.parse(incomingRaw) : null; } catch (e) {}
+  if (incoming) {
+    if (incoming.phase === 'enroute') return res.status(409).json({ error: 'Gegen [' + targetTag + '] ist bereits ein koordinierter Angriff unterwegs.' });
+    const cdLeft = Math.max(0, (incoming.lastAttackAt || 0) + ALLIANCE_MUSTER_COOLDOWN_MS - Date.now());
+    if (cdLeft > 0) return res.status(429).json({ error: 'Die Allianzbasis von [' + targetTag + '] steht noch unter Schutz (Abklingzeit).', cdLeft });
+  }
+
+  const now = Date.now();
+  const doc = {
+    id: 'muster' + now, targetTag, createdBy: req.userId, createdByName: req.username || 'Kommandant',
+    message: String(message || '').replace(/[<>]/g, '').slice(0, 140),
+    createdAt: now, museterEndsAt: now + gatherSeconds * 1000,
+    phase: 'gathering', dispatch: null, result: null
+  };
+  setMusterAttackDoc(tag, doc);
+  await saveDb();
+  res.json({ ok: true, doc });
+});
+
+app.post('/api/musterattack/join', authMiddleware, async (req, res) => {
+  const { tag, musterAttackId, composition, originPlanet } = req.body || {};
+  if (!tag || !musterAttackId || !composition || typeof composition !== 'object' || !originPlanet) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  const myRole = allianceRoleOf(tag, req.userId);
+  if (!myRole) return res.status(403).json({ error: 'Nur Mitglieder dieser Allianz können beitreten.' });
+
+  const doc = getMusterAttackDoc(tag);
+  if (!doc || doc.id !== musterAttackId || doc.phase !== 'gathering' || doc.museterEndsAt <= Date.now()) {
+    return res.status(409).json({ error: 'Gerade keine offene Sammelphase für diesen Angriff.' });
+  }
+  const existingJoinRaw = db.shared['alliance:' + tag + ':musterjoin:' + musterAttackId + ':' + req.userId];
+  if (existingJoinRaw) {
+    try { if (!JSON.parse(existingJoinRaw).cancelled) return res.status(409).json({ error: 'Du hast diesem Angriff bereits eine Flotte angeschlossen.' }); } catch (e) {}
+  }
+
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save; try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  const fleetObj = allianceRaidFleetObj(save, originPlanet);
+  if (!fleetObj) return res.status(404).json({ error: 'Kein Flottenstandort gefunden.' });
+
+  const clampedComposition = {};
+  let totalShips = 0;
+  for (const k of ALLIANCE_RAID_ATTACK_SHIP_KEYS) {
+    const requested = Math.max(0, Math.floor(Number(composition[k]) || 0));
+    const available = Math.max(0, Math.floor(fleetObj[k] || 0));
+    const n = Math.min(requested, available);
+    if (n > 0) { clampedComposition[k] = n; totalShips += n; }
+  }
+  if (totalShips < 1) return res.status(400).json({ error: 'Keine gültige Flotte am angegebenen Standort verfügbar.' });
+
+  for (const [k, n] of Object.entries(clampedComposition)) fleetObj[k] = Math.max(0, (fleetObj[k] || 0) - n);
+  const power = computeAllianceRaidPower(save, clampedComposition);
+
+  const joinDoc = {
+    name: req.username || 'Kommandant', composition: clampedComposition, power, originPlanet,
+    shipCount: totalShips, joinedAt: Date.now(), cancelled: false, claimed: false
+  };
+  db.shared['alliance:' + tag + ':musterjoin:' + musterAttackId + ':' + req.userId] = JSON.stringify(joinDoc);
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+  await saveDb();
+  res.json({ ok: true, join: joinDoc, saveVersion: mySaveVersion });
+});
+
+app.post('/api/musterattack/cancel', authMiddleware, async (req, res) => {
+  const { tag, musterAttackId } = req.body || {};
+  if (!tag || !musterAttackId) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!allianceRoleOf(tag, req.userId)) return res.status(403).json({ error: 'Nur Mitglieder dieser Allianz.' });
+
+  const doc = getMusterAttackDoc(tag);
+  if (!doc || doc.id !== musterAttackId || doc.phase !== 'gathering' || doc.museterEndsAt <= Date.now()) {
+    return res.status(409).json({ error: 'Ein Rückzug ist nur während der laufenden Sammelphase möglich.' });
+  }
+  const joinKey = 'alliance:' + tag + ':musterjoin:' + musterAttackId + ':' + req.userId;
+  const joinRaw = db.shared[joinKey];
+  if (!joinRaw) return res.status(404).json({ error: 'Kein Beitritt zu diesem Angriff gefunden.' });
+  let join; try { join = JSON.parse(joinRaw); } catch (e) { return res.status(500).json({ error: 'Beitritts-Dokument beschädigt.' }); }
+  if (join.cancelled) return res.json({ ok: true, alreadyCancelled: true });
+
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save; try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  const fleetObj = allianceRaidFleetObj(save, join.originPlanet);
+  if (fleetObj) { for (const [k, n] of Object.entries(join.composition || {})) fleetObj[k] = (fleetObj[k] || 0) + n; }
+  join.cancelled = true;
+  db.shared[joinKey] = JSON.stringify(join);
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+  await saveDb();
+  res.json({ ok: true, saveVersion: mySaveVersion });
+});
+
+app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => {
+  const { tag } = req.body || {};
+  if (!tag) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!allianceRoleOf(tag, req.userId)) return res.status(403).json({ error: 'Nur Mitglieder dieser Allianz.' });
+
+  const doc = getMusterAttackDoc(tag);
+  if (!doc || doc.phase !== 'gathering' || doc.museterEndsAt > Date.now()) return res.json({ ok: true, doc });
+
+  const parts = listMusterJoins(tag, doc.id);
+  if (!parts.length) {
+    doc.phase = 'resolved'; doc.result = { noParticipants: true, resolvedAt: Date.now() };
+    setMusterAttackDoc(tag, doc);
+    await saveDb();
+    return res.json({ ok: true, doc });
+  }
+
+  const totalComposition = {};
+  let totalPower = 0, totalShips = 0, topPower = -1, topId = null;
+  for (const p of parts) {
+    for (const [k, n] of Object.entries(p.composition || {})) totalComposition[k] = (totalComposition[k] || 0) + n;
+    totalPower += p.power || 0; totalShips += p.shipCount || 0;
+    if ((p.power || 0) > topPower) { topPower = p.power || 0; topId = p.playerId; }
+  }
+
+  const myBaseRaw = db.shared['alliance:' + tag + ':base'];
+  let myBase = null; try { myBase = myBaseRaw ? JSON.parse(myBaseRaw) : null; } catch (e) {}
+  const targetBaseRaw = db.shared['alliance:' + doc.targetTag + ':base'];
+  let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
+  const sameSys = !!(myBase && targetBase && myBase.sector === targetBase.sector);
+  // Fester Wert statt personenbezogener Geschwindigkeit (gleicher Grund wie beim Allianz-Raid: ein
+  // gemeinsamer Verband hat keine "eine" persönliche Forschung).
+  const dispatchSec = ALLIANCE_MUSTER_TEST_MODE ? ALLIANCE_MUSTER_TEST_DISPATCH_SEC : (sameSys ? 120 : 480);
+  const now = Date.now();
+  doc.dispatch = {
+    departedAt: now, arrivalAt: now + dispatchSec * 1000, totalComposition,
+    totalPower: Math.round(totalPower), totalShips, participantCount: parts.length,
+    topParticipantId: topId, topParticipantPower: Math.round(Math.max(0, topPower)),
+    participantIds: parts.map(p => p.playerId)
+  };
+  doc.phase = 'enroute';
+  setMusterAttackDoc(tag, doc);
+  db.shared['alliance:' + doc.targetTag + ':incomingmuster'] = JSON.stringify({
+    attackerTag: tag, musterAttackId: doc.id, phase: 'enroute', dispatchedAt: now,
+    arrivalAt: doc.dispatch.arrivalAt, lastAttackAt: now, totalShips, resolvedAt: null
+  });
+  await saveDb();
+  res.json({ ok: true, doc });
+});
+
+// Kampf-Auflösung bei Ankunft: identische Formel wie zuvor im Frontend (resolveAllianceMusterAttack).
+// Schreibt Schaden/Zerstörung/Verlustquote in das geteilte alliance:<targetTag>:basewar-Dokument -
+// die Verteidiger-Infrastruktur (Verlust-Anwendung je Mitglied, Bericht, Chat-Ankündigung, Alarm)
+// bleibt unverändert clientseitig (liest dieses Dokument nur, schreibt es nicht mehr selbst).
+app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
+  const { tag } = req.body || {};
+  if (!tag) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  const doc = getMusterAttackDoc(tag);
+  // Anders als bei allen anderen musterattack-Endpunkten darf resolve auch vom VERTEIDIGER ausgelöst
+  // werden (dessen eigener Client bemerkt die Ankunft über sein eigenes incomingmuster-Dokument,
+  // siehe checkIncomingAllianceMuster im Frontend) - deshalb Mitgliedschaft in tag ODER in
+  // doc.targetTag akzeptieren, nicht nur in tag wie sonst.
+  const myRoleAttacker = allianceRoleOf(tag, req.userId);
+  const myRoleDefender = doc ? allianceRoleOf(doc.targetTag, req.userId) : null;
+  if (!myRoleAttacker && !myRoleDefender) return res.status(403).json({ error: 'Nur Mitglieder der angreifenden oder verteidigenden Allianz.' });
+
+  if (!doc || doc.phase !== 'enroute' || !doc.dispatch || doc.dispatch.arrivalAt > Date.now()) return res.json({ ok: true, doc });
+
+  const targetTag = doc.targetTag;
+  const targetBaseRaw = db.shared['alliance:' + targetTag + ':base'];
+  let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
+  if (!targetBase || !targetBase.foundedAt) {
+    doc.phase = 'resolved';
+    doc.result = { success: false, damage: 0, destroyed: false, defensePower: 0, ownLossPct: 0.05, note: 'target-gone', resolvedAt: Date.now() };
+    setMusterAttackDoc(tag, doc);
+    await saveDb();
+    return res.json({ ok: true, doc });
+  }
+
+  const warRaw = db.shared['alliance:' + targetTag + ':basewar'];
+  let war = null; try { war = warRaw ? JSON.parse(warRaw) : null; } catch (e) {}
+  war = war || { damage: 0, lastDamageAt: 0, destroyedAt: null, destroyedCount: 0, attacks: [] };
+
+  const targetLevel = allianceMusterBaseLevel(targetTag);
+  if (targetLevel < 1 || war.destroyedAt) {
+    doc.phase = 'resolved';
+    doc.result = { success: false, damage: 0, destroyed: false, defensePower: 0, ownLossPct: 0.05, note: targetLevel < 1 ? 'target-not-built' : 'target-already-destroyed', resolvedAt: Date.now() };
+    setMusterAttackDoc(tag, doc);
+    await saveDb();
+    return res.json({ ok: true, doc });
+  }
+
+  const defense = ALLIANCE_BASE_DEF_PER_LEVEL * targetLevel + allianceMusterDefenseApprox(targetTag);
+  const power = doc.dispatch.totalPower;
+  const chance = Math.max(0.10, Math.min(0.92, power / (power + defense)));
+  const success = Math.random() < chance;
+  const maxHp = allianceBaseMaxHp(targetLevel);
+  const effDmgBefore = allianceBaseEffDamage(war, targetLevel);
+  const now = Date.now();
+  let dealt = 0, destroyed = false;
+  if (success) {
+    dealt = Math.round(power * (0.8 + Math.random() * 0.4));
+    const newDamage = Math.min(maxHp, effDmgBefore + dealt);
+    war.damage = newDamage; war.lastDamageAt = now;
+    if (newDamage >= maxHp) { destroyed = true; war.destroyedAt = now; war.destroyedCount = (war.destroyedCount || 0) + 1; }
+  } else {
+    dealt = Math.round(power * 0.15);
+    war.damage = Math.min(maxHp, effDmgBefore + dealt); war.lastDamageAt = now;
+  }
+  const defLossPct = success ? Math.max(0.08, Math.min(0.35, power / (power + defense * 1.5))) : Math.max(0.03, Math.min(0.12, power / (power + defense * 3)));
+  war.attacks = war.attacks || [];
+  war.attacks.unshift({ id: 'atk' + now, ts: now, attackerTag: tag, attackerName: '[' + tag + ']-Verband (' + doc.dispatch.participantCount + ' Kommandanten)', power: Math.round(power), damage: dealt, defLossPct: Math.round(defLossPct * 100) / 100, destroyed, isMusterAttack: true });
+  war.attacks = war.attacks.slice(0, 25);
+  db.shared['alliance:' + targetTag + ':basewar'] = JSON.stringify(war);
+
+  const ownLossPct = allianceRaidDampenLoss(success ? 0.10 + Math.random() * 0.12 : 0.25 + Math.random() * 0.20);
+  doc.phase = 'resolved';
+  doc.result = {
+    success, damage: dealt, destroyed, defensePower: Math.round(defense), ownLossPct,
+    chancePct: Math.round(chance * 100), targetLevel, topParticipantId: doc.dispatch.topParticipantId,
+    totalPower: power, resolvedAt: now
+  };
+  setMusterAttackDoc(tag, doc);
+
+  const incomingRaw = db.shared['alliance:' + targetTag + ':incomingmuster'];
+  try {
+    const incoming = incomingRaw ? JSON.parse(incomingRaw) : null;
+    if (incoming && incoming.musterAttackId === doc.id) { incoming.phase = 'resolved'; incoming.resolvedAt = now; db.shared['alliance:' + targetTag + ':incomingmuster'] = JSON.stringify(incoming); }
+  } catch (e) {}
+
+  await saveDb();
+  res.json({ ok: true, doc });
+});
+
+// Eigene Belohnung eines abgeschlossenen koordinierten Angriffs abholen - jeder Teilnehmer ruft das
+// für sich selbst auf, exakt wie /api/allianceraid/claim (Server schreibt ausschließlich in den
+// eigenen Spielstand).
+app.post('/api/musterattack/claim', authMiddleware, async (req, res) => {
+  const { tag, musterAttackId } = req.body || {};
+  if (!tag || !musterAttackId) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!allianceRoleOf(tag, req.userId)) return res.status(403).json({ error: 'Nur Mitglieder dieser Allianz.' });
+
+  const joinKey = 'alliance:' + tag + ':musterjoin:' + musterAttackId + ':' + req.userId;
+  const joinRaw = db.shared[joinKey];
+  if (!joinRaw) return res.status(404).json({ error: 'Kein Beitritt zu diesem Angriff gefunden.' });
+  let join; try { join = JSON.parse(joinRaw); } catch (e) { return res.status(500).json({ error: 'Beitritts-Dokument beschädigt.' }); }
+  if (join.cancelled) return res.json({ ok: true, cancelled: true });
+  if (join.claimed) return res.json({ ok: true, alreadyClaimed: true });
+
+  const doc = getMusterAttackDoc(tag);
+  if (!doc || doc.id !== musterAttackId || doc.phase !== 'resolved' || !doc.result) return res.status(409).json({ error: 'Angriff ist noch nicht abgeschlossen.' });
+
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save; try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  const fleetObj = allianceRaidFleetObj(save, join.originPlanet);
+  const res_ = doc.result;
+
+  if (res_.noParticipants) {
+    if (fleetObj) { for (const [k, n] of Object.entries(join.composition || {})) fleetObj[k] = (fleetObj[k] || 0) + n; }
+    join.claimed = true; db.shared[joinKey] = JSON.stringify(join);
+    const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+    await saveDb();
+    return res.json({ ok: true, noParticipants: true, saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
+  }
+
+  const totalPower = (doc.dispatch && doc.dispatch.totalPower) || 0;
+  const share = totalPower > 0 ? Math.min(1, (join.power || 0) / totalPower) : 0;
+  const isTop = res_.topParticipantId === req.userId;
+  const bp = Math.round((res_.destroyed ? 150 : (res_.success ? 60 : 15)) * (0.5 + share * 1.5));
+  const credits = Math.round((res_.destroyed ? 400 : (res_.success ? 150 : 40)) * (0.5 + share * 1.5));
+  const fp = Math.round((res_.destroyed ? 200 : (res_.success ? 80 : 20)) * (0.5 + share * 1.5));
+  const lostShips = {};
+  if (fleetObj) {
+    for (const [k, sentCount] of Object.entries(join.composition || {})) {
+      if (!sentCount) continue;
+      const lost = Math.min(sentCount, Math.round(sentCount * (res_.ownLossPct || 0)));
+      const survivors = sentCount - lost;
+      if (survivors > 0) fleetObj[k] = (fleetObj[k] || 0) + survivors;
+      if (lost > 0) lostShips[k] = lost;
+    }
+  }
+  save.credits = (save.credits || 0) + credits;
+  save.battlePoints = (save.battlePoints || 0) + bp;
+  save.resources = save.resources || {};
+  save.resources.forschungspunkte = (save.resources.forschungspunkte || 0) + fp;
+  join.claimed = true;
+  db.shared[joinKey] = JSON.stringify(join);
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+  await saveDb();
+  res.json({
+    ok: true, destroyed: res_.destroyed, success: res_.success, isTop, share: Math.round(share * 100),
+    credits, battlePoints: bp, forschungspunkte: fp, lostShips, damage: res_.damage, defensePower: res_.defensePower, chancePct: res_.chancePct,
+    saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints, newForschungspunkte: save.resources.forschungspunkte
   });
 });
 

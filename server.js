@@ -455,6 +455,25 @@ function checkHallOfFamePermission(req, key, isWrite) {
   }
   return null;
 }
+// moondefense:<playerId>/moonsiegelog:<playerId> (19.07.2026, Härtung): liefen bisher OHNE jede
+// Sonderregel - jeder eingeloggte Nutzer konnte den Mondbestand JEDES Spielers direkt überschreiben
+// (Monde einfach verschwinden lassen) oder sich einen frei erfundenen Sieges-Logeintrag eintragen.
+// Lesen bleibt offen (Ziel-Auswahl für neue Belagerungen braucht das). moonsiegelog: ist NUR noch
+// vom Server selbst beschreibbar (Ereignisse kommen ausschließlich aus /api/moonsiege/resolve).
+// moondefense: darf weiterhin vom Besitzer selbst beschrieben werden (eigene Mond-Liste bekannt
+// geben, siehe publishAllianceBaseDefense-Analogon im Frontend), aber NICHT mehr von fremden
+// Accounts - das Entfernen eines zerstörten Mondes passiert jetzt ausschließlich serverseitig.
+function checkMoonDefensePermission(req, key, isWrite) {
+  if (key.startsWith('moonsiegelog:')) {
+    return isWrite ? 'moonsiegelog wird nur vom Server geschrieben.' : null;
+  }
+  if (key.startsWith('moondefense:')) {
+    if (!isWrite) return null;
+    const targetId = key.slice('moondefense:'.length);
+    return targetId === req.userId ? null : 'Du kannst nur deine eigene Mond-Liste bekannt geben.';
+  }
+  return null;
+}
 // Gibt bei erlaubtem Zugriff null zurück, sonst einen Fehlertext für die 403-Antwort.
 function checkAllianceKeyPermission(req, key, isWrite) {
   const m = key.match(/^alliance:([^:]+):(.+)$/);
@@ -1242,7 +1261,7 @@ app.get('/api/storage/:key', authMiddleware, (req, res) => {
   const shared = req.query.shared === 'true';
   const key = req.params.key;
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false) || checkChatKeyPermission(req, key, false) || checkHallOfFamePermission(req, key, false);
+    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false) || checkChatKeyPermission(req, key, false) || checkHallOfFamePermission(req, key, false) || checkMoonDefensePermission(req, key, false);
     if (denyReason) return res.status(403).json({ error: denyReason });
   }
   const store = shared ? db.shared : (db.private[req.userId] || {});
@@ -1259,7 +1278,7 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   const expectedVersion = req.body ? req.body.expectedVersion : undefined;
 
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true);
+    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
     // Wortfilter (13.07.2026, Feature-Wunsch: Moderation vorbereiten) - Allianz-Tag (aus dem
     // Schlüssel) und -Name (aus dem Wert) auf unangemessene Begriffe prüfen, bevor eine Gründung/
@@ -3421,6 +3440,147 @@ app.post('/api/musterattack/claim', authMiddleware, async (req, res) => {
     credits, battlePoints: bp, forschungspunkte: fp, lostShips, damage: res_.damage, defensePower: res_.defensePower, chancePct: res_.chancePct,
     saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints, newForschungspunkte: save.resources.forschungspunkte
   });
+});
+
+// Solo-Angriff EINES einzelnen Spielers auf eine fremde Allianzbasis (separat vom koordinierten
+// Musterangriff oben - älterer, einfacherer Mechanismus ohne Sammelphase). Regressions-Fix
+// (19.07.2026): schrieb bisher direkt über den generischen Speicher-Endpunkt in
+// alliance:<targetTag>:basewar - seit dessen vollständiger Sperre (Musterangriff-Härtung) wäre das
+// ohne diesen dedizierten Endpunkt kaputt. Löst Beitritt+Auflösung+Belohnung in EINEM Aufruf auf
+// (keine Mehrspieler-Koordination nötig wie beim Musterangriff), sonst identische Formeln wie dort.
+app.post('/api/basedamage/solo', authMiddleware, async (req, res) => {
+  const { tag, targetTag: targetTagRaw, composition, originPlanet } = req.body || {};
+  const targetTag = String(targetTagRaw || '').trim().toUpperCase();
+  if (!tag || !targetTag || targetTag === tag || !composition || typeof composition !== 'object' || !originPlanet) {
+    return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  }
+  if (!allianceRoleOf(tag, req.userId)) return res.status(403).json({ error: 'Nur Mitglieder einer Allianz können Basis-Angriffe starten.' });
+
+  const targetBaseRaw = db.shared['alliance:' + targetTag + ':base'];
+  let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
+  if (!targetBase || !targetBase.foundedAt) return res.status(404).json({ error: 'Die Allianz [' + targetTag + '] hat keine (auffindbare) Allianzbasis.' });
+
+  const warRaw = db.shared['alliance:' + targetTag + ':basewar'];
+  let war = null; try { war = warRaw ? JSON.parse(warRaw) : null; } catch (e) {}
+  war = war || { damage: 0, lastDamageAt: 0, destroyedAt: null, destroyedCount: 0, attacks: [] };
+  if (war.destroyedAt) return res.status(409).json({ error: 'Die Allianzbasis von [' + targetTag + '] liegt bereits in Trümmern.' });
+
+  const targetLevel = allianceMusterBaseLevel(targetTag);
+  if (targetLevel < 1) return res.status(409).json({ error: 'Die Allianzbasis von [' + targetTag + '] ist noch im Aufbau (Stufe 0).' });
+
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save; try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  const fleetObj = allianceRaidFleetObj(save, originPlanet);
+  if (!fleetObj) return res.status(404).json({ error: 'Kein Flottenstandort gefunden.' });
+
+  const clampedComposition = {};
+  let totalShips = 0;
+  for (const k of ALLIANCE_RAID_ATTACK_SHIP_KEYS) {
+    const requested = Math.max(0, Math.floor(Number(composition[k]) || 0));
+    const available = Math.max(0, Math.floor(fleetObj[k] || 0));
+    const n = Math.min(requested, available);
+    if (n > 0) { clampedComposition[k] = n; totalShips += n; }
+  }
+  if (totalShips < 1) return res.status(400).json({ error: 'Keine gültige Flotte am angegebenen Standort verfügbar.' });
+  // WICHTIG, anders als bei /musterattack/join: dieser Missionstyp zieht die gesendeten Schiffe NICHT
+  // beim Abflug aus der Flotte ab (computeAwayByType zählt sie clientseitig nur als "unterwegs", der
+  // Frontend-Flottenzähler bleibt währenddessen unverändert) - deshalb hier NICHT abziehen, sonst
+  // würden die Schiffe doppelt verschwinden (einmal durch diesen Abzug, einmal weil sie ohnehin nie
+  // "zurückgegeben" werden). Nur die tatsächlichen KAMPFVERLUSTE werden unten direkt abgezogen.
+  const power = computeAllianceRaidPower(save, clampedComposition);
+  const defense = ALLIANCE_BASE_DEF_PER_LEVEL * targetLevel + allianceMusterDefenseApprox(targetTag);
+  const chance = Math.max(0.10, Math.min(0.92, power / (power + defense)));
+  const success = Math.random() < chance;
+  const maxHp = allianceBaseMaxHp(targetLevel);
+  const effDmgBefore = allianceBaseEffDamage(war, targetLevel);
+  const now = Date.now();
+  let dealt = 0, destroyed = false;
+  if (success) {
+    dealt = Math.round(power * (0.8 + Math.random() * 0.4));
+    const newDamage = Math.min(maxHp, effDmgBefore + dealt);
+    war.damage = newDamage; war.lastDamageAt = now;
+    if (newDamage >= maxHp) { destroyed = true; war.destroyedAt = now; war.destroyedCount = (war.destroyedCount || 0) + 1; }
+  } else {
+    dealt = Math.round(power * 0.15);
+    war.damage = Math.min(maxHp, effDmgBefore + dealt); war.lastDamageAt = now;
+  }
+  const defLossPct = success ? Math.max(0.08, Math.min(0.35, power / (power + defense * 1.5))) : Math.max(0.03, Math.min(0.12, power / (power + defense * 3)));
+  war.attacks = war.attacks || [];
+  war.attacks.unshift({ id: 'solo' + now, ts: now, attackerTag: tag, attackerName: req.username || 'Kommandant', power: Math.round(power), damage: dealt, defLossPct: Math.round(defLossPct * 100) / 100, destroyed, isSolo: true });
+  war.attacks = war.attacks.slice(0, 25);
+  db.shared['alliance:' + targetTag + ':basewar'] = JSON.stringify(war);
+
+  const ownLossPct = allianceRaidDampenLoss(success ? 0.10 + Math.random() * 0.12 : 0.25 + Math.random() * 0.20);
+  const lostShips = {};
+  for (const [k, sentCount] of Object.entries(clampedComposition)) {
+    // Verluste direkt von der AKTUELLEN Flotte abziehen (dort sind die gesendeten Schiffe die ganze
+    // Zeit über mitgezählt geblieben, siehe Kommentar oben) - gedeckelt auf das, was tatsächlich noch
+    // da ist, falls sich der Bestand seit dem Abflug durch andere Aktionen verändert hat.
+    const lost = Math.min(sentCount, Math.round(sentCount * ownLossPct), fleetObj[k] || 0);
+    if (lost > 0) { fleetObj[k] = Math.max(0, (fleetObj[k] || 0) - lost); lostShips[k] = lost; }
+  }
+  const bp = destroyed ? 60 : (success ? 15 : 4);
+  save.battlePoints = (save.battlePoints || 0) + bp;
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+  await saveDb();
+  res.json({
+    ok: true, success, destroyed, damage: dealt, defensePower: Math.round(defense), chancePct: Math.round(chance * 100),
+    attackPower: Math.round(power), battlePoints: bp, lostShips, ownLossPct, hullAfter: Math.round(maxHp - war.damage), hullMax: maxHp,
+    saveVersion: mySaveVersion, newBattlePoints: save.battlePoints
+  });
+});
+
+// Mondbelagerung (19.07.2026, Härtung - vorher rein clientseitig, siehe Frontend-Kommentar bei
+// resolveMoonSiege): der angreifende Client berechnete Zerstörungschance/Erfolg selbst und schrieb
+// das Ergebnis direkt in moondefense:<targetId>/moonsiegelog:<targetId>, inklusive eigener
+// Kampfpunkte-Gutschrift, komplett ohne Serverprüfung. Löst Beitritt+Auflösung+Belohnung in einem
+// Aufruf auf (der Mondzerstörer wird bei diesem Missionstyp nie aus der Flotte entfernt und läuft
+// bei Misserfolg auch kein Verlustrisiko - die einzige "Kosten" sind Treibstoff und die 48-Std.-
+// Abklingzeit, beide bleiben client-seitig wie bisher, da rein selbstbezogen und nicht
+// PvP-relevant). Vereinfachte Angriffskraft ohne Schiffsmodul-Bonus (analog computeAllianceRaidPower
+// ohne Doktrin/Gebäude-Bonus) - akzeptierte Vereinfachung, siehe dortiger Kommentar.
+app.post('/api/moonsiege/resolve', authMiddleware, async (req, res) => {
+  const { targetPlayerId, targetMoonKey, originPlanet } = req.body || {};
+  if (!targetPlayerId || !targetMoonKey || !originPlanet) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save; try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  const fleetObj = allianceRaidFleetObj(save, originPlanet);
+  if (!fleetObj || (fleetObj.mondzerstoerer || 0) < 1) return res.status(400).json({ error: 'Kein einsatzbereiter Mondzerstörer an diesem Standort.' });
+
+  const targetRaw = db.shared['moondefense:' + targetPlayerId];
+  let targetDoc = null; try { targetDoc = targetRaw ? JSON.parse(targetRaw) : null; } catch (e) {}
+  const targetMoon = targetDoc && Array.isArray(targetDoc.moons) ? targetDoc.moons.find(mo => mo.moonKey === targetMoonKey) : null;
+  if (!targetMoon) return res.status(404).json({ error: 'Dieses Mond-Ziel ist nicht (mehr) auffindbar.' });
+
+  const power = 300 * (0.85 + Math.random() * 0.3);
+  const reduction = Math.min(0.75, (targetMoon.shieldLevel || 0) * 0.04 + (targetMoon.stabilityLevel || 0) * 0.02 + (targetMoon.allianceTag ? 0.05 : 0));
+  const baseChance = power / (power + Math.max(1, targetMoon.defense || 0) * 2.2);
+  const chance = Math.max(0.03, Math.min(0.5, baseChance * (1 - reduction)));
+  const destroyed = Math.random() < chance;
+  const bp = destroyed ? 150 : 20;
+
+  save.battlePoints = (save.battlePoints || 0) + bp;
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+
+  const freshRaw = db.shared['moondefense:' + targetPlayerId];
+  let fresh = null; try { fresh = freshRaw ? JSON.parse(freshRaw) : targetDoc; } catch (e) { fresh = targetDoc; }
+  if (fresh && Array.isArray(fresh.moons)) {
+    if (destroyed) fresh.moons = fresh.moons.filter(mo => mo.moonKey !== targetMoonKey);
+    db.shared['moondefense:' + targetPlayerId] = JSON.stringify(fresh);
+  }
+  const logRaw = db.shared['moonsiegelog:' + targetPlayerId];
+  let log2 = null; try { log2 = logRaw ? JSON.parse(logRaw) : null; } catch (e) {}
+  log2 = log2 || { events: [] };
+  log2.events = log2.events || [];
+  log2.events.unshift({ id: Date.now() + '-' + Math.random().toString(36).slice(2, 8), ts: Date.now(), attackerName: req.username || 'Kommandant', moonKey: targetMoonKey, moonName: targetMoon.name, destroyed, chancePct: Math.round(chance * 100) });
+  log2.events = log2.events.slice(0, 25);
+  db.shared['moonsiegelog:' + targetPlayerId] = JSON.stringify(log2);
+
+  await saveDb();
+  res.json({ ok: true, destroyed, chancePct: Math.round(chance * 100), battlePoints: bp, targetMoonName: targetMoon.name, saveVersion: mySaveVersion, newBattlePoints: save.battlePoints });
 });
 
 // Spieler greift ein NPC-Fraktionssystem an. Der Server ist autoritativ: er prüft die Flotte des

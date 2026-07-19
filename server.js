@@ -612,6 +612,14 @@ function checkAllianceKeyPermission(req, key, isWrite) {
     }
     return null;
   }
+  if (rest === 'raid' || rest.startsWith('raidjoin:')) {
+    // Allianz-Raid (19.07.2026, Härtung): Lesen bleibt offen (Sammelphase-Anzeige/Teilnehmerliste),
+    // aber Schreiben NUR noch über die dedizierten /api/allianceraid/*-Endpunkte - sonst könnte ein
+    // manipulierter Client die dortige Validierung (echte Flotte, serverseitig berechnete
+    // Angriffskraft, Belohnungsauflösung) komplett umgehen, indem er einfach direkt hierher
+    // schreibt. Ohne diese Sperre wäre die gesamte Härtung der neuen Endpunkte wirkungslos.
+    return isWrite ? 'Allianz-Raid-Daten werden nur über die dedizierten Endpunkte geschrieben.' : null;
+  }
   return null; // andere alliance:-Unterressourcen (Chat existiert separat als globalchat:, nicht hier) bleiben wie bisher offen
 }
 

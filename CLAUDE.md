@@ -32,4 +32,4 @@ Gilt für **jedes** Skript, auch neue Standalone-Skripte (wie `thank_bugreporter
 
 ## Deploy
 
-Push nach `master` ändert nichts automatisch – Sascha zieht und startet den Container auf dem Pi manuell per SSH neu.
+Push nach `master` ändert von hier aus nichts automatisch (diese Session hat keinen Zugriff auf den Pi). Optionales Auto-Pull-Skript liegt unter `deploy/autodeploy.sh` – zieht per Cron auf dem Pi automatisch `master` und startet den Container neu, sobald sich `HEAD` ändert (inkl. `npm install`-Erkennung bei geänderter `package.json`). Einrichtung ist manuell und einmalig (siehe Kommentarkopf der Datei); ohne diese Einrichtung bleibt es beim bisherigen Modell: Sascha zieht und startet den Container auf dem Pi manuell per SSH neu.

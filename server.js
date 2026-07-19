@@ -2549,6 +2549,330 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
   });
 });
 
+// ===== Allianz-Raid: serverseitige Härtung (19.07.2026, Spieler-Wunsch "sicherer machen") =====
+// Der Allianz-Raid lief bisher (wie der Musterangriff) rein clientseitig über generische
+// storageSet-Aufrufe: jedes Mitglied konnte im eigenen Beitritts-Dokument einen frei erfundenen
+// "power"-Wert eintragen und sich damit einen überproportionalen Belohnungsanteil UND den
+// Top-Schädiger-Bonus (+50%) verschaffen, ohne dass die gemeldete Flotte je gegen den echten
+// Spielstand geprüft wurde. Analog zur Weltboss-Härtung oben (/api/worldboss/resolve) verlagert
+// dies die Beitritts-Validierung UND die komplette Wellen-Auflösung in den Server: Schiffszahlen
+// werden gegen die tatsächliche Flotte des Standorts geprüft und dort abgezogen, Angriffskraft wird
+// serverseitig aus der GEPRÜFTEN Zusammensetzung berechnet (nie vom Client übernommen), und die
+// gesamte Wellen-Auflösung (Schaden, Verluste, Belohnung für ALLE Teilnehmer) läuft in EINEM
+// serverseitigen Aufruf statt über einen client-seitigen "claim"-Schritt pro Spieler.
+// Bewusst NICHT gehärtet: die Flugzeit zum Treffpunkt (travelSec/arrivesAtBaseAt) bleibt clientseitig
+// gesetzt - exakt dieselbe Vertrauensannahme wie bei JEDER anderen Missionsart in diesem Spiel
+// (Angriff, Expedition, auch der Weltboss-Anflug: mission.endTime wird dort ebenfalls ungeprüft vom
+// Client übernommen, siehe oben) - keine raid-spezifische neue Lücke, nur Konsistenz mit dem
+// bestehenden Modell.
+const ALLIANCE_RAID_HP_BASE = 20000, ALLIANCE_RAID_HP_GROWTH = 1.4;
+const ALLIANCE_RAID_COUNTER_BASE = 4000;
+const ALLIANCE_RAID_DURATION_MS = 72 * 60 * 60 * 1000;
+const ALLIANCE_RAID_RESTART_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const ALLIANCE_RAID_WAVE_COOLDOWN_MS = 2 * 60 * 60 * 1000;
+const ALLIANCE_RAID_GATHER_DURATIONS = [30 * 60, 60 * 60, 120 * 60];
+// Test-Modus (19.07.2026): NUR aktiv, wenn die Umgebungsvariable explizit gesetzt ist (nie in
+// Produktion) - erlaubt Integrationstests, die Sammel-/Flugzeiten OHNE echtes Warten von 30+ Minuten
+// prüfen, ohne die Produktionswerte selbst anzutasten. Siehe test_allianceraid.js.
+const ALLIANCE_RAID_TEST_MODE = process.env.ALLIANCE_RAID_TEST_MODE === '1';
+const ALLIANCE_RAID_TEST_DISPATCH_SEC = 2;
+const ALLIANCE_RAID_ATTACK_SHIP_KEYS = ['jaeger', 'bomber', 'cruisers', 'destroyers', 'schlachtschiff', 'carrier', 'superschlachtschiff', 'waechter'];
+const ALLIANCE_RAID_RETREAT_THRESHOLD = 0.4, ALLIANCE_RAID_RETREAT_SAVE_FACTOR = 0.5;
+function allianceRaidHpFor(level) { return Math.round(ALLIANCE_RAID_HP_BASE * Math.pow(ALLIANCE_RAID_HP_GROWTH, Math.max(0, level - 1))); }
+function allianceRaidCounterFor(level) { return Math.round(ALLIANCE_RAID_COUNTER_BASE * Math.pow(ALLIANCE_RAID_HP_GROWTH, Math.max(0, level - 1))); }
+function allianceRaidDampenLoss(pct) {
+  if (pct <= ALLIANCE_RAID_RETREAT_THRESHOLD) return pct;
+  const excess = pct - ALLIANCE_RAID_RETREAT_THRESHOLD;
+  return ALLIANCE_RAID_RETREAT_THRESHOLD + excess * (1 - ALLIANCE_RAID_RETREAT_SAVE_FACTOR);
+}
+function computeAllianceRaidPower(save, composition) {
+  const research = save.research || {};
+  let power = rawFleetPower(composition) * fleetDiversityMult(composition);
+  if (research.rkampf) power *= (1 + research.rkampf * 0.02);
+  if (research.rkampf2) power *= (1 + research.rkampf2 * 0.02);
+  power *= stanceOf(save).atkMult;
+  return Math.round(power);
+}
+function allianceRaidFleetObj(save, planetKey) {
+  if (planetKey === 'home') return save.fleet;
+  return save.colonies && save.colonies[planetKey] && save.colonies[planetKey].fleet;
+}
+function getAllianceRaidDoc(tag) {
+  const raw = db.shared['alliance:' + tag + ':raid'];
+  if (typeof raw !== 'string') return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+function setAllianceRaidDoc(tag, doc) { db.shared['alliance:' + tag + ':raid'] = JSON.stringify(doc); }
+function allianceRaidWaveKey(doc) { return doc ? doc.id + '-w' + (doc.waveNumber || 1) : null; }
+function listAllianceRaidJoins(tag, waveKey) {
+  const prefix = 'alliance:' + tag + ':raidjoin:' + waveKey + ':';
+  const out = [];
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix)) continue;
+    try {
+      const doc = JSON.parse(db.shared[k]);
+      if (doc && !doc.cancelled) out.push(Object.assign({ playerId: k.slice(prefix.length) }, doc));
+    } catch (e) {}
+  }
+  return out;
+}
+
+// Neuen Boss ausrufen ODER die nächste Welle gegen einen angeschlagenen ('idle') Boss starten - nur
+// Admin/Offizier, exakt dieselbe Zustandsmaschine wie vorher im Frontend (Stufe steigt nur nach
+// echtem Sieg, kein Straf-Sprung bei ungenutztem Entkommen).
+app.post('/api/allianceraid/create', authMiddleware, async (req, res) => {
+  const { tag, gatherSeconds } = req.body || {};
+  const gatherOk = ALLIANCE_RAID_GATHER_DURATIONS.includes(gatherSeconds) || (ALLIANCE_RAID_TEST_MODE && Number(gatherSeconds) > 0);
+  if (!tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  const myRole = allianceRoleOf(tag, req.userId);
+  if (myRole !== 'admin' && myRole !== 'officer') return res.status(403).json({ error: 'Nur Admins/Offiziere können einen Allianz-Raid ausrufen.' });
+  const baseRaw = db.shared['alliance:' + tag + ':base'];
+  let base = null;
+  try { base = baseRaw ? JSON.parse(baseRaw) : null; } catch (e) {}
+  if (!base || !base.foundedAt) return res.status(400).json({ error: 'Der Allianz-Raid braucht eine gegründete Allianzbasis als Treffpunkt.' });
+
+  const now = Date.now();
+  const existing = getAllianceRaidDoc(tag);
+  if (existing && (existing.phase === 'gathering' || existing.phase === 'enroute')) {
+    return res.status(409).json({ error: 'Es läuft bereits eine Angriffswelle gegen den Sternenfresser.' });
+  }
+  let doc;
+  if (existing && existing.phase === 'idle' && existing.expiresAt > now) {
+    const waveCdLeft = Math.max(0, (existing.lastWaveEndedAt || 0) + ALLIANCE_RAID_WAVE_COOLDOWN_MS - now);
+    if (waveCdLeft > 0) return res.status(429).json({ error: 'Nächste Welle noch nicht bereit.', waveCdLeft });
+    doc = existing;
+    doc.waveNumber = (doc.waveNumber || 1) + 1;
+    doc.phase = 'gathering'; doc.gatherEndsAt = now + gatherSeconds * 1000; doc.dispatch = null;
+  } else {
+    const endedAt = existing ? (existing.result ? existing.result.resolvedAt : existing.expiresAt) : 0;
+    const restartCdLeft = existing ? Math.max(0, (endedAt || 0) + ALLIANCE_RAID_RESTART_COOLDOWN_MS - now) : 0;
+    if (restartCdLeft > 0) return res.status(429).json({ error: 'Nächster Allianz-Raid noch nicht bereit.', restartCdLeft });
+    const level = existing && existing.result && existing.result.destroyed ? (existing.level || 1) + 1 : (existing ? (existing.level || 1) : 1);
+    const pool = SYSTEMS.filter(s => s !== base.sector);
+    const sourceList = pool.length ? pool : SYSTEMS;
+    const targetSector = sourceList[Math.floor(Math.random() * sourceList.length)];
+    doc = {
+      id: 'raid' + now, level, maxHp: allianceRaidHpFor(level), hp: allianceRaidHpFor(level), targetSector,
+      waveNumber: 1, startedAt: now, expiresAt: now + ALLIANCE_RAID_DURATION_MS, gatherEndsAt: now + gatherSeconds * 1000,
+      phase: 'gathering', dispatch: null, lastWaveResult: null, lastWaveEndedAt: null, result: null
+    };
+  }
+  setAllianceRaidDoc(tag, doc);
+  await saveDb();
+  res.json({ ok: true, doc });
+});
+
+// Flotte der Sammelphase anschließen: Schiffszahlen werden auf das gekappt, was am gemeldeten
+// Standort TATSÄCHLICH vorhanden ist (stiller Kapp statt harter Ablehnung - verzeihender bei knappen
+// Rundungsdifferenzen), dort sofort abgezogen, und die Angriffskraft wird aus der geprüften
+// Zusammensetzung UND dem echten Forschungs-/Taktikstand serverseitig berechnet.
+app.post('/api/allianceraid/join', authMiddleware, async (req, res) => {
+  const { tag, raidId, waveNumber, composition, originPlanet, travelSec } = req.body || {};
+  if (!tag || !raidId || typeof waveNumber !== 'number' || !composition || typeof composition !== 'object' || !originPlanet) {
+    return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  }
+  const myRole = allianceRoleOf(tag, req.userId);
+  if (!myRole) return res.status(403).json({ error: 'Nur Mitglieder dieser Allianz können beitreten.' });
+
+  const doc = getAllianceRaidDoc(tag);
+  if (!doc || doc.id !== raidId || doc.waveNumber !== waveNumber || doc.phase !== 'gathering' || doc.gatherEndsAt <= Date.now()) {
+    return res.status(409).json({ error: 'Gerade keine offene Sammelphase für diese Welle.' });
+  }
+  const waveKey = allianceRaidWaveKey(doc);
+  const existingJoinRaw = db.shared['alliance:' + tag + ':raidjoin:' + waveKey + ':' + req.userId];
+  if (existingJoinRaw) {
+    try { if (!JSON.parse(existingJoinRaw).cancelled) return res.status(409).json({ error: 'Du hast dieser Welle bereits eine Flotte angeschlossen.' }); } catch (e) {}
+  }
+
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save;
+  try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  const fleetObj = allianceRaidFleetObj(save, originPlanet);
+  if (!fleetObj) return res.status(404).json({ error: 'Kein Flottenstandort gefunden.' });
+
+  const clampedComposition = {};
+  let totalShips = 0;
+  for (const k of ALLIANCE_RAID_ATTACK_SHIP_KEYS) {
+    const requested = Math.max(0, Math.floor(Number(composition[k]) || 0));
+    const available = Math.max(0, Math.floor(fleetObj[k] || 0));
+    const n = Math.min(requested, available);
+    if (n > 0) { clampedComposition[k] = n; totalShips += n; }
+  }
+  if (totalShips < 1) return res.status(400).json({ error: 'Keine gültige Flotte am angegebenen Standort verfügbar.' });
+
+  for (const [k, n] of Object.entries(clampedComposition)) fleetObj[k] = Math.max(0, (fleetObj[k] || 0) - n);
+
+  const power = computeAllianceRaidPower(save, clampedComposition);
+  const safeTravelSec = Math.max(1, Number(travelSec) || 1);
+  const arrivesAtBaseAt = Date.now() + safeTravelSec * 1000;
+
+  const joinDoc = {
+    name: req.username || 'Kommandant', composition: clampedComposition, power, originPlanet,
+    shipCount: totalShips, joinedAt: Date.now(), travelSec: safeTravelSec, arrivesAtBaseAt, cancelled: false
+  };
+  db.shared['alliance:' + tag + ':raidjoin:' + waveKey + ':' + req.userId] = JSON.stringify(joinDoc);
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+  await saveDb();
+  res.json({ ok: true, join: joinDoc, saveVersion: mySaveVersion });
+});
+
+// Rückzug während der laufenden Sammelphase: Schiffe kehren sofort und vollständig zum gemeldeten
+// Standort zurück.
+app.post('/api/allianceraid/cancel', authMiddleware, async (req, res) => {
+  const { tag, raidId, waveNumber } = req.body || {};
+  if (!tag || !raidId || typeof waveNumber !== 'number') return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!allianceRoleOf(tag, req.userId)) return res.status(403).json({ error: 'Nur Mitglieder dieser Allianz.' });
+
+  const waveKey = raidId + '-w' + waveNumber;
+  const joinKey = 'alliance:' + tag + ':raidjoin:' + waveKey + ':' + req.userId;
+  const joinRaw = db.shared[joinKey];
+  if (!joinRaw) return res.status(404).json({ error: 'Kein Beitritt gefunden.' });
+  let join; try { join = JSON.parse(joinRaw); } catch (e) { return res.status(500).json({ error: 'Beitritts-Dokument beschädigt.' }); }
+  if (join.cancelled) return res.status(409).json({ error: 'Bereits zurückgezogen.' });
+
+  const doc = getAllianceRaidDoc(tag);
+  if (!doc || doc.id !== raidId || doc.waveNumber !== waveNumber || doc.phase !== 'gathering' || doc.gatherEndsAt <= Date.now()) {
+    return res.status(409).json({ error: 'Ein Rückzug ist nur während der laufenden Sammelphase möglich.' });
+  }
+
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save; try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  const fleetObj = allianceRaidFleetObj(save, join.originPlanet);
+  if (fleetObj) { for (const [k, n] of Object.entries(join.composition || {})) fleetObj[k] = (fleetObj[k] || 0) + n; }
+
+  db.shared[joinKey] = JSON.stringify({ cancelled: true });
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+  await saveDb();
+  res.json({ ok: true, saveVersion: mySaveVersion });
+});
+
+// Sammelphase abgelaufen -> Verband zusammenstellen und abfliegen lassen. Race-tolerant wie alle
+// anderen Poll-Endpunkte hier (jeder online Client kann das auslösen; ein no-op, falls eine andere
+// Anfrage bereits gewonnen hat). Nur rechtzeitig eingetroffene Teilnehmer (arrivesAtBaseAt <=
+// gatherEndsAt, beide bereits serverseitig aus dem echten Beitritts-Zeitpunkt gesetzt) zählen zum
+// abfliegenden Verband.
+app.post('/api/allianceraid/checkdispatch', authMiddleware, async (req, res) => {
+  const { tag } = req.body || {};
+  if (!tag) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!allianceRoleOf(tag, req.userId)) return res.status(403).json({ error: 'Nur Mitglieder dieser Allianz.' });
+
+  const doc = getAllianceRaidDoc(tag);
+  if (!doc || doc.phase !== 'gathering' || doc.gatherEndsAt > Date.now()) return res.json({ ok: true, doc });
+
+  const waveKey = allianceRaidWaveKey(doc);
+  const allParts = listAllianceRaidJoins(tag, waveKey);
+  const onTime = allParts.filter(p => (p.arrivesAtBaseAt || Infinity) <= doc.gatherEndsAt);
+
+  if (!onTime.length) {
+    doc.phase = 'idle'; doc.lastWaveEndedAt = Date.now();
+    doc.lastWaveResult = { waveNumber: doc.waveNumber, noParticipants: true, resolvedAt: Date.now() };
+    setAllianceRaidDoc(tag, doc);
+    await saveDb();
+    return res.json({ ok: true, doc });
+  }
+
+  const totalComposition = {};
+  let totalPower = 0, totalShips = 0, topPower = -1, topId = null;
+  for (const p of onTime) {
+    for (const [k, n] of Object.entries(p.composition || {})) totalComposition[k] = (totalComposition[k] || 0) + n;
+    totalPower += p.power || 0; totalShips += p.shipCount || 0;
+    if ((p.power || 0) > topPower) { topPower = p.power || 0; topId = p.playerId; }
+  }
+
+  const baseRaw = db.shared['alliance:' + tag + ':base'];
+  let base = null; try { base = baseRaw ? JSON.parse(baseRaw) : null; } catch (e) {}
+  const sameSys = !!(base && base.sector === doc.targetSector);
+  // Zweite Flugetappe (Basis -> Boss-Standort): bewusst OHNE personenbezogenen Geschwindigkeits-
+  // Multiplikator - ein gemeinsamer Verband hat keine "eine" persönliche Forschung, ein fester
+  // Wert ist hier korrekter als der Zufall, wessen Client die Sammelphase zuerst als abgelaufen
+  // bemerkt (das war eine Inkonsistenz der bisherigen clientseitigen Umsetzung).
+  const dispatchSec = ALLIANCE_RAID_TEST_MODE ? ALLIANCE_RAID_TEST_DISPATCH_SEC : (sameSys ? 150 : 600);
+  const now = Date.now();
+  doc.dispatch = {
+    departedAt: now, arrivalAt: now + dispatchSec * 1000, totalComposition,
+    totalPower: Math.round(totalPower), totalShips, participantCount: onTime.length,
+    topParticipantId: topId, topParticipantPower: Math.round(Math.max(0, topPower)),
+    // Wer tatsächlich im abgeflogenen Verband steckt (nur rechtzeitig Eingetroffene) - resolve MUSS
+    // sich hierauf stützen, nicht erneut alle Beitritts-Dokumente der Welle auflisten, sonst würden
+    // Zuspätkommer (die beim Dispatch korrekt ausgeschlossen wurden) trotzdem eine Belohnung/Verluste
+    // aus der Wellen-Auflösung bekommen, obwohl sie nie am Kampf teilgenommen haben.
+    participantIds: onTime.map(p => p.playerId)
+  };
+  doc.phase = 'enroute';
+  setAllianceRaidDoc(tag, doc);
+  await saveDb();
+  res.json({ ok: true, doc });
+});
+
+// Ankunft am Boss-Standort -> Kampf auflösen. Schaden = Gesamt-Angriffskraft des Verbands (gedeckelt
+// auf die Rest-HP), eigene Verluste anhand des Machtverhältnisses zur bosseigenen Gegenwehr. Anders
+// als vorher (client-seitiger "claim" pro Spieler) werden HIER die Belohnungen/Verluste für ALLE
+// Teilnehmer der Welle in EINEM serverseitigen Durchlauf direkt in deren jeweiligen Spielstand
+// geschrieben - kein Spieler kann sich mehr selbst einen höheren Anteil zuschreiben, als ihm laut
+// der (serverseitig berechneten) Angriffskraft zusteht.
+app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
+  const { tag } = req.body || {};
+  if (!tag) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!allianceRoleOf(tag, req.userId)) return res.status(403).json({ error: 'Nur Mitglieder dieser Allianz.' });
+
+  const doc = getAllianceRaidDoc(tag);
+  if (!doc || doc.phase !== 'enroute' || !doc.dispatch || doc.dispatch.arrivalAt > Date.now()) return res.json({ ok: true, doc });
+
+  const waveKey = allianceRaidWaveKey(doc);
+  const power = doc.dispatch.totalPower;
+  const damage = Math.min(doc.hp, power);
+  const newHp = Math.max(0, doc.hp - damage);
+  const destroyed = newHp <= 0;
+  const counter = allianceRaidCounterFor(doc.level);
+  const rawLossPct = Math.max(0.05, Math.min(0.6, counter / (counter + power)));
+  const lossPct = allianceRaidDampenLoss(rawLossPct);
+  const now = Date.now();
+  const level = doc.level;
+
+  // Nur die Teilnehmer verarbeiten, die laut Dispatch tatsächlich im Verband waren (siehe Kommentar
+  // bei checkdispatch/participantIds) - NICHT erneut alle Beitritts-Dokumente der Welle auflisten,
+  // sonst bekämen Zuspätkommer fälschlich Belohnung/Verluste aus einem Kampf, an dem sie nie
+  // teilgenommen haben.
+  const participantIds = new Set(doc.dispatch.participantIds || []);
+  const parts = listAllianceRaidJoins(tag, waveKey).filter(p => participantIds.has(p.playerId));
+  for (const p of parts) {
+    const pSaveRaw = getSaveValue(p.playerId);
+    if (!pSaveRaw) continue;
+    let pSave; try { pSave = JSON.parse(pSaveRaw); } catch (e) { continue; }
+    const fleetObj = allianceRaidFleetObj(pSave, p.originPlanet);
+    if (fleetObj) {
+      for (const [k, sentCount] of Object.entries(p.composition || {})) {
+        if (!sentCount) continue;
+        const lost = Math.min(fleetObj[k] || 0, Math.round(sentCount * lossPct));
+        if (lost > 0) fleetObj[k] = Math.max(0, (fleetObj[k] || 0) - lost);
+      }
+    }
+    const share = power > 0 ? Math.min(1, (p.power || 0) / power) : 0;
+    const isTop = doc.dispatch.topParticipantId === p.playerId;
+    const credits = Math.round((300 + level * 150) * (0.4 + 0.6 * share) * (isTop ? 1.5 : 1) * (destroyed ? 1 : 0.6));
+    const bp = Math.round((8 + level * 4) * (0.4 + 0.6 * share) * (destroyed ? 1 : 0.6));
+    pSave.credits = (pSave.credits || 0) + credits;
+    pSave.battlePoints = (pSave.battlePoints || 0) + bp;
+    pSave.xp = (pSave.xp || 0) + (destroyed ? 20 : 12);
+    setSaveValue(p.playerId, JSON.stringify(pSave));
+  }
+
+  doc.hp = newHp;
+  const waveResult = {
+    waveNumber: doc.waveNumber, damage: Math.round(damage), destroyed, lossPct,
+    totalPower: power, totalShips: doc.dispatch.totalShips, participantCount: doc.dispatch.participantCount,
+    topParticipantId: doc.dispatch.topParticipantId, resolvedAt: now
+  };
+  doc.lastWaveResult = waveResult;
+  doc.lastWaveEndedAt = now;
+  if (destroyed) { doc.phase = 'resolved'; doc.result = waveResult; } else { doc.phase = 'idle'; }
+  setAllianceRaidDoc(tag, doc);
+  await saveDb();
+  res.json({ ok: true, doc });
+});
+
 // Spieler greift ein NPC-Fraktionssystem an. Der Server ist autoritativ: er prüft die Flotte des
 // Angreifers gegen die Militärstärke der besitzenden Fraktion, würfelt den Ausgang, und bei Erfolg
 // wechselt das System in den Besitz des Spielers (controlledSystems). Bei Misserfolg verliert der

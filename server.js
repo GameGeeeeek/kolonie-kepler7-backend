@@ -2109,8 +2109,35 @@ const MARKET_RESOURCES = {
   kristalle:  { basePrice: 3.2,  min: 0.5,  max: 9.0 },
   deuterium:  { basePrice: 4.8,  min: 0.7,  max: 14.0 },
   energie:    { basePrice: 2.4,  min: 0.35, max: 7.0 },
-  antimaterie:{ basePrice: 24.0, min: 3.5,  max: 80.0 }
+  antimaterie:{ basePrice: 24.0, min: 3.5,  max: 80.0 },
+  // Tier-2-Ressourcen (19.07.2026, Tier-2-Konzept Block 4): Basispreise ~1,5x des Zutaten-Werts der
+  // jeweiligen Fabrik-Kette (36/68/94/252/281 Basis-Einheiten) - raffinierte Ware handelt mit
+  // Aufschlag. impactScale 60: Tier-2 wird in zweistelligen STÜCKZAHLEN gehandelt, nicht in
+  // Tausenden - ohne die Skalierung hätte selbst ein Kauf am Tageslimit praktisch keine
+  // Preiswirkung (die Impact-Formel rechnet pro 1000 Einheiten). Mit 60 bewegt ein 40er-Nano-Kauf
+  // den Preis um ~10% - fühlbare Slippage in Tier-2-üblichen Mengen.
+  nanolegierungen:      { basePrice: 55,  min: 8,  max: 165,  impactScale: 60 },
+  quantenchips:         { basePrice: 100, min: 15, max: 300,  impactScale: 60 },
+  hochenergiekristalle: { basePrice: 140, min: 20, max: 420,  impactScale: 60 },
+  fusionskerne:         { basePrice: 380, min: 55, max: 1150, impactScale: 60 },
+  kikerne:              { basePrice: 420, min: 60, max: 1260, impactScale: 60 }
 };
+// Tages-Kauflimits für Tier-2 am Markt (je Spieler, je Ressource): Der Markt darf die Fabriken
+// ERGÄNZEN (ein festgefahrener Spieler kauft sich einen Engpass frei), aber nie ERSETZEN - ohne
+// Limit würden Kredite zu einem zweiten Produktionskanal an den Fabriken vorbei (dieselbe
+// Balance-Regel wie bei den Pakt-Geschenk-Deckeln, hier ~2x deren Werte). Die Zähler leben bewusst
+// in db.marketTier2Buys AUSSERHALB des Spielstands: der Spielstand wird vom Client geschrieben und
+// wäre damit manipulierbar - ein clientseitig zurückgesetzter Zähler darf das Limit nicht umgehen.
+// Verkäufe sind unbegrenzt (durch Slippage + Preisuntergrenze selbstregulierend, wie bei den
+// Basis-Ressourcen).
+const MARKET_TIER2_DAILY_BUY_CAPS = { nanolegierungen: 40, quantenchips: 20, hochenergiekristalle: 15, fusionskerne: 8, kikerne: 6 };
+function tier2BuyStateFor(userId) {
+  if (!db.marketTier2Buys) db.marketTier2Buys = {};
+  const today = new Date().toISOString().slice(0, 10);
+  let entry = db.marketTier2Buys[userId];
+  if (!entry || entry.date !== today) { entry = { date: today, counts: {} }; db.marketTier2Buys[userId] = entry; }
+  return entry;
+}
 // Wie stark eine gehandelte Menge den Preis bewegt (pro 1000 Einheiten, zusätzlich mit dem
 // Basispreis der Ressource multipliziert - siehe Formel im Handels-Endpunkt). Käufe +, Verkäufe −.
 const MARKET_IMPACT_PER_1000 = 0.04;
@@ -2436,9 +2463,17 @@ app.get('/api/galaxy', authMiddleware, (req, res) => {
 app.get('/api/market', authMiddleware, (req, res) => {
   const g = loadOrInitGalaxy();
   const market = loadOrInitMarket(g);
+  // impactScale mitliefern, damit die Client-Vorschau dieselbe Slippage rechnet wie der Server
+  // (eine Quelle der Wahrheit statt gespiegelter Konstanten); bei Tier-2 zusätzlich das persönliche
+  // Rest-Tageslimit für die Kauf-Anzeige.
+  const buyState = tier2BuyStateFor(req.userId);
   const out = {};
   for (const key of Object.keys(MARKET_RESOURCES)) {
-    out[key] = { price: market[key], basePrice: MARKET_RESOURCES[key].basePrice };
+    out[key] = { price: market[key], basePrice: MARKET_RESOURCES[key].basePrice, impactScale: MARKET_RESOURCES[key].impactScale || 1 };
+    if (MARKET_TIER2_DAILY_BUY_CAPS[key]) {
+      out[key].dailyBuyCap = MARKET_TIER2_DAILY_BUY_CAPS[key];
+      out[key].dailyBuyRemaining = Math.max(0, MARKET_TIER2_DAILY_BUY_CAPS[key] - (buyState.counts[key] || 0));
+    }
   }
   res.json({ market: out });
 });
@@ -2488,12 +2523,23 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
   try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
   save.resources = save.resources || {};
 
+  // Tier-2-Tageslimit für Käufe prüfen und VOR der Verbuchung reservieren (siehe Kommentar bei
+  // MARKET_TIER2_DAILY_BUY_CAPS - Zähler leben serverseitig außerhalb des Spielstands).
+  let tier2BuyState = null;
+  if (action === 'buy' && MARKET_TIER2_DAILY_BUY_CAPS[resource]) {
+    tier2BuyState = tier2BuyStateFor(req.userId);
+    const used = tier2BuyState.counts[resource] || 0;
+    const remaining = MARKET_TIER2_DAILY_BUY_CAPS[resource] - used;
+    if (amt > remaining) return res.status(400).json({ error: 'Tageslimit für ' + resource + '-Käufe erreicht (' + MARKET_TIER2_DAILY_BUY_CAPS[resource] + '/Tag, heute noch ' + Math.max(0, remaining) + ' möglich).' });
+  }
+
   const g = loadOrInitGalaxy();
   const market = loadOrInitMarket(g);
   const priceBefore = market[resource];
   // Durchschnittspreis über die gehandelte Menge (der Preis bewegt sich WÄHREND des Handels linear,
   // große Trades bekommen dadurch einen spürbar schlechteren Schnitt – realistische Slippage).
-  const impact = (amt / 1000) * MARKET_IMPACT_PER_1000 * MARKET_RESOURCES[resource].basePrice;
+  // impactScale: Tier-2 wird in Stückzahlen gehandelt, siehe MARKET_RESOURCES-Kommentar.
+  const impact = (amt / 1000) * MARKET_IMPACT_PER_1000 * MARKET_RESOURCES[resource].basePrice * (MARKET_RESOURCES[resource].impactScale || 1);
   const priceAfterRaw = action === 'buy' ? priceBefore + impact : priceBefore - impact;
   const priceAfter = clampMarketPrice(resource, priceAfterRaw);
   const avgPrice = (priceBefore + priceAfter) / 2;
@@ -2512,6 +2558,9 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
     if ((save.credits || 0) < credits) return res.status(400).json({ error: 'Nicht genug Kredite.' });
     save.credits -= credits;
     save.resources[resource] = (save.resources[resource] || 0) + amt;
+    // Tier-2-Tageslimit erst NACH allen Fehlerprüfungen verbuchen (ein abgelehnter Kauf darf das
+    // Kontingent nicht verbrauchen).
+    if (tier2BuyState) tier2BuyState.counts[resource] = (tier2BuyState.counts[resource] || 0) + amt;
   }
 
   market[resource] = priceAfter;
@@ -2527,7 +2576,11 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
     priceBefore, priceAfter,
     saveVersion: mySaveVersion,
     newCredits: save.credits,
-    newResourceAmount: save.resources[resource]
+    newResourceAmount: save.resources[resource],
+    // Rest-Tageslimit für die Kauf-Anzeige (nur bei Tier-2-Ressourcen gesetzt).
+    dailyBuyRemaining: MARKET_TIER2_DAILY_BUY_CAPS[resource] !== undefined
+      ? Math.max(0, MARKET_TIER2_DAILY_BUY_CAPS[resource] - (tier2BuyStateFor(req.userId).counts[resource] || 0))
+      : undefined
   });
 });
 

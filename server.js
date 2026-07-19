@@ -455,6 +455,25 @@ function checkHallOfFamePermission(req, key, isWrite) {
   }
   return null;
 }
+// moondefense:<playerId>/moonsiegelog:<playerId> (19.07.2026, Härtung): liefen bisher OHNE jede
+// Sonderregel - jeder eingeloggte Nutzer konnte den Mondbestand JEDES Spielers direkt überschreiben
+// (Monde einfach verschwinden lassen) oder sich einen frei erfundenen Sieges-Logeintrag eintragen.
+// Lesen bleibt offen (Ziel-Auswahl für neue Belagerungen braucht das). moonsiegelog: ist NUR noch
+// vom Server selbst beschreibbar (Ereignisse kommen ausschließlich aus /api/moonsiege/resolve).
+// moondefense: darf weiterhin vom Besitzer selbst beschrieben werden (eigene Mond-Liste bekannt
+// geben, siehe publishAllianceBaseDefense-Analogon im Frontend), aber NICHT mehr von fremden
+// Accounts - das Entfernen eines zerstörten Mondes passiert jetzt ausschließlich serverseitig.
+function checkMoonDefensePermission(req, key, isWrite) {
+  if (key.startsWith('moonsiegelog:')) {
+    return isWrite ? 'moonsiegelog wird nur vom Server geschrieben.' : null;
+  }
+  if (key.startsWith('moondefense:')) {
+    if (!isWrite) return null;
+    const targetId = key.slice('moondefense:'.length);
+    return targetId === req.userId ? null : 'Du kannst nur deine eigene Mond-Liste bekannt geben.';
+  }
+  return null;
+}
 // Gibt bei erlaubtem Zugriff null zurück, sonst einen Fehlertext für die 403-Antwort.
 function checkAllianceKeyPermission(req, key, isWrite) {
   const m = key.match(/^alliance:([^:]+):(.+)$/);
@@ -1242,7 +1261,7 @@ app.get('/api/storage/:key', authMiddleware, (req, res) => {
   const shared = req.query.shared === 'true';
   const key = req.params.key;
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false) || checkChatKeyPermission(req, key, false) || checkHallOfFamePermission(req, key, false);
+    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false) || checkChatKeyPermission(req, key, false) || checkHallOfFamePermission(req, key, false) || checkMoonDefensePermission(req, key, false);
     if (denyReason) return res.status(403).json({ error: denyReason });
   }
   const store = shared ? db.shared : (db.private[req.userId] || {});
@@ -1259,7 +1278,7 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   const expectedVersion = req.body ? req.body.expectedVersion : undefined;
 
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true);
+    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
     // Wortfilter (13.07.2026, Feature-Wunsch: Moderation vorbereiten) - Allianz-Tag (aus dem
     // Schlüssel) und -Name (aus dem Wert) auf unangemessene Begriffe prüfen, bevor eine Gründung/
@@ -3510,6 +3529,58 @@ app.post('/api/basedamage/solo', authMiddleware, async (req, res) => {
     attackPower: Math.round(power), battlePoints: bp, lostShips, ownLossPct, hullAfter: Math.round(maxHp - war.damage), hullMax: maxHp,
     saveVersion: mySaveVersion, newBattlePoints: save.battlePoints
   });
+});
+
+// Mondbelagerung (19.07.2026, Härtung - vorher rein clientseitig, siehe Frontend-Kommentar bei
+// resolveMoonSiege): der angreifende Client berechnete Zerstörungschance/Erfolg selbst und schrieb
+// das Ergebnis direkt in moondefense:<targetId>/moonsiegelog:<targetId>, inklusive eigener
+// Kampfpunkte-Gutschrift, komplett ohne Serverprüfung. Löst Beitritt+Auflösung+Belohnung in einem
+// Aufruf auf (der Mondzerstörer wird bei diesem Missionstyp nie aus der Flotte entfernt und läuft
+// bei Misserfolg auch kein Verlustrisiko - die einzige "Kosten" sind Treibstoff und die 48-Std.-
+// Abklingzeit, beide bleiben client-seitig wie bisher, da rein selbstbezogen und nicht
+// PvP-relevant). Vereinfachte Angriffskraft ohne Schiffsmodul-Bonus (analog computeAllianceRaidPower
+// ohne Doktrin/Gebäude-Bonus) - akzeptierte Vereinfachung, siehe dortiger Kommentar.
+app.post('/api/moonsiege/resolve', authMiddleware, async (req, res) => {
+  const { targetPlayerId, targetMoonKey, originPlanet } = req.body || {};
+  if (!targetPlayerId || !targetMoonKey || !originPlanet) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save; try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  const fleetObj = allianceRaidFleetObj(save, originPlanet);
+  if (!fleetObj || (fleetObj.mondzerstoerer || 0) < 1) return res.status(400).json({ error: 'Kein einsatzbereiter Mondzerstörer an diesem Standort.' });
+
+  const targetRaw = db.shared['moondefense:' + targetPlayerId];
+  let targetDoc = null; try { targetDoc = targetRaw ? JSON.parse(targetRaw) : null; } catch (e) {}
+  const targetMoon = targetDoc && Array.isArray(targetDoc.moons) ? targetDoc.moons.find(mo => mo.moonKey === targetMoonKey) : null;
+  if (!targetMoon) return res.status(404).json({ error: 'Dieses Mond-Ziel ist nicht (mehr) auffindbar.' });
+
+  const power = 300 * (0.85 + Math.random() * 0.3);
+  const reduction = Math.min(0.75, (targetMoon.shieldLevel || 0) * 0.04 + (targetMoon.stabilityLevel || 0) * 0.02 + (targetMoon.allianceTag ? 0.05 : 0));
+  const baseChance = power / (power + Math.max(1, targetMoon.defense || 0) * 2.2);
+  const chance = Math.max(0.03, Math.min(0.5, baseChance * (1 - reduction)));
+  const destroyed = Math.random() < chance;
+  const bp = destroyed ? 150 : 20;
+
+  save.battlePoints = (save.battlePoints || 0) + bp;
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+
+  const freshRaw = db.shared['moondefense:' + targetPlayerId];
+  let fresh = null; try { fresh = freshRaw ? JSON.parse(freshRaw) : targetDoc; } catch (e) { fresh = targetDoc; }
+  if (fresh && Array.isArray(fresh.moons)) {
+    if (destroyed) fresh.moons = fresh.moons.filter(mo => mo.moonKey !== targetMoonKey);
+    db.shared['moondefense:' + targetPlayerId] = JSON.stringify(fresh);
+  }
+  const logRaw = db.shared['moonsiegelog:' + targetPlayerId];
+  let log2 = null; try { log2 = logRaw ? JSON.parse(logRaw) : null; } catch (e) {}
+  log2 = log2 || { events: [] };
+  log2.events = log2.events || [];
+  log2.events.unshift({ id: Date.now() + '-' + Math.random().toString(36).slice(2, 8), ts: Date.now(), attackerName: req.username || 'Kommandant', moonKey: targetMoonKey, moonName: targetMoon.name, destroyed, chancePct: Math.round(chance * 100) });
+  log2.events = log2.events.slice(0, 25);
+  db.shared['moonsiegelog:' + targetPlayerId] = JSON.stringify(log2);
+
+  await saveDb();
+  res.json({ ok: true, destroyed, chancePct: Math.round(chance * 100), battlePoints: bp, targetMoonName: targetMoon.name, saveVersion: mySaveVersion, newBattlePoints: save.battlePoints });
 });
 
 // Spieler greift ein NPC-Fraktionssystem an. Der Server ist autoritativ: er prüft die Flotte des

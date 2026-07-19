@@ -1402,9 +1402,15 @@ const DEFENSE_VALUES = { turm: 15, flak: 20, schild: 30, laser: 25, plasma: 50, 
 // Muss exakt synchron zu SHIP_SCORE_WEIGHTS im Frontend bleiben (dort die eigentliche Quelle für
 // computeScore()) - bei Änderungen dort immer auch hier nachpflegen, sonst weicht der serverseitig
 // validierte Score vom eigentlich beabsichtigten Wert ab.
+// 19.07.2026 synchronisiert zu Frontend v8.121.0: es fehlten 7 neuere Schiffstypen (Leerenjäger +
+// die 5 Event-Schiffe + Spionagekreuzer-Nachzügler) - deren Besitzer bekamen serverseitig zu
+// NIEDRIGE Scores validiert (exakt der CLAUDE.md-Fallstrick "Backend-Kopie mitpflegen"). Dazu die
+// drei neuen Tier-2-Schiffe (nanoklinge/quantenkreuzer/fusionsdreadnought).
 const SHIP_SCORE_WEIGHTS = {
   ships:15, cruisers:25, jaeger:12, destroyers:35, bomber:45,
   schlachtschiff:70, carrier:30, superschlachtschiff:180, waechter:20,
+  leerenjaeger:120, kometenjaeger:18, enterschiff:28, phantomschiff:26, riftwaechter:22, gesandtenschiff:15, schuerfschiff:15,
+  nanoklinge:45, quantenkreuzer:65, fusionsdreadnought:150,
   forscher:20, frachter:10, frachtergross:40, spaeher:15, spionageschiff:22, colonyShips:5, recycler:12
 };
 // Bug/Sicherheitslücke behoben (13.07.2026, danke an Sascha für den Hinweis): der Bestenlisten-Score
@@ -1484,13 +1490,14 @@ function rawFleetPower(f) {
   if (!f) return 0;
   return diminishingShipCount(f.cruisers || 0) * 20 + diminishingShipCount(f.destroyers || 0) * 45 + diminishingShipCount(f.ships || 0) * 5 +
     diminishingShipCount(f.jaeger || 0) * 10 + diminishingShipCount(f.bomber || 0) * 60 + diminishingShipCount(f.schlachtschiff || 0) * 90 +
-    diminishingShipCount(f.carrier || 0) * 15 + diminishingShipCount(f.superschlachtschiff || 0) * 220 + diminishingShipCount(f.waechter || 0) * 8;
+    diminishingShipCount(f.carrier || 0) * 15 + diminishingShipCount(f.superschlachtschiff || 0) * 220 + diminishingShipCount(f.waechter || 0) * 8 +
+    diminishingShipCount(f.nanoklinge || 0) * 55 + diminishingShipCount(f.quantenkreuzer || 0) * 80 + diminishingShipCount(f.fusionsdreadnought || 0) * 180;
 }
 // Verteidigungsspezialisierung (13.07.2026) - defWeight-Gewichte identisch zum Frontend (SHIP_DEFS),
 // wirken NUR hier auf die Verteidigung, nie auf die Angriffskraft. Keine Schilde hier (der Backend-
 // Ansatz kennt generell keine Schilde, vorbestehende Vereinfachung gegenüber dem Frontend).
-const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3 };
-const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8 };
+const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5 };
+const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180 };
 function weightedFleetDefensePower(f) {
   if (!f) return 0;
   let sum = 0;
@@ -2667,7 +2674,7 @@ const ALLIANCE_RAID_GATHER_DURATIONS = [30 * 60, 60 * 60, 120 * 60];
 // prüfen, ohne die Produktionswerte selbst anzutasten. Siehe test_allianceraid.js.
 const ALLIANCE_RAID_TEST_MODE = process.env.ALLIANCE_RAID_TEST_MODE === '1';
 const ALLIANCE_RAID_TEST_DISPATCH_SEC = 2;
-const ALLIANCE_RAID_ATTACK_SHIP_KEYS = ['jaeger', 'bomber', 'cruisers', 'destroyers', 'schlachtschiff', 'carrier', 'superschlachtschiff', 'waechter'];
+const ALLIANCE_RAID_ATTACK_SHIP_KEYS = ['jaeger', 'bomber', 'cruisers', 'destroyers', 'schlachtschiff', 'carrier', 'superschlachtschiff', 'waechter', 'nanoklinge', 'quantenkreuzer', 'fusionsdreadnought'];
 const ALLIANCE_RAID_RETREAT_THRESHOLD = 0.4, ALLIANCE_RAID_RETREAT_SAVE_FACTOR = 0.5;
 function allianceRaidHpFor(level) { return Math.round(ALLIANCE_RAID_HP_BASE * Math.pow(ALLIANCE_RAID_HP_GROWTH, Math.max(0, level - 1))); }
 function allianceRaidCounterFor(level) { return Math.round(ALLIANCE_RAID_COUNTER_BASE * Math.pow(ALLIANCE_RAID_HP_GROWTH, Math.max(0, level - 1))); }

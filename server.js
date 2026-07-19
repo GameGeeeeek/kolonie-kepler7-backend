@@ -2709,7 +2709,12 @@ app.post('/api/allianceraid/join', authMiddleware, async (req, res) => {
 
   const joinDoc = {
     name: req.username || 'Kommandant', composition: clampedComposition, power, originPlanet,
-    shipCount: totalShips, joinedAt: Date.now(), travelSec: safeTravelSec, arrivesAtBaseAt, cancelled: false
+    shipCount: totalShips, joinedAt: Date.now(), travelSec: safeTravelSec, arrivesAtBaseAt,
+    // Momentaufnahme der zum Beitrittszeitpunkt gültigen Sammelphasen-Deadline - macht die
+    // "rechtzeitig angekommen?"-Prüfung beim späteren /claim vollständig aus dem eigenen
+    // Beitritts-Dokument beantwortbar, unabhängig davon, ob doc.gatherEndsAt inzwischen (durch eine
+    // neue Welle) einen anderen Wert hat.
+    gatherEndsAt: doc.gatherEndsAt, cancelled: false, claimed: false
   };
   db.shared['alliance:' + tag + ':raidjoin:' + waveKey + ':' + req.userId] = JSON.stringify(joinDoc);
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
@@ -2812,6 +2817,15 @@ app.post('/api/allianceraid/checkdispatch', authMiddleware, async (req, res) => 
 // Teilnehmer der Welle in EINEM serverseitigen Durchlauf direkt in deren jeweiligen Spielstand
 // geschrieben - kein Spieler kann sich mehr selbst einen höheren Anteil zuschreiben, als ihm laut
 // der (serverseitig berechneten) Angriffskraft zusteht.
+// Bewusst OHNE Belohnungsverteilung hier (anders als eine frühere Fassung dieses Endpunkts) - eine
+// EINZELNE Anfrage in fremde Spielstände ALLER Teilnehmer zu schreiben, ausgelöst von wem auch immer
+// zufällig zuerst pollt, hätte bei jedem NICHT-aufrufenden Teilnehmer die serverseitige Versions-
+// nummer seines Spielstands im Hintergrund erhöht, ohne dass dessen eigener Client das mitbekommt -
+// beim nächsten regulären Speichern dieses Spielers wäre das (harmlos, aber unnötig) als
+// Versionskonflikt aufgeschlagen. Sauberer: /resolve macht NUR die gemeinsame, einmalige
+// Kampfauflösung (Schaden/HP/Phase), jeder Teilnehmer holt seine EIGENE Belohnung über den
+// separaten /claim-Endpunkt unten selbst ab (exakt wie /api/worldboss/resolve: der Server schreibt
+// dabei ausschließlich in den Spielstand des jeweils AUFRUFENDEN Spielers).
 app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
   const { tag } = req.body || {};
   if (!tag) return res.status(400).json({ error: 'Ungültige Anfrage.' });
@@ -2820,7 +2834,6 @@ app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
   const doc = getAllianceRaidDoc(tag);
   if (!doc || doc.phase !== 'enroute' || !doc.dispatch || doc.dispatch.arrivalAt > Date.now()) return res.json({ ok: true, doc });
 
-  const waveKey = allianceRaidWaveKey(doc);
   const power = doc.dispatch.totalPower;
   const damage = Math.min(doc.hp, power);
   const newHp = Math.max(0, doc.hp - damage);
@@ -2829,35 +2842,6 @@ app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
   const rawLossPct = Math.max(0.05, Math.min(0.6, counter / (counter + power)));
   const lossPct = allianceRaidDampenLoss(rawLossPct);
   const now = Date.now();
-  const level = doc.level;
-
-  // Nur die Teilnehmer verarbeiten, die laut Dispatch tatsächlich im Verband waren (siehe Kommentar
-  // bei checkdispatch/participantIds) - NICHT erneut alle Beitritts-Dokumente der Welle auflisten,
-  // sonst bekämen Zuspätkommer fälschlich Belohnung/Verluste aus einem Kampf, an dem sie nie
-  // teilgenommen haben.
-  const participantIds = new Set(doc.dispatch.participantIds || []);
-  const parts = listAllianceRaidJoins(tag, waveKey).filter(p => participantIds.has(p.playerId));
-  for (const p of parts) {
-    const pSaveRaw = getSaveValue(p.playerId);
-    if (!pSaveRaw) continue;
-    let pSave; try { pSave = JSON.parse(pSaveRaw); } catch (e) { continue; }
-    const fleetObj = allianceRaidFleetObj(pSave, p.originPlanet);
-    if (fleetObj) {
-      for (const [k, sentCount] of Object.entries(p.composition || {})) {
-        if (!sentCount) continue;
-        const lost = Math.min(fleetObj[k] || 0, Math.round(sentCount * lossPct));
-        if (lost > 0) fleetObj[k] = Math.max(0, (fleetObj[k] || 0) - lost);
-      }
-    }
-    const share = power > 0 ? Math.min(1, (p.power || 0) / power) : 0;
-    const isTop = doc.dispatch.topParticipantId === p.playerId;
-    const credits = Math.round((300 + level * 150) * (0.4 + 0.6 * share) * (isTop ? 1.5 : 1) * (destroyed ? 1 : 0.6));
-    const bp = Math.round((8 + level * 4) * (0.4 + 0.6 * share) * (destroyed ? 1 : 0.6));
-    pSave.credits = (pSave.credits || 0) + credits;
-    pSave.battlePoints = (pSave.battlePoints || 0) + bp;
-    pSave.xp = (pSave.xp || 0) + (destroyed ? 20 : 12);
-    setSaveValue(p.playerId, JSON.stringify(pSave));
-  }
 
   doc.hp = newHp;
   const waveResult = {
@@ -2871,6 +2855,94 @@ app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
   setAllianceRaidDoc(tag, doc);
   await saveDb();
   res.json({ ok: true, doc });
+});
+
+// Eigene Belohnung einer abgeschlossenen Welle abholen - jeder Teilnehmer ruft das für sich selbst
+// auf (Server schreibt ausschließlich in DESSEN eigenen Spielstand, nie in den eines anderen
+// Spielers). Verluste/Belohnung werden aus dem bereits serverseitig berechneten lastWaveResult/
+// result UND dem eigenen, ebenfalls serverseitig berechneten Beitritts-Dokument abgeleitet - der
+// Client kann hier nichts mehr vortäuschen. Ein "claimed"-Flag im eigenen Beitritts-Dokument
+// verhindert Mehrfachauszahlung (Doppelklick, Netzwerk-Retry).
+app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
+  const { tag, raidId, waveNumber } = req.body || {};
+  if (!tag || !raidId || typeof waveNumber !== 'number') return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!allianceRoleOf(tag, req.userId)) return res.status(403).json({ error: 'Nur Mitglieder dieser Allianz.' });
+
+  const waveKey = raidId + '-w' + waveNumber;
+  const joinKey = 'alliance:' + tag + ':raidjoin:' + waveKey + ':' + req.userId;
+  const joinRaw = db.shared[joinKey];
+  if (!joinRaw) return res.status(404).json({ error: 'Kein Beitritt zu dieser Welle gefunden.' });
+  let join; try { join = JSON.parse(joinRaw); } catch (e) { return res.status(500).json({ error: 'Beitritts-Dokument beschädigt.' }); }
+  if (join.cancelled) return res.json({ ok: true, missedWave: false, cancelled: true });
+  if (join.claimed) return res.json({ ok: true, alreadyClaimed: true });
+
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save; try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  const fleetObj = allianceRaidFleetObj(save, join.originPlanet);
+
+  // "Rechtzeitig angekommen?" ist vollständig aus dem EIGENEN Beitritts-Dokument beantwortbar
+  // (arrivesAtBaseAt vs. die dort gespeicherte Momentaufnahme von gatherEndsAt, siehe join()) -
+  // unabhängig davon, ob der Raid inzwischen in einer neueren Welle steckt.
+  const missedWave = (join.arrivesAtBaseAt || Infinity) > (join.gatherEndsAt != null ? join.gatherEndsAt : -Infinity);
+  if (missedWave) {
+    if (fleetObj) { for (const [k, n] of Object.entries(join.composition || {})) fleetObj[k] = (fleetObj[k] || 0) + n; }
+    join.claimed = true;
+    db.shared[joinKey] = JSON.stringify(join);
+    const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+    await saveDb();
+    return res.json({ ok: true, missedWave: true, saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
+  }
+
+  const doc = getAllianceRaidDoc(tag);
+  // Das WELLEN-Ergebnis (lastWaveResult/result) muss noch zu GENAU dieser waveNumber passen - ist
+  // inzwischen schon eine neuere Welle gestartet/aufgelöst worden (seltene Race, siehe Kommentar bei
+  // der früheren clientseitigen Fassung dieser Logik), gibt es kein passendes Ergebnis mehr. Dann
+  // sicherheitshalber die Flotte unversehrt zurückgeben statt sie verschwinden zu lassen ODER eine
+  // falsche (neuere) Belohnung auszuzahlen.
+  const res_ = doc && doc.lastWaveResult && doc.lastWaveResult.waveNumber === waveNumber ? doc.lastWaveResult
+    : (doc && doc.result && doc.result.waveNumber === waveNumber ? doc.result : null);
+  if (!res_) {
+    if (fleetObj) { for (const [k, n] of Object.entries(join.composition || {})) fleetObj[k] = (fleetObj[k] || 0) + n; }
+    join.claimed = true;
+    db.shared[joinKey] = JSON.stringify(join);
+    const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+    await saveDb();
+    return res.json({ ok: true, missedWave: true, staleResult: true, saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
+  }
+
+  const share = res_.totalPower > 0 ? Math.min(1, (join.power || 0) / res_.totalPower) : 0;
+  const isTop = res_.topParticipantId === req.userId;
+  const level = doc.level;
+  const credits = Math.round((300 + level * 150) * (0.4 + 0.6 * share) * (isTop ? 1.5 : 1) * (res_.destroyed ? 1 : 0.6));
+  const bp = Math.round((8 + level * 4) * (0.4 + 0.6 * share) * (res_.destroyed ? 1 : 0.6));
+  // WICHTIG: anders als beim Weltboss (wo die Flotte bis zur Missionsauflösung im Spielstand bleibt
+  // und Verluste von dort abgezogen werden) wurden die gesendeten Schiffe hier bereits BEIM BEITRITT
+  // aus fleetObj entfernt (siehe /join). Der Verlust wird deshalb direkt aus der gesendeten Menge
+  // berechnet, und nur die ÜBERLEBENDEN kommen zurück - NICHT von der (für diese Schiffstypen
+  // bereits leeren) aktuellen Flotte abgezogen, sonst wäre der Verlust immer 0.
+  const lostShips = {};
+  if (fleetObj) {
+    for (const [k, sentCount] of Object.entries(join.composition || {})) {
+      if (!sentCount) continue;
+      const lost = Math.min(sentCount, Math.round(sentCount * (res_.lossPct || 0)));
+      const survivors = sentCount - lost;
+      if (survivors > 0) fleetObj[k] = (fleetObj[k] || 0) + survivors;
+      if (lost > 0) lostShips[k] = lost;
+    }
+  }
+  save.credits = (save.credits || 0) + credits;
+  save.battlePoints = (save.battlePoints || 0) + bp;
+  save.xp = (save.xp || 0) + (res_.destroyed ? 20 : 12);
+  join.claimed = true;
+  db.shared[joinKey] = JSON.stringify(join);
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+  await saveDb();
+  res.json({
+    ok: true, missedWave: false, destroyed: res_.destroyed, isTop, share: Math.round(share * 100),
+    credits, battlePoints: bp, xp: res_.destroyed ? 20 : 12, lostShips,
+    saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints
+  });
 });
 
 // Spieler greift ein NPC-Fraktionssystem an. Der Server ist autoritativ: er prüft die Flotte des

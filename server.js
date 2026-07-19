@@ -620,6 +620,80 @@ function checkAllianceKeyPermission(req, key, isWrite) {
     // schreibt. Ohne diese Sperre wäre die gesamte Härtung der neuen Endpunkte wirkungslos.
     return isWrite ? 'Allianz-Raid-Daten werden nur über die dedizierten Endpunkte geschrieben.' : null;
   }
+  // Ab hier (19.07.2026, Fund beim Allianz-Raid-Audit): eine ganze Reihe von alliance:-
+  // Unterressourcen lief bisher komplett ohne Sonderregel - schreibbar für JEDEN eingeloggten
+  // Nutzer, nicht nur Mitglieder der jeweiligen Allianz. Für die meisten reicht hier (vorerst) ein
+  // reiner Mitgliedschafts-/Eigentums-Check (analog contrib:/warscore:/warcontrib: oben) - er
+  // verhindert Vandalismus durch fremde Accounts, verhindert aber NICHT, dass ein böswilliges
+  // EIGENES Mitglied sich selbst einen erfundenen Wert einträgt (gleiches akzeptiertes Restrisiko
+  // wie bei contrib:). musterattack/musterjoin/basewar/incomingmuster bleiben hier bewusst NUR
+  // mitgliedschafts-, nicht wertgeprüft - eine vollständige Härtung (serverseitig berechnete
+  // Angriffskraft/Schadensauflösung wie beim Allianz-Raid) ist als eigenes, größeres Vorhaben
+  // vorgesehen und würde diese Zwischenregel dann ersetzen.
+  if (rest === 'base') {
+    // Allianzbasis-Dokument (Gründung/Ausbaustufen-Freigabe): granuläre Prüfung "Stufe deckt sich
+    // mit echten Beiträgen" wäre wünschenswert (analog unlocked oben), fehlt hier aber noch (eigene
+    // Kostentabelle allianceBaseCumCost ist bisher nicht serverseitig gespiegelt) - vorerst
+    // zumindest kein Zugriff für Nicht-Mitglieder.
+    if (!isWrite) return null;
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen die Allianzbasis ändern.';
+  }
+  if (rest.startsWith('basedef:')) {
+    if (!isWrite) return null;
+    const targetId = rest.slice('basedef:'.length);
+    if (targetId !== req.userId) return 'Du kannst nur deine eigene Basisverteidigung eintragen.';
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen Schiffe zur Basisverteidigung melden.';
+  }
+  if (rest === 'buildready' || rest === 'points' || rest === 'endgameactive' || rest === 'worldactive' || rest === 'paradebest') {
+    if (!isWrite) return null;
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen das ändern.';
+  }
+  if (rest.startsWith('donation:')) {
+    if (!isWrite) return null;
+    const parts = rest.split(':'); // donation:<weekKey>:<playerId>
+    const targetId = parts[2];
+    if (targetId && targetId !== req.userId) return 'Du kannst nur deine eigene Spende eintragen.';
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen Spenden eintragen.';
+  }
+  if (rest.startsWith('dominance:')) {
+    if (!isWrite) return null;
+    const targetId = rest.slice('dominance:'.length);
+    if (targetId !== req.userId) return 'Du kannst nur deinen eigenen Dominanz-Wert eintragen.';
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen das eintragen.';
+  }
+  if (rest.startsWith('paradesnapshot:')) {
+    if (!isWrite) return null;
+    const targetId = rest.slice('paradesnapshot:'.length);
+    if (targetId !== req.userId) return 'Du kannst nur deine eigene Flotte melden.';
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen ihre Flotte für die Parade melden.';
+  }
+  if (rest === 'msg' || rest.startsWith('msg:')) {
+    // Allianz-Chat/System-Neuigkeiten: wird immer nur in die EIGENE Allianz geschrieben (auch die
+    // automatischen "Allianzbasis"/"Spendenwertung"-Systemnachrichten laufen über die eigene
+    // myAllianceTag()) - kein legitimer Fall, in dem ein Nicht-Mitglied hier schreiben müsste.
+    if (!isWrite) return null;
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen hier schreiben.';
+  }
+  if (rest === 'musterattack' || rest.startsWith('musterjoin:')) {
+    // Koordinierter Angriff (eigene Allianz plant/sammelt): wird nur in die EIGENE musterattack
+    // geschrieben (das Ziel-Dokument der GEGNERISCHEN Allianz ist basewar/incomingmuster, siehe
+    // unten). Mitgliedschafts-Check schließt zumindest Fremdzugriff - die eigentliche Kampfkraft-/
+    // Ergebnis-Härtung ist noch offen (siehe Kommentar oben).
+    if (!isWrite) return null;
+    if (rest.startsWith('musterjoin:')) {
+      const parts = rest.split(':'); // musterjoin:<musterAttackId>:<playerId>
+      const targetId = parts[2];
+      if (targetId && targetId !== req.userId) return 'Du kannst nur deinen eigenen Beitritt eintragen.';
+    }
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen das ändern.';
+  }
+  // basewar/incomingmuster ABSICHTLICH noch ohne Sonderregel: der Angreifer schreibt hier legitim in
+  // den Namensraum der ANGEGRIFFENEN (fremden) Allianz (Schaden/Zerstörung/Ankündigung), das ist kein
+  // simpler "nur eigene Mitgliedschaft"-Fall wie oben, sondern bräuchte dieselbe Art von Diff-Prüfung
+  // wie bei wars oder - besser - dieselbe vollständige serverseitige Kampfauflösung wie beim
+  // Allianz-Raid (geplant, siehe TODO/Taskliste "Musterangriff serverseitig härten"). Bis dahin bleibt
+  // dieser Pfad offen, GENAU wie musterattack/musterjoin selbst nur mitgliedschaftsgeprüft sind -
+  // die eigentliche Kampfkraft-/Schadenshärtung kommt dort gemeinsam, nicht hier isoliert.
   return null; // andere alliance:-Unterressourcen (Chat existiert separat als globalchat:, nicht hier) bleiben wie bisher offen
 }
 

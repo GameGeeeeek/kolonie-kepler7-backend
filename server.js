@@ -3529,6 +3529,8 @@ app.post('/api/basedamage/solo', authMiddleware, async (req, res) => {
   }
   const bp = destroyed ? 60 : (success ? 15 : 4);
   save.battlePoints = (save.battlePoints || 0) + bp;
+  save.resources = save.resources || {};
+  save.resources.hochenergiekristalle = Math.max(0, (save.resources.hochenergiekristalle || 0) - MOONSIEGE_AMMO_HEK);
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
   await saveDb();
   res.json({
@@ -3547,6 +3549,7 @@ app.post('/api/basedamage/solo', authMiddleware, async (req, res) => {
 // Abklingzeit, beide bleiben client-seitig wie bisher, da rein selbstbezogen und nicht
 // PvP-relevant). Vereinfachte Angriffskraft ohne Schiffsmodul-Bonus (analog computeAllianceRaidPower
 // ohne Doktrin/Gebäude-Bonus) - akzeptierte Vereinfachung, siehe dortiger Kommentar.
+const MOONSIEGE_AMMO_HEK = 25; // Hochenergiekristalle je Belagerungsschuss (Tier-2-Munition)
 app.post('/api/moonsiege/resolve', authMiddleware, async (req, res) => {
   const { targetPlayerId, targetMoonKey, originPlanet } = req.body || {};
   if (!targetPlayerId || !targetMoonKey || !originPlanet) return res.status(400).json({ error: 'Ungültige Anfrage.' });
@@ -3556,11 +3559,18 @@ app.post('/api/moonsiege/resolve', authMiddleware, async (req, res) => {
   let save; try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
   const fleetObj = allianceRaidFleetObj(save, originPlanet);
   if (!fleetObj || (fleetObj.mondzerstoerer || 0) < 1) return res.status(400).json({ error: 'Kein einsatzbereiter Mondzerstörer an diesem Standort.' });
-
   const targetRaw = db.shared['moondefense:' + targetPlayerId];
   let targetDoc = null; try { targetDoc = targetRaw ? JSON.parse(targetRaw) : null; } catch (e) {}
   const targetMoon = targetDoc && Array.isArray(targetDoc.moons) ? targetDoc.moons.find(mo => mo.moonKey === targetMoonKey) : null;
   if (!targetMoon) return res.status(404).json({ error: 'Dieses Mond-Ziel ist nicht (mehr) auffindbar.' });
+  // Hochenergie-Ladung (19.07.2026, Tier-2-Verbrauchs-Sink): jeder Belagerungsschuss kostet
+  // MOONSIEGE_AMMO_HEK Hochenergiekristalle - serverseitig geprüft und abgebucht, damit die
+  // Munitionspflicht nicht clientseitig umgangen werden kann (der Endpunkt ist ohnehin die
+  // einzige Auflösungs-Autorität).
+  if (((save.resources || {}).hochenergiekristalle || 0) < MOONSIEGE_AMMO_HEK) {
+    return res.status(400).json({ error: 'Nicht genug Hochenergiekristalle für die Belagerungs-Ladung (' + MOONSIEGE_AMMO_HEK + ' benötigt) - das Kristalllabor stellt sie her.' });
+  }
+
 
   const power = 300 * (0.85 + Math.random() * 0.3);
   const reduction = Math.min(0.75, (targetMoon.shieldLevel || 0) * 0.04 + (targetMoon.stabilityLevel || 0) * 0.02 + (targetMoon.allianceTag ? 0.05 : 0));
@@ -3570,6 +3580,8 @@ app.post('/api/moonsiege/resolve', authMiddleware, async (req, res) => {
   const bp = destroyed ? 150 : 20;
 
   save.battlePoints = (save.battlePoints || 0) + bp;
+  save.resources = save.resources || {};
+  save.resources.hochenergiekristalle = Math.max(0, (save.resources.hochenergiekristalle || 0) - MOONSIEGE_AMMO_HEK);
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
 
   const freshRaw = db.shared['moondefense:' + targetPlayerId];
@@ -3587,7 +3599,7 @@ app.post('/api/moonsiege/resolve', authMiddleware, async (req, res) => {
   db.shared['moonsiegelog:' + targetPlayerId] = JSON.stringify(log2);
 
   await saveDb();
-  res.json({ ok: true, destroyed, chancePct: Math.round(chance * 100), battlePoints: bp, targetMoonName: targetMoon.name, saveVersion: mySaveVersion, newBattlePoints: save.battlePoints });
+  res.json({ ok: true, destroyed, chancePct: Math.round(chance * 100), battlePoints: bp, targetMoonName: targetMoon.name, saveVersion: mySaveVersion, newBattlePoints: save.battlePoints, ammoUsed: MOONSIEGE_AMMO_HEK, newHochenergiekristalle: save.resources.hochenergiekristalle });
 });
 
 // Spieler greift ein NPC-Fraktionssystem an. Der Server ist autoritativ: er prüft die Flotte des

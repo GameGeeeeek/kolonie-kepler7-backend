@@ -1273,7 +1273,9 @@ app.get('/api/storage/:key', authMiddleware, (req, res) => {
   if (shared && key.startsWith('leaderboard:') && typeof entry === 'string') {
     try {
       const parsed = JSON.parse(entry);
-      parsed.isSupporter = supporterStatusFor(key.slice('leaderboard:'.length)).active;
+      const status = supporterStatusFor(key.slice('leaderboard:'.length));
+      parsed.isSupporter = status.active;
+      parsed.supporterTier = status.active ? status.tier : null;
       return res.json({ key, value: JSON.stringify(parsed), shared, version: 0 });
     } catch (e) { /* kaputter Eintrag - unverändert durchreichen, kein Absturz */ }
   }
@@ -1320,7 +1322,9 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
           // Wie Score/Wochenscore darüber: der Client könnte isSupporter sonst einfach selbst auf
           // true setzen. GET überschreibt das ohnehin bei jedem Lesen erneut (siehe oben), das hier
           // ist nur Verteidigung in der Tiefe, damit der gespeicherte Wert auch für sich stimmt.
-          submitted.isSupporter = supporterStatusFor(targetId).active;
+          const submittedStatus = supporterStatusFor(targetId);
+          submitted.isSupporter = submittedStatus.active;
+          submitted.supporterTier = submittedStatus.active ? submittedStatus.tier : null;
           finalValue = JSON.stringify(submitted);
         } catch (e) { /* Spielstand/Wert kaputt - unverändert durchreichen, kein Absturz */ }
       }
@@ -3771,12 +3775,13 @@ app.post('/api/kofi-webhook', express.urlencoded({ extended: true, limit: '256kb
     } else {
       db.kofiSupportersAnonymousTotal = (db.kofiSupportersAnonymousTotal || 0) + amount;
     }
-    // Unterstützer-Kennzeichnung in der Bestenliste (20.07.2026, Spieler-Wunsch): Ko-fi schickt bei
-    // JEDER Zahlung eine E-Mail mit, unabhängig von der öffentlich/anonym-Einstellung des Namens -
-    // das ist die einzige zuverlässige, nicht fälschbare Verknüpfung zu einem Spiel-Account (der
-    // Kommandantenname wäre frei wählbar und damit nachbaubar, siehe /api/claim-supporter unten).
-    // Wird NIRGENDS öffentlich ausgegeben, nur intern für den Abgleich beim Freischalten genutzt -
-    // gleiche Anonymitäts-Zusicherung wie beim Namen oben, nur eine Ebene tiefer.
+    // Unterstützer-Kennzeichnung in der Bestenliste (20.07.2026, Spieler-Wunsch, Verknüpfung C
+    // "E-Mail-Verifizierung"): Ko-fi schickt bei JEDER Zahlung eine E-Mail mit, unabhängig von der
+    // öffentlich/anonym-Einstellung des Namens - das ist die zuverlässige, nicht fälschbare
+    // Verknüpfung zu einem Spiel-Account (der Kommandantenname wäre frei wählbar und damit
+    // nachbaubar durch Umbenennen, siehe /api/claim-supporter unten). Wird NIRGENDS öffentlich
+    // ausgegeben, nur intern für den Abgleich beim Freischalten genutzt. total treibt die
+    // Medaillen-Stufe (siehe supporterTierFor).
     const email = String(payload.email || '').trim().toLowerCase();
     if (email) {
       if (!db.kofiDonationsByEmail) db.kofiDonationsByEmail = {};
@@ -3798,19 +3803,26 @@ app.get('/api/kofi-top-supporter', (req, res) => {
   const [name, total] = entries[0];
   res.json({ topSupporter: { name, total: Math.round(total * 100) / 100 } });
 });
-// Unterstützer-Abzeichen (20.07.2026, Spieler-Wunsch "Supporter farblich/mit Medaille kennzeichnen"):
-// bewusst zeitlich befristet (30 Tage ab der jeweils letzten Spende) statt dauerhaft - ein einzelner
-// Kaffee vor einem Jahr soll nicht für immer ein Abzeichen tragen, regelmäßige Unterstützer bleiben
-// dagegen durchgehend markiert, da jede neue Spende das Fenster verlängert (lastDonationAt wird beim
-// Webhook überschrieben, nicht addiert).
+// Unterstützer-Abzeichen (20.07.2026, Spieler-Wunsch "farblich/mit Medaille kennzeichnen", Verknüpfung
+// C "E-Mail-Verifizierung"): bewusst zeitlich befristet (30 Tage ab der letzten Spende) statt
+// dauerhaft - ein einzelner Kaffee vor einem Jahr soll nicht für immer ein Abzeichen tragen,
+// regelmäßige Unterstützer bleiben durchgehend markiert, da jede neue Spende das Fenster verlängert
+// (lastDonationAt wird beim Webhook überschrieben, nicht addiert). Die Stufe (Bronze/Silber/Gold,
+// siehe supporterTierFor) ergibt sich aus der GESAMTSUMME aller Spenden dieser E-Mail, nicht nur der
+// letzten - ein früherer großzügiger Spender behält seine Stufe auch bei einer kleinen Folgespende.
 const SUPPORTER_BADGE_DAYS = 30;
+function supporterTierFor(total) {
+  if (total >= 50) return 'gold';
+  if (total >= 15) return 'silver';
+  return 'bronze';
+}
 function supporterStatusFor(userId) {
   const user = findUserById(userId);
   if (!user || !user.kofiEmail) return { active: false };
   const rec = (db.kofiDonationsByEmail || {})[user.kofiEmail];
   if (!rec) return { active: false };
   const ageDays = (Date.now() - rec.lastDonationAt) / 86400000;
-  return { active: ageDays <= SUPPORTER_BADGE_DAYS, lastDonationAt: rec.lastDonationAt };
+  return { active: ageDays <= SUPPORTER_BADGE_DAYS, lastDonationAt: rec.lastDonationAt, tier: supporterTierFor(rec.total) };
 }
 // Authentifizierter Selbstbedienungs-Endpunkt: Spieler trägt seine Ko-fi-E-Mail ein, Server gleicht
 // sie mit den beim Webhook gespeicherten Spenden ab. Absichtlich KEIN Enumerations-Leck - die
@@ -3828,5 +3840,5 @@ app.post('/api/claim-supporter', authMiddleware, async (req, res) => {
   user.kofiEmail = email;
   await saveDb();
   const status = supporterStatusFor(req.userId);
-  res.json({ ok: true, active: status.active, daysLeft: status.active ? Math.max(0, Math.ceil(SUPPORTER_BADGE_DAYS - (Date.now() - status.lastDonationAt) / 86400000)) : 0 });
+  res.json({ ok: true, active: status.active, tier: status.tier || null, daysLeft: status.active ? Math.max(0, Math.ceil(SUPPORTER_BADGE_DAYS - (Date.now() - status.lastDonationAt) / 86400000)) : 0 });
 });

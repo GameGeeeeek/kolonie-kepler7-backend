@@ -1267,6 +1267,16 @@ app.get('/api/storage/:key', authMiddleware, (req, res) => {
   const store = shared ? db.shared : (db.private[req.userId] || {});
   const entry = store[key];
   if (entry === undefined) return res.status(404).json({ error: 'not found' });
+  // Unterstützer-Abzeichen wird bei JEDEM Lesen frisch berechnet (nicht nur beim Schreiben, siehe
+  // PUT unten) - sonst würde ein Eintrag, der beim Ablaufen der 30 Tage gerade nicht neu geschrieben
+  // wird (Spieler pausiert), das Abzeichen fälschlich unbegrenzt weitertragen.
+  if (shared && key.startsWith('leaderboard:') && typeof entry === 'string') {
+    try {
+      const parsed = JSON.parse(entry);
+      parsed.isSupporter = supporterStatusFor(key.slice('leaderboard:'.length)).active;
+      return res.json({ key, value: JSON.stringify(parsed), shared, version: 0 });
+    } catch (e) { /* kaputter Eintrag - unverändert durchreichen, kein Absturz */ }
+  }
   if (shared || typeof entry === 'string') return res.json({ key, value: entry, shared, version: 0 });
   res.json({ key, value: entry.value, shared, version: entry.version || 0 });
 });
@@ -1307,6 +1317,10 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
           const submitted = JSON.parse(value);
           submitted.score = correctScore;
           submitted.weekScore = correctWeekScore;
+          // Wie Score/Wochenscore darüber: der Client könnte isSupporter sonst einfach selbst auf
+          // true setzen. GET überschreibt das ohnehin bei jedem Lesen erneut (siehe oben), das hier
+          // ist nur Verteidigung in der Tiefe, damit der gespeicherte Wert auch für sich stimmt.
+          submitted.isSupporter = supporterStatusFor(targetId).active;
           finalValue = JSON.stringify(submitted);
         } catch (e) { /* Spielstand/Wert kaputt - unverändert durchreichen, kein Absturz */ }
       }
@@ -3757,6 +3771,20 @@ app.post('/api/kofi-webhook', express.urlencoded({ extended: true, limit: '256kb
     } else {
       db.kofiSupportersAnonymousTotal = (db.kofiSupportersAnonymousTotal || 0) + amount;
     }
+    // Unterstützer-Kennzeichnung in der Bestenliste (20.07.2026, Spieler-Wunsch): Ko-fi schickt bei
+    // JEDER Zahlung eine E-Mail mit, unabhängig von der öffentlich/anonym-Einstellung des Namens -
+    // das ist die einzige zuverlässige, nicht fälschbare Verknüpfung zu einem Spiel-Account (der
+    // Kommandantenname wäre frei wählbar und damit nachbaubar, siehe /api/claim-supporter unten).
+    // Wird NIRGENDS öffentlich ausgegeben, nur intern für den Abgleich beim Freischalten genutzt -
+    // gleiche Anonymitäts-Zusicherung wie beim Namen oben, nur eine Ebene tiefer.
+    const email = String(payload.email || '').trim().toLowerCase();
+    if (email) {
+      if (!db.kofiDonationsByEmail) db.kofiDonationsByEmail = {};
+      const rec = db.kofiDonationsByEmail[email] || { total: 0, lastDonationAt: 0 };
+      rec.total += amount;
+      rec.lastDonationAt = Date.now();
+      db.kofiDonationsByEmail[email] = rec;
+    }
     saveDb();
     console.log('Ko-fi-Webhook verarbeitet: ' + (payload.type || 'Zahlung') + ' über ' + amount + ' ' + (payload.currency || '') + (payload.is_public ? ' von ' + payload.from_name : ' (anonym)'));
   } catch (e) { console.error('Ko-fi-Webhook Fehler:', e.message); }
@@ -3769,4 +3797,36 @@ app.get('/api/kofi-top-supporter', (req, res) => {
   if (!entries.length) return res.json({ topSupporter: null });
   const [name, total] = entries[0];
   res.json({ topSupporter: { name, total: Math.round(total * 100) / 100 } });
+});
+// Unterstützer-Abzeichen (20.07.2026, Spieler-Wunsch "Supporter farblich/mit Medaille kennzeichnen"):
+// bewusst zeitlich befristet (30 Tage ab der jeweils letzten Spende) statt dauerhaft - ein einzelner
+// Kaffee vor einem Jahr soll nicht für immer ein Abzeichen tragen, regelmäßige Unterstützer bleiben
+// dagegen durchgehend markiert, da jede neue Spende das Fenster verlängert (lastDonationAt wird beim
+// Webhook überschrieben, nicht addiert).
+const SUPPORTER_BADGE_DAYS = 30;
+function supporterStatusFor(userId) {
+  const user = findUserById(userId);
+  if (!user || !user.kofiEmail) return { active: false };
+  const rec = (db.kofiDonationsByEmail || {})[user.kofiEmail];
+  if (!rec) return { active: false };
+  const ageDays = (Date.now() - rec.lastDonationAt) / 86400000;
+  return { active: ageDays <= SUPPORTER_BADGE_DAYS, lastDonationAt: rec.lastDonationAt };
+}
+// Authentifizierter Selbstbedienungs-Endpunkt: Spieler trägt seine Ko-fi-E-Mail ein, Server gleicht
+// sie mit den beim Webhook gespeicherten Spenden ab. Absichtlich KEIN Enumerations-Leck - die
+// Fehlermeldung bei Nichttreffer verrät nicht, ob die E-Mail überhaupt schon einmal gespendet hat vs.
+// falsch geschrieben wurde, beides derselbe generische Text.
+app.post('/api/claim-supporter', authMiddleware, async (req, res) => {
+  const email = String((req.body && req.body.email) || '').trim().toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'Bitte eine gültige E-Mail-Adresse angeben.' });
+  }
+  const rec = (db.kofiDonationsByEmail || {})[email];
+  if (!rec) return res.status(404).json({ error: 'Keine Ko-fi-Spende mit dieser E-Mail-Adresse gefunden.' });
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Account nicht gefunden.' });
+  user.kofiEmail = email;
+  await saveDb();
+  const status = supporterStatusFor(req.userId);
+  res.json({ ok: true, active: status.active, daysLeft: status.active ? Math.max(0, Math.ceil(SUPPORTER_BADGE_DAYS - (Date.now() - status.lastDonationAt) / 86400000)) : 0 });
 });

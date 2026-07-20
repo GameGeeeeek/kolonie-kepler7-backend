@@ -2321,6 +2321,14 @@ const MARKET_RESOURCES = {
 // Wie stark eine gehandelte Menge den Preis bewegt (pro 1000 Einheiten, zusätzlich mit dem
 // Basispreis der Ressource multipliziert - siehe Formel im Handels-Endpunkt). Käufe +, Verkäufe −.
 const MARKET_IMPACT_PER_1000 = 0.04;
+// Markt-Vertiefung (20.07.2026): Preisverlauf + Angebots-/Nachfrageschock-Ereignisse. Labels/Namen hier
+// zentral, damit die galaktische News dieselbe Bezeichnung nutzt wie der Client.
+const MARKET_RES_LABELS = { erz:'Erz', kristalle:'Kristalle', deuterium:'Deuterium', energie:'Energie', antimaterie:'Antimaterie' };
+const MARKET_EVENT_SHORTAGE_NAMES = ['{res}-Knappheit', 'Lieferengpass bei {res}', 'Run auf {res}'];
+const MARKET_EVENT_GLUT_NAMES = ['{res}-Schwemme', 'Überproduktion von {res}', '{res}-Ausverkauf'];
+const MARKET_HISTORY_LEN = 24;            // ~6h Verlauf bei 15-Min-Ticks
+const MARKET_EVENT_CHANCE = 0.04;         // pro Tick, solange kein Ereignis aktiv (~1 alle 6h)
+const MARKET_EVENT_DRIFT_RATE = 0.08;     // Erholungstempo Richtung Schock-Ziel (unabhängig von der Richtung)
 function loadOrInitMarket(g) {
   if (!g.market) g.market = {};
   for (const [key, info] of Object.entries(MARKET_RESOURCES)) {
@@ -2365,6 +2373,8 @@ function loadOrInitGalaxy() {
   if (!db.galaxy.lastTick) db.galaxy.lastTick = Date.now();
   if (!db.galaxy.controlledSystems) db.galaxy.controlledSystems = {}; // systemId -> userId (vom Spieler eroberte Systeme)
   if (db.galaxy.worldBoss === undefined) db.galaxy.worldBoss = null;
+  if (!db.galaxy.marketHistory) db.galaxy.marketHistory = {}; // key -> rollender Preisverlauf (Sparkline)
+  if (db.galaxy.marketEvent === undefined) db.galaxy.marketEvent = null; // aktiver Angebots-/Nachfrageschock
   loadOrInitMarket(db.galaxy);
   loadOrInitFactions(db.galaxy);
   return db.galaxy;
@@ -2474,12 +2484,52 @@ function galaxyTick() {
   const MARKET_SELL_RECOVERY_RATE = 0.015;
   const MARKET_BUY_RECOVERY_RATE = 0.15;
   const market = loadOrInitMarket(g);
+
+  // Markt-Ereignisse (20.07.2026 "Markt vertiefen"): gelegentlicher Angebots-/Nachfrageschock auf EINE
+  // Ressource. Statt eines harten Preissprungs verschiebt das Ereignis nur das Erholungs-ZIEL
+  // (basePrice*mult) für seine Laufzeit - der Preis driftet organisch zum Schockniveau und nach Ablauf
+  // wieder zurück. Immer nur ein Ereignis gleichzeitig.
+  if (g.marketEvent && g.marketEvent.endsAt <= Date.now()) {
+    pushGalaxyNews('ti-truck', 'Marktlage normalisiert: „' + g.marketEvent.label + '" ist vorbei, die Preise beruhigen sich.');
+    g.marketEvent = null;
+  }
+  if (!g.marketEvent && Math.random() < MARKET_EVENT_CHANCE) {
+    const keys = Object.keys(MARKET_RESOURCES);
+    const rkey = keys[Math.floor(Math.random() * keys.length)];
+    const rlabel = MARKET_RES_LABELS[rkey] || rkey;
+    const shortage = Math.random() < 0.5;
+    const mult = shortage ? (1.35 + Math.random() * 0.35) : (0.5 + Math.random() * 0.2);
+    const names = shortage ? MARKET_EVENT_SHORTAGE_NAMES : MARKET_EVENT_GLUT_NAMES;
+    const durH = 2 + Math.floor(Math.random() * 3); // 2-4h
+    g.marketEvent = {
+      resource: rkey, kind: shortage ? 'shortage' : 'glut', mult: Math.round(mult * 100) / 100,
+      label: names[Math.floor(Math.random() * names.length)].replace('{res}', rlabel),
+      startedAt: Date.now(), endsAt: Date.now() + durH * 3600 * 1000
+    };
+    pushGalaxyNews(shortage ? 'ti-arrow-up' : 'ti-box',
+      'MARKT: ' + g.marketEvent.label + ' – ' + rlabel + (shortage ? ' wird knapp, die Preise steigen deutlich.' : ' überschwemmt den Markt, die Preise fallen.'));
+  }
+
   for (const [key, info] of Object.entries(MARKET_RESOURCES)) {
     const cur = market[key];
-    const recoverRate = cur < info.basePrice ? MARKET_SELL_RECOVERY_RATE : MARKET_BUY_RECOVERY_RATE;
-    const towardBase = cur + (info.basePrice - cur) * recoverRate;
+    const evHere = g.marketEvent && g.marketEvent.resource === key;
+    // Ereignis verschiebt das Erholungsziel dieser Ressource; sonst zurück zum Normalpreis.
+    const target = evHere ? clampMarketPrice(key, info.basePrice * g.marketEvent.mult) : info.basePrice;
+    // Während eines Ereignisses ein festes, richtungsunabhängiges Drift-Tempo (spürbare Bewegung in
+    // beide Richtungen); sonst die bewährte asymmetrische Erholung (gedrückte Preise erholen sich langsam).
+    const recoverRate = evHere ? MARKET_EVENT_DRIFT_RATE : (cur < target ? MARKET_SELL_RECOVERY_RATE : MARKET_BUY_RECOVERY_RATE);
+    const towardBase = cur + (target - cur) * recoverRate;
     const noise = towardBase * (Math.random() - 0.5) * 0.05;
     market[key] = clampMarketPrice(key, towardBase + noise);
+  }
+
+  // Preisverlauf mitschreiben (rollend, letzte MARKET_HISTORY_LEN Ticks) für den Sparkline-Chart im Client.
+  if (!g.marketHistory) g.marketHistory = {};
+  for (const key of Object.keys(MARKET_RESOURCES)) {
+    const h = g.marketHistory[key] || [];
+    h.push(Math.round(market[key] * 100) / 100);
+    while (h.length > MARKET_HISTORY_LEN) h.shift();
+    g.marketHistory[key] = h;
   }
 
   // Abgelaufene kollabierte Systeme wieder freigeben.
@@ -2648,9 +2698,9 @@ app.get('/api/market', authMiddleware, (req, res) => {
   // bleibt für künftige Sonder-Ressourcen erhalten).
   const out = {};
   for (const key of Object.keys(MARKET_RESOURCES)) {
-    out[key] = { price: market[key], basePrice: MARKET_RESOURCES[key].basePrice, impactScale: MARKET_RESOURCES[key].impactScale || 1 };
+    out[key] = { price: market[key], basePrice: MARKET_RESOURCES[key].basePrice, impactScale: MARKET_RESOURCES[key].impactScale || 1, history: (g.marketHistory && g.marketHistory[key]) || [] };
   }
-  res.json({ market: out });
+  res.json({ market: out, event: g.marketEvent || null });
 });
 
 // Ermittelt den Markt-Rabatt (Kartell-Ruf + Allianz-Handelsabkommen) SERVERSEITIG aus dem echten

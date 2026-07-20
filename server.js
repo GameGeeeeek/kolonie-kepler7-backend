@@ -738,6 +738,7 @@ function pushNotificationText(type, payload) {
   if (type === 'pact-offer') return { title: 'Neues Pakt-Angebot', body: (payload.fromName || 'Ein Spieler') + ' bietet dir einen Nichtangriffspakt an.' };
   if (type === 'weltboss-kill') return { title: 'Weltboss besiegt!', body: 'Leviathan Stufe ' + (payload.level || 1) + ' erlegt - dein Beitrag: ' + (payload.share || 0) + '%.' };
   if (type === 'raid-incoming') return { title: 'Überfall!', body: 'Eine feindliche Flotte greift deine Kolonie an.' };
+  if (type === 'spy-detected') return { title: 'Spionage entdeckt', body: (payload.fromName || 'Ein Spieler') + ' hat deine Kolonie ausgespäht' + (payload.deep ? ' (Tiefen-Aufklärung inkl. Beute-Schätzung).' : '.') };
   if (type === 'message') return { title: 'Neue Nachricht', body: (payload.fromName || 'Ein Spieler') + ' hat dir geschrieben.' };
   if (type === 'patchnotes') return { title: 'Kolonie Kepler-7 aktualisiert', body: 'Version ' + (payload.version || '') + ' ist da - tippen für die Neuigkeiten.' };
   if (type === 'alliance-application') return { title: 'Neue Bewerbung', body: (payload.name || 'Ein Spieler') + ' möchte [' + (payload.tag || '') + '] beitreten.' };
@@ -1292,6 +1293,27 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   if (shared) {
     const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
+    // Spionage-Ping (Gegenspionage-Feedback): reiner Info-Ping, der dem ausgespähten Spieler eine
+    // "du wurdest ausgespäht"-Benachrichtigung zustellt. Wird NICHT persistent gespeichert (kein
+    // Datenmüll im geteilten Speicher) und ist gegen Fälschung abgesichert: nur der eingeloggte
+    // Absender darf pingen (payload.fromId muss == req.userId sein), das Ziel muss existieren und darf
+    // nicht man selbst sein. So kann niemand fremde Namen unterschieben oder sich selbst pingen.
+    if (key.startsWith('spyping:')) {
+      const targetId = key.slice('spyping:'.length);
+      try {
+        const payload = JSON.parse(value);
+        if (payload && payload.fromId === req.userId && targetId && targetId !== req.userId) {
+          const targetUser = findUserById(targetId);
+          if (targetUser) {
+            const prefs = getNotifPrefs(targetUser);
+            if (prefs.enabled) {
+              pushNotificationEvent(targetId, 'spy-detected', { fromName: String(payload.fromName || 'Ein Spieler').slice(0, 40), deep: !!payload.deep });
+            }
+          }
+        }
+      } catch (e) { /* kaputter Ping - ignorieren, kein Absturz */ }
+      return res.json({ ok: true });
+    }
     // Wortfilter (13.07.2026, Feature-Wunsch: Moderation vorbereiten) - Allianz-Tag (aus dem
     // Schlüssel) und -Name (aus dem Wert) auf unangemessene Begriffe prüfen, bevor eine Gründung/
     // Umbenennung überhaupt gespeichert wird.

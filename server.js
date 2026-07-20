@@ -721,7 +721,8 @@ function getNotifPrefs(user) {
     weltboss: p.weltboss !== false,
     raid: p.raid !== false,
     patchnotes: p.patchnotes !== false,
-    application: p.application !== false
+    application: p.application !== false,
+    spy: p.spy !== false
   };
 }
 function pushNotificationEvent(userId, type, payload) {
@@ -1306,7 +1307,7 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
           const targetUser = findUserById(targetId);
           if (targetUser) {
             const prefs = getNotifPrefs(targetUser);
-            if (prefs.enabled) {
+            if (prefs.enabled && prefs.spy) {
               pushNotificationEvent(targetId, 'spy-detected', { fromName: String(payload.fromName || 'Ein Spieler').slice(0, 40), deep: !!payload.deep });
             }
           }
@@ -2117,7 +2118,8 @@ app.post('/api/notification-prefs', authMiddleware, async (req, res) => {
     weltboss: b.weltboss !== false,
     raid: b.raid !== false,
     patchnotes: b.patchnotes !== false,
-    application: b.application !== false
+    application: b.application !== false,
+    spy: b.spy !== false
   };
   await saveDb();
   res.json(getNotifPrefs(user));

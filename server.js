@@ -1336,6 +1336,16 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
     return res.json({ key, value: finalValue, shared });
   }
 
+  // Plausibilitäts-Check NUR für den eigentlichen Spielstand (siehe saveSanityViolation oben) - andere
+  // private Schlüssel (__reports, __pushSubscriptions, Einstellungen o.ä.) sind kein PvP-/Bestenlisten-
+  // relevanter Zustand und werden bewusst nicht eingeschränkt.
+  if (key === SAVE_KEY) {
+    try {
+      const violation = saveSanityViolation(JSON.parse(value));
+      if (violation) return res.status(400).json({ error: 'Spielstand abgelehnt (unplausibler Wert): ' + violation });
+    } catch (e) { return res.status(400).json({ error: 'Spielstand ist kein gültiges JSON.' }); }
+  }
+
   db.private[req.userId] = db.private[req.userId] || {};
   const existing = db.private[req.userId][key];
   const existingVersion = existing === undefined ? -1 : (typeof existing === 'string' ? 0 : (existing.version || 0));
@@ -1499,6 +1509,51 @@ function allBuildingsOf(save) {
   const list = [save.buildings].filter(Boolean);
   for (const c of Object.values(save.colonies || {})) if (c && c.buildings) list.push(c.buildings);
   return list;
+}
+// Plausibilitäts-Grenzwerte für den privaten Spielstand (20.07.2026, Security-Audit-Fund: PUT
+// /api/storage/kepler7-save-v3 speicherte den kompletten Save bisher ungeprüft, nur die
+// Versionsnummer wurde abgeglichen - jede Stelle, die laut Architektur-Doku "serverseitig aus dem
+// gespeicherten Spielstand neu berechnet" (Kampfkraft, Bestenlisten-Score, Weltboss-Beitrag), rechnete
+// also in Wahrheit mit frei erfundenen Werten weiter, z.B. fleet.jaeger:999999). Bewusst GROSSZÜGIGE,
+// pauschale Grenzwerte statt einer vollen Nachbildung der Spiellogik (Baukosten/Produktionsraten) - das
+// wäre ein zweiter Spiel-Client auf dem Server und ein Wartungsalbtraum bei jeder künftigen
+// Mechanik-Änderung. Reales Maximum bei Gebäuden/Forschung liegt bei Stufe 20 (paar Ausnahmen
+// niedriger) - 60 lässt reichlich Luft für künftige Erweiterungen, ohne offensichtlichen Unsinn
+// durchzulassen.
+const SAVE_SANITY_LIMITS = {
+  maxBuildingLevel: 60,
+  maxResearchLevel: 60,
+  maxShipsPerType: 500000,
+  maxResourceValue: 1e13,
+  maxCredits: 1e8,
+  maxPrestige: 500,
+  maxXp: 1e9
+};
+function numberOutOfRange(v, max) {
+  return typeof v === 'number' && (!Number.isFinite(v) || v < 0 || v > max);
+}
+function saveSanityViolation(save) {
+  if (!save || typeof save !== 'object') return null;
+  for (const b of allBuildingsOf(save)) {
+    for (const [k, v] of Object.entries(b || {})) {
+      if (numberOutOfRange(v, SAVE_SANITY_LIMITS.maxBuildingLevel)) return 'Gebäudestufe "' + k + '" unplausibel: ' + v;
+    }
+  }
+  for (const [k, v] of Object.entries(save.research || {})) {
+    if (numberOutOfRange(v, SAVE_SANITY_LIMITS.maxResearchLevel)) return 'Forschungsstufe "' + k + '" unplausibel: ' + v;
+  }
+  for (const f of allFleetsOf(save)) {
+    for (const [k, v] of Object.entries(f || {})) {
+      if (numberOutOfRange(v, SAVE_SANITY_LIMITS.maxShipsPerType)) return 'Schiffszahl "' + k + '" unplausibel: ' + v;
+    }
+  }
+  for (const [k, v] of Object.entries(save.resources || {})) {
+    if (numberOutOfRange(v, SAVE_SANITY_LIMITS.maxResourceValue)) return 'Ressource "' + k + '" unplausibel: ' + v;
+  }
+  if (numberOutOfRange(save.credits, SAVE_SANITY_LIMITS.maxCredits)) return 'Kredite unplausibel: ' + save.credits;
+  if (numberOutOfRange(save.prestige, SAVE_SANITY_LIMITS.maxPrestige)) return 'Prestige unplausibel: ' + save.prestige;
+  if (numberOutOfRange(save.xp, SAVE_SANITY_LIMITS.maxXp)) return 'XP unplausibel: ' + save.xp;
+  return null;
 }
 // Rohe Flottenkraft EINES Flottenobjekts, mit Grenznutzen-Deckel, aber OHNE Taktik-Haltung/Konter –
 // wird für den Verteidigungsbeitrag der eigenen Flotte gebraucht (analog Frontend attackPowerRaw),
@@ -2067,10 +2122,33 @@ app.post('/api/schedule-raid-alert', authMiddleware, async (req, res) => {
 app.get('/api/push/public-key', (req, res) => {
   res.json({ publicKey: VAPID_KEYS.publicKey });
 });
+// Allowlist bekannter Web-Push-Dienst-Domains (20.07.2026, Security-Audit-Fund): sendWebPushToUser()
+// schickt später eine echte serverseitige HTTP-Anfrage genau an die hier registrierte endpoint-URL
+// (siehe webpush.sendNotification()). Ohne Prüfung könnte ein Spieler eine beliebige interne/private
+// Adresse (z.B. im LAN des Pi) als "Push-Endpoint" hinterlegen und den Server per Benachrichtigung
+// (z.B. über /api/schedule-raid-alert) dazu bringen, dorthin zuzugreifen (SSRF). Nur echte
+// Browser-Push-Dienste akzeptieren.
+const PUSH_ENDPOINT_ALLOWED_HOSTS = [
+  'fcm.googleapis.com', 'android.googleapis.com', // Chrome/Edge/Samsung Internet (FCM)
+  'updates.push.services.mozilla.com', // Firefox
+  'web.push.apple.com' // Safari (macOS/iOS ab 16.4)
+];
+const PUSH_ENDPOINT_ALLOWED_SUFFIXES = ['.notify.windows.com']; // ältere Edge/Windows-Push-Server (wns#.notify.windows.com)
+function isAllowedPushEndpoint(endpoint) {
+  let url;
+  try { url = new URL(endpoint); } catch (e) { return false; }
+  if (url.protocol !== 'https:') return false;
+  const host = url.hostname.toLowerCase();
+  if (PUSH_ENDPOINT_ALLOWED_HOSTS.includes(host)) return true;
+  return PUSH_ENDPOINT_ALLOWED_SUFFIXES.some(suf => host.endsWith(suf));
+}
 app.post('/api/push/subscribe', authMiddleware, async (req, res) => {
   const sub = req.body || {};
   if (!sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
     return res.status(400).json({ error: 'Ungültiges Push-Abonnement.' });
+  }
+  if (!isAllowedPushEndpoint(sub.endpoint)) {
+    return res.status(400).json({ error: 'Push-Endpoint wird nicht unterstützt.' });
   }
   if (!db.private[req.userId]) db.private[req.userId] = {};
   const subs = db.private[req.userId].__pushSubscriptions || [];

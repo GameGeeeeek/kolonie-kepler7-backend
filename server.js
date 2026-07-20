@@ -1439,7 +1439,11 @@ const SHIP_SCORE_WEIGHTS = {
   schlachtschiff:70, carrier:30, superschlachtschiff:180, waechter:20,
   leerenjaeger:120, kometenjaeger:18, enterschiff:28, phantomschiff:26, riftwaechter:22, gesandtenschiff:15, schuerfschiff:15,
   nanoklinge:45, quantenkreuzer:65, fusionsdreadnought:150,
-  forscher:20, frachter:10, frachtergross:40, spaeher:15, spionageschiff:22, colonyShips:5, recycler:12
+  forscher:20, frachter:10, frachtergross:40, spaeher:15, spionageschiff:22, colonyShips:5, recycler:12,
+  // Bugfix (20.07.2026, Bug-Sweep): mondzerstoerer fehlte komplett - maxOwned:1, 10 Tage Bauzeit,
+  // Top-Tier-Forschung nötig, atk 300 (höchster Wert im Spiel), Gewicht identisch zur Frontend-Kopie
+  // (weltraum_kolonie.html SHIP_SCORE_WEIGHTS) synchron gehalten.
+  mondzerstoerer:250
 };
 // Bug/Sicherheitslücke behoben (13.07.2026, danke an Sascha für den Hinweis): der Bestenlisten-Score
 // wurde bisher komplett clientseitig berechnet und ungeprüft übernommen - jeder hätte sich per

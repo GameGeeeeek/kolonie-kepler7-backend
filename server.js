@@ -703,6 +703,13 @@ function checkAllianceKeyPermission(req, key, isWrite) {
     // Speicher-Endpunkt ist für beide komplett gesperrt.
     return isWrite ? 'Musterangriff-Daten werden nur über die dedizierten Endpunkte geschrieben.' : null;
   }
+  if (rest.startsWith('sharedintel:')) {
+    // Geteilte Aufklärung (Spionage-Vertiefung): ein Mitglied teilt einen Spähbericht mit der eigenen
+    // Allianz. Lesen bleibt offen (Mitglieder rufen die gesammelte Aufklärung ab), Schreiben nur für
+    // Mitglieder - sonst könnte ein Fremder den Allianz-Namensraum mit gefälschter Aufklärung fluten.
+    if (!isWrite) return null;
+    return myRole ? null : 'Nur Mitglieder dieser Allianz dürfen Aufklärung teilen.';
+  }
   return null; // andere alliance:-Unterressourcen (Chat existiert separat als globalchat:, nicht hier) bleiben wie bisher offen
 }
 

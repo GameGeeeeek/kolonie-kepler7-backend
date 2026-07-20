@@ -746,7 +746,9 @@ function pushNotificationText(type, payload) {
   if (type === 'pact-offer') return { title: 'Neues Pakt-Angebot', body: (payload.fromName || 'Ein Spieler') + ' bietet dir einen Nichtangriffspakt an.' };
   if (type === 'weltboss-kill') return { title: 'Weltboss besiegt!', body: 'Leviathan Stufe ' + (payload.level || 1) + ' erlegt - dein Beitrag: ' + (payload.share || 0) + '%.' };
   if (type === 'raid-incoming') return { title: 'Überfall!', body: 'Eine feindliche Flotte greift deine Kolonie an.' };
-  if (type === 'spy-detected') return { title: 'Spionage entdeckt', body: (payload.fromName || 'Ein Spieler') + ' hat deine Kolonie ausgespäht' + (payload.deep ? ' (Tiefen-Aufklärung inkl. Beute-Schätzung).' : '.') };
+  if (type === 'spy-detected') return payload.sabotage
+    ? { title: 'Störmanöver!', body: (payload.fromName || 'Ein Spieler') + ' hat ein Sabotage-Störmanöver gegen dich geflogen - prüfe deine Ressourcen und Spionageabwehr.' }
+    : { title: 'Spionage entdeckt', body: (payload.fromName || 'Ein Spieler') + ' hat deine Kolonie ausgespäht' + (payload.deep ? ' (Tiefen-Aufklärung inkl. Beute-Schätzung).' : '.') };
   if (type === 'message') return { title: 'Neue Nachricht', body: (payload.fromName || 'Ein Spieler') + ' hat dir geschrieben.' };
   if (type === 'patchnotes') return { title: 'Kolonie Kepler-7 aktualisiert', body: 'Version ' + (payload.version || '') + ' ist da - tippen für die Neuigkeiten.' };
   if (type === 'alliance-application') return { title: 'Neue Bewerbung', body: (payload.name || 'Ein Spieler') + ' möchte [' + (payload.tag || '') + '] beitreten.' };
@@ -1773,6 +1775,66 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     });
     await saveDb();
     return res.json({ success: false, attackPower, defensePower, saveVersion: mySaveVersion });
+  }
+});
+
+// Störmanöver (Sabotage, Spionage-Vertiefung 20.07.2026): ein Spionagekreuzer stiehlt VERDECKT eine
+// kleine, gedeckelte Menge Ressourcen (4-8%, deutlich weniger als der echte Angriff mit 12-25%), ganz
+// ohne Flottenkampf - der Erfolg hängt an der Spionageabwehr-Forschung des Ziels, nicht an Flottenstärke.
+// Pro Ziel gilt eine 2-Stunden-Abklingzeit gegen Spam. Serverseitig aufgelöst und gehärtet wie /api/attack
+// (Beute wird aus dem echten Spielstand berechnet, nie clientseitig gemeldet), inkl. Anti-Farming-Abschlag.
+const SABOTAGE_COOLDOWN_MS = 2 * 60 * 60 * 1000;
+app.post('/api/sabotage', attackRateLimit, authMiddleware, async (req, res) => {
+  const { targetUserId } = req.body || {};
+  if (!targetUserId || targetUserId === req.userId) return res.status(400).json({ error: 'Ungültiges Ziel.' });
+  const attackerRaw = getSaveValue(req.userId);
+  const targetRaw = getSaveValue(targetUserId);
+  if (!attackerRaw || !targetRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let attacker, target;
+  try { attacker = JSON.parse(attackerRaw); target = JSON.parse(targetRaw); }
+  catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  // Spionagekreuzer nötig - aus dem ECHTEN Spielstand gezählt, nicht dem verschleierten Bestenlisten-Wert.
+  const scouts = fleetSummary(attacker).spionageschiff || 0;
+  if (scouts < 1) return res.status(400).json({ error: 'Du brauchst mindestens einen Spionagekreuzer für ein Störmanöver.' });
+  // Abklingzeit pro Ziel.
+  if (!db.private[req.userId]) db.private[req.userId] = {};
+  const cds = db.private[req.userId].__sabotageCooldowns || {};
+  const cdLeft = Math.max(0, (cds[targetUserId] || 0) + SABOTAGE_COOLDOWN_MS - Date.now());
+  if (cdLeft > 0) return res.status(429).json({ error: 'Störmanöver-Abklingzeit gegen dieses Ziel noch aktiv.', cooldownMs: cdLeft });
+  // Erfolgschance sinkt mit der Spionageabwehr-Stufe des Ziels (0,85 minus 6% je Stufe, mind. 0,25).
+  const shieldLvl = (target.research && target.research.rspyshield) || 0;
+  const chance = Math.max(0.25, 0.85 - shieldLvl * 0.06);
+  const success = Math.random() < chance;
+  cds[targetUserId] = Date.now();
+  db.private[req.userId].__sabotageCooldowns = cds;
+  const targetUser = findUserById(targetUserId);
+  if (success) {
+    const lootPct = 0.04 + Math.random() * 0.04; // 4-8% (Angriff: 12-25%)
+    const farmPenalty = farmingPenaltyFor(req.userId, targetUserId);
+    const stolen = {};
+    for (const [r, amt] of Object.entries(target.resources || {})) {
+      if (r === 'energie' || r === 'forschungspunkte') continue; // nur erbeutbare Ressourcen, wie beim Angriff
+      const take = Math.floor((amt || 0) * lootPct * farmPenalty);
+      if (take > 0) {
+        stolen[r] = take;
+        target.resources[r] = Math.max(0, (target.resources[r] || 0) - take);
+        attacker.resources[r] = (attacker.resources[r] || 0) + take;
+      }
+    }
+    attacker.battlePoints = (attacker.battlePoints || 0) + 8;
+    const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
+    setSaveValue(targetUserId, JSON.stringify(target));
+    addReport(req.userId, { type: 'sabotage-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt', stolen });
+    addReport(targetUserId, { type: 'sabotage-received', result: 'loss', attackerName: req.username, stolen });
+    if (targetUser) { const prefs = getNotifPrefs(targetUser); if (prefs.enabled && prefs.spy) pushNotificationEvent(targetUserId, 'spy-detected', { fromName: req.username, sabotage: true }); }
+    await saveDb();
+    return res.json({ success: true, stolen, saveVersion: mySaveVersion });
+  } else {
+    addReport(req.userId, { type: 'sabotage-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt' });
+    addReport(targetUserId, { type: 'sabotage-received', result: 'win', attackerName: req.username });
+    if (targetUser) { const prefs = getNotifPrefs(targetUser); if (prefs.enabled && prefs.spy) pushNotificationEvent(targetUserId, 'spy-detected', { fromName: req.username, sabotage: true }); }
+    await saveDb();
+    return res.json({ success: false });
   }
 });
 

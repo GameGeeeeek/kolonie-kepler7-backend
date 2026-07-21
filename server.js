@@ -2920,9 +2920,11 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
   const priceAfter = clampMarketPrice(resource, priceAfterRaw);
   const avgPrice = (priceBefore + priceAfter) / 2;
   const discount = marketDiscountPctFor(save);
-  // Verkaufserlös zusätzlich um 20% reduziert (realistischer Geld-Brief-Spread), Kartell-/Allianz-
-  // Rabatt wirkt beim Verkauf als Bonus obendrauf, beim Kauf als Abzug von den Kosten.
-  const MARKET_SELL_SPREAD = 0.80;
+  // Verkaufserlös reduziert (Geld-Brief-Spread), Kartell-/Allianz-Rabatt wirkt beim Verkauf als Bonus
+  // obendrauf, beim Kauf als Abzug von den Kosten. Balance (21.07.2026, Spieler-Report "zu viele Kredite
+  // beim Verkauf"): von 0.80 auf 0.55 gesenkt - Ressourcen zu Krediten zu machen ist damit deutlich
+  // weniger lukrativ. Muss mit der Frontend-Vorschau estimateTradeCredits() übereinstimmen.
+  const MARKET_SELL_SPREAD = 0.55;
   let credits;
   if (action === 'sell') {
     if ((save.resources[resource] || 0) < amt) return res.status(400).json({ error: 'Nicht genug ' + resource + ' zum Verkaufen.' });

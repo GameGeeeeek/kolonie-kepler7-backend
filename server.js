@@ -1180,7 +1180,8 @@ app.get('/api/me', authMiddleware, (req, res) => {
     maskedEmail: user ? maskEmail(user.email) : '',
     pendingEmail: user && user.pendingEmail ? maskEmail(user.pendingEmail) : null,
     wantsPatchnotes: user ? (user.wantsPatchnotes !== false) : true,
-    homeSystem: user && user.homeSystem, homeSlot: user && user.homeSlot
+    homeSystem: user && user.homeSystem, homeSlot: user && user.homeSlot,
+    attackShieldMs: attackShieldRemaining(req.userId)
   });
 });
 
@@ -1743,9 +1744,34 @@ function fleetSummary(save) {
   return totals;
 }
 
+// --- Angriffs-Schutzschild (Anti-Ganking) ---
+// Wer erfolgreich überfallen (Beute) ODER sabotiert wird, bekommt einen zeitlich begrenzten Schild:
+// Solange er aktiv ist, prallen weitere PvP-Angriffe/Störmanöver gegen dieses Konto ab. Das bremst das
+// Dauer-Farmen frisch geschlagener (oft schwächerer/abwesender) Spieler. Selbst offensiv zu werden
+// (eigener Angriff/Sabotage) verwirkt den eigenen Schild sofort - der Schutz ist für Opfer gedacht,
+// nicht als Immunitäts-Trick für Angreifer. Serverautoritativ in db.private[userId].__attackShieldUntil.
+const ATTACK_SHIELD_MS = 30 * 60 * 1000;
+function attackShieldRemaining(userId) {
+  const until = (db.private[userId] && db.private[userId].__attackShieldUntil) || 0;
+  return Math.max(0, until - Date.now());
+}
+function grantAttackShield(userId) {
+  if (!db.private[userId]) db.private[userId] = {};
+  // Nicht verlängern, wenn schon ein längerer Schild läuft - immer auf mind. ATTACK_SHIELD_MS setzen.
+  db.private[userId].__attackShieldUntil = Math.max(db.private[userId].__attackShieldUntil || 0, Date.now() + ATTACK_SHIELD_MS);
+}
+function breakOwnAttackShield(userId) {
+  if (db.private[userId]) db.private[userId].__attackShieldUntil = 0;
+}
+
 app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   const { targetUserId } = req.body || {};
   if (!targetUserId || targetUserId === req.userId) return res.status(400).json({ error: 'Ungültiges Ziel.' });
+  // Ziel unter Schutzschild? -> Angriff prallt ab (kein Kampf, keine Beute, kein Punktgewinn).
+  const shieldLeft = attackShieldRemaining(targetUserId);
+  if (shieldLeft > 0) return res.status(403).json({ error: 'Ziel steht unter Angriffs-Schutzschild.', shieldMs: shieldLeft });
+  // Selbst offensiv werden verwirkt den eigenen Schild.
+  breakOwnAttackShield(req.userId);
 
   const attackerRaw = getSaveValue(req.userId);
   const targetRaw = getSaveValue(targetUserId);
@@ -1793,6 +1819,8 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
 
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     setSaveValue(targetUserId, JSON.stringify(target));
+    // Opfer wurde beraubt -> Schutzschild gewähren (nur wenn tatsächlich Beute floss).
+    if (Object.keys(stolen).length > 0) grantAttackShield(targetUserId);
 
     addReport(req.userId, {
       type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt',
@@ -1834,6 +1862,10 @@ const SABOTAGE_COOLDOWN_MS = 2 * 60 * 60 * 1000;
 app.post('/api/sabotage', attackRateLimit, authMiddleware, async (req, res) => {
   const { targetUserId } = req.body || {};
   if (!targetUserId || targetUserId === req.userId) return res.status(400).json({ error: 'Ungültiges Ziel.' });
+  // Schutzschild des Ziels respektieren; selbst offensiv werden verwirkt den eigenen Schild.
+  const sabShieldLeft = attackShieldRemaining(targetUserId);
+  if (sabShieldLeft > 0) return res.status(403).json({ error: 'Ziel steht unter Angriffs-Schutzschild.', shieldMs: sabShieldLeft });
+  breakOwnAttackShield(req.userId);
   const attackerRaw = getSaveValue(req.userId);
   const targetRaw = getSaveValue(targetUserId);
   if (!attackerRaw || !targetRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
@@ -1878,6 +1910,7 @@ app.post('/api/sabotage', attackRateLimit, authMiddleware, async (req, res) => {
     attacker.battlePoints = (attacker.battlePoints || 0) + 8;
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     setSaveValue(targetUserId, JSON.stringify(target));
+    grantAttackShield(targetUserId); // Opfer erhält Schutzschild gegen weiteres Nachtreten
     addReport(req.userId, { type: 'sabotage-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt', effect });
     addReport(targetUserId, { type: 'sabotage-received', result: 'loss', attackerName: req.username, effect });
     if (targetUser) { const prefs = getNotifPrefs(targetUser); if (prefs.enabled && prefs.spy) pushNotificationEvent(targetUserId, 'sabotaged', { fromName: req.username, kind: effect.kind, durationMin: effect.durationMin }); }

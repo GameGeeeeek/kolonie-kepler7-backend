@@ -735,13 +735,27 @@ function getNotifPrefs(user) {
     completion: p.completion !== false
   };
 }
-function pushNotificationEvent(userId, type, payload) {
+function pushNotificationEvent(userId, type, payload, opts) {
   if (!userId) return;
   if (!db.private[userId]) db.private[userId] = {};
   const list = db.private[userId].__notificationEvents || [];
   list.unshift({ id: crypto.randomUUID(), type, time: Date.now(), payload });
   db.private[userId].__notificationEvents = list.slice(0, 30);
-  sendWebPushToUser(userId, type, payload); // schluckt eigene Fehler, blockiert nie den Aufrufer
+  // opts.skipWebPush: den Postfach-Eintrag trotzdem speichern (volle Historie), aber die echte
+  // Handy-Push unterdrücken - genutzt für die Anti-Flut-Drosselung bei wiederholten Angriffen.
+  if (!(opts && opts.skipWebPush)) sendWebPushToUser(userId, type, payload); // schluckt eigene Fehler, blockiert nie den Aufrufer
+}
+// Anti-Push-Flut bei Angriffen (Retention-Feinschliff, 21.07.2026): ein Dauer-Angreifer soll den
+// Verteidiger nicht mit Handy-Pushes zuspammen. Gibt true zurück (und merkt sich den Zeitpunkt), wenn
+// seit der letzten Angriffs-Push genug Zeit vergangen ist - sonst false (Postfach-Eintrag kommt
+// trotzdem, nur die Push wird unterdrückt).
+const ATTACK_PUSH_COOLDOWN_MS = 30 * 60 * 1000;
+function allowAttackPush(targetUserId) {
+  if (!db.private[targetUserId]) db.private[targetUserId] = {};
+  const now = Date.now();
+  if (now - (db.private[targetUserId].__lastAttackPush || 0) < ATTACK_PUSH_COOLDOWN_MS) return false;
+  db.private[targetUserId].__lastAttackPush = now;
+  return true;
 }
 // Lesbarer Titel/Text je Ereignistyp für die eigentliche Push-Nachricht (Postfach-Anzeige im
 // Client hat ihre eigene, leicht andere Formulierung - hier bewusst kompakter fürs Benachrichtigungsfenster).
@@ -1772,7 +1786,7 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     });
     // Verteidiger benachrichtigen (Retention-Trigger 21.07.2026): angegriffen zu werden ist einer der
     // stärksten Rückkehr-Anlässe. Server hat den Kampf ohnehin aufgelöst - hier nur der Push obendrauf.
-    if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: false, looted: Object.keys(stolen).length > 0 }); }
+    if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: false, looted: Object.keys(stolen).length > 0 }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     await saveDb();
     return res.json({ success: true, stolen, destroyedBuilding, attackPower, defensePower, saveVersion: mySaveVersion });
   } else {
@@ -1787,7 +1801,7 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
       type: 'attack-received', result: 'win', attackerName: req.username,
       attackPower, defensePower, defenseBefore, fleet: attackerFleetSummary
     });
-    if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: true, looted: false }); }
+    if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: true, looted: false }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     await saveDb();
     return res.json({ success: false, attackPower, defensePower, saveVersion: mySaveVersion });
   }

@@ -1399,7 +1399,14 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   if (key === SAVE_KEY) {
     try {
       const violation = saveSanityViolation(JSON.parse(value));
-      if (violation) return res.status(400).json({ error: 'Spielstand abgelehnt (unplausibler Wert): ' + violation });
+      if (violation) {
+        // Sichtbar loggen: eine Ablehnung bedeutet für den Spieler faktisch kompletten Speicherverlust,
+        // das darf nie unbemerkt passieren. So lässt sich im docker-log sofort sehen, WELCHER Wert bei
+        // WELCHEM Konto anschlägt (falls trotz angehobener Grenzen noch etwas rejected wird, z.B. ein
+        // NaN/negativer Wert aus einem Client-Bug).
+        console.warn('[save-reject] userId=' + req.userId + ' reason=' + violation);
+        return res.status(400).json({ error: 'Spielstand abgelehnt (unplausibler Wert): ' + violation });
+      }
     } catch (e) { return res.status(400).json({ error: 'Spielstand ist kein gültiges JSON.' }); }
   }
 
@@ -1581,14 +1588,22 @@ function allBuildingsOf(save) {
 // Mechanik-Änderung. Reales Maximum bei Gebäuden/Forschung liegt bei Stufe 20 (paar Ausnahmen
 // niedriger) - 60 lässt reichlich Luft für künftige Erweiterungen, ohne offensichtlichen Unsinn
 // durchzulassen.
+// Plausibilitäts-Obergrenzen (Anti-Cheat gegen injizierte Absurd-Werte). WICHTIG (Spieler-Report
+// 21.07.2026): Diese Grenzen dürfen legitimes, langjähriges Spiel NIE blockieren - ein einziger
+// überschrittener Wert lässt den GESAMTEN Spielstand serverseitig ablehnen (HTTP 400), was faktisch
+// kompletten Speicherverlust bedeutet (jeder Reload lädt den letzten akzeptierten Stand -> "immer 8h
+// offline"). Die alten Grenzen (Gebäude/Forschung Stufe 60, Kredite 1e8) wurden von entwickelten
+// Konten real überschritten und froren deren Speichern ein. Jetzt klar oberhalb jedes realistischen
+// Spielfortschritts angesetzt - sie fangen weiterhin offensichtlich gefälschte Werte ab, sperren aber
+// keine echten Spieler mehr aus.
 const SAVE_SANITY_LIMITS = {
-  maxBuildingLevel: 60,
-  maxResearchLevel: 60,
-  maxShipsPerType: 500000,
-  maxResourceValue: 1e13,
-  maxCredits: 1e8,
-  maxPrestige: 500,
-  maxXp: 1e9
+  maxBuildingLevel: 10000,
+  maxResearchLevel: 10000,
+  maxShipsPerType: 1e9,
+  maxResourceValue: 1e15,
+  maxCredits: 1e12,
+  maxPrestige: 100000,
+  maxXp: 1e14
 };
 function numberOutOfRange(v, max) {
   return typeof v === 'number' && (!Number.isFinite(v) || v < 0 || v > max);

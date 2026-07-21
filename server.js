@@ -2513,19 +2513,31 @@ function loadOrInitGalaxy() {
 // dessen Spielstand geschrieben (keine Schreibzugriffe auf fremde Spielstände - die würden mit dem
 // Autosave online spielender Nutzer kollidieren).
 const WORLD_BOSS_NAMES = ['Leviathan der Leere', 'Chronos-Verschlinger', 'Die Singularität', 'Wächter des Abgrunds', 'Nova-Titan'];
+// Boss-Archetypen (#8): jeder Spawn wählt eine Variante, die HP-Menge und Auftauchdauer verändert und
+// einen thematischen Kampf-Trait mitbringt. Bewusst BELOHNUNGS-NEUTRAL gehalten (keine Änderung an der
+// schadensanteil-basierten Belohnungsmathematik) - die Variety kommt aus Zähigkeit/Zeitdruck/Flavour,
+// nicht aus abweichenden Ausschüttungen. hpMult/durH modifizieren nur Spawn-Parameter.
+const WORLD_BOSS_ARCHETYPES = [
+  { key: 'normal',   label: 'Wandelnder Koloss', hpMult: 1.0,  durH: 72, trait: 'Ein ausgewogener Gegner – gemeinsames Dauerfeuer bringt ihn zu Fall.' },
+  { key: 'bastion',  label: 'Panzer-Bastion',    hpMult: 1.8,  durH: 96, trait: 'Extrem zäh (deutlich mehr HP), bleibt dafür länger – nur koordinierte Allianzen knacken ihn.' },
+  { key: 'schwarm',  label: 'Schwarm-Titan',     hpMult: 0.55, durH: 36, trait: 'Wenig HP, aber kurzes Zeitfenster – schnell zuschlagen, sonst zieht er sich zurück!' },
+  { key: 'phantom',  label: 'Phasen-Phantom',    hpMult: 1.2,  durH: 60, trait: 'Wechselt ständig seine Deckung – seine Schwäche gegen bestimmte Schiffstypen wiegt hier besonders schwer.' }
+];
 function spawnWorldBoss(g) {
   const users = Math.max(1, Object.keys(db.users).length);
-  const maxHp = Math.round(40000 * (1 + users * 0.4));
+  const arch = WORLD_BOSS_ARCHETYPES[Math.floor(Math.random() * WORLD_BOSS_ARCHETYPES.length)];
+  const maxHp = Math.round(40000 * (1 + users * 0.4) * arch.hpMult);
   g.worldBoss = {
     id: crypto.randomUUID(),
     name: WORLD_BOSS_NAMES[Math.floor(Math.random() * WORLD_BOSS_NAMES.length)],
+    archetype: arch.key, archetypeLabel: arch.label, archetypeTrait: arch.trait,
     maxHp, hp: maxHp,
     system: pickRandomFreeSystem(),
-    expiresAt: Date.now() + 72 * 3600 * 1000,
+    expiresAt: Date.now() + arch.durH * 3600 * 1000,
     participants: {},   // userId -> Gesamtschaden (für die Bestenliste)
     lastAttack: {}      // userId -> Zeitstempel des letzten Angriffs (Abklingzeit)
   };
-  pushGalaxyNews('ti-alien', 'WELTBOSS: ' + g.worldBoss.name + ' ist bei ' + g.worldBoss.system + ' erschienen! Alle Kommandanten können ihn gemeinsam bekämpfen (' + maxHp.toLocaleString('de-DE') + ' HP).');
+  pushGalaxyNews('ti-alien', 'WELTBOSS (' + arch.label + '): ' + g.worldBoss.name + ' ist bei ' + g.worldBoss.system + ' erschienen! ' + arch.trait + ' Gemeinsam bekämpfbar (' + maxHp.toLocaleString('de-DE') + ' HP, Rückzug in ' + arch.durH + 'h).');
 }
 
 // ============ NPC-Fraktionen mit echtem Territorium ============

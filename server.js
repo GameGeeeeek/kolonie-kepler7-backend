@@ -2685,11 +2685,77 @@ function resolveWeeklyLeagueServer() {
   for (const uid of Object.keys(current)) wl.startScores[uid] = current[uid];
 }
 
+// --- Erklärte Allianz-Kriege auflösen (#4) ---
+// Ein Krieg (Frontend: declareWar) läuft 7 Tage und liegt komplett in db.shared: die Kriegslisten
+// (alliance:<TAG>:wars = {enemies:[...]}), die Punktestände (alliance:<TAG>:warscore:<ENEMY>) und die
+// individuellen Beiträge (alliance:<TAG>:warcontrib:<ENEMY>:<playerId>). Zusätzlich schreibt der Client
+// jetzt ein Zeitfenster (alliance:<TAG>:warmeta:<ENEMY> = {endsAt}). Ist es abgelaufen UND der Krieg noch
+// in beiden Kriegslisten aktiv, kürt der Server anhand der Kriegspunkte einen Sieger, schüttet dessen
+// beteiligten Kämpfern eine flache Kredit-Prämie aus (bewusst KEINE "N-Min-Produktion", um Explosionen zu
+// vermeiden) und räumt alle Kriegsdaten auf. Bei Frieden (Client entwertet das Zeitfenster + entfernt aus
+// den Kriegslisten) wird nur aufgeräumt, ohne Belohnung.
+const WAR_VICTORY_CREDITS = 1200;
+function warEnemiesOf(tag) {
+  try { const raw = db.shared['alliance:' + tag + ':wars']; return raw ? (JSON.parse(raw).enemies || []) : []; } catch (e) { return []; }
+}
+function warScoreOf(tag, enemy) {
+  try { const raw = db.shared['alliance:' + tag + ':warscore:' + enemy]; return raw ? (JSON.parse(raw).score || 0) : 0; } catch (e) { return 0; }
+}
+function warContributorIds(tag, enemy) {
+  const prefix = 'alliance:' + tag + ':warcontrib:' + enemy + ':';
+  return Object.keys(db.shared).filter(k => k.startsWith(prefix)).map(k => k.slice(prefix.length));
+}
+function removeWarEnemy(tag, enemy) {
+  const list = warEnemiesOf(tag).filter(e => e !== enemy);
+  db.shared['alliance:' + tag + ':wars'] = JSON.stringify({ enemies: list });
+}
+function cleanupWarKeys(a, b) {
+  const del = [
+    'alliance:' + a + ':warmeta:' + b, 'alliance:' + b + ':warmeta:' + a,
+    'alliance:' + a + ':warscore:' + b, 'alliance:' + b + ':warscore:' + a
+  ];
+  for (const k of del) delete db.shared[k];
+  const cp1 = 'alliance:' + a + ':warcontrib:' + b + ':', cp2 = 'alliance:' + b + ':warcontrib:' + a + ':';
+  for (const k of Object.keys(db.shared)) if (k.startsWith(cp1) || k.startsWith(cp2)) delete db.shared[k];
+}
+function resolveAllianceWarsServer() {
+  const now = Date.now();
+  const metaKeys = Object.keys(db.shared).filter(k => /^alliance:[^:]+:warmeta:[^:]+$/.test(k));
+  const seenPairs = new Set();
+  for (const key of metaKeys) {
+    const parts = key.split(':'); // ['alliance', A, 'warmeta', B]
+    const A = parts[1], B = parts[3];
+    let meta = null; try { meta = JSON.parse(db.shared[key]); } catch (e) {}
+    if (!meta) { delete db.shared[key]; continue; }
+    if ((meta.endsAt || 0) > now) continue; // Krieg läuft noch
+    const pair = [A, B].sort().join('|');
+    if (seenPairs.has(pair)) continue;
+    seenPairs.add(pair);
+    const stillActive = warEnemiesOf(A).includes(B) && warEnemiesOf(B).includes(A);
+    if (stillActive) {
+      const scoreA = warScoreOf(A, B), scoreB = warScoreOf(B, A);
+      const winner = scoreA > scoreB ? A : (scoreB > scoreA ? B : null);
+      if (winner) {
+        const loser = winner === A ? B : A;
+        const wS = winner === A ? scoreA : scoreB, lS = winner === A ? scoreB : scoreA;
+        const members = warContributorIds(winner, loser);
+        for (const uid of members) pushPendingReward(uid, { type: 'war-victory', enemyTag: loser, credits: WAR_VICTORY_CREDITS, myScore: wS, theirScore: lS });
+        pushGalaxyNews('ti-trophy', 'Allianz-Krieg beendet: [' + winner + '] besiegt [' + loser + '] mit ' + wS + ':' + lS + ' Kriegspunkten.');
+      } else {
+        pushGalaxyNews('ti-flag', 'Allianz-Krieg zwischen [' + A + '] und [' + B + '] endet unentschieden (' + scoreA + ':' + scoreB + ').');
+      }
+      removeWarEnemy(A, B); removeWarEnemy(B, A);
+    }
+    cleanupWarKeys(A, B);
+  }
+}
+
 function galaxyTick() {
   const g = loadOrInitGalaxy();
   g.lastTick = Date.now();
   updateHallOfFameServer();
   resolveWeeklyLeagueServer();
+  resolveAllianceWarsServer();
 
   // NPC-Reiche wachsen langsam, gedeckelt bei 2.5x, damit es nicht unendlich eskaliert.
   g.npcEmpireStrength = Math.min(2.5, g.npcEmpireStrength * (1 + 0.002 + Math.random() * 0.003));

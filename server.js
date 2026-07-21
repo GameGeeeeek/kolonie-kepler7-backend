@@ -61,16 +61,38 @@ function loadDb() {
 }
 let db = loadDb();
 
-let writeChain = Promise.resolve();
+// saveDb() mit In-Flight-Coalescing: Bisher reihte jeder Aufruf einen EIGENEN vollständigen Schreib-
+// vorgang der gesamten db.json in eine Kette - bei mehreren gleichzeitigen Requests also N teure
+// JSON.stringify+write-Durchläufe. Jetzt läuft immer nur EIN Schreibvorgang; alle Aufrufe, die während
+// eines laufenden Writes eintreffen, werden zu genau EINEM Folge-Write zusammengefasst (der den dann
+// aktuellsten db-Stand schreibt). Kein künstlicher Delay im Leerlauf, und die await-Semantik bleibt
+// erhalten: das zurückgegebene Promise löst erst auf, nachdem ein Write gelaufen ist, der die
+// Änderung des Aufrufers enthält (der Waiter wird frühestens vom nächsten startenden Write eingelöst).
+let saveInFlight = false;
+let saveWaiters = [];
+function performDbWrite() {
+  saveInFlight = true;
+  const claimed = saveWaiters;
+  saveWaiters = [];
+  const data = JSON.stringify(db); // Snapshot des aktuellen Standes (synchron, enthält alle bisherigen Mutationen)
+  const tmp = DB_FILE + '.tmp';
+  const finish = (err) => {
+    if (err) console.error('DB-Speichern fehlgeschlagen:', err);
+    saveInFlight = false;
+    claimed.forEach(r => r());
+    // Kamen während des Schreibens neue saveDb()-Aufrufe rein? Dann genau EIN weiterer Write.
+    if (saveWaiters.length) performDbWrite();
+  };
+  fs.writeFile(tmp, data, (err) => {
+    if (err) return finish(err);
+    fs.rename(tmp, DB_FILE, (err2) => finish(err2));
+  });
+}
 function saveDb() {
-  writeChain = writeChain.then(() => new Promise((resolve, reject) => {
-    const tmp = DB_FILE + '.tmp';
-    fs.writeFile(tmp, JSON.stringify(db), (err) => {
-      if (err) return reject(err);
-      fs.rename(tmp, DB_FILE, (err2) => err2 ? reject(err2) : resolve());
-    });
-  }));
-  return writeChain;
+  return new Promise((resolve) => {
+    saveWaiters.push(resolve);
+    if (!saveInFlight) performDbWrite();
+  });
 }
 
 const app = express();
@@ -82,7 +104,19 @@ const app = express();
 // proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; - im vorhandenen nginx-Setup bitte
 // einmal gegenpruefen, falls Rate-Limiting nicht wie erwartet greift).
 app.set('trust proxy', 1);
-app.use(cors());
+// CORS auf die eigenen Spiel-Domains beschränken (statt für JEDE Website offen zu stehen). Das Frontend
+// wird same-origin über den nginx-Proxy ausgeliefert, braucht also keinen Fremd-Origin-Zugriff. Anfragen
+// OHNE Origin-Header (native Apps, curl, Server-zu-Server wie Ko-fi-/GitHub-Webhooks, same-origin) werden
+// weiterhin zugelassen - nur fremde Browser-Websites bekommen keinen CORS-Freibrief mehr. Die erlaubten
+// Origins lassen sich per Env-Var CORS_ORIGINS (kommagetrennt) überschreiben.
+const CORS_ALLOWED = (process.env.CORS_ORIGINS || 'https://www.gamegeeeeek.de,https://gamegeeeeek.de')
+  .split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || CORS_ALLOWED.includes(origin)) return cb(null, true);
+    return cb(null, false); // kein Access-Control-Allow-Origin-Header -> Browser blockt die fremde Seite
+  }
+}));
 // --- Rate-Limiting (13.07.2026, Feature-Wunsch: Vorbereitung auf plötzlichen Ansturm/TikTok-viral) ---
 // Bewusst ohne zusätzliche npm-Abhängigkeit (express-rate-limit) - ein einfacher In-Memory-Zähler
 // pro IP reicht für einen einzelnen Server voll aus und erspart einen zusätzlichen npm-install-

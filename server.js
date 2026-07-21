@@ -729,7 +729,8 @@ function getNotifPrefs(user) {
     raid: p.raid !== false,
     patchnotes: p.patchnotes !== false,
     application: p.application !== false,
-    spy: p.spy !== false
+    spy: p.spy !== false,
+    attack: p.attack !== false
   };
 }
 function pushNotificationEvent(userId, type, payload) {
@@ -746,6 +747,9 @@ function pushNotificationText(type, payload) {
   if (type === 'pact-offer') return { title: 'Neues Pakt-Angebot', body: (payload.fromName || 'Ein Spieler') + ' bietet dir einen Nichtangriffspakt an.' };
   if (type === 'weltboss-kill') return { title: 'Weltboss besiegt!', body: 'Leviathan Stufe ' + (payload.level || 1) + ' erlegt - dein Beitrag: ' + (payload.share || 0) + '%.' };
   if (type === 'raid-incoming') return { title: 'Überfall!', body: 'Eine feindliche Flotte greift deine Kolonie an.' };
+  if (type === 'attack-received') return payload.defended
+    ? { title: 'Angriff abgewehrt!', body: (payload.attackerName || 'Ein Spieler') + ' hat dich angegriffen - deine Verteidigung hat gehalten. Sieh dir den Bericht an.' }
+    : { title: 'Du wurdest angegriffen!', body: (payload.attackerName || 'Ein Spieler') + ' hat deine Kolonie überfallen' + (payload.looted ? ' und Ressourcen erbeutet' : '') + '. Rüste auf oder schlage zurück!' };
   if (type === 'spy-detected') return payload.sabotage
     ? { title: 'Störmanöver!', body: (payload.fromName || 'Ein Spieler') + ' hat ein Sabotage-Störmanöver gegen dich geflogen - prüfe deine Ressourcen und Spionageabwehr.' }
     : { title: 'Spionage entdeckt', body: (payload.fromName || 'Ein Spieler') + ' hat deine Kolonie ausgespäht' + (payload.deep ? ' (Tiefen-Aufklärung inkl. Beute-Schätzung).' : '.') };
@@ -1759,6 +1763,9 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
       type: 'attack-received', result: 'loss', attackerName: req.username,
       attackPower, defensePower, stolen, destroyedBuilding, defenseBefore, fleet: attackerFleetSummary
     });
+    // Verteidiger benachrichtigen (Retention-Trigger 21.07.2026): angegriffen zu werden ist einer der
+    // stärksten Rückkehr-Anlässe. Server hat den Kampf ohnehin aufgelöst - hier nur der Push obendrauf.
+    if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: false, looted: Object.keys(stolen).length > 0 }); }
     await saveDb();
     return res.json({ success: true, stolen, destroyedBuilding, attackPower, defensePower, saveVersion: mySaveVersion });
   } else {
@@ -1773,6 +1780,7 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
       type: 'attack-received', result: 'win', attackerName: req.username,
       attackPower, defensePower, defenseBefore, fleet: attackerFleetSummary
     });
+    if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: true, looted: false }); }
     await saveDb();
     return res.json({ success: false, attackPower, defensePower, saveVersion: mySaveVersion });
   }
@@ -2188,7 +2196,8 @@ app.post('/api/notification-prefs', authMiddleware, async (req, res) => {
     raid: b.raid !== false,
     patchnotes: b.patchnotes !== false,
     application: b.application !== false,
-    spy: b.spy !== false
+    spy: b.spy !== false,
+    attack: b.attack !== false
   };
   await saveDb();
   res.json(getNotifPrefs(user));

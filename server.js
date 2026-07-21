@@ -2577,9 +2577,44 @@ function pickRandomFreeSystem() {
   const free = SYSTEMS.filter(s => !occupied.has(s));
   return free.length ? free[Math.floor(Math.random()*free.length)] : SYSTEMS[Math.floor(Math.random()*SYSTEMS.length)];
 }
+// Ruhmeshalle serverseitig pflegen (#7): Bisher hielt nur der Client den Eintrag des aktuellen Monats
+// aktuell (beim Bestenlisten-Laden) - lud in den letzten Stunden vor Monatswechsel niemand die Liste,
+// fror ein veralteter Champion ein. Jetzt aktualisiert der galaxyTick (alle 15 Min, auch ohne Online-
+// Spieler) den Eintrag des laufenden Monats mit dem tatsächlichen Bestenlisten-Spitzenreiter. Vergangene
+// Monate bleiben unangetastet (sie werden nie überschrieben) und frieren am Monatswechsel automatisch auf
+// dem letzten Stand ein. Schreibt direkt in db.shared (Server ist autoritativ, keine Permission-Prüfung).
+function updateHallOfFameServer() {
+  let champion = null;
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith('leaderboard:')) continue;
+    try {
+      const v = JSON.parse(db.shared[k]);
+      if (!champion || (v.score || 0) > (champion.score || 0)) champion = v;
+    } catch (e) {}
+  }
+  if (!champion) return;
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  let records = [];
+  try { records = db.shared['halloffame:records'] ? JSON.parse(db.shared['halloffame:records']) : []; } catch (e) { records = []; }
+  const entry = { month: thisMonth, name: champion.name || 'Unbekannt', allianceTag: champion.allianceTag || '', score: champion.score || 0 };
+  const idx = records.findIndex(r => r && r.month === thisMonth);
+  if (idx >= 0) {
+    // Nur überschreiben, wenn sich wirklich etwas ändert (spart unnötige DB-Writes je Tick).
+    const p = records[idx];
+    if (p.name === entry.name && p.allianceTag === entry.allianceTag && p.score === entry.score) return;
+    records[idx] = entry;
+  } else {
+    records.push(entry);
+  }
+  records.sort((a, b) => a.month.localeCompare(b.month));
+  records = records.slice(-24);
+  db.shared['halloffame:records'] = JSON.stringify(records);
+}
+
 function galaxyTick() {
   const g = loadOrInitGalaxy();
   g.lastTick = Date.now();
+  updateHallOfFameServer();
 
   // NPC-Reiche wachsen langsam, gedeckelt bei 2.5x, damit es nicht unendlich eskaliert.
   g.npcEmpireStrength = Math.min(2.5, g.npcEmpireStrength * (1 + 0.002 + Math.random() * 0.003));

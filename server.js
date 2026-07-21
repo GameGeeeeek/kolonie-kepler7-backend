@@ -1853,26 +1853,33 @@ app.post('/api/sabotage', attackRateLimit, authMiddleware, async (req, res) => {
   db.private[req.userId].__sabotageCooldowns = cds;
   const targetUser = findUserById(targetUserId);
   if (success) {
-    const lootPct = 0.04 + Math.random() * 0.04; // 4-8% (Angriff: 12-25%)
-    const farmPenalty = farmingPenaltyFor(req.userId, targetUserId);
-    const stolen = {};
-    for (const [r, amt] of Object.entries(target.resources || {})) {
-      if (r === 'energie' || r === 'forschungspunkte') continue; // nur erbeutbare Ressourcen, wie beim Angriff
-      const take = Math.floor((amt || 0) * lootPct * farmPenalty);
-      if (take > 0) {
-        stolen[r] = take;
-        target.resources[r] = Math.max(0, (target.resources[r] || 0) - take);
-        attacker.resources[r] = (attacker.resources[r] || 0) + take;
-      }
+    // Echte Sabotage statt Ressourcenklau (Spieler-Wunsch 21.07.2026): zufällig entweder ein
+    // Produktionsgebäude des Ziels 30 Min lang -50% (mineDebuff, vom Client wie die NPC-Sabotage
+    // angewendet/angezeigt/reparierbar) ODER die Verteidigung 30 Min lang -30% (defenseSabotage).
+    // Wird direkt in den Ziel-Spielstand geschrieben; der Angreifer bekommt keine Beute mehr, nur
+    // Kampfpunkte. Keine Ressourcen wechseln den Besitzer.
+    const now = Date.now();
+    const DUR_MS = 30 * 60 * 1000;
+    let effect;
+    if (Math.random() < 0.5) {
+      // Produktion lahmlegen: ein Kern-Produktionsgebäude wählen, das das Ziel tatsächlich besitzt.
+      const prodKeys = ['solar', 'mine', 'raffinerie', 'synth', 'fusionsreaktor'];
+      const owned = prodKeys.filter(k => target.buildings && (target.buildings[k] || 0) > 0);
+      const key = owned.length ? owned[Math.floor(Math.random() * owned.length)] : 'mine';
+      target.mineDebuff = { key, planet: 'home', pct: 0.5, until: now + DUR_MS, sabotage: true };
+      effect = { kind: 'production', buildingKey: key, pct: 0.5, durationMin: 30 };
+    } else {
+      target.defenseSabotage = { pct: 0.3, until: now + DUR_MS, sabotage: true };
+      effect = { kind: 'defense', pct: 0.3, durationMin: 30 };
     }
     attacker.battlePoints = (attacker.battlePoints || 0) + 8;
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     setSaveValue(targetUserId, JSON.stringify(target));
-    addReport(req.userId, { type: 'sabotage-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt', stolen });
-    addReport(targetUserId, { type: 'sabotage-received', result: 'loss', attackerName: req.username, stolen });
+    addReport(req.userId, { type: 'sabotage-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt', effect });
+    addReport(targetUserId, { type: 'sabotage-received', result: 'loss', attackerName: req.username, effect });
     if (targetUser) { const prefs = getNotifPrefs(targetUser); if (prefs.enabled && prefs.spy) pushNotificationEvent(targetUserId, 'spy-detected', { fromName: req.username, sabotage: true }); }
     await saveDb();
-    return res.json({ success: true, stolen, saveVersion: mySaveVersion });
+    return res.json({ success: true, effect, saveVersion: mySaveVersion });
   } else {
     addReport(req.userId, { type: 'sabotage-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt' });
     addReport(targetUserId, { type: 'sabotage-received', result: 'win', attackerName: req.username });

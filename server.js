@@ -2611,10 +2611,85 @@ function updateHallOfFameServer() {
   db.shared['halloffame:records'] = JSON.stringify(records);
 }
 
+// --- Wochenliga serverseitig abrechnen (#6) ---
+// Bisher bestimmte jeder CLIENT selbst seine Liga-Platzierung UND zahlte sich die Belohnung aus - beides
+// manipulierbar. Jetzt hält der Server für die laufende Woche je Spieler den START-Score (aus der bereits
+// serverseitig validierten Bestenliste) und rechnet am Wochenwechsel autoritativ ab: Rang nach echtem
+// Punktezuwachs, Liga nach Rang, Belohnung als pending-reward vom Typ 'weekly-league' (der Client wendet
+// nur noch die vom Server zugewiesene Liga-Stufe an, siehe claimPendingRewards). Läuft im galaxyTick, also
+// auch ohne Online-Spieler exakt am Wochenwechsel.
+const WEEKLY_LEAGUE_KEYS = ['platin', 'gold', 'silber', 'bronze'];
+function serverWeekKey(ts) {
+  const d = new Date(ts);
+  const day = (d.getDay() + 6) % 7; // Mo=0 ... So=6
+  const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - day);
+  return monday.getFullYear() + '-' + String(monday.getMonth() + 1).padStart(2, '0') + '-' + String(monday.getDate()).padStart(2, '0');
+}
+function leagueIndexForRankServer(rank, total) {
+  if (total >= 8) {
+    const q = Math.ceil(total * 0.25);
+    if (rank <= q) return 0;
+    if (rank <= 2 * q) return 1;
+    if (rank <= 3 * q) return 2;
+    return 3;
+  }
+  return Math.min(Math.max(0, rank - 1), 3);
+}
+function pushPendingReward(userId, reward) {
+  if (!db.private[userId]) db.private[userId] = {};
+  const list = db.private[userId].__pendingRewards || [];
+  // Idempotenz: dieselbe Wochenliga-Belohnung nie doppelt einreihen.
+  if (reward.type === 'weekly-league' && list.some(r => r.type === 'weekly-league' && r.weekKey === reward.weekKey)) return;
+  reward.id = crypto.randomUUID();
+  list.push(reward);
+  db.private[userId].__pendingRewards = list.slice(-20);
+}
+function resolveWeeklyLeagueServer() {
+  const g = loadOrInitGalaxy();
+  if (!g.weeklyLeague || typeof g.weeklyLeague !== 'object') g.weeklyLeague = { weekKey: null, startScores: {} };
+  const wl = g.weeklyLeague;
+  if (!wl.startScores || typeof wl.startScores !== 'object') wl.startScores = {};
+  const nowKey = serverWeekKey(Date.now());
+  // Aktuelle (validierte) Scores der Bestenliste einsammeln.
+  const current = {};
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith('leaderboard:')) continue;
+    const uid = k.slice('leaderboard:'.length);
+    try { current[uid] = (JSON.parse(db.shared[k]).score) || 0; } catch (e) {}
+  }
+  if (wl.weekKey === nowKey) {
+    // Gleiche Woche: neu aufgetauchte Spieler mit ihrem aktuellen Score als Startwert erfassen.
+    for (const uid of Object.keys(current)) if (!(uid in wl.startScores)) wl.startScores[uid] = current[uid];
+    return;
+  }
+  // Wochenwechsel -> Vorwoche abrechnen (nur wenn es eine gab und Teilnehmer existieren).
+  if (wl.weekKey) {
+    const participants = [];
+    for (const uid of Object.keys(wl.startScores)) {
+      if (!(uid in current)) continue; // nicht mehr in der Bestenliste
+      participants.push({ uid, weekScore: Math.max(0, current[uid] - (wl.startScores[uid] || 0)) });
+    }
+    if (participants.length) {
+      participants.sort((a, b) => b.weekScore - a.weekScore);
+      const total = participants.length;
+      participants.forEach((p, i) => {
+        const league = WEEKLY_LEAGUE_KEYS[leagueIndexForRankServer(i + 1, total)];
+        pushPendingReward(p.uid, { type: 'weekly-league', league, rank: i + 1, total, weekKey: wl.weekKey });
+      });
+      pushGalaxyNews('ti-trophy', 'Wochenliga abgerechnet: ' + total + ' Kommandanten haben um den Aufstieg gekämpft. Belohnungen warten beim nächsten Login.');
+    }
+  }
+  // Neue Woche starten: alle aktuellen Scores als Startwerte festhalten.
+  wl.weekKey = nowKey;
+  wl.startScores = {};
+  for (const uid of Object.keys(current)) wl.startScores[uid] = current[uid];
+}
+
 function galaxyTick() {
   const g = loadOrInitGalaxy();
   g.lastTick = Date.now();
   updateHallOfFameServer();
+  resolveWeeklyLeagueServer();
 
   // NPC-Reiche wachsen langsam, gedeckelt bei 2.5x, damit es nicht unendlich eskaliert.
   g.npcEmpireStrength = Math.min(2.5, g.npcEmpireStrength * (1 + 0.002 + Math.random() * 0.003));

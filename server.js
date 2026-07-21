@@ -2860,7 +2860,7 @@ app.get('/api/market', authMiddleware, (req, res) => {
   // bleibt für künftige Sonder-Ressourcen erhalten).
   const out = {};
   for (const key of Object.keys(MARKET_RESOURCES)) {
-    out[key] = { price: market[key], basePrice: MARKET_RESOURCES[key].basePrice, impactScale: MARKET_RESOURCES[key].impactScale || 1, history: (g.marketHistory && g.marketHistory[key]) || [] };
+    out[key] = { price: market[key], basePrice: MARKET_RESOURCES[key].basePrice, min: MARKET_RESOURCES[key].min, max: MARKET_RESOURCES[key].max, impactScale: MARKET_RESOURCES[key].impactScale || 1, history: (g.marketHistory && g.marketHistory[key]) || [] };
   }
   res.json({ market: out, event: g.marketEvent || null });
 });
@@ -2918,7 +2918,21 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
   const impact = (amt / 1000) * MARKET_IMPACT_PER_1000 * MARKET_RESOURCES[resource].basePrice * (MARKET_RESOURCES[resource].impactScale || 1);
   const priceAfterRaw = action === 'buy' ? priceBefore + impact : priceBefore - impact;
   const priceAfter = clampMarketPrice(resource, priceAfterRaw);
-  const avgPrice = (priceBefore + priceAfter) / 2;
+  // Klemm-korrekter Durchschnittspreis (Balance 21.07.2026, Spieler-Report "beim Verkauf von 900k gibt
+  // es viel zu viele Kredite"): Ein sehr großer Trade drückt den Preis oft WEIT über den Boden/Deckel
+  // hinaus. Bisher wurde trotzdem stur zwischen priceBefore und dem geklemmten Preis gemittelt - das
+  // überzahlte Mega-Verkäufe massiv, weil die große Masse der Einheiten real am Boden gehandelt wird,
+  // aber wie zum Mittelwert (priceBefore+Boden)/2 vergütet wurde. Jetzt: linear NUR bis die Grenze
+  // erreicht ist, alle weiteren Einheiten zur Grenze. Kleine Trades (ohne Klemmung) bleiben unverändert.
+  let avgPrice;
+  if (priceAfterRaw === priceAfter) {
+    avgPrice = (priceBefore + priceAfter) / 2;
+  } else {
+    const total = Math.abs(priceBefore - priceAfterRaw);
+    const toBound = Math.abs(priceBefore - priceAfter);
+    const f = total > 0 ? Math.min(1, toBound / total) : 0; // Anteil der Einheiten VOR dem Anschlag
+    avgPrice = f * ((priceBefore + priceAfter) / 2) + (1 - f) * priceAfter;
+  }
   const discount = marketDiscountPctFor(save);
   // Verkaufserlös reduziert (Geld-Brief-Spread), Kartell-/Allianz-Rabatt wirkt beim Verkauf als Bonus
   // obendrauf, beim Kauf als Abzug von den Kosten. Balance (21.07.2026, Spieler-Report "zu viele Kredite

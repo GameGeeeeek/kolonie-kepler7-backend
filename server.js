@@ -165,6 +165,13 @@ function authMiddleware(req, res, next) {
     // Sperrung sonst erst beim nächsten Login-Versuch wirksam werden lassen, nicht sofort.
     const user = findUserById(payload.userId);
     if (user && user.banned) return res.status(403).json({ error: 'Dieses Konto wurde gesperrt.' });
+    // Token-Versions-Prüfung: nach einem Passwort-Reset zählt user.tokenVersion hoch, wodurch ältere
+    // Tokens (mit kleinerem tv) ungültig werden - ein gestohlenes/geleaktes Token verliert so beim
+    // Passwortwechsel sofort seine Gültigkeit, statt bis zu 180 Tage weiterzuleben. Fehlende Felder
+    // (Bestandskonten / alte Tokens) gelten beidseitig als 0, bleiben also gültig.
+    if (user && (user.tokenVersion || 0) !== (payload.tv || 0)) {
+      return res.status(401).json({ error: 'Sitzung abgelaufen oder ungültig.' });
+    }
     req.userId = payload.userId;
     req.username = payload.username;
     next();
@@ -1155,7 +1162,10 @@ app.post('/api/login', authRateLimit, async (req, res) => {
     return res.status(403).json({ error: 'Konto noch nicht bestätigt. Bitte klicke auf den Link in der Bestätigungs-E-Mail.', needsVerification: true });
   }
 
-  const token = jwt.sign({ userId: user.userId, username: user.username }, JWT_SECRET, { expiresIn: '180d' });
+  // tv (tokenVersion) wird bei jedem Passwort-Reset hochgezählt und in authMiddleware gegengeprüft -
+  // dadurch werden nach einem Passwortwechsel ALLE zuvor ausgestellten (bis zu 180 Tage gültigen)
+  // Tokens sofort ungültig. Bestandskonten ohne Feld gelten als Version 0 (kein Zwangs-Logout).
+  const token = jwt.sign({ userId: user.userId, username: user.username, tv: user.tokenVersion || 0 }, JWT_SECRET, { expiresIn: '180d' });
   res.json({ token, userId: user.userId, username: user.username });
 });
 
@@ -1285,6 +1295,9 @@ app.post('/api/reset-password', authRateLimit, async (req, res) => {
   const user = findUserById(entry.userId);
   if (!user) return res.status(404).json({ error: 'Account nicht gefunden.' });
   user.passwordHash = await bcrypt.hash(newPassword, 10);
+  // Alle bisher ausgestellten Tokens dieses Kontos ungültig machen (siehe authMiddleware) - wer das
+  // Passwort zurücksetzt, wirft damit auch mögliche fremde/gekaperte Sitzungen sofort raus.
+  user.tokenVersion = (user.tokenVersion || 0) + 1;
   delete db.resetTokens[token];
   await saveDb();
   res.json({ ok: true });
@@ -2404,8 +2417,40 @@ app.get('/health', (req, res) => {
   res.status(status).json({ ok: dbOk, uptimeSec: Math.round(process.uptime()), time: new Date().toISOString() });
 });
 
-app.listen(PORT, () => {
+const httpServer = app.listen(PORT, () => {
   console.log('Kepler-7 Server läuft auf Port ' + PORT);
+});
+
+// --- Sauberes Herunterfahren: bei Neustart/Stop ausstehende In-Memory-Änderungen flushen ---
+// Ohne dies gehen bei jedem Neustart bis zu 5 Minuten (Intervall des periodischen saveDb) an nur im
+// RAM gehaltenen Daten verloren - v.a. Analytics (die bewusst nicht pro Event gespeichert werden) und
+// alles seit dem letzten saveDb. Passiert real bei JEDEM Deploy: nodemon startet bei Code-Änderungen
+// im Bind-Mount per SIGUSR2 neu, ein `docker restart`/`docker stop` sendet SIGTERM. Hier wird jeweils
+// einmal die DB auf Platte geschrieben, bevor der Prozess endet.
+let shutdownFlush = null;
+function flushBeforeExit() {
+  // saveDb() reiht sich in die Write-Chain ein und liefert ein Promise, das erst nach dem
+  // vollständigen atomaren Schreiben (tmp -> rename) auflöst. Nur einmal pro Shutdown starten.
+  if (!shutdownFlush) {
+    shutdownFlush = saveDb().catch(e => console.error('Flush beim Herunterfahren fehlgeschlagen:', e));
+  }
+  return shutdownFlush;
+}
+async function handleTerminate(signal) {
+  console.log(signal + ' empfangen - flushe DB und beende...');
+  httpServer.close(); // keine neuen Verbindungen mehr annehmen
+  await flushBeforeExit();
+  process.exit(0);
+}
+process.on('SIGTERM', () => handleTerminate('SIGTERM'));
+process.on('SIGINT', () => handleTerminate('SIGINT'));
+// nodemon signalisiert einen Neustart per SIGUSR2. Wir flushen erst und lösen das Signal danach erneut
+// aus (Handler ist per `once` schon entfernt), damit nodemon seinen Neustart wie gewohnt durchführt -
+// dieser Prozess darf sich hier NICHT selbst per process.exit beenden, sonst bleibt nodemon hängen.
+process.once('SIGUSR2', async () => {
+  console.log('SIGUSR2 (nodemon-Neustart) - flushe DB...');
+  await flushBeforeExit();
+  process.kill(process.pid, 'SIGUSR2');
 });
 
 // ============ Lebendige Galaxie: gemeinsame Hintergrund-Simulation ============

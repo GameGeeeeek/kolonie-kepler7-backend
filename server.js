@@ -731,7 +731,8 @@ function getNotifPrefs(user) {
     application: p.application !== false,
     spy: p.spy !== false,
     attack: p.attack !== false,
-    leaderboard: p.leaderboard !== false
+    leaderboard: p.leaderboard !== false,
+    completion: p.completion !== false
   };
 }
 function pushNotificationEvent(userId, type, payload) {
@@ -755,6 +756,10 @@ function pushNotificationText(type, payload) {
     ? { title: 'Störmanöver!', body: (payload.fromName || 'Ein Spieler') + ' hat ein Sabotage-Störmanöver gegen dich geflogen - prüfe deine Ressourcen und Spionageabwehr.' }
     : { title: 'Spionage entdeckt', body: (payload.fromName || 'Ein Spieler') + ' hat deine Kolonie ausgespäht' + (payload.deep ? ' (Tiefen-Aufklärung inkl. Beute-Schätzung).' : '.') };
   if (type === 'leaderboard-overtaken') return { title: 'Du wurdest überholt!', body: (payload.aheadName || 'Ein Spieler') + ' ist an dir vorbeigezogen - du bist jetzt auf Platz ' + (payload.rank || '?') + '. Zeit, zurückzuschlagen!' };
+  if (type === 'job-complete') {
+    const labels = { research: 'Deine Forschung ist abgeschlossen', construction: 'Ein Bauauftrag ist fertiggestellt', expedition: 'Eine Expedition ist zurückgekehrt', mission: 'Eine Mission ist zurückgekehrt', terraform: 'Ein Terraforming-Projekt ist fertig', exotic: 'Eine exotische Forschung ist abgeschlossen', veteran: 'Eine Veteranen-Ausbildung ist abgeschlossen' };
+    return { title: 'Kolonie Kepler-7', body: (labels[payload.jobType] || 'Etwas in deiner Kolonie ist fertig') + ' - komm zurück und mach weiter!' };
+  }
   if (type === 'message') return { title: 'Neue Nachricht', body: (payload.fromName || 'Ein Spieler') + ' hat dir geschrieben.' };
   if (type === 'patchnotes') return { title: 'Kolonie Kepler-7 aktualisiert', body: 'Version ' + (payload.version || '') + ' ist da - tippen für die Neuigkeiten.' };
   if (type === 'alliance-application') return { title: 'Neue Bewerbung', body: (payload.name || 'Ein Spieler') + ' möchte [' + (payload.tag || '') + '] beitreten.' };
@@ -2200,7 +2205,8 @@ app.post('/api/notification-prefs', authMiddleware, async (req, res) => {
     application: b.application !== false,
     spy: b.spy !== false,
     attack: b.attack !== false,
-    leaderboard: b.leaderboard !== false
+    leaderboard: b.leaderboard !== false,
+    completion: b.completion !== false
   };
   await saveDb();
   res.json(getNotifPrefs(user));
@@ -2216,6 +2222,32 @@ app.post('/api/notifications/dismiss', authMiddleware, async (req, res) => {
   }
   await saveDb();
   res.json({ ok: true });
+});
+// Fertigstellungs-Erinnerungen (Retention, 21.07.2026): Der Client kennt die Endzeiten seiner
+// laufenden Aufträge (Forschung, Bau, Expeditionen, Terraforming etc.), der Server nicht. Der Client
+// meldet daher die anstehenden Fertigstellungen als Ersatz-Termine (replace-all). Läuft ein Termin
+// ab, während der Spieler NICHT online ist (erkannt am lastSeen-Zeitstempel der Bestenliste), schickt
+// checkCompletionReminders() eine Push-Benachrichtigung. Nur Zeitstempel + Typ, keine sensiblen Daten.
+const VALID_REMINDER_TYPES = new Set(['research', 'construction', 'expedition', 'mission', 'terraform', 'exotic', 'veteran']);
+const REMINDER_MAX = 10;
+const REMINDER_MAX_HORIZON_MS = 14 * 24 * 3600 * 1000; // keine Termine weiter als 14 Tage in der Zukunft
+app.post('/api/reminders', authMiddleware, async (req, res) => {
+  const inList = Array.isArray((req.body || {}).reminders) ? req.body.reminders : [];
+  const now = Date.now();
+  const clean = [];
+  for (const r of inList) {
+    if (!r || typeof r !== 'object') continue;
+    const type = String(r.type || '');
+    const endTime = Number(r.endTime);
+    if (!VALID_REMINDER_TYPES.has(type)) continue;
+    if (!Number.isFinite(endTime) || endTime <= now || endTime > now + REMINDER_MAX_HORIZON_MS) continue;
+    clean.push({ type, endTime });
+    if (clean.length >= REMINDER_MAX) break;
+  }
+  if (!db.private[req.userId]) db.private[req.userId] = {};
+  db.private[req.userId].__reminders = clean;
+  await saveDb();
+  res.json({ ok: true, count: clean.length });
 });
 // Client meldet eine bevorstehende NPC-Überfall-Erkennung an (rein lokal berechnet, der Server
 // bekäme sonst nie etwas davon mit). Ein aktiver Alarm je Spieler, überschreibt einen alten.
@@ -2740,6 +2772,42 @@ function checkLeaderboardOvertakes() {
     }
   } catch (e) { console.error('checkLeaderboardOvertakes fehlgeschlagen:', e.message); }
 }
+// "Online"-Näherung über den lastSeen-Zeitstempel der Bestenliste (wird bei jedem Client-Speichern
+// gesetzt, auch alle 10s im offenen Tab). Wer kürzlich gespeichert hat, ist gerade da und braucht
+// keine Fertigstellungs-Push (er sieht es im Spiel selbst).
+const REMINDER_ONLINE_THRESHOLD_MS = 2 * 60 * 1000;
+function userIsOnline(userId) {
+  try {
+    const lb = db.shared['leaderboard:' + userId];
+    if (!lb) return false;
+    const v = JSON.parse(lb);
+    return (Date.now() - (v.lastSeen || 0)) < REMINDER_ONLINE_THRESHOLD_MS;
+  } catch (e) { return false; }
+}
+function checkCompletionReminders() {
+  try {
+    const now = Date.now();
+    let changed = false;
+    for (const [userId, priv] of Object.entries(db.private)) {
+      if (!priv || !Array.isArray(priv.__reminders) || !priv.__reminders.length) continue;
+      const due = priv.__reminders.filter(r => r.endTime <= now);
+      if (!due.length) continue;
+      priv.__reminders = priv.__reminders.filter(r => r.endTime > now);
+      changed = true;
+      if (userIsOnline(userId)) continue; // im Spiel selbst gesehen - keine Push nötig
+      const user = findUserById(userId);
+      if (!user) continue;
+      const prefs = getNotifPrefs(user);
+      if (!prefs.enabled || !prefs.completion) continue;
+      // Nur EINE Push je Durchlauf und Spieler (der früheste fällige Typ), auch wenn mehrere Aufträge
+      // gleichzeitig fällig werden - verhindert eine Benachrichtigungs-Flut nach langer Abwesenheit.
+      due.sort((a, b) => a.endTime - b.endTime);
+      pushNotificationEvent(userId, 'job-complete', { jobType: due[0].type });
+    }
+    if (changed) saveDb();
+  } catch (e) { console.error('checkCompletionReminders fehlgeschlagen:', e.message); }
+}
+setInterval(checkCompletionReminders, 60 * 1000);
 setInterval(galaxyTick, GALAXY_TICK_MS);
 galaxyTick(); // einmal sofort beim Serverstart, damit nicht 15 Min. auf den ersten Zustand gewartet wird
 

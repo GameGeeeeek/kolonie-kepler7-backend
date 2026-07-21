@@ -769,6 +769,9 @@ function pushNotificationText(type, payload) {
   if (type === 'spy-detected') return payload.sabotage
     ? { title: 'Störmanöver!', body: (payload.fromName || 'Ein Spieler') + ' hat ein Sabotage-Störmanöver gegen dich geflogen - prüfe deine Ressourcen und Spionageabwehr.' }
     : { title: 'Spionage entdeckt', body: (payload.fromName || 'Ein Spieler') + ' hat deine Kolonie ausgespäht' + (payload.deep ? ' (Tiefen-Aufklärung inkl. Beute-Schätzung).' : '.') };
+  if (type === 'sabotaged') return payload.kind === 'defense'
+    ? { title: 'Verteidigung sabotiert!', body: (payload.fromName || 'Ein Spieler') + ' hat deine Verteidigung um 30% geschwächt (' + (payload.durationMin || 30) + ' Min). Repariere oder rüste auf!' }
+    : { title: 'Produktion sabotiert!', body: (payload.fromName || 'Ein Spieler') + ' hat eine Produktion lahmgelegt (-50% für ' + (payload.durationMin || 30) + ' Min). Repariere im Verteidigungs-Tab.' };
   if (type === 'leaderboard-overtaken') return { title: 'Du wurdest überholt!', body: (payload.aheadName || 'Ein Spieler') + ' ist an dir vorbeigezogen - du bist jetzt auf Platz ' + (payload.rank || '?') + '. Zeit, zurückzuschlagen!' };
   if (type === 'job-complete') {
     const labels = { research: 'Deine Forschung ist abgeschlossen', construction: 'Ein Bauauftrag ist fertiggestellt', expedition: 'Eine Expedition ist zurückgekehrt', mission: 'Eine Mission ist zurückgekehrt', terraform: 'Ein Terraforming-Projekt ist fertig', exotic: 'Eine exotische Forschung ist abgeschlossen', veteran: 'Eine Veteranen-Ausbildung ist abgeschlossen' };
@@ -1877,7 +1880,7 @@ app.post('/api/sabotage', attackRateLimit, authMiddleware, async (req, res) => {
     setSaveValue(targetUserId, JSON.stringify(target));
     addReport(req.userId, { type: 'sabotage-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt', effect });
     addReport(targetUserId, { type: 'sabotage-received', result: 'loss', attackerName: req.username, effect });
-    if (targetUser) { const prefs = getNotifPrefs(targetUser); if (prefs.enabled && prefs.spy) pushNotificationEvent(targetUserId, 'spy-detected', { fromName: req.username, sabotage: true }); }
+    if (targetUser) { const prefs = getNotifPrefs(targetUser); if (prefs.enabled && prefs.spy) pushNotificationEvent(targetUserId, 'sabotaged', { fromName: req.username, kind: effect.kind, durationMin: effect.durationMin }); }
     await saveDb();
     return res.json({ success: true, effect, saveVersion: mySaveVersion });
   } else {

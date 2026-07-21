@@ -730,7 +730,8 @@ function getNotifPrefs(user) {
     patchnotes: p.patchnotes !== false,
     application: p.application !== false,
     spy: p.spy !== false,
-    attack: p.attack !== false
+    attack: p.attack !== false,
+    leaderboard: p.leaderboard !== false
   };
 }
 function pushNotificationEvent(userId, type, payload) {
@@ -753,6 +754,7 @@ function pushNotificationText(type, payload) {
   if (type === 'spy-detected') return payload.sabotage
     ? { title: 'Störmanöver!', body: (payload.fromName || 'Ein Spieler') + ' hat ein Sabotage-Störmanöver gegen dich geflogen - prüfe deine Ressourcen und Spionageabwehr.' }
     : { title: 'Spionage entdeckt', body: (payload.fromName || 'Ein Spieler') + ' hat deine Kolonie ausgespäht' + (payload.deep ? ' (Tiefen-Aufklärung inkl. Beute-Schätzung).' : '.') };
+  if (type === 'leaderboard-overtaken') return { title: 'Du wurdest überholt!', body: (payload.aheadName || 'Ein Spieler') + ' ist an dir vorbeigezogen - du bist jetzt auf Platz ' + (payload.rank || '?') + '. Zeit, zurückzuschlagen!' };
   if (type === 'message') return { title: 'Neue Nachricht', body: (payload.fromName || 'Ein Spieler') + ' hat dir geschrieben.' };
   if (type === 'patchnotes') return { title: 'Kolonie Kepler-7 aktualisiert', body: 'Version ' + (payload.version || '') + ' ist da - tippen für die Neuigkeiten.' };
   if (type === 'alliance-application') return { title: 'Neue Bewerbung', body: (payload.name || 'Ein Spieler') + ' möchte [' + (payload.tag || '') + '] beitreten.' };
@@ -2197,7 +2199,8 @@ app.post('/api/notification-prefs', authMiddleware, async (req, res) => {
     patchnotes: b.patchnotes !== false,
     application: b.application !== false,
     spy: b.spy !== false,
-    attack: b.attack !== false
+    attack: b.attack !== false,
+    leaderboard: b.leaderboard !== false
   };
   await saveDb();
   res.json(getNotifPrefs(user));
@@ -2689,7 +2692,53 @@ function galaxyTick() {
   }
   if (!g.worldBoss && Math.random() < 0.10) spawnWorldBoss(g);
 
+  checkLeaderboardOvertakes();
+
   saveDb();
+}
+// Bestenlisten-Überholt-Push (Retention, 21.07.2026): erkennt einmal pro Galaxie-Tick, wenn ein
+// Spieler in der Rangliste zurückgefallen ist (jemand hat ihn überholt), und schickt ihm eine
+// Benachrichtigung. Nur für die vorderen Ränge (LIMIT), damit es ein motivierendes Wettkampfsignal
+// bleibt und nicht bei jeder Mini-Schwankung tief im Feld feuert. Pro Spieler ein Cooldown gegen
+// Spam. Der gespeicherte Rang (__lastRank) wird für ALLE Einträge aktualisiert, damit die Baseline
+// stimmt, auch wenn kein Push ausgelöst wird.
+const OVERTAKE_RANK_LIMIT = 50;
+const OVERTAKE_PUSH_COOLDOWN_MS = 6 * 3600 * 1000;
+function checkLeaderboardOvertakes() {
+  try {
+    const entries = [];
+    for (const key of Object.keys(db.shared)) {
+      if (!key.startsWith('leaderboard:')) continue;
+      const userId = key.slice('leaderboard:'.length);
+      let v = null;
+      try { v = JSON.parse(db.shared[key]); } catch (e) { continue; }
+      if (!v) continue;
+      entries.push({ userId, score: v.score || 0, name: v.name || 'Kommandant' });
+    }
+    if (entries.length < 2) return;
+    entries.sort((a, b) => b.score - a.score);
+    const now = Date.now();
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const rank = i + 1;
+      const user = findUserById(e.userId);
+      if (!user) continue;
+      if (!db.private[e.userId]) db.private[e.userId] = {};
+      const priv = db.private[e.userId];
+      const prevRank = priv.__lastRank;
+      // Nur pushen, wenn: vorheriger Rang bekannt, jetzt schlechter (höhere Zahl), im vorderen Feld,
+      // Push-Kategorie aktiv und Cooldown abgelaufen.
+      if (typeof prevRank === 'number' && rank > prevRank && rank <= OVERTAKE_RANK_LIMIT) {
+        const prefs = getNotifPrefs(user);
+        if (prefs.enabled && prefs.leaderboard && (now - (priv.__lastOvertakenPush || 0)) >= OVERTAKE_PUSH_COOLDOWN_MS) {
+          const aheadName = (entries[i - 1] && entries[i - 1].name) || 'Ein Spieler';
+          pushNotificationEvent(e.userId, 'leaderboard-overtaken', { rank, prevRank, aheadName });
+          priv.__lastOvertakenPush = now;
+        }
+      }
+      priv.__lastRank = rank;
+    }
+  } catch (e) { console.error('checkLeaderboardOvertakes fehlgeschlagen:', e.message); }
 }
 setInterval(galaxyTick, GALAXY_TICK_MS);
 galaxyTick(); // einmal sofort beim Serverstart, damit nicht 15 Min. auf den ersten Zustand gewartet wird

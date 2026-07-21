@@ -1821,6 +1821,16 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     setSaveValue(targetUserId, JSON.stringify(target));
     // Opfer wurde beraubt -> Schutzschild gewähren (nur wenn tatsächlich Beute floss).
     if (Object.keys(stolen).length > 0) grantAttackShield(targetUserId);
+    // Kopfgeld (#2): Wer den aktuellen Kopfgeld-Träger (Bestenlisten-Erster) schlägt, kassiert die Prämie
+    // - nur einmal pro Woche, nicht auf sich selbst.
+    {
+      const gB = loadOrInitGalaxy();
+      if (gB.bounty && !gB.bounty.claimed && gB.bounty.targetUserId === targetUserId && req.userId !== targetUserId) {
+        gB.bounty.claimed = true; gB.bounty.claimedBy = req.username;
+        pushPendingReward(req.userId, { type: 'bounty', targetName: gB.bounty.targetName, credits: gB.bounty.reward });
+        pushGalaxyNews('ti-award', 'Kopfgeld kassiert: ' + req.username + ' hat ' + gB.bounty.targetName + ' bezwungen (+' + gB.bounty.reward + ' Kredite).');
+      }
+    }
 
     addReport(req.userId, {
       type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt',
@@ -2750,12 +2760,32 @@ function resolveAllianceWarsServer() {
   }
 }
 
+// --- Kopfgeld-System (#2) ---
+// Jede Woche liegt ein Kopfgeld auf dem aktuellen Bestenlisten-Ersten (der stärkste, sichtbarste
+// Spieler). Wer ihn per PvP-Angriff schlägt, kassiert eine flache Kredit-Prämie - danach ist das
+// Kopfgeld für diese Woche vergeben (nur ein Kassierer). Man kann kein Kopfgeld auf sich selbst
+// kassieren. Der Angriffs-Schutzschild (#5) begrenzt ohnehin das Nachtreten, sodass der Anführer nicht
+// beliebig oft gejagt werden kann. Liegt komplett in db.galaxy.bounty und wird über /api/galaxy sichtbar.
+const BOUNTY_REWARD = 2000;
+function resolveBountyServer() {
+  const g = loadOrInitGalaxy();
+  const nowKey = serverWeekKey(Date.now());
+  if (g.bounty && g.bounty.weekKey === nowKey) return; // diese Woche bereits gesetzt (ob kassiert oder nicht)
+  let top = null, topId = null;
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith('leaderboard:')) continue;
+    try { const v = JSON.parse(db.shared[k]); if (!top || (v.score || 0) > (top.score || 0)) { top = v; topId = k.slice('leaderboard:'.length); } } catch (e) {}
+  }
+  if (top && topId) g.bounty = { targetUserId: topId, targetName: top.name || 'Unbekannt', reward: BOUNTY_REWARD, weekKey: nowKey, claimed: false, claimedBy: null };
+}
+
 function galaxyTick() {
   const g = loadOrInitGalaxy();
   g.lastTick = Date.now();
   updateHallOfFameServer();
   resolveWeeklyLeagueServer();
   resolveAllianceWarsServer();
+  resolveBountyServer();
 
   // NPC-Reiche wachsen langsam, gedeckelt bei 2.5x, damit es nicht unendlich eskaliert.
   g.npcEmpireStrength = Math.min(2.5, g.npcEmpireStrength * (1 + 0.002 + Math.random() * 0.003));

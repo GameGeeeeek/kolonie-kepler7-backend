@@ -1730,6 +1730,17 @@ function fleetDiversityMult(fleet) {
 }
 // enemyFleetForCounter: die GESAMTE gegnerische Flotte (fleetSummary), optional – nur bei echtem PvP
 // bekannt und übergeben, macht das Kontersystem wirksam.
+// ===== Tier-2-Schiffs-Kampfauren (einzigartige Fähigkeiten) =====
+// IDENTISCH zum Frontend (weltraum_kolonie.html, t2OffenseAuraMult/t2DefenseAuraMult) - gedeckelte,
+// additive Auren, damit der server-autoritative PvP-Kampf nicht von der Client-Vorschau abweicht.
+// Ohne diese Schiffe ist der Multiplikator exakt 1.0 (keine Balance-Verschiebung an bestehenden Kämpfen).
+//  - Offensiv (Schild-Penetration): Nanoklinge +2%/Schiff, Singularitäts-Vernichter +5%/Schiff, max +30%.
+//  - Defensiv (Schildprojektion): Quantenkreuzer +3%/Schiff, Metamaterial-Titan +5%/Schiff, max +30%.
+const T2_OFFENSE_AURA = { nanoklinge: 0.02, singularitaetsvernichter: 0.05 }, T2_OFFENSE_AURA_CAP = 0.30;
+const T2_DEFENSE_AURA = { quantenkreuzer: 0.03, metamaterialtitan: 0.05 }, T2_DEFENSE_AURA_CAP = 0.30;
+function t2AuraSum(fleet, tbl, cap) { if (!fleet) return 0; let s = 0; for (const k in tbl) s += (fleet[k] || 0) * tbl[k]; return Math.min(cap, s); }
+function t2OffenseAuraMult(fleet) { return 1 + t2AuraSum(fleet, T2_OFFENSE_AURA, T2_OFFENSE_AURA_CAP); }
+function t2DefenseAuraMult(fleet) { return 1 + t2AuraSum(fleet, T2_DEFENSE_AURA, T2_DEFENSE_AURA_CAP); }
 function computeAttackPower(save, enemyFleetForCounter) {
   const research = save.research || {};
   let power = 0;
@@ -1742,6 +1753,7 @@ function computeAttackPower(save, enemyFleetForCounter) {
   if (k) power *= (1 + k * 0.02);
   if (k2) power *= (1 + k2 * 0.02);
   power *= stanceOf(save).atkMult;
+  power *= t2OffenseAuraMult(fleetSummary(save)); // Tier-2 Offensiv-Aura (Nanoklinge/Vernichter), gedeckelt
   return Math.round(power);
 }
 function computeDefensePower(save) {
@@ -1765,6 +1777,7 @@ function computeDefensePower(save) {
   if (p) power *= (1 + p * 0.02);
   if (s) power *= (1 + s * 0.02);
   power *= stanceOf(save).defMult;
+  power *= t2DefenseAuraMult(fleetSummary(save)); // Tier-2 Defensiv-Aura (Quantenkreuzer/Titan), gedeckelt
   return Math.round(power);
 }
 // Anti-Farming: Punktestand aus der Bestenliste lesen, für die Beute-Reduktion bei großem Gefälle.

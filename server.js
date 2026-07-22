@@ -1870,14 +1870,21 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
         attacker.resources[r] = (attacker.resources[r] || 0) + take;
       }
     }
-    let destroyedBuilding = null;
-    const buildingSets = allBuildingsOf(target);
-    const candidates = [];
-    for (const b of buildingSets) for (const k of Object.keys(DEFENSE_VALUES)) if ((b[k] || 0) > 0) candidates.push([b, k]);
-    if (candidates.length) {
+    let destroyedBuilding = null, destroyedBuildingCount = 0;
+    // Hyperbomber – einzigartige Tier-2-Fähigkeit „Sprengladungen": je 4 Hyperbomber in der
+    // Angriffsflotte wird ein ZUSÄTZLICHES Verteidigungsgebäude zerstört (max +2, also bis zu 3 statt 1).
+    // destroyedBuilding bleibt das ERSTE zerstörte (Abwärtskompatibilität der Berichte), Anzahl separat.
+    const hbCount = attackerFleetSummary.hyperbomber || 0;
+    const buildingHits = 1 + Math.min(2, Math.floor(hbCount / 4));
+    for (let hbi = 0; hbi < buildingHits; hbi++) {
+      const buildingSets = allBuildingsOf(target);
+      const candidates = [];
+      for (const b of buildingSets) for (const k of Object.keys(DEFENSE_VALUES)) if ((b[k] || 0) > 0) candidates.push([b, k]);
+      if (!candidates.length) break;
       const [b, k] = candidates[Math.floor(Math.random() * candidates.length)];
       b[k] = Math.max(0, b[k] - 1);
-      destroyedBuilding = k;
+      if (!destroyedBuilding) destroyedBuilding = k;
+      destroyedBuildingCount++;
     }
     attacker.battlePoints = (attacker.battlePoints || 0) + 25;
 
@@ -1898,17 +1905,17 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
 
     addReport(req.userId, {
       type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt',
-      attackPower, defensePower, stolen, destroyedBuilding, defenseBefore, fleet: attackerFleetSummary
+      attackPower, defensePower, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary
     });
     addReport(targetUserId, {
       type: 'attack-received', result: 'loss', attackerName: req.username,
-      attackPower, defensePower, stolen, destroyedBuilding, defenseBefore, fleet: attackerFleetSummary
+      attackPower, defensePower, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary
     });
     // Verteidiger benachrichtigen (Retention-Trigger 21.07.2026): angegriffen zu werden ist einer der
     // stärksten Rückkehr-Anlässe. Server hat den Kampf ohnehin aufgelöst - hier nur der Push obendrauf.
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: false, looted: Object.keys(stolen).length > 0 }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     await saveDb();
-    return res.json({ success: true, stolen, destroyedBuilding, attackPower, defensePower, saveVersion: mySaveVersion });
+    return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, saveVersion: mySaveVersion });
   } else {
     attacker.battlePoints = (attacker.battlePoints || 0) + 3;
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));

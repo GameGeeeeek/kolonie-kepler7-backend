@@ -1553,7 +1553,7 @@ const SHIP_SCORE_WEIGHTS = {
   ships:15, cruisers:25, jaeger:12, destroyers:35, bomber:45,
   schlachtschiff:70, carrier:30, superschlachtschiff:180, waechter:20,
   leerenjaeger:120, kometenjaeger:18, enterschiff:28, phantomschiff:26, riftwaechter:22, gesandtenschiff:15, schuerfschiff:15,
-  nanoklinge:45, quantenkreuzer:65, fusionsdreadnought:150,
+  nanoklinge:45, quantenkreuzer:65, fusionsdreadnought:150, hyperjaeger:30, hyperbomber:110,
   forscher:20, frachter:10, frachtergross:40, spaeher:15, spionageschiff:22, colonyShips:5, recycler:12,
   // Bugfix (20.07.2026, Bug-Sweep): mondzerstoerer fehlte komplett - maxOwned:1, 10 Tage Bauzeit,
   // Top-Tier-Forschung nötig, atk 300 (höchster Wert im Spiel), Gewicht identisch zur Frontend-Kopie
@@ -1698,13 +1698,17 @@ function rawFleetPower(f) {
     // bewusst draußen - sie kämpfen auch clientseitig nicht.
     diminishingShipCount(f.leerenjaeger || 0) * 140 + diminishingShipCount(f.kometenjaeger || 0) * 18 +
     diminishingShipCount(f.enterschiff || 0) * 25 + diminishingShipCount(f.phantomschiff || 0) * 35 +
-    diminishingShipCount(f.riftwaechter || 0) * 20;
+    diminishingShipCount(f.riftwaechter || 0) * 20 +
+    // Tier-2-Hyperjäger/-bomber (22.07.2026, Spieler-Wunsch) - Angriffswerte identisch zum Frontend
+    // (SHIP_DEFS). Anders als reguläre Jäger/Bomber KEIN Trägerhangar nötig, daher hier ohne
+    // deployableFighters-Kappung direkt gewertet (das Backend kennt den Hangar-Mechanismus ohnehin nicht).
+    diminishingShipCount(f.hyperjaeger || 0) * 30 + diminishingShipCount(f.hyperbomber || 0) * 130;
 }
 // Verteidigungsspezialisierung (13.07.2026) - defWeight-Gewichte identisch zum Frontend (SHIP_DEFS),
 // wirken NUR hier auf die Verteidigung, nie auf die Angriffskraft. Keine Schilde hier (der Backend-
 // Ansatz kennt generell keine Schilde, vorbestehende Vereinfachung gegenüber dem Frontend).
-const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5, leerenjaeger:1.1, kometenjaeger:0.6, enterschiff:1.6, phantomschiff:0.3, riftwaechter:0.8 };
-const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20 };
+const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5, leerenjaeger:1.1, kometenjaeger:0.6, enterschiff:1.6, phantomschiff:0.3, riftwaechter:0.8, hyperjaeger:0.6, hyperbomber:0.9 };
+const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130 };
 function weightedFleetDefensePower(f) {
   if (!f) return 0;
   let sum = 0;
@@ -3447,7 +3451,7 @@ const ALLIANCE_RAID_TEST_MODE = process.env.ALLIANCE_RAID_TEST_MODE === '1';
 const ALLIANCE_RAID_TEST_DISPATCH_SEC = 2;
 // Leerenjäger + 4 Event-Kampfschiffe seit 19.07.2026 dabei (Balance-Entscheidung) - Utility-Schiffe
 // ohne Angriffswert (gesandtenschiff/schuerfschiff) bewusst weiterhin nicht.
-const ALLIANCE_RAID_ATTACK_SHIP_KEYS = ['jaeger', 'bomber', 'cruisers', 'destroyers', 'schlachtschiff', 'carrier', 'superschlachtschiff', 'waechter', 'nanoklinge', 'quantenkreuzer', 'fusionsdreadnought', 'leerenjaeger', 'kometenjaeger', 'enterschiff', 'phantomschiff', 'riftwaechter'];
+const ALLIANCE_RAID_ATTACK_SHIP_KEYS = ['jaeger', 'bomber', 'cruisers', 'destroyers', 'schlachtschiff', 'carrier', 'superschlachtschiff', 'waechter', 'nanoklinge', 'quantenkreuzer', 'fusionsdreadnought', 'leerenjaeger', 'kometenjaeger', 'enterschiff', 'phantomschiff', 'riftwaechter', 'hyperjaeger', 'hyperbomber'];
 const ALLIANCE_RAID_RETREAT_THRESHOLD = 0.4, ALLIANCE_RAID_RETREAT_SAVE_FACTOR = 0.5;
 function allianceRaidHpFor(level) { return Math.round(ALLIANCE_RAID_HP_BASE * Math.pow(ALLIANCE_RAID_HP_GROWTH, Math.max(0, level - 1))); }
 function allianceRaidCounterFor(level) { return Math.round(ALLIANCE_RAID_COUNTER_BASE * Math.pow(ALLIANCE_RAID_HP_GROWTH, Math.max(0, level - 1))); }

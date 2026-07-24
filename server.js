@@ -223,6 +223,16 @@ function commanderLevelFromXp(xp) {
   return Math.floor(Math.sqrt((xp || 0) / 50));
 }
 const REFERRAL_LEVEL_THRESHOLD = 5;
+// Werbe-Meilensteine für den Einladenden: zusätzlich zum +50-Kredite-Bonus je Einladung gibt es bei
+// bestimmten Gesamtzahlen geworbener Spieler eine spürbare Extra-Belohnung. Nutzt das ohnehin getrackte
+// referralCount; da es je Einlösung um genau 1 steigt, feuert jeder Meilenstein exakt einmal.
+const REFERRAL_MILESTONES = [
+  { n: 3,  credits: 500,  fragments: 3 },
+  { n: 5,  credits: 1200, fragments: 6 },
+  { n: 10, credits: 3000, fragments: 15 },
+  { n: 25, credits: 8000, fragments: 40 }
+];
+function referralMilestoneFor(count) { return REFERRAL_MILESTONES.find(m => m.n === count) || null; }
 
 // --- Wortfilter (13.07.2026, Feature-Wunsch: Moderation vorbereiten) ---
 // Moderate Liste eindeutig unangemessener Begriffe (gängige Beleidigungen, bekannte Hassbegriffe,
@@ -826,6 +836,7 @@ function pushNotificationText(type, payload) {
     return { title: 'Neuer ' + label, body: (payload.username || 'Ein Spieler') + ': ' + (payload.text || '') };
   }
   if (type === 'referral-redeemed') return { title: 'Einladungs-Bonus erhalten', body: (payload.username || 'Ein Spieler') + ' hat deinen Einladungscode eingelöst - +50 Kredite für dich!' };
+  if (type === 'referral-milestone') return { title: 'Werbe-Meilenstein erreicht!', body: 'Schon ' + (payload.count || '?') + ' Spieler geworben! Bonus: +' + (payload.credits || 0) + ' Kredite und +' + (payload.fragments || 0) + ' Modulfragmente.' };
   if (type === 'player-reported') return { title: 'Spieler gemeldet', body: (payload.reporterName||'Jemand') + ' hat ' + (payload.targetName||'einen Spieler') + ' gemeldet: ' + (payload.reason||'') };
   return { title: 'Kolonie Kepler-7', body: 'Es gibt Neuigkeiten.' };
 }
@@ -2544,9 +2555,16 @@ app.post('/api/referral/redeem', authMiddleware, async (req, res) => {
       const referrerSave = JSON.parse(referrerSaveRaw);
       referrerSave.credits = (referrerSave.credits || 0) + 50;
       referrerSave.referralCount = (referrerSave.referralCount || 0) + 1;
+      // Werbe-Meilenstein erreicht? -> Extra-Belohnung obendrauf.
+      const milestone = referralMilestoneFor(referrerSave.referralCount);
+      if (milestone) {
+        referrerSave.credits = (referrerSave.credits || 0) + milestone.credits;
+        referrerSave.moduleFragments = (referrerSave.moduleFragments || 0) + milestone.fragments;
+      }
       setSaveValue(referrer.userId, JSON.stringify(referrerSave));
       try {
-        pushNotificationEvent(referrer.userId, 'referral-redeemed', { username: req.username });
+        if (milestone) pushNotificationEvent(referrer.userId, 'referral-milestone', { username: req.username, count: referrerSave.referralCount, credits: milestone.credits, fragments: milestone.fragments });
+        else pushNotificationEvent(referrer.userId, 'referral-redeemed', { username: req.username });
       } catch (e) {}
     } catch (e) { console.error('Einladungs-Bonus für Einladenden fehlgeschlagen:', e.message); }
   }

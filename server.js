@@ -1561,16 +1561,50 @@ const DOCTRINE_MULTS = { doc_offensive: { atk: 1.20, def: 0.85 }, doc_defensive:
 function doctrineMult(save, side) { const d = DOCTRINE_MULTS[save && save.doctrine]; return d ? d[side] : 1; }
 // Temporäre Buffs (state.buffs) – atk/def-Multiplikatoren, solange nicht abgelaufen. Wie im Frontend.
 function buffMult(save, kind) { let m = 1; const now = Date.now(); for (const b of (save && save.buffs) || []) { if (b && b.kind === kind && b.expiresAt > now && typeof b.mult === 'number') m *= b.mult; } return m; }
-// Gedeckelte Kampf-Bonus-Gruppe – die serverseitig zuverlässig aus dem Save ableitbaren, GLOBALEN Terme
-// aus attackCombatBonusRaw/defenseCombatBonusRaw (Frontend). Gedeckelt bei +100% (identische Logik).
-// Noch NICHT gespiegelt (bräuchten große Tabellen-Ports, folgen ggf. separat): Allianz-Kampftechs,
-// Flaggschiff, Mega-Projekte, Veteranen-Ausbildung, Fähigkeitsbaum, Offizier Admiral, Allianz-Projekte.
-function combatBonusGroup(save) {
+// Gedeckelte Kampf-Bonus-Gruppen – die serverseitig zuverlässig aus dem Save ableitbaren, GLOBALEN Terme
+// aus attackCombatBonusRaw/defenseCombatBonusRaw (Frontend). JE SEITE separat bei +100% gedeckelt
+// (identische Logik: 1 + Math.min(1.0, ...)). Angriff und Verteidigung sind bewusst NICHT identisch:
+// Piratennest-Prestige wirkt nur auf Angriff, der Admiral voll auf Angriff und nur halb auf Verteidigung.
+// Portierte Konstanten identisch zum Frontend (FLAGSHIP_BONUS_PER_LEVEL, VETERAN_TRAINING, SKILL_TREE
+// 'war', OFFICER_BONUS_PER_LEVEL/OFFICER_TALENT_LEVEL, Mega-Projekt 'voidreaktor' +10%).
+// Weiterhin NICHT gespiegelt (bräuchten Allianz-Shared-Storage-Lookups bzw. per-Planet-Granularität, die
+// die aggregierten compute*-Funktionen nicht haben): Allianz-Kampftechs (a_atk/a_def/…), Allianz-Projekte
+// (ap_kriegsrat, ep_verteidigung), Allianzbasis-Verteidigungsbonus, Veteranen-Rang je Planet, Schiffs-
+// Module je Planet.
+const FLAGSHIP_BONUS_PER_LEVEL = 0.015;
+const VETERAN_COMBAT_BONUS = { vet1: 0.02, vet2: 0.02, vet3: 0.03 };
+const SKILL_WAR_BONUS = { war1: 0.02, war2: 0.02, war3: 0.03 };
+const OFFICER_BONUS_PER_LEVEL = 0.02, OFFICER_TALENT_LEVEL = 5;
+function admiralBonus(save) {
+  const lvl = (save.officers || {}).admiral || 0;
+  const baseLvls = Math.min(lvl, OFFICER_TALENT_LEVEL);
+  const extraLvls = Math.max(0, lvl - OFFICER_TALENT_LEVEL);
+  const extraRate = OFFICER_BONUS_PER_LEVEL * (((save.officerTalents || {}).admiral) === 'power' ? 1.5 : 1);
+  return baseLvls * OFFICER_BONUS_PER_LEVEL + extraLvls * extraRate;
+}
+// Gemeinsame, seitenunabhängige Terme (in Angriff UND Verteidigung identisch, Frontend attack/defenseCombatBonusRaw).
+function combatBonusCommon(save) {
   let b = 0;
   b += ((save.prestigePerks || []).filter(k => k === 'combat').length) * 0.03;
+  b += (((save.flagship && save.flagship.level) || 0)) * FLAGSHIP_BONUS_PER_LEVEL;
   b += (((save.ascension && save.ascension.tree && save.ascension.tree.combat) || 0)) * 0.02;
+  const st = save.skillTree || {};
+  for (const k in SKILL_WAR_BONUS) if (st[k]) b += SKILL_WAR_BONUS[k];
+  if (save.megaProjects && save.megaProjects.voidreaktor) b += 0.10; // megaProjectCombatMult()-1
+  const vt = save.veteranTraining || {};
+  for (const k in VETERAN_COMBAT_BONUS) if (vt[k]) b += VETERAN_COMBAT_BONUS[k];
   if (save.achievements && save.achievements.artifactset) b += 0.05;
-  b += Math.min(5, save.pirateLairPrestige || 0) * 0.02;
+  return b;
+}
+function attackBonusGroup(save) {
+  let b = combatBonusCommon(save);
+  b += Math.min(5, save.pirateLairPrestige || 0) * 0.02; // Piratennest-Prestige: NUR Angriff
+  b += admiralBonus(save);                               // Admiral: voll auf Angriff
+  return Math.min(1.0, b);
+}
+function defenseBonusGroup(save) {
+  let b = combatBonusCommon(save);
+  b += admiralBonus(save) * 0.5; // Admiral: halbe Rate auf Verteidigung
   return Math.min(1.0, b);
 }
 // Muss exakt synchron zu SHIP_SCORE_WEIGHTS im Frontend bleiben (dort die eigentliche Quelle für
@@ -1799,7 +1833,7 @@ function computeAttackPower(save, enemyFleetForCounter) {
   if (k2) power *= (1 + k2 * 0.02);
   power *= doctrineMult(save, 'atk');
   power *= stanceOf(save).atkMult;
-  power *= (1 + combatBonusGroup(save)); // gedeckelte Kampf-Bonus-Gruppe (Teil-Port, siehe Kommentar)
+  power *= (1 + attackBonusGroup(save)); // gedeckelte Angriffs-Bonus-Gruppe (Teil-Port, siehe Kommentar)
   power *= buffMult(save, 'atk');        // temporäre Angriffs-Buffs
   power *= t2OffenseAuraMult(fleetSummary(save)); // Tier-2 Offensiv-Aura (Nanoklinge/Vernichter), gedeckelt
   return Math.round(power);
@@ -1829,7 +1863,7 @@ function computeDefensePower(save) {
   if (s) power *= (1 + s * 0.02);
   power *= doctrineMult(save, 'def');
   power *= stanceOf(save).defMult;
-  power *= (1 + combatBonusGroup(save)); // gedeckelte Kampf-Bonus-Gruppe (Teil-Port, siehe Kommentar)
+  power *= (1 + defenseBonusGroup(save)); // gedeckelte Verteidigungs-Bonus-Gruppe (Teil-Port, siehe Kommentar)
   power *= buffMult(save, 'def');        // temporäre Verteidigungs-Buffs
   power *= t2DefenseAuraMult(fleetSummary(save)); // Tier-2 Defensiv-Aura (Quantenkreuzer/Titan), gedeckelt
   return Math.round(power);

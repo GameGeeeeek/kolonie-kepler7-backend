@@ -1280,7 +1280,8 @@ app.get('/api/me', authMiddleware, (req, res) => {
     pendingEmail: user && user.pendingEmail ? maskEmail(user.pendingEmail) : null,
     wantsPatchnotes: user ? (user.wantsPatchnotes !== false) : true,
     homeSystem: user && user.homeSystem, homeSlot: user && user.homeSlot,
-    attackShieldMs: attackShieldRemaining(req.userId)
+    attackShieldMs: attackShieldRemaining(req.userId),
+    season: seasonInfoForUser(req.userId)
   });
 });
 
@@ -2980,8 +2981,9 @@ function leagueIndexForRankServer(rank, total) {
 function pushPendingReward(userId, reward) {
   if (!db.private[userId]) db.private[userId] = {};
   const list = db.private[userId].__pendingRewards || [];
-  // Idempotenz: dieselbe Wochenliga-Belohnung nie doppelt einreihen.
+  // Idempotenz: dieselbe Wochenliga-/Saison-Belohnung nie doppelt einreihen.
   if (reward.type === 'weekly-league' && list.some(r => r.type === 'weekly-league' && r.weekKey === reward.weekKey)) return;
+  if (reward.type === 'season-league' && list.some(r => r.type === 'season-league' && r.seasonKey === reward.seasonKey)) return;
   reward.id = crypto.randomUUID();
   list.push(reward);
   db.private[userId].__pendingRewards = list.slice(-20);
@@ -3025,6 +3027,78 @@ function resolveWeeklyLeagueServer() {
   wl.weekKey = nowKey;
   wl.startScores = {};
   for (const uid of Object.keys(current)) wl.startScores[uid] = current[uid];
+}
+
+// --- Saison-Liga (langfristiger, prestigeträchtiger Wettbewerbs-Loop) ---
+// Wie die Wochenliga, aber über einen KALENDERMONAT und mit exklusiven, dauerhaften Belohnungen
+// (Saison-Titel je Liga) statt Ressourcen. Genau derselbe serverautoritative Ablauf: der Server hält
+// je Spieler den Start-Score der Saison, rechnet am Monatswechsel nach echtem Punktezuwachs ab, weist
+// die Liga nach Rang zu und reiht eine pending-reward vom Typ 'season-league' ein. Läuft im galaxyTick.
+const SEASON_LEAGUE_TIERS = ['diamant', 'platin', 'gold', 'silber', 'bronze'];
+function serverSeasonKey(ts) {
+  const d = new Date(ts);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+function seasonEndsAt(ts) {
+  const d = new Date(ts);
+  return new Date(d.getFullYear(), d.getMonth() + 1, 1).getTime(); // Beginn des Folgemonats
+}
+function seasonTierForRankServer(rank, total) {
+  // Fünf Ligen nach Quintil-Grenzen (20/40/60/80 %). Grenzen einzeln aufgerundet, damit auch bei
+  // kleineren Feldern die UNTERSTE Liga (Bronze) erreichbar bleibt statt durch Rundung leerzulaufen.
+  if (total < 5) return Math.min(Math.max(0, rank - 1), 4);
+  for (let t = 0; t < 4; t++) { if (rank <= Math.ceil(total * (t + 1) / 5)) return t; }
+  return 4;
+}
+function resolveSeasonLeagueServer() {
+  const g = loadOrInitGalaxy();
+  if (!g.seasonLeague || typeof g.seasonLeague !== 'object') g.seasonLeague = { seasonKey: null, startScores: {} };
+  const sl = g.seasonLeague;
+  if (!sl.startScores || typeof sl.startScores !== 'object') sl.startScores = {};
+  const nowKey = serverSeasonKey(Date.now());
+  const current = {};
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith('leaderboard:')) continue;
+    const uid = k.slice('leaderboard:'.length);
+    try { current[uid] = (JSON.parse(db.shared[k]).score) || 0; } catch (e) {}
+  }
+  if (sl.seasonKey === nowKey) {
+    for (const uid of Object.keys(current)) if (!(uid in sl.startScores)) sl.startScores[uid] = current[uid];
+    return;
+  }
+  // Saisonwechsel -> Vorsaison abrechnen.
+  if (sl.seasonKey) {
+    const participants = [];
+    for (const uid of Object.keys(sl.startScores)) {
+      if (!(uid in current)) continue;
+      participants.push({ uid, seasonScore: Math.max(0, current[uid] - (sl.startScores[uid] || 0)) });
+    }
+    if (participants.length) {
+      participants.sort((a, b) => b.seasonScore - a.seasonScore);
+      const total = participants.length;
+      participants.forEach((p, i) => {
+        const tier = SEASON_LEAGUE_TIERS[seasonTierForRankServer(i + 1, total)];
+        pushPendingReward(p.uid, { type: 'season-league', tier, rank: i + 1, total, seasonKey: sl.seasonKey });
+      });
+      const champ = participants[0];
+      const champName = (() => { try { return JSON.parse(db.shared['leaderboard:' + champ.uid]).name || 'Unbekannt'; } catch (e) { return 'Unbekannt'; } })();
+      pushGalaxyNews('ti-trophy', 'Saison ' + sl.seasonKey + ' beendet! ' + total + ' Kommandanten kämpften um den Aufstieg – Saison-Champion: ' + champName + '. Deine Saison-Belohnung wartet beim nächsten Login.');
+    }
+  }
+  // Neue Saison starten.
+  sl.seasonKey = nowKey;
+  sl.startScores = {};
+  for (const uid of Object.keys(current)) sl.startScores[uid] = current[uid];
+}
+// Kompakte Saison-Info fürs Frontend (/me): aktueller Saison-Schlüssel, Ende und der eigene Start-Score.
+// startScore === null bedeutet „für diese Saison noch nicht erfasst" (der Client behandelt das als 0-Zuwachs,
+// bis der nächste galaxyTick den Startwert festhält).
+function seasonInfoForUser(userId) {
+  const g = loadOrInitGalaxy();
+  const sl = (g && g.seasonLeague) || {};
+  const key = sl.seasonKey || serverSeasonKey(Date.now());
+  const startScore = (sl.startScores && sl.startScores[userId] != null) ? sl.startScores[userId] : null;
+  return { key, endsAt: seasonEndsAt(Date.now()), startScore };
 }
 
 // --- Erklärte Allianz-Kriege auflösen (#4) ---
@@ -3116,6 +3190,7 @@ function galaxyTick() {
   g.lastTick = Date.now();
   updateHallOfFameServer();
   resolveWeeklyLeagueServer();
+  resolveSeasonLeagueServer();
   resolveAllianceWarsServer();
   resolveBountyServer();
 

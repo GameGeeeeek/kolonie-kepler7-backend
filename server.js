@@ -1043,15 +1043,69 @@ const SYSTEM_NEIGHBORS = {};
   }
 })();
 const HOME_SLOTS_PER_SYSTEM = 8;
+const SYSTEM_COORD_BY_ID = {};
+for (const s of SYSTEM_COORDS) SYSTEM_COORD_BY_ID[s.id] = s;
+// Neue Spieler bewusst weit weg von bestehenden Kolonien einteilen, statt gleichverteilt-zufällig.
+// Regeln (in dieser Reihenfolge): (1) Systeme mit den WENIGSTEN Bewohnern zuerst – so bekommt jedes
+// System erst einen Spieler, bevor sich zwei ein System teilen; (2) bei gleicher Bewohnerzahl das
+// System wählen, dessen NÄCHSTER bewohnter Nachbar am WEITESTEN entfernt ist (Farthest-Point-Streuung
+// auf den echten Kartenkoordinaten). Ergebnis: der erste Spieler landet irgendwo, jeder weitere möglichst
+// weit weg von allen bereits bewohnten Systemen.
 function assignHomeSlot() {
-  const taken = new Set(Object.values(db.users).filter(u => u.homeSystem).map(u => u.homeSystem + ':' + u.homeSlot));
-  const free = [];
-  for (const sys of SYSTEMS) for (let slot = 0; slot < HOME_SLOTS_PER_SYSTEM; slot++) {
-    const key = sys + ':' + slot;
-    if (!taken.has(key)) free.push({ system: sys, slot });
+  const occupancy = {}; // system -> Anzahl Spieler
+  for (const u of Object.values(db.users)) {
+    if (u.homeSystem) occupancy[u.homeSystem] = (occupancy[u.homeSystem] || 0) + 1;
   }
-  if (!free.length) return { system: SYSTEMS[Math.floor(Math.random() * SYSTEMS.length)], slot: Math.floor(Math.random() * HOME_SLOTS_PER_SYSTEM) };
-  return free[Math.floor(Math.random() * free.length)];
+  const occupiedCoords = Object.keys(occupancy)
+    .map(id => SYSTEM_COORD_BY_ID[id])
+    .filter(Boolean);
+
+  // Systeme mit noch freiem Slot
+  const candidates = SYSTEMS.filter(sys => (occupancy[sys] || 0) < HOME_SLOTS_PER_SYSTEM);
+  if (!candidates.length) {
+    // Alle Systeme voll (praktisch nie: 41 Systeme × 8 Slots) – irgendeinen Slot vergeben.
+    return { system: SYSTEMS[Math.floor(Math.random() * SYSTEMS.length)], slot: Math.floor(Math.random() * HOME_SLOTS_PER_SYSTEM) };
+  }
+
+  // Distanz eines Kandidaten zum nächsten bewohnten System (Infinity, wenn noch niemand da ist).
+  function minDistToOccupied(sys) {
+    const c = SYSTEM_COORD_BY_ID[sys];
+    if (!c) return 0;
+    let best = Infinity;
+    for (const o of occupiedCoords) {
+      if (o.id === sys) continue; // eigenes System nicht mitzählen
+      const d = Math.hypot(o.gx - c.gx, o.gy - c.gy);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
+  // Beste Kombination aus wenigster Bewohnerzahl und größter Distanz suchen.
+  let bestOcc = Infinity, bestDist = -Infinity;
+  const distCache = {};
+  for (const sys of candidates) {
+    const occ = occupancy[sys] || 0;
+    const dist = (distCache[sys] = minDistToOccupied(sys));
+    if (occ < bestOcc || (occ === bestOcc && dist > bestDist)) { bestOcc = occ; bestDist = dist; }
+  }
+  // Gleich gute Systeme (gleiche Bewohnerzahl UND praktisch gleiche Distanz) – zufällig eines nehmen,
+  // damit bei exakten Gleichständen nicht alle zeitgleichen Registrierungen dasselbe System bekommen.
+  const topTier = candidates.filter(sys => {
+    const occ = occupancy[sys] || 0;
+    if (occ !== bestOcc) return false;
+    const d = distCache[sys];
+    return (d === Infinity && bestDist === Infinity) || Math.abs(d - bestDist) < 1e-6;
+  });
+  const chosenSystem = topTier[Math.floor(Math.random() * topTier.length)];
+
+  // Freien Slot im gewählten System bestimmen.
+  const takenSlots = new Set(
+    Object.values(db.users).filter(u => u.homeSystem === chosenSystem).map(u => u.homeSlot)
+  );
+  const freeSlots = [];
+  for (let slot = 0; slot < HOME_SLOTS_PER_SYSTEM; slot++) if (!takenSlots.has(slot)) freeSlots.push(slot);
+  const chosenSlot = freeSlots.length ? freeSlots[Math.floor(Math.random() * freeSlots.length)] : Math.floor(Math.random() * HOME_SLOTS_PER_SYSTEM);
+  return { system: chosenSystem, slot: chosenSlot };
 }
 
 // Migration: Bestandsaccounts ohne zugewiesenes Heimatsystem nachträglich einteilen

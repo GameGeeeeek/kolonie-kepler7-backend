@@ -1865,6 +1865,13 @@ function computeDefensePower(save) {
   power *= stanceOf(save).defMult;
   power *= (1 + defenseBonusGroup(save)); // gedeckelte Verteidigungs-Bonus-Gruppe (Teil-Port, siehe Kommentar)
   power *= buffMult(save, 'def');        // temporäre Verteidigungs-Buffs
+  // Feindliche Sabotage (Störmanöver): der /api/sabotage-Endpunkt schreibt defenseSabotage
+  // (-30% für 30 Min) zwar in den Ziel-Save, hier wurde es aber NIE gelesen - der Malus hatte auf
+  // server-entschiedene Folgeangriffe keine Wirkung, obwohl genau das sein Zweck ist (Bonus-Audit
+  // 24.07.2026). Identisch zum Frontend (defensePower): power *= (1 - pct), nur solange aktiv.
+  if (save.defenseSabotage && save.defenseSabotage.until > Date.now() && typeof save.defenseSabotage.pct === 'number') {
+    power *= (1 - Math.max(0, Math.min(0.9, save.defenseSabotage.pct)));
+  }
   power *= t2DefenseAuraMult(fleetSummary(save)); // Tier-2 Defensiv-Aura (Quantenkreuzer/Titan), gedeckelt
   return Math.round(power);
 }
@@ -1880,6 +1887,30 @@ function farmingPenaltyFor(attackerUserId, targetUserId) {
   const myScore = scoreOf(attackerUserId), targetScore = scoreOf(targetUserId);
   const ratio = targetScore > 0 ? myScore / targetScore : 1;
   return ratio > 3 ? Math.max(0.3, 1 - (ratio - 3) * 0.1) : 1;
+}
+// Schildmodul ('schild', Effekt raidloss, MODULE_DEFS im Frontend): senkt clientseitig den
+// Ressourcenverlust bei NPC-Überfällen je Standort (lossPct *= max(0.4, 1 - moduleBonusAt)).
+// Serverseitig wirkte es bisher GAR NICHT - ausgerechnet beim echten PvP, wo der Schutz am
+// wichtigsten wäre (Bonus-Audit 24.07.2026). Da die Server-Beute KONTOWEIT abgezogen wird (keine
+// Ziel-Planet-Auflösung im Angriff), wird der Schutz als MITTELWERT der Standort-Boni über alle
+// Standorte (Heimat + Kolonien) angewendet - ein voll bestücktes Lager schützt also anteilig,
+// kann aber nicht das ganze Imperium mit den Modulen EINES Standorts abdecken. Gleicher
+// 0.4-Boden wie im Frontend. Modul-Instanzen sind als "typ:seltenheit" kodiert.
+const MODULE_RARITY_MULT = { gewoehnlich: 1.0, selten: 1.6, episch: 2.4, legendaer: 3.5, mythisch: 5.0 };
+const RAIDLOSS_MODULE_BASE = 0.05;
+function raidlossProtectionMult(save) {
+  const eq = save.equippedModules || {};
+  const locations = 1 + Object.keys(save.colonies || {}).length;
+  let total = 0;
+  for (const pk of Object.keys(eq)) {
+    for (const instKey of (eq[pk] || [])) {
+      if (typeof instKey !== 'string') continue;
+      const [type, rarity] = instKey.split(':');
+      if (type !== 'schild') continue;
+      total += RAIDLOSS_MODULE_BASE * (MODULE_RARITY_MULT[rarity] || 1);
+    }
+  }
+  return Math.max(0.4, 1 - (locations > 0 ? total / locations : 0));
 }
 function defenseBreakdown(save) {
   const totals = {};
@@ -1949,9 +1980,11 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     const lootPct = 0.12 + Math.random() * 0.13; // 12-25%
     // Anti-Farming: deutlich stärkere Angreifer bekommen anteilig weniger Beute (nie unter 30%).
     const farmPenalty = farmingPenaltyFor(req.userId, targetUserId);
+    // Schildmodule des Ziels senken die Beute (siehe raidlossProtectionMult - vorher wirkungslos im PvP).
+    const lootProtection = raidlossProtectionMult(target);
     const stolen = {};
     for (const [r, amt] of Object.entries(target.resources || {})) {
-      const take = Math.floor((amt || 0) * lootPct * farmPenalty);
+      const take = Math.floor((amt || 0) * lootPct * farmPenalty * lootProtection);
       if (take > 0) {
         stolen[r] = take;
         target.resources[r] = Math.max(0, (target.resources[r] || 0) - take);

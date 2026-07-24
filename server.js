@@ -1147,6 +1147,7 @@ app.post('/api/register', authRateLimit, async (req, res) => {
   const home = assignHomeSlot();
   db.users[key] = { userId, username: cleanName, passwordHash, email: cleanEmail, emailVerified: false, createdAt: Date.now(), homeSystem: home.system, homeSlot: home.slot };
   grantNewbieShield(userId); // 4 Tage Anfängerschutz ab Registrierung
+  recordAnalyticsEvent(userId, 'funnel:register'); // Onboarding-Trichter: Konto angelegt
 
   if (!db.verifyTokens) db.verifyTokens = {};
   const verifyToken = crypto.randomBytes(32).toString('hex');
@@ -1194,6 +1195,7 @@ app.post('/api/verify-email', async (req, res) => {
     user.emailVerified = true; // eine bestätigte neue Adresse zählt auch als bestätigtes Konto
   } else {
     user.emailVerified = true;
+    recordAnalyticsEvent(user.userId, 'funnel:verify'); // Onboarding-Trichter: Konto per E-Mail bestätigt (Aktivierung)
   }
   delete db.verifyTokens[token];
   await saveDb();
@@ -1255,6 +1257,7 @@ app.post('/api/login', authRateLimit, async (req, res) => {
   // dadurch werden nach einem Passwortwechsel ALLE zuvor ausgestellten (bis zu 180 Tage gültigen)
   // Tokens sofort ungültig. Bestandskonten ohne Feld gelten als Version 0 (kein Zwangs-Logout).
   const token = jwt.sign({ userId: user.userId, username: user.username, tv: user.tokenVersion || 0 }, JWT_SECRET, { expiresIn: '180d' });
+  recordAnalyticsEvent(user.userId, 'funnel:login'); // Onboarding-Trichter: erfolgreiche Anmeldung
   res.json({ token, userId: user.userId, username: user.username });
 });
 

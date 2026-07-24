@@ -1147,6 +1147,7 @@ app.post('/api/register', authRateLimit, async (req, res) => {
   const home = assignHomeSlot();
   db.users[key] = { userId, username: cleanName, passwordHash, email: cleanEmail, emailVerified: false, createdAt: Date.now(), homeSystem: home.system, homeSlot: home.slot };
   grantNewbieShield(userId); // 4 Tage Anfängerschutz ab Registrierung
+  recordAnalyticsEvent(userId, 'funnel:register'); // Onboarding-Trichter: Konto angelegt
 
   if (!db.verifyTokens) db.verifyTokens = {};
   const verifyToken = crypto.randomBytes(32).toString('hex');
@@ -1194,6 +1195,7 @@ app.post('/api/verify-email', async (req, res) => {
     user.emailVerified = true; // eine bestätigte neue Adresse zählt auch als bestätigtes Konto
   } else {
     user.emailVerified = true;
+    recordAnalyticsEvent(user.userId, 'funnel:verify'); // Onboarding-Trichter: Konto per E-Mail bestätigt (Aktivierung)
   }
   delete db.verifyTokens[token];
   await saveDb();
@@ -1255,6 +1257,7 @@ app.post('/api/login', authRateLimit, async (req, res) => {
   // dadurch werden nach einem Passwortwechsel ALLE zuvor ausgestellten (bis zu 180 Tage gültigen)
   // Tokens sofort ungültig. Bestandskonten ohne Feld gelten als Version 0 (kein Zwangs-Logout).
   const token = jwt.sign({ userId: user.userId, username: user.username, tv: user.tokenVersion || 0 }, JWT_SECRET, { expiresIn: '180d' });
+  recordAnalyticsEvent(user.userId, 'funnel:login'); // Onboarding-Trichter: erfolgreiche Anmeldung
   res.json({ token, userId: user.userId, username: user.username });
 });
 
@@ -3418,6 +3421,77 @@ function checkCompletionReminders() {
   } catch (e) { console.error('checkCompletionReminders fehlgeschlagen:', e.message); }
 }
 setInterval(checkCompletionReminders, 60 * 1000);
+
+// --- Reaktivierung: Winback-E-Mails für inaktive Spieler ---
+// Push deckt bereits laufende Ereignisse ab (Überfall, überholt, Bau fertig ...), erreicht aber nur
+// Spieler, die ihre Push-Erlaubnis erteilt haben und deren Gerät das Abo behalten hat. Wer das Spiel
+// länger nicht geöffnet hat, bekommt sonst GAR nichts, das ihn zurückholt. Diese Winback-Mails schließen
+// genau diese Lücke: gestaffelt nach Inaktivitätsdauer, pro Stufe nur einmal, mit Opt-out über die
+// bestehende „Neuigkeiten per E-Mail"-Einstellung (wantsPatchnotes) - kein neuer Abmelde-Mechanismus nötig.
+const WINBACK_TIERS = [ { key: 'd3', days: 3 }, { key: 'd10', days: 10 } ];
+const WINBACK_MAX_PER_RUN = 40;      // Sende-Burst je Durchlauf deckeln (Mail-Rate schonen)
+const WINBACK_MIN_GAP_MS = 3 * 24 * 60 * 60 * 1000; // Mindestabstand zwischen zwei Winback-Mails je Spieler
+function getUserLastSeen(userId) {
+  try {
+    const lb = db.shared['leaderboard:' + userId];
+    if (!lb) return 0;
+    const v = JSON.parse(lb);
+    return v.lastSeen || 0;
+  } catch (e) { return 0; }
+}
+// Reine, testbare Entscheidung: höchste erreichte, noch nicht gesendete Inaktivitätsstufe (oder null).
+function winbackTierToSend(daysAway, sentTiers) {
+  let pick = null;
+  for (const t of WINBACK_TIERS) { if (daysAway >= t.days && !sentTiers.includes(t.key)) pick = t.key; }
+  return pick;
+}
+async function checkDormantWinback() {
+  try {
+    const now = Date.now();
+    let changed = false, sent = 0;
+    for (const user of Object.values(db.users)) {
+      if (sent >= WINBACK_MAX_PER_RUN) break;
+      if (!user || !user.emailVerified || !user.email) continue;
+      if (user.wantsPatchnotes === false) continue; // Opt-out respektieren
+      const lastSeen = getUserLastSeen(user.userId);
+      if (!lastSeen) continue; // nie richtig gespielt - keine Winback-Mail an tote Registrierungen
+      const daysAway = (now - lastSeen) / 86400000;
+      const priv = db.private[user.userId] || (db.private[user.userId] = {});
+      const wb = priv.__winback || (priv.__winback = { sent: [], lastSentAt: 0 });
+      // Zurückgekehrt (kürzlich gespielt)? -> Zustand zurücksetzen, damit spätere Inaktivität wieder greift.
+      if (daysAway < 1) { if (wb.sent.length) { priv.__winback = { sent: [], lastSentAt: 0 }; changed = true; } continue; }
+      const tier = winbackTierToSend(daysAway, wb.sent);
+      if (!tier) continue;
+      if (wb.lastSentAt && (now - wb.lastSentAt) < WINBACK_MIN_GAP_MS) continue; // Sicherheitsnetz gegen Spam
+      const days = Math.floor(daysAway);
+      try {
+        const link = PUBLIC_URL + '/';
+        const html = voidSignalEmail({
+          eyebrow: 'Signal aus dem Tiefenraum',
+          username: user.username,
+          statusLabel: 'Deine Kolonie hält die Stellung',
+          statusColor: '#7f77dd',
+          bodyHtml: 'Kommandant, deine Kolonie hält seit ' + days + ' Tagen die Stellung – Produktion, Forschung und Flotten laufen auch ohne dich weiter, und der Offline-Ertrag stapelt sich. Doch Rivalen rücken auf deine Position vor. Kehr zurück und sichere, was dir gehört, bevor es jemand anderes tut.',
+          ctaLabel: 'Zur Kolonie zurückkehren',
+          ctaUrl: link,
+          footerNote: 'Du bekommst diese Erinnerung, weil dein Konto längere Zeit inaktiv war. Nicht mehr erwünscht? Deaktiviere „Neuigkeiten per E-Mail" in den Einstellungen.'
+        });
+        const text = voidSignalPlainText({
+          username: user.username, statusLabel: 'Deine Kolonie hält die Stellung',
+          plainBody: 'Deine Kolonie hält seit ' + days + ' Tagen die Stellung und der Offline-Ertrag stapelt sich. Kehr zurück, bevor Rivalen aufrücken.',
+          ctaUrl: link
+        });
+        await sendEmail(user.email, 'Deine Kolonie wartet auf dich – Kolonie Kepler-7', html, text);
+        wb.sent.push(tier); wb.lastSentAt = now; changed = true; sent++;
+        console.log('[winback] userId=' + user.userId + ' tier=' + tier + ' daysAway=' + days);
+      } catch (e) { console.error('Winback-Mail fehlgeschlagen:', e.message); }
+    }
+    if (changed) await saveDb();
+  } catch (e) { console.error('checkDormantWinback fehlgeschlagen:', e.message); }
+}
+setInterval(checkDormantWinback, 60 * 60 * 1000);   // stündlich prüfen
+setTimeout(checkDormantWinback, 2 * 60 * 1000);     // erster Lauf ~2 Min nach Start (blockiert den Boot nicht)
+
 setInterval(galaxyTick, GALAXY_TICK_MS);
 galaxyTick(); // einmal sofort beim Serverstart, damit nicht 15 Min. auf den ersten Zustand gewartet wird
 

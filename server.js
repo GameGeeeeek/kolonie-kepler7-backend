@@ -1540,8 +1540,39 @@ app.delete('/api/reports', authMiddleware, async (req, res) => {
 // Mega-Flotten-Grenznutzen, Anti-Farming). Bekannte, noch NICHT synchronisierte Frontend-Boni, die
 // hier bewusst fehlen (vorbestehende Lücke, nicht neu): Doktrin, Prestige-Perks, Skill-Baum,
 // Allianzforschung, Buffs, Planeten-Rollen, Mega-Projekte, Artefakt-Bonus. Ebenfalls fehlend: die
-// Verteidigungsanlage "flak" taucht im Frontend auf, war hier nie in DEFENSE_VALUES enthalten.
-const DEFENSE_VALUES = { turm: 15, flak: 20, schild: 30, laser: 25, plasma: 50, raketen: 40, gauss: 65, festung: 150 };
+// Verteidigungsgebäude – defVal EXAKT wie im Frontend (BUILDING_DEFS, category:'defense'). 23.07.2026:
+// Tabelle war stark veraltet (nur 8 Gebäude, festung/flak falsch) – dadurch zählten die meisten
+// modernen Verteidigungsgebäude im server-autoritativen PvP GAR NICHT. Jetzt vollständig gespiegelt.
+// (abhorchposten/mondschild haben defVal 0 – reine Utility, tragen wie im Frontend nichts bei.)
+const DEFENSE_VALUES = {
+  turm: 15, flak: 10, schild: 30, ionenschild: 45, laser: 25, plasma: 50, raketen: 40, gauss: 65,
+  railgun: 85, voidbarriere: 110, festung: 350, bunker: 135, nanoplattform: 150, sensorphalanx: 20,
+  schildkuppel: 220, fusionsbastion: 250, kiverteidigung: 300, metamaterialwall: 340, singularitaetsturm: 330
+};
+// Gebäude-Schildanteil: im Frontend trägt jedes Verteidigungsgebäude defVal + round(defVal*0.4) bei
+// (der Schild-Zuschlag). Serverseitig als Faktor 1.4 auf die Gebäude-Summe abgebildet.
+const BUILDING_SHIELD_FACTOR = 1.4;
+// Schiffs-Schildpunkte – wie im Frontend (SHIP_DEFS): explizite Werte, sonst round(atk*0.5).
+const SHIP_SHIELD_EXPLICIT = { enterschiff: 32, phantomschiff: 5, waechter: 14, quantenkreuzer: 20, metamaterialtitan: 80, superschlachtschiff: 110 };
+function shipShield(k) { return SHIP_SHIELD_EXPLICIT[k] !== undefined ? SHIP_SHIELD_EXPLICIT[k] : Math.round((SHIP_ATK_VALUES[k] || 0) * 0.5); }
+function fleetShieldSum(f) { if (!f) return 0; let s = 0; for (const k of Object.keys(SHIP_ATK_VALUES)) s += (f[k] || 0) * shipShield(k); return s; }
+// Doktrin-Multiplikatoren (DOCTRINE_DEFS im Frontend). Neutral, wenn keine Doktrin aktiv.
+const DOCTRINE_MULTS = { doc_offensive: { atk: 1.20, def: 0.85 }, doc_defensive: { atk: 0.85, def: 1.20 }, doc_logistics: { atk: 1, def: 1 } };
+function doctrineMult(save, side) { const d = DOCTRINE_MULTS[save && save.doctrine]; return d ? d[side] : 1; }
+// Temporäre Buffs (state.buffs) – atk/def-Multiplikatoren, solange nicht abgelaufen. Wie im Frontend.
+function buffMult(save, kind) { let m = 1; const now = Date.now(); for (const b of (save && save.buffs) || []) { if (b && b.kind === kind && b.expiresAt > now && typeof b.mult === 'number') m *= b.mult; } return m; }
+// Gedeckelte Kampf-Bonus-Gruppe – die serverseitig zuverlässig aus dem Save ableitbaren, GLOBALEN Terme
+// aus attackCombatBonusRaw/defenseCombatBonusRaw (Frontend). Gedeckelt bei +100% (identische Logik).
+// Noch NICHT gespiegelt (bräuchten große Tabellen-Ports, folgen ggf. separat): Allianz-Kampftechs,
+// Flaggschiff, Mega-Projekte, Veteranen-Ausbildung, Fähigkeitsbaum, Offizier Admiral, Allianz-Projekte.
+function combatBonusGroup(save) {
+  let b = 0;
+  b += ((save.prestigePerks || []).filter(k => k === 'combat').length) * 0.03;
+  b += (((save.ascension && save.ascension.tree && save.ascension.tree.combat) || 0)) * 0.02;
+  if (save.achievements && save.achievements.artifactset) b += 0.05;
+  b += Math.min(5, save.pirateLairPrestige || 0) * 0.02;
+  return Math.min(1.0, b);
+}
 // Muss exakt synchron zu SHIP_SCORE_WEIGHTS im Frontend bleiben (dort die eigentliche Quelle für
 // computeScore()) - bei Änderungen dort immer auch hier nachpflegen, sonst weicht der serverseitig
 // validierte Score vom eigentlich beabsichtigten Wert ab.
@@ -1554,6 +1585,10 @@ const SHIP_SCORE_WEIGHTS = {
   schlachtschiff:70, carrier:30, superschlachtschiff:180, waechter:20,
   leerenjaeger:120, kometenjaeger:18, enterschiff:28, phantomschiff:26, riftwaechter:22, gesandtenschiff:15, schuerfschiff:15,
   nanoklinge:45, quantenkreuzer:65, fusionsdreadnought:150, hyperjaeger:30, hyperbomber:110,
+  // Apex-Schiffe (23.07.2026): Metamaterial-Titan + Singularitäts-Vernichter fehlten bisher komplett
+  // (Score-Untervalidierung ihrer Besitzer, exakt der CLAUDE.md-Fallstrick). Gewichte identisch zur
+  // Frontend-Kopie SHIP_SCORE_WEIGHTS (weltraum_kolonie.html).
+  metamaterialtitan:135, singularitaetsvernichter:200,
   forscher:20, frachter:10, frachtergross:40, spaeher:15, spionageschiff:22, colonyShips:5, recycler:12,
   // Bugfix (20.07.2026, Bug-Sweep): mondzerstoerer fehlte komplett - maxOwned:1, 10 Tage Bauzeit,
   // Top-Tier-Forschung nötig, atk 300 (höchster Wert im Spiel), Gewicht identisch zur Frontend-Kopie
@@ -1707,8 +1742,13 @@ function rawFleetPower(f) {
 // Verteidigungsspezialisierung (13.07.2026) - defWeight-Gewichte identisch zum Frontend (SHIP_DEFS),
 // wirken NUR hier auf die Verteidigung, nie auf die Angriffskraft. Keine Schilde hier (der Backend-
 // Ansatz kennt generell keine Schilde, vorbestehende Vereinfachung gegenüber dem Frontend).
-const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5, leerenjaeger:1.1, kometenjaeger:0.6, enterschiff:1.6, phantomschiff:0.3, riftwaechter:0.8, hyperjaeger:0.6, hyperbomber:0.9 };
-const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130 };
+// Apex-Schiffe metamaterialtitan/singularitaetsvernichter (23.07.2026): defWeight/atk identisch zum
+// Frontend (SHIP_DEFS). Sie fehlten hier komplett und trugen serverseitig 0 zur Verteidigung bei,
+// obwohl der Metamaterial-Titan der schwerste Verteidigungs-Titan des Spiels ist. Werte NUR für die
+// Verteidigungs-/Schildberechnung (weightedFleetDefensePower/fleetShieldSum) - bewusst NICHT in
+// rawFleetPower, exakt wie das Frontend beide aus attackPowerRaw/ATTACK_SHIP_KEYS ausschließt.
+const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5, leerenjaeger:1.1, kometenjaeger:0.6, enterschiff:1.6, phantomschiff:0.3, riftwaechter:0.8, hyperjaeger:0.6, hyperbomber:0.9, metamaterialtitan:2.0, singularitaetsvernichter:1.6 };
+const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130, metamaterialtitan:150, singularitaetsvernichter:280 };
 function weightedFleetDefensePower(f) {
   if (!f) return 0;
   let sum = 0;
@@ -1752,7 +1792,10 @@ function computeAttackPower(save, enemyFleetForCounter) {
   const k = research.rkampf || 0, k2 = research.rkampf2 || 0;
   if (k) power *= (1 + k * 0.02);
   if (k2) power *= (1 + k2 * 0.02);
+  power *= doctrineMult(save, 'atk');
   power *= stanceOf(save).atkMult;
+  power *= (1 + combatBonusGroup(save)); // gedeckelte Kampf-Bonus-Gruppe (Teil-Port, siehe Kommentar)
+  power *= buffMult(save, 'atk');        // temporäre Angriffs-Buffs
   power *= t2OffenseAuraMult(fleetSummary(save)); // Tier-2 Offensiv-Aura (Nanoklinge/Vernichter), gedeckelt
   return Math.round(power);
 }
@@ -1763,20 +1806,26 @@ function computeDefensePower(save) {
   const homeBuildings = save.buildings || {};
   let homeBuildingSub = 0;
   for (const [k, v] of Object.entries(DEFENSE_VALUES)) homeBuildingSub += (homeBuildings[k] || 0) * v;
-  power += homeBuildingSub * HOME_DEFENSE_BONUS;
+  power += homeBuildingSub * BUILDING_SHIELD_FACTOR * HOME_DEFENSE_BONUS; // Gebäude + Schildanteil
   for (const c of Object.values(save.colonies || {})) {
     if (!c || !c.buildings) continue;
-    for (const [k, v] of Object.entries(DEFENSE_VALUES)) power += (c.buildings[k] || 0) * v;
+    let sub = 0;
+    for (const [k, v] of Object.entries(DEFENSE_VALUES)) sub += (c.buildings[k] || 0) * v;
+    power += sub * BUILDING_SHIELD_FACTOR;
   }
-  power += Math.round(weightedFleetDefensePower(save.fleet) * fleetDiversityMult(save.fleet) * 0.4) * HOME_DEFENSE_BONUS;
+  // Flotten-Verteidigung = Angriffs-abgeleiteter Anteil (×0,4) + Schildsumme, wie im Frontend.
+  power += Math.round((weightedFleetDefensePower(save.fleet) * 0.4 + fleetShieldSum(save.fleet)) * fleetDiversityMult(save.fleet)) * HOME_DEFENSE_BONUS;
   for (const c of Object.values(save.colonies || {})) {
     if (!c || !c.fleet) continue;
-    power += Math.round(weightedFleetDefensePower(c.fleet) * fleetDiversityMult(c.fleet) * 0.4);
+    power += Math.round((weightedFleetDefensePower(c.fleet) * 0.4 + fleetShieldSum(c.fleet)) * fleetDiversityMult(c.fleet));
   }
   const p = research.rpanzer || 0, s = research.rschildmatrix || 0;
   if (p) power *= (1 + p * 0.02);
   if (s) power *= (1 + s * 0.02);
+  power *= doctrineMult(save, 'def');
   power *= stanceOf(save).defMult;
+  power *= (1 + combatBonusGroup(save)); // gedeckelte Kampf-Bonus-Gruppe (Teil-Port, siehe Kommentar)
+  power *= buffMult(save, 'def');        // temporäre Verteidigungs-Buffs
   power *= t2DefenseAuraMult(fleetSummary(save)); // Tier-2 Defensiv-Aura (Quantenkreuzer/Titan), gedeckelt
   return Math.round(power);
 }

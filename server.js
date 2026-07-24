@@ -1755,12 +1755,17 @@ function saveSanityViolation(save) {
 // wird für den Verteidigungsbeitrag der eigenen Flotte gebraucht (analog Frontend attackPowerRaw),
 // damit Taktik-Haltung dort nicht doppelt bzw. falsch (Angriffs- statt Verteidigungsmultiplikator)
 // einfließt.
-function rawFleetPower(f) {
+// ssAtkMult/t2AtkMult (24.07.2026, Modul-Verdrahtung): Klassen-Angriffsmodule des Angreifers
+// (Zielcomputer auf Schlachtschiffe, Singularitäts-Fokusarray auf die Tier-2-Klasse) - werden nur
+// von computeAttackPower() mit echten Werten befüllt (aus save.equippedShipModules), alle anderen
+// Aufrufer (Verteidigungsbeitrag, Raid-/Muster-Kompositionen) bleiben neutral bei 1.
+function rawFleetPower(f, ssAtkMult, t2AtkMult) {
   if (!f) return 0;
+  const ssM = ssAtkMult || 1, t2M = t2AtkMult || 1;
   return diminishingShipCount(f.cruisers || 0) * 20 + diminishingShipCount(f.destroyers || 0) * 45 + diminishingShipCount(f.ships || 0) * 5 +
-    diminishingShipCount(f.jaeger || 0) * 10 + diminishingShipCount(f.bomber || 0) * 60 + diminishingShipCount(f.schlachtschiff || 0) * 90 +
+    diminishingShipCount(f.jaeger || 0) * 10 + diminishingShipCount(f.bomber || 0) * 60 + diminishingShipCount(f.schlachtschiff || 0) * 90 * ssM +
     diminishingShipCount(f.carrier || 0) * 15 + diminishingShipCount(f.superschlachtschiff || 0) * 220 + diminishingShipCount(f.waechter || 0) * 8 +
-    diminishingShipCount(f.nanoklinge || 0) * 55 + diminishingShipCount(f.quantenkreuzer || 0) * 80 + diminishingShipCount(f.fusionsdreadnought || 0) * 180 +
+    (diminishingShipCount(f.nanoklinge || 0) * 55 + diminishingShipCount(f.quantenkreuzer || 0) * 80 + diminishingShipCount(f.fusionsdreadnought || 0) * 180) * t2M +
     // Leerenjäger + Event-Kampfschiffe (19.07.2026, Balance-Entscheidung Sascha: "Ja in Tabelle") -
     // Angriffswerte identisch zum Frontend (SHIP_DEFS). Die beiden reinen Utility-Event-Schiffe
     // (gesandtenschiff/schuerfschiff, atk 0, nicht in ATTACK_SHIP_KEYS des Frontends) bleiben
@@ -1776,7 +1781,7 @@ function rawFleetPower(f) {
     // Apex-Flaggschiff, stärkster regulärer Angriffswert (280). War bisher NUR in der Verteidigung
     // (SHIP_ATK_VALUES/SHIP_DEF_WEIGHTS), trug hier 0 Angriff bei - identisch zum Frontend nachgezogen
     // (attackPowerRaw/ATTACK_SHIP_KEYS). Metamaterial-Titan bleibt bewusst draußen (reine Verteidigung).
-    diminishingShipCount(f.singularitaetsvernichter || 0) * 280;
+    diminishingShipCount(f.singularitaetsvernichter || 0) * 280 * t2M;
 }
 // Verteidigungsspezialisierung (13.07.2026) - defWeight-Gewichte identisch zum Frontend (SHIP_DEFS),
 // wirken NUR hier auf die Verteidigung, nie auf die Angriffskraft. Keine Schilde hier (der Backend-
@@ -1822,9 +1827,12 @@ function t2OffenseAuraMult(fleet) { return 1 + t2AuraSum(fleet, T2_OFFENSE_AURA,
 function t2DefenseAuraMult(fleet) { return 1 + t2AuraSum(fleet, T2_DEFENSE_AURA, T2_DEFENSE_AURA_CAP); }
 function computeAttackPower(save, enemyFleetForCounter) {
   const research = save.research || {};
+  // Klassen-Angriffsmodule aus dem Spielstand (Zielcomputer/Fokusarray, siehe SHIP_MODULE_COMBAT_BASE).
+  const ssAtkMult = 1 + shipModuleBonus(save, 'schlachtschiff', 'atk');
+  const t2AtkMult = 1 + shipModuleBonus(save, 'raffiniert', 'atk');
   let power = 0;
   for (const f of allFleetsOf(save)) {
-    let fp = rawFleetPower(f) * fleetDiversityMult(f);
+    let fp = rawFleetPower(f, ssAtkMult, t2AtkMult) * fleetDiversityMult(f);
     if (enemyFleetForCounter) fp *= counterMultiplier(f, enemyFleetForCounter);
     power += fp;
   }
@@ -1898,6 +1906,30 @@ function farmingPenaltyFor(attackerUserId, targetUserId) {
 // 0.4-Boden wie im Frontend. Modul-Instanzen sind als "typ:seltenheit" kodiert.
 const MODULE_RARITY_MULT = { gewoehnlich: 1.0, selten: 1.6, episch: 2.4, legendaer: 3.5, mythisch: 5.0 };
 const RAIDLOSS_MODULE_BASE = 0.05;
+// Schiffsklassen-Kampfmodule (SHIP_MODULE_DEFS im Frontend, nur die kampfrelevanten Einträge).
+// Bugfix (24.07.2026, Modul-Text-Audit): Zielcomputer wirkte nur in der Client-Vorschau, Reaktorkern-
+// Upgrade und Singularitäts-Fokusarray wirkten NIRGENDS (kein Verbraucher) - Spieler zahlten
+// z.B. 10 Singularitätskerne für ein totes Modul. Der Server liest die ausgerüsteten Module jetzt
+// direkt aus dem (server-validierten) Spielstand - kein Cheat-Vektor, und FE-Vorschau und Server-PvP
+// bleiben synchron. Basiswerte × Seltenheits-Multiplikator, atk je Klasse bei +100% gedeckelt
+// (identisch zur Frontend-Deckelung von Zielcomputer/Fokusarray).
+const SHIP_MODULE_COMBAT_BASE = {
+  ss_zielcomputer: { klasse: 'schlachtschiff', effect: 'atk', base: 0.05 },
+  mz_reaktorkern: { klasse: 'mondzerstoerer', effect: 'atk', base: 0.05 },
+  t2_singularitaetsfokus: { klasse: 'raffiniert', effect: 'atk', base: 0.14 },
+  mz_praezisionslaser: { klasse: 'mondzerstoerer', effect: 'siegechance', base: 0.05 }
+};
+function shipModuleBonus(save, klasse, effect) {
+  let sum = 0;
+  for (const instKey of (((save || {}).equippedShipModules || {})[klasse] || [])) {
+    if (typeof instKey !== 'string') continue;
+    const [key, rarity] = instKey.split(':');
+    const def = SHIP_MODULE_COMBAT_BASE[key];
+    if (!def || def.klasse !== klasse || def.effect !== effect) continue;
+    sum += def.base * (MODULE_RARITY_MULT[rarity] || 1);
+  }
+  return effect === 'atk' ? Math.min(1.0, sum) : sum;
+}
 function raidlossProtectionMult(save) {
   const eq = save.equippedModules || {};
   const locations = 1 + Object.keys(save.colonies || {}).length;
@@ -4490,10 +4522,17 @@ app.post('/api/moonsiege/resolve', authMiddleware, async (req, res) => {
   }
 
 
-  const power = 300 * (0.85 + Math.random() * 0.3);
+  // Mondzerstörer-Klassenmodule (24.07.2026, Modul-Text-Audit): Reaktorkern-Upgrade (atk) und
+  // Präzisionslaser (siegechance) versprachen ihre Wirkung seit Einführung, wurden aber NIRGENDS
+  // verrechnet. Jetzt aus dem (server-validierten) Angreifer-Save gelesen: atk verstärkt die
+  // Belagerungskraft (gedeckelt +100%), der Laser addiert direkt Erfolgschance NACH dem regulären
+  // 50%-Deckel (sonst wäre er gegen starke Ziele wirkungslos), harter Gesamt-Deckel bei 65%.
+  const mzAtkMult = 1 + shipModuleBonus(save, 'mondzerstoerer', 'atk');
+  const siegeChanceBonus = shipModuleBonus(save, 'mondzerstoerer', 'siegechance');
+  const power = 300 * mzAtkMult * (0.85 + Math.random() * 0.3);
   const reduction = Math.min(0.75, (targetMoon.shieldLevel || 0) * 0.04 + (targetMoon.stabilityLevel || 0) * 0.02 + (targetMoon.allianceTag ? 0.05 : 0));
   const baseChance = power / (power + Math.max(1, targetMoon.defense || 0) * 2.2);
-  const chance = Math.max(0.03, Math.min(0.5, baseChance * (1 - reduction)));
+  const chance = Math.max(0.03, Math.min(0.65, Math.min(0.5, baseChance * (1 - reduction)) + siegeChanceBonus));
   const destroyed = Math.random() < chance;
   const bp = destroyed ? 150 : 20;
 

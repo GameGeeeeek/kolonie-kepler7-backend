@@ -1989,6 +1989,16 @@ const SHIP_MODULE_COMBAT_BASE = {
   t2_singularitaetsfokus: { klasse: 'raffiniert', effect: 'atk', base: 0.14 },
   mz_praezisionslaser: { klasse: 'mondzerstoerer', effect: 'siegechance', base: 0.05 }
 };
+// Modul-Level (FE/BE-Parität, Modul-Overhaul Runde 1): Instanzen sind als "typ:seltenheit:level"
+// kodiert; fehlt das Level-Segment, gilt Level 1. Der Level-Multiplikator (+10% je Stufe, max. Lvl 10)
+// muss serverseitig identisch wie im Frontend (moduleLevelMult) angewendet werden, sonst weicht die
+// server-validierte PvP-Kampfkraft von der Frontend-Vorschau ab.
+const MODULE_LEVEL_PER = 0.10, MODULE_LEVEL_MAX = 10;
+function moduleLevelMultServer(instKey) {
+  const l = parseInt(String(instKey).split(':')[2] || '1', 10);
+  const lvl = Math.max(1, Math.min(MODULE_LEVEL_MAX, isNaN(l) ? 1 : l));
+  return 1 + (lvl - 1) * MODULE_LEVEL_PER;
+}
 function shipModuleBonus(save, klasse, effect) {
   let sum = 0;
   for (const instKey of (((save || {}).equippedShipModules || {})[klasse] || [])) {
@@ -1996,7 +2006,7 @@ function shipModuleBonus(save, klasse, effect) {
     const [key, rarity] = instKey.split(':');
     const def = SHIP_MODULE_COMBAT_BASE[key];
     if (!def || def.klasse !== klasse || def.effect !== effect) continue;
-    sum += def.base * (MODULE_RARITY_MULT[rarity] || 1);
+    sum += def.base * (MODULE_RARITY_MULT[rarity] || 1) * moduleLevelMultServer(instKey);
   }
   return effect === 'atk' ? Math.min(1.0, sum) : sum;
 }
@@ -2009,7 +2019,7 @@ function raidlossProtectionMult(save) {
       if (typeof instKey !== 'string') continue;
       const [type, rarity] = instKey.split(':');
       if (type !== 'schild') continue;
-      total += RAIDLOSS_MODULE_BASE * (MODULE_RARITY_MULT[rarity] || 1);
+      total += RAIDLOSS_MODULE_BASE * (MODULE_RARITY_MULT[rarity] || 1) * moduleLevelMultServer(instKey);
     }
   }
   return Math.max(0.4, 1 - (locations > 0 ? total / locations : 0));

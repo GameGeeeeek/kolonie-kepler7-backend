@@ -1146,6 +1146,7 @@ app.post('/api/register', authRateLimit, async (req, res) => {
   const userId = crypto.randomUUID();
   const home = assignHomeSlot();
   db.users[key] = { userId, username: cleanName, passwordHash, email: cleanEmail, emailVerified: false, createdAt: Date.now(), homeSystem: home.system, homeSlot: home.slot };
+  grantNewbieShield(userId); // 4 Tage Anfängerschutz ab Registrierung
 
   if (!db.verifyTokens) db.verifyTokens = {};
   const verifyToken = crypto.randomBytes(32).toString('hex');
@@ -2031,6 +2032,15 @@ function grantAttackShield(userId) {
 }
 function breakOwnAttackShield(userId) {
   if (db.private[userId]) db.private[userId].__attackShieldUntil = 0;
+}
+// Anfängerschutz: frisch registrierte Konten bekommen einen langen Start-Schild (4 Tage), damit
+// Neueinsteiger in Ruhe aufbauen können, statt sofort von etablierten Spielern gefarmt zu werden.
+// Nutzt denselben __attackShieldUntil-Mechanismus wie der reaktive Schild – bricht also ebenfalls,
+// sobald der Neuling selbst offensiv wird (breakOwnAttackShield in /attack und /sabotage).
+const NEWBIE_SHIELD_MS = 4 * 24 * 60 * 60 * 1000;
+function grantNewbieShield(userId) {
+  if (!db.private[userId]) db.private[userId] = {};
+  db.private[userId].__attackShieldUntil = Math.max(db.private[userId].__attackShieldUntil || 0, Date.now() + NEWBIE_SHIELD_MS);
 }
 
 app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {

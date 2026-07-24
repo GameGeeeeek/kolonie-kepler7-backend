@@ -1737,7 +1737,12 @@ function rawFleetPower(f) {
     // Tier-2-Hyperjäger/-bomber (22.07.2026, Spieler-Wunsch) - Angriffswerte identisch zum Frontend
     // (SHIP_DEFS). Anders als reguläre Jäger/Bomber KEIN Trägerhangar nötig, daher hier ohne
     // deployableFighters-Kappung direkt gewertet (das Backend kennt den Hangar-Mechanismus ohnehin nicht).
-    diminishingShipCount(f.hyperjaeger || 0) * 30 + diminishingShipCount(f.hyperbomber || 0) * 130;
+    diminishingShipCount(f.hyperjaeger || 0) * 30 + diminishingShipCount(f.hyperbomber || 0) * 130 +
+    // Singularitäts-Vernichter (24.07.2026, Balance-Entscheidung Sascha: "Ja, angreifen lassen") -
+    // Apex-Flaggschiff, stärkster regulärer Angriffswert (280). War bisher NUR in der Verteidigung
+    // (SHIP_ATK_VALUES/SHIP_DEF_WEIGHTS), trug hier 0 Angriff bei - identisch zum Frontend nachgezogen
+    // (attackPowerRaw/ATTACK_SHIP_KEYS). Metamaterial-Titan bleibt bewusst draußen (reine Verteidigung).
+    diminishingShipCount(f.singularitaetsvernichter || 0) * 280;
 }
 // Verteidigungsspezialisierung (13.07.2026) - defWeight-Gewichte identisch zum Frontend (SHIP_DEFS),
 // wirken NUR hier auf die Verteidigung, nie auf die Angriffskraft. Keine Schilde hier (der Backend-

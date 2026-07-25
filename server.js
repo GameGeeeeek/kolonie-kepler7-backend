@@ -2649,6 +2649,103 @@ app.get('/api/admin/analytics', authMiddleware, (req, res) => {
   res.json({ granularity: 'day', points: result });
 });
 
+// --- Wiederkehr-Quote / Retention (25.07.2026) ---
+// WARUM: Es gab bisher nur "wie viele waren heute da" (DAU). Ohne die Frage "kommen sie WIEDER"
+// laesst sich keine einzige Aenderung am Spiel beurteilen - man sieht Ausschlaege, aber nie, ob sie
+// etwas getragen haben. Die Rohdaten liegen laengst vor (db.analytics.daily[tag].uniqueUsers),
+// es fehlte nur die Auswertung. Deshalb kein neues Tracking, nur eine neue Sicht.
+//
+// KOHORTEN-ANKER ist user.createdAt (Registrierung), NICHT der erste Analytics-Tag eines Spielers.
+// Ueber die Analytics-Tage waere jeder Bestandsspieler faelschlich "neu", sobald die aelteren Tage
+// weggeraeumt sind (pruneOldAnalytics haelt 60 Tage) - die Retention saehe kuenstlich gut aus.
+//
+// EHRLICHKEIT BEI LUECKEN: Wo das 60-Tage-Fenster die Frage nicht beantworten kann, steht null und
+// nicht 0. Eine Kohorte von gestern HAT noch keine D7-Quote; sie als "0%" auszuweisen waere eine
+// Falschaussage, auf deren Basis man dann Entscheidungen trifft.
+const ANALYTICS_WINDOW_DAYS = 60; // muss zu pruneOldAnalytics passen
+function activeSetForDay(dayKey) {
+  const day = db.analytics && db.analytics.daily && db.analytics.daily[dayKey];
+  return new Set((day && day.uniqueUsers) || []);
+}
+function analyticsWindowStartKey() {
+  return analyticsDateKey(new Date(Date.now() - (ANALYTICS_WINDOW_DAYS - 1) * 86400000));
+}
+app.get('/api/admin/retention', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const tage = Math.max(7, Math.min(60, parseInt(req.query.days, 10) || 30));
+  const heuteKey = analyticsDateKey();
+  const fensterStart = analyticsWindowStartKey();
+
+  // Aktive je Tag einmal vorberechnen - sonst wird pro Kohorte erneut ueber die Tabelle gelaufen.
+  const aktive = {};
+  for (let i = 0; i <= ANALYTICS_WINDOW_DAYS; i++) {
+    const k = analyticsDateKey(new Date(Date.now() - i * 86400000));
+    aktive[k] = activeSetForDay(k);
+  }
+
+  // Registrierungen nach Tag buendeln.
+  const kohorten = {};
+  let ohneCreatedAt = 0;
+  for (const u of Object.values(db.users || {})) {
+    if (!u || !u.userId) continue;
+    if (!u.createdAt) { ohneCreatedAt++; continue; } // Altkonten von vor der createdAt-Einfuehrung
+    const k = analyticsDateKey(new Date(u.createdAt));
+    (kohorten[k] = kohorten[k] || []).push(u.userId);
+  }
+
+  const quote = (ids, zielKey) => {
+    // Liegt der Zieltag in der Zukunft oder ausserhalb des Analytics-Fensters, ist die Frage
+    // schlicht nicht beantwortbar - dann null statt einer erfundenen 0.
+    if (zielKey > heuteKey) return null;
+    if (zielKey < fensterStart) return null;
+    const set = aktive[zielKey];
+    if (!set) return null;
+    let wieder = 0;
+    for (const id of ids) if (set.has(id)) wieder++;
+    return { wieder, quote: ids.length ? Math.round((wieder / ids.length) * 1000) / 10 : 0 };
+  };
+
+  const punkte = [];
+  for (let i = tage - 1; i >= 0; i--) {
+    const tagKey = analyticsDateKey(new Date(Date.now() - i * 86400000));
+    const ids = kohorten[tagKey] || [];
+    const plus = n => analyticsDateKey(new Date(new Date(tagKey + 'T00:00:00Z').getTime() + n * 86400000));
+    punkte.push({
+      tag: tagKey,
+      neu: ids.length,
+      d1: ids.length ? quote(ids, plus(1)) : null,
+      d7: ids.length ? quote(ids, plus(7)) : null
+    });
+  }
+
+  // Tageshaftung ("kommen die von gestern heute wieder?"). Braucht keine Kohorten und funktioniert
+  // deshalb auch fuer Bestandsspieler - in einem kleinen Spiel oft die aussagekraeftigere Zahl.
+  const haftung = [];
+  for (let i = tage - 1; i >= 1; i--) {
+    const vorKey = analyticsDateKey(new Date(Date.now() - i * 86400000));
+    const tagKey = analyticsDateKey(new Date(Date.now() - (i - 1) * 86400000));
+    const vor = aktive[vorKey], heute = aktive[tagKey];
+    if (!vor || !heute || vor.size === 0) { haftung.push({ tag: tagKey, aktiv: heute ? heute.size : 0, wieder: null, quote: null }); continue; }
+    let wieder = 0;
+    for (const id of vor) if (heute.has(id)) wieder++;
+    haftung.push({ tag: tagKey, aktiv: heute.size, wieder, quote: Math.round((wieder / vor.size) * 1000) / 10 });
+  }
+
+  // Gesamtbild: wie viele registrierte Konten haben ueberhaupt je gespielt (im Fenster)?
+  const jeAktiv = new Set();
+  for (const k of Object.keys(aktive)) for (const id of aktive[k]) jeAktiv.add(id);
+  const konten = Object.values(db.users || {}).filter(u => u && u.userId).length;
+
+  res.json({
+    fenster: { tage: ANALYTICS_WINDOW_DAYS, von: fensterStart, bis: heuteKey },
+    konten,
+    imFensterAktiv: jeAktiv.size,
+    kontenOhneRegistrierungsdatum: ohneCreatedAt,
+    kohorten: punkte,
+    haftung
+  });
+});
+
 // --- Spieler melden + Admin-Moderation (13.07.2026, Feature-Wunsch: Moderation vorbereiten) ---
 // Admin-Zugriff ist fest auf das eigene Konto beschränkt (analog zum bestehenden Muster bei
 // Feedback-Push-Benachrichtigungen an 'gamegeeeeek') - kein eigenes Rollensystem, da es bewusst nur

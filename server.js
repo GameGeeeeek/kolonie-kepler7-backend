@@ -1776,12 +1776,38 @@ function computeScoreServer(save) {
 
 // Schiffs-Kontersystem (Schere-Stein-Papier) – identisch zum Frontend. Bei echtem PvP sind BEIDE
 // Flottenzusammensetzungen bekannt (anders als bei NPC-Kämpfen), wirkt hier also immer.
-const SHIP_COUNTERS = {
-  jaeger: { strongVs: ['bomber'], weakVs: ['cruisers', 'destroyers'] },
-  bomber: { strongVs: ['cruisers', 'destroyers'], weakVs: ['jaeger'] },
-  cruisers: { strongVs: ['jaeger'], weakVs: ['bomber'] },
-  destroyers: { strongVs: ['jaeger'], weakVs: ['bomber'] }
+// Konterrollen (25.07.2026) – MUSS zeichengleich zum Frontend bleiben (weltraum_kolonie.html,
+// COUNTER_ROLE_DEFS/COUNTER_ROLE_OF). Weicht eine Seite ab, rechnet der Server einen anderen
+// Kampfausgang aus als die Vorschau im Spiel anzeigt – der Spieler sieht dann eine Gewinnchance,
+// die nicht stimmt. test_konter_paritaet.js vergleicht beide Tabellen automatisch.
+// Vorher hatten nur vier Schiffe eine Konterrolle; alle Tier-2- und Event-Schiffe waren
+// konterneutral, ausgerechnet die teuerste Flotte also nicht konterbar.
+const COUNTER_ROLE_DEFS = [
+  { key: 'abfang', name: 'Abfangjäger', schlaegt: 'bomber' },
+  { key: 'bomber', name: 'Bomber', schlaegt: 'kapital' },
+  { key: 'kapital', name: 'Großkampfschiff', schlaegt: 'abfang' }
+];
+const COUNTER_ROLE_OF = {
+  jaeger: 'abfang', hyperjaeger: 'abfang', kometenjaeger: 'abfang', phantomschiff: 'abfang', leerenjaeger: 'abfang',
+  bomber: 'bomber', hyperbomber: 'bomber', nanoklinge: 'bomber', singularitaetsvernichter: 'bomber', mondzerstoerer: 'bomber',
+  cruisers: 'kapital', destroyers: 'kapital', schlachtschiff: 'kapital', superschlachtschiff: 'kapital',
+  carrier: 'kapital', waechter: 'kapital', quantenkreuzer: 'kapital', fusionsdreadnought: 'kapital',
+  metamaterialtitan: 'kapital', enterschiff: 'kapital', riftwaechter: 'kapital'
 };
+const SHIP_COUNTERS = (() => {
+  const byRole = {}; for (const r of COUNTER_ROLE_DEFS) byRole[r.key] = [];
+  for (const [ship, role] of Object.entries(COUNTER_ROLE_OF)) if (byRole[role]) byRole[role].push(ship);
+  const beatsOf = {}; for (const r of COUNTER_ROLE_DEFS) beatsOf[r.key] = r.schlaegt;
+  const out = {};
+  for (const [ship, role] of Object.entries(COUNTER_ROLE_OF)) {
+    const beatenBy = COUNTER_ROLE_DEFS.filter(r => r.schlaegt === role).map(r => r.key);
+    out[ship] = {
+      strongVs: byRole[beatsOf[role]] || [],
+      weakVs: beatenBy.reduce((acc, r) => acc.concat(byRole[r] || []), [])
+    };
+  }
+  return out;
+})();
 const COUNTER_BONUS = 0.25, COUNTER_MALUS = 0.15;
 function counterMultiplier(ownFleet, enemyFleet) {
   if (!ownFleet || !enemyFleet) return 1;
@@ -1931,14 +1957,44 @@ function weightedFleetDefensePower(f) {
   }
   return sum;
 }
-// Flotten-Diversitäts-Bonus - identisch zum Frontend (fleetDiversityMult).
-const FLEET_DIVERSITY_COMBAT_KEYS = ['jaeger','cruisers','destroyers','bomber','schlachtschiff','superschlachtschiff','carrier','waechter'];
-const FLEET_DIVERSITY_BONUS_PER_TYPE = 0.02, FLEET_DIVERSITY_MAX_TYPES = 5;
+// Flottenaufbau-Bonus - identisch zum Frontend (fleetDiversityMult, siehe dortigen Kommentar).
+// Vorher: +2% je unterschiedlichem Schiffstyp (eine Checkliste). Jetzt: wie gleichmäßig sich die
+// Angriffskraft der Flotte über die drei Konterrollen verteilt. Ausgewogen = +8% und konterneutral,
+// spezialisiert = +0% und dafür der volle Konterbonus/-malus. Höchstwert unverändert +8%.
+const FLEET_BALANCE_MAX_BONUS = 0.08;
+// Angriffsgewichte NUR für die Rollenbalance. Bewusst eine eigene Tabelle statt SHIP_ATK_VALUES:
+// dort fehlt der Mondzerstörer absichtlich (Spezialschiff mit eigenem Belagerungs-Endpunkt, zählt
+// nicht in rawFleetPower/fleetShieldSum) - ihn dort nachzutragen wäre eine ungewollte Änderung der
+// PvP-Kampfkraft. Diese Tabelle spiegelt die atk-Werte aus SHIP_DEFS des Frontends, aus denen die
+// dortige Balance-Rechnung sie direkt zieht; test_flottenbalance.js vergleicht beide Seiten.
+const COUNTER_ROLE_ATK = {
+  jaeger: 10, hyperjaeger: 30, kometenjaeger: 18, phantomschiff: 35, leerenjaeger: 140,
+  bomber: 60, hyperbomber: 130, nanoklinge: 55, singularitaetsvernichter: 280, mondzerstoerer: 300,
+  cruisers: 20, destroyers: 45, schlachtschiff: 90, superschlachtschiff: 220, carrier: 15,
+  waechter: 8, quantenkreuzer: 80, fusionsdreadnought: 180, metamaterialtitan: 150,
+  enterschiff: 25, riftwaechter: 20
+};
 function fleetDiversityMult(fleet) {
   if (!fleet) return 1;
-  const distinctTypes = FLEET_DIVERSITY_COMBAT_KEYS.filter(k => (fleet[k] || 0) > 0).length;
-  const bonusTypes = Math.max(0, Math.min(FLEET_DIVERSITY_MAX_TYPES, distinctTypes) - 1);
-  return 1 + bonusTypes * FLEET_DIVERSITY_BONUS_PER_TYPE;
+  const perRole = {};
+  let total = 0;
+  for (const [k, atk] of Object.entries(COUNTER_ROLE_ATK)) {
+    const rolle = COUNTER_ROLE_OF[k];
+    if (!rolle) continue;
+    const n = fleet[k] || 0;
+    if (!(n > 0)) continue;
+    const gewicht = n * (atk || 1);
+    perRole[rolle] = (perRole[rolle] || 0) + gewicht;
+    total += gewicht;
+  }
+  if (total <= 0) return 1;
+  const rollen = COUNTER_ROLE_DEFS.length;
+  const ideal = 1 / rollen;
+  let abweichung = 0;
+  for (const r of COUNTER_ROLE_DEFS) abweichung += Math.abs((perRole[r.key] || 0) / total - ideal);
+  const maxAbweichung = 2 * (1 - ideal);
+  const balance = maxAbweichung > 0 ? Math.max(0, 1 - abweichung / maxAbweichung) : 1;
+  return 1 + balance * FLEET_BALANCE_MAX_BONUS;
 }
 // enemyFleetForCounter: die GESAMTE gegnerische Flotte (fleetSummary), optional – nur bei echtem PvP
 // bekannt und übergeben, macht das Kontersystem wirksam.

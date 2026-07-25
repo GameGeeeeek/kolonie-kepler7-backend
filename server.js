@@ -3720,6 +3720,173 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
   });
 });
 
+// ===== Modulbörse: Spieler-zu-Spieler-Handel mit Modulen (25.07.2026) =====
+// Bis hierher gab es keinen Weg, ein Modul an einen anderen Spieler abzugeben - Duplikate konnte man
+// nur zerlegen oder verschmelzen. Die Börse arbeitet mit ECHTER TREUHAND: beim Einstellen verlässt
+// das Modul sofort das Inventar des Verkäufers und liegt bis zum Kauf oder Rückzug ausschließlich im
+// Angebot. Damit ist die gefährlichste Klasse von Fehlern - dasselbe Modul zweimal verkaufen oder es
+// durch Einstellen zu verdoppeln - konstruktiv ausgeschlossen statt nur unwahrscheinlich gemacht.
+//
+// Warum das sicher ist, obwohl Node mehrere Requests bedient: Der gesamte Zustandswechsel eines
+// Endpunkts (Listing prüfen, entfernen, Save schreiben) läuft synchron in EINEM Tick, ohne dazwischen-
+// liegendes await. Zwei gleichzeitige Käufe desselben Angebots können sich deshalb nicht überlappen -
+// der zweite findet das Listing bereits nicht mehr. Das erste await steht bewusst erst nach dem
+// vollständigen Zustandswechsel (saveDb()).
+//
+// Ehrliche Grenze: Der Server kennt die Modul-Definitionen des Frontends nicht und kann nicht prüfen,
+// ob ein instKey ein "legitimes" Modul beschreibt - er prüft nur Format und tatsächlichen BESITZ im
+// gespeicherten Inventar. Wer seinen eigenen Spielstand manipuliert, könnte damit ein erfundenes
+// Modul einstellen. Das ist dieselbe Vertrauensgrenze wie beim übrigen Spielstand (der Client
+// schreibt ihn) und wird durch die Sanity-Limits gedeckelt, nicht durch diese Börse.
+const MODULE_MARKET_MAX_LISTINGS_PER_USER = 5;   // gleichzeitig offene Angebote je Spieler
+const MODULE_MARKET_MIN_PRICE = 1000;
+const MODULE_MARKET_MAX_PRICE = 5000000;
+const MODULE_MARKET_FEE_PCT = 0.05;              // Einstellgebühr, wird beim Verkauf vom Erlös abgezogen
+const MODULE_MARKET_MAX_TOTAL = 300;             // Gesamtgröße der Börse (Schutz vor Zumüllen)
+// instKey-Format aus dem Frontend: "<typ>:<seltenheit>[:<level>[:<substats>]]". Bewusst streng, damit
+// keine beliebigen Zeichenketten in den geteilten Zustand wandern.
+const MODULE_INSTKEY_RE = /^[a-z0-9_]{2,40}:[a-z]{4,14}(:\d{1,2})?(:[a-zA-Z0-9,._-]{1,60})?$/;
+function loadOrInitModuleMarket() {
+  if (!db.shared) db.shared = {};
+  if (!Array.isArray(db.shared.__moduleMarket)) db.shared.__moduleMarket = [];
+  return db.shared.__moduleMarket;
+}
+// Zählt ein Modul im Inventar des übergebenen Spielstands (nur NICHT ausgerüstete liegen dort - das
+// Frontend nimmt ausgerüstete Module aus der Zählkarte heraus, siehe equipModule).
+function moduleInvOf(save, isShip) {
+  const key = isShip ? 'shipModules' : 'modules';
+  if (!save[key] || typeof save[key] !== 'object') save[key] = {};
+  return save[key];
+}
+function publicListing(l, viewerId) {
+  return {
+    id: l.id, isShip: !!l.isShip, instKey: l.instKey, price: l.price,
+    sellerName: l.sellerName, createdAt: l.createdAt, mine: l.sellerId === viewerId
+  };
+}
+
+// Offene Angebote ansehen. Bewusst ohne Auth-Zwang auf fremde Daten: es werden nur Modulschlüssel,
+// Preis und Verkäufername ausgeliefert, keine Spielstände.
+app.get('/api/modulemarket', authMiddleware, (req, res) => {
+  const listings = loadOrInitModuleMarket();
+  res.json({
+    listings: listings.map(l => publicListing(l, req.userId)),
+    limits: {
+      maxPerUser: MODULE_MARKET_MAX_LISTINGS_PER_USER,
+      minPrice: MODULE_MARKET_MIN_PRICE,
+      maxPrice: MODULE_MARKET_MAX_PRICE,
+      feePct: MODULE_MARKET_FEE_PCT
+    }
+  });
+});
+
+// Modul einstellen: wandert SOFORT aus dem Inventar in die Treuhand.
+app.post('/api/modulemarket/list', authMiddleware, async (req, res) => {
+  const { isShip, instKey, price } = req.body || {};
+  const key = String(instKey || '');
+  if (!MODULE_INSTKEY_RE.test(key)) return res.status(400).json({ error: 'Ungültiger Modulschlüssel.' });
+  const p = Math.floor(Number(price));
+  if (!Number.isFinite(p) || p < MODULE_MARKET_MIN_PRICE || p > MODULE_MARKET_MAX_PRICE) {
+    return res.status(400).json({ error: 'Preis muss zwischen ' + MODULE_MARKET_MIN_PRICE + ' und ' + MODULE_MARKET_MAX_PRICE + ' Krediten liegen.' });
+  }
+  const listings = loadOrInitModuleMarket();
+  if (listings.length >= MODULE_MARKET_MAX_TOTAL) return res.status(429).json({ error: 'Die Modulbörse ist gerade voll - bitte später erneut versuchen.' });
+  const mine = listings.filter(l => l.sellerId === req.userId).length;
+  if (mine >= MODULE_MARKET_MAX_LISTINGS_PER_USER) {
+    return res.status(400).json({ error: 'Maximal ' + MODULE_MARKET_MAX_LISTINGS_PER_USER + ' eigene Angebote gleichzeitig.' });
+  }
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save;
+  try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  const inv = moduleInvOf(save, !!isShip);
+  if ((inv[key] || 0) < 1) return res.status(400).json({ error: 'Dieses Modul liegt nicht (mehr) in deinem Inventar. Ausgerüstete Module musst du erst abnehmen.' });
+  // Treuhand: erst aus dem Inventar nehmen, dann einstellen - in dieser Reihenfolge, damit ein
+  // Fehler beim Speichern niemals ein Angebot ohne Gegenwert hinterlässt.
+  inv[key] -= 1;
+  if (inv[key] <= 0) delete inv[key];
+  const listing = {
+    id: crypto.randomUUID(),
+    sellerId: req.userId,
+    sellerName: req.username,
+    isShip: !!isShip,
+    instKey: key,
+    price: p,
+    createdAt: Date.now()
+  };
+  listings.push(listing);
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+  await saveDb();
+  res.json({ ok: true, listing: publicListing(listing, req.userId), saveVersion: mySaveVersion });
+});
+
+// Eigenes Angebot zurückziehen: Modul kehrt ins Inventar zurück.
+app.post('/api/modulemarket/cancel', authMiddleware, async (req, res) => {
+  const { id } = req.body || {};
+  const listings = loadOrInitModuleMarket();
+  const idx = listings.findIndex(l => l.id === id);
+  if (idx < 0) return res.status(404).json({ error: 'Angebot nicht gefunden (vielleicht wurde es gerade gekauft).' });
+  const listing = listings[idx];
+  if (listing.sellerId !== req.userId) return res.status(403).json({ error: 'Das ist nicht dein Angebot.' });
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save;
+  try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  // Erst aus der Börse entfernen, dann zurücklegen - so kann das Modul nie gleichzeitig im Angebot
+  // UND im Inventar liegen.
+  listings.splice(idx, 1);
+  const inv = moduleInvOf(save, listing.isShip);
+  inv[listing.instKey] = (inv[listing.instKey] || 0) + 1;
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+  await saveDb();
+  res.json({ ok: true, instKey: listing.instKey, isShip: listing.isShip, saveVersion: mySaveVersion });
+});
+
+// Angebot kaufen.
+app.post('/api/modulemarket/buy', authMiddleware, async (req, res) => {
+  const { id } = req.body || {};
+  const listings = loadOrInitModuleMarket();
+  const idx = listings.findIndex(l => l.id === id);
+  if (idx < 0) return res.status(404).json({ error: 'Angebot nicht mehr verfügbar.' });
+  const listing = listings[idx];
+  if (listing.sellerId === req.userId) return res.status(400).json({ error: 'Du kannst dein eigenes Angebot nicht kaufen - zieh es stattdessen zurück.' });
+  const saveRaw = getSaveValue(req.userId);
+  if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save;
+  try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  if ((save.credits || 0) < listing.price) return res.status(400).json({ error: 'Nicht genug Kredite (' + listing.price + ' nötig).' });
+  // Ab hier bis saveDb() kein await: der komplette Übergang (Angebot weg, Käufer zahlt und erhält,
+  // Verkäufer bekommt seine Gutschrift eingereiht) passiert in einem Tick und ist damit unteilbar.
+  listings.splice(idx, 1);
+  save.credits -= listing.price;
+  const inv = moduleInvOf(save, listing.isShip);
+  inv[listing.instKey] = (inv[listing.instKey] || 0) + 1;
+  const fee = Math.round(listing.price * MODULE_MARKET_FEE_PCT);
+  const payout = listing.price - fee;
+  // Der Erlös geht NICHT direkt in den Spielstand des Verkäufers: der kann online sein, und sein
+  // nächster Auto-Save würde die Gutschrift mit seinem älteren Client-Stand überschreiben (siehe
+  // ausführliche Begründung bei /api/pending-rewards). Stattdessen die etablierte Warteschlange.
+  pushPendingReward(listing.sellerId, {
+    type: 'module-sale',
+    credits: payout,
+    instKey: listing.instKey,
+    isShip: listing.isShip,
+    price: listing.price,
+    fee,
+    buyerName: req.username,
+    time: Date.now()
+  });
+  const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+  await saveDb();
+  res.json({
+    ok: true,
+    instKey: listing.instKey, isShip: listing.isShip, price: listing.price, fee,
+    sellerName: listing.sellerName,
+    saveVersion: mySaveVersion,
+    newCredits: save.credits
+  });
+});
+
 // Löst eine abgeschlossene Weltboss-Mission serverseitig auf. Bug/Sicherheitslücke behoben
 // (13.07.2026): der komplette Schaden (inkl. "Tötung" des gemeinsamen Bosses) wurde bisher rein
 // clientseitig berechnet und ungeprüft in den geteilten Speicher (worldboss:current) geschrieben -

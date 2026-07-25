@@ -267,6 +267,53 @@ function containsBannedTerm(text) {
   return BANNED_TERMS.some(term => normalized.includes(term));
 }
 
+// --- Mengenschutz für den geteilten Speicher (25.07.2026) ---
+// db.shared lag komplett im Arbeitsspeicher und wurde bei jedem saveDb() als eine JSON-Datei neu
+// geschrieben - ohne jede Obergrenze: weder für die Größe eines einzelnen Wertes noch für die Zahl
+// der Schlüssel. Die einzigen Schranken waren express.json({limit:'2mb'}) pro Anfrage und der
+// globale 240/min-Ratenbegrenzer je IP. Ein Konto in einer Schleife (böswillig oder schlicht ein
+// Client-Bug) konnte die Datei damit unbegrenzt wachsen lassen - und das trifft nicht ein Konto,
+// sondern Arbeitsspeicher, Speicherdauer und Plattenplatz des ganzen Servers.
+//
+// Wichtig für die Auslegung: Ein ÜBERSCHREIBEN vorhandener Schlüssel lässt den Speicher nicht
+// wachsen - das ist die normale Spielschleife (Bestenlisten-Eintrag, Allianzdokumente, Missionen).
+// Gedeckelt wird deshalb nur das ANLEGEN neuer Schlüssel. Selbst am harten Deckel bleibt das Spiel
+// dadurch bedienbar, statt komplett zu blockieren.
+const MAX_SHARED_VALUE_BYTES = 64 * 1024;   // größte echte Nutzlast (Allianzdokumente) liegt weit darunter
+const MAX_SHARED_KEYS = 200000;             // harte Notbremse, blockiert nur neue Schlüssel
+
+// Chat-Nachrichten legen JE NACHRICHT einen eigenen geteilten Schlüssel an (globalchat:msg:<id>,
+// alliance:<TAG>:msg:<id>) und wurden nirgends aufgeräumt - der eigentliche Wachstumstreiber im
+// NORMALEN Betrieb, ganz ohne Angreifer. Der Client liest ohnehin nur die neuesten 50 Schlüssel je
+// Kanal und zeigt davon 30 an; alles Ältere ist reine Last, die bei jeder Abfrage mit übertragen
+// wird. 100 behaltene Nachrichten je Kanal liegen also klar über allem, was jemand sehen kann.
+const CHAT_KEEP_PER_CHANNEL = 100;
+// Sortiert nach dem Zeitstempel AUS DEM SCHLÜSSEL (Format "<Date.now()>-<zufall>"), nicht
+// lexikografisch - sonst stünde "9..." vor "10...", sobald die Millisekunden eine Stelle zulegen.
+function chatKeyTimestamp(key) {
+  const id = key.slice(key.lastIndexOf(':') + 1);
+  const ts = parseInt(id, 10);
+  return Number.isFinite(ts) ? ts : 0;
+}
+function pruneChatKeys() {
+  const kanaele = new Map();
+  for (const k of Object.keys(db.shared)) {
+    const i = k.lastIndexOf(':msg:');
+    if (i < 0) continue;
+    const prefix = k.slice(0, i + 5);
+    if (!kanaele.has(prefix)) kanaele.set(prefix, []);
+    kanaele.get(prefix).push(k);
+  }
+  let geloescht = 0;
+  for (const [, keys] of kanaele) {
+    if (keys.length <= CHAT_KEEP_PER_CHANNEL) continue;
+    keys.sort((a, b) => chatKeyTimestamp(a) - chatKeyTimestamp(b));
+    for (const k of keys.slice(0, keys.length - CHAT_KEEP_PER_CHANNEL)) { delete db.shared[k]; geloescht++; }
+  }
+  if (geloescht) console.log('[shared-prune] ' + geloescht + ' alte Chat-Schlüssel entfernt');
+  return geloescht;
+}
+
 // --- Allianz-Berechtigungen ---
 // Das Allianz-System läuft komplett über den generischen geteilten Speicher (alliance:<TAG>:...) -
 // der lief bisher OHNE jede serverseitige Rechte-Prüfung, jedes eingeloggte Konto konnte JEDEN
@@ -1507,6 +1554,18 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   if (shared) {
     const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
+    // Mengenschutz (siehe MAX_SHARED_VALUE_BYTES oben). Bewusst NACH der Rechteprüfung und VOR jedem
+    // Schreibzugriff - und bewusst nur für NEUE Schlüssel, damit die normale Spielschleife
+    // (Überschreiben vorhandener Dokumente) auch am Deckel weiterläuft.
+    const wertBytes = Buffer.byteLength(value || '', 'utf8');
+    if (wertBytes > MAX_SHARED_VALUE_BYTES) {
+      console.log('[shared-reject] userId=' + req.userId + ' key=' + key + ' bytes=' + wertBytes);
+      return res.status(413).json({ error: 'Wert zu groß für den geteilten Speicher (' + Math.round(wertBytes / 1024) + ' KB, erlaubt sind ' + (MAX_SHARED_VALUE_BYTES / 1024) + ' KB).' });
+    }
+    if (db.shared[key] === undefined && Object.keys(db.shared).length >= MAX_SHARED_KEYS) {
+      console.log('[shared-reject] userId=' + req.userId + ' key=' + key + ' reason=keylimit');
+      return res.status(507).json({ error: 'Der geteilte Speicher ist voll - neue Einträge sind vorübergehend gesperrt. Bestehende lassen sich weiter aktualisieren.' });
+    }
     // Spionage-Ping (Gegenspionage-Feedback): reiner Info-Ping, der dem ausgespähten Spieler eine
     // "du wurdest ausgespäht"-Benachrichtigung zustellt. Wird NICHT persistent gespeichert (kein
     // Datenmüll im geteilten Speicher) und ist gegen Fälschung abgesichert: nur der eingeloggte
@@ -3507,6 +3566,7 @@ function resolveBountyServer() {
 function galaxyTick() {
   const g = loadOrInitGalaxy();
   g.lastTick = Date.now();
+  pruneChatKeys();   // alte Chat-Schlüssel wegräumen - siehe CHAT_KEEP_PER_CHANNEL
   updateHallOfFameServer();
   resolveWeeklyLeagueServer();
   resolveSeasonLeagueServer();

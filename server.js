@@ -1319,10 +1319,38 @@ app.get('/api/me', authMiddleware, (req, res) => {
     maskedEmail: user ? maskEmail(user.email) : '',
     pendingEmail: user && user.pendingEmail ? maskEmail(user.pendingEmail) : null,
     wantsPatchnotes: user ? (user.wantsPatchnotes !== false) : true,
+    // Zeitpunkt der Anmeldung, die die aktuell laufende Sitzung eröffnet hat. Im Spiel als
+    // "Zuletzt angemeldet" sichtbar - die einzige Möglichkeit für Spieler zu erkennen, ob sich
+    // jemand anderes an ihrem Konto angemeldet hat. null bei Konten, die sich seit Einführung
+    // der Sitzungsführung noch nicht neu angemeldet haben.
+    lastLoginAt: (user && user.activeSessionAt) || null,
     homeSystem: user && user.homeSystem, homeSlot: user && user.homeSlot,
     attackShieldMs: attackShieldRemaining(req.userId),
     season: seasonInfoForUser(req.userId)
   });
+});
+
+// --- Alle Sitzungen beenden ---
+// Für den Fall "jemand anderes ist an meinem Konto": zählt tokenVersion hoch (entwertet damit JEDES
+// bisher ausgestellte Token, auch alte sid-lose aus der Zeit vor der Sitzungsführung) und löscht die
+// aktive Sitzung. Danach ist NIEMAND mehr angemeldet - auch das aufrufende Gerät nicht, das ist so
+// gewollt und wird im Spiel auch so angekündigt.
+// Passwort-Bestätigung wie bei /api/update-email: verhindert, dass ein gestohlenes Token allein
+// reicht, um den rechtmäßigen Besitzer auszusperren.
+// Wichtig für die Erwartungshaltung: das allein schützt nicht dauerhaft, wenn das Passwort bekannt
+// ist - dann kann sich derselbe Fremde direkt wieder anmelden. Das Spiel empfiehlt deshalb an der
+// Stelle zusätzlich einen Passwortwechsel.
+app.post('/api/logout-all', authMiddleware, authRateLimit, async (req, res) => {
+  const { password } = req.body || {};
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Account nicht gefunden.' });
+  const ok = await bcrypt.compare(String(password || ''), user.passwordHash);
+  if (!ok) return res.status(401).json({ error: 'Passwort stimmt nicht.' });
+  user.tokenVersion = (user.tokenVersion || 0) + 1;
+  delete user.activeSessionId;
+  delete user.activeSessionAt;
+  await saveDb();
+  res.json({ ok: true });
 });
 
 // --- E-Mail hinterlegen oder ändern (mit Bestätigung auf der NEUEN Adresse + Passwort-Check) ---

@@ -1808,6 +1808,71 @@ const SHIP_COUNTERS = (() => {
   }
   return out;
 })();
+// ===== Kampfphasen (25.07.2026) - identisch zum Frontend (BATTLE_PHASES/resolveBattlePhases) =====
+// Statt eines einzelnen Wurfs drei Phasen mit unterschiedlicher Kontergewichtung; wer zwei davon
+// gewinnt, gewinnt den Kampf.
+const BATTLE_PHASES = [
+  { key: 'anflug', name: 'Anflug', konterGewicht: 1.5 },
+  { key: 'haupt', name: 'Hauptgefecht', konterGewicht: 1.0 },
+  { key: 'rueckzug', name: 'Rückzug', konterGewicht: 0.5 }
+];
+// "Zwei von drei" verschärft die Wahrscheinlichkeit: p_gesamt = 3p²(1-p) + p³. Damit der Kampf
+// INSGESAMT denselben Spielraum behält wie vorher, müssen die Phasen-Deckel zurückgerechnet werden.
+// PvP lief bisher mit [0,10 … 0,90]; das ergibt je Phase [0,196 … 0,804]:
+//   p=0,196 -> 3·0,0384·0,804 + 0,00753 = 0,100
+//   p=0,804 -> 3·0,6464·0,196 + 0,5197  = 0,900
+// Das Frontend nutzt für NPC-Kämpfe andere Grenzen ([0,05 … 0,95] -> [0,14 … 0,86]), deshalb sind
+// die Deckel Parameter und keine Konstanten. Wer daran dreht, muss neu zurückrechnen.
+const PVP_PHASE_MIN = 0.196, PVP_PHASE_MAX = 0.804;
+function resolveBattlePhases(basePower, defense, counterMult, minC, maxC, rng) {
+  const wurf = rng || Math.random;
+  const mult = (typeof counterMult === 'number' && counterMult > 0) ? counterMult : 1;
+  const phasen = [];
+  let siege = 0;
+  for (const ph of BATTLE_PHASES) {
+    const p = Math.max(0, basePower * (1 + (mult - 1) * ph.konterGewicht));
+    const roh = (p + defense) > 0 ? p / (p + defense) : 0;
+    const chance = Math.max(minC, Math.min(maxC, roh));
+    const gewonnen = wurf() < chance;
+    if (gewonnen) siege++;
+    phasen.push({ key: ph.key, name: ph.name, chance, gewonnen, power: Math.round(p) });
+  }
+  return { success: siege >= 2, siege, phasen };
+}
+function battleWinChance(basePower, defense, counterMult, minC, maxC) {
+  const mult = (typeof counterMult === 'number' && counterMult > 0) ? counterMult : 1;
+  const ps = BATTLE_PHASES.map(ph => {
+    const p = Math.max(0, basePower * (1 + (mult - 1) * ph.konterGewicht));
+    const roh = (p + defense) > 0 ? p / (p + defense) : 0;
+    return Math.max(minC, Math.min(maxC, roh));
+  });
+  const [a, b, c] = ps;
+  return a * b * (1 - c) + a * (1 - b) * c + (1 - a) * b * c + a * b * c;
+}
+
+// ===== Verteidigungs-Aufstellung (25.07.2026) - identisch zum Frontend (DEFENSE_FORMATIONS) =====
+// Der Verteidiger legt sich vorab fest, gegen welche Art Angriffsflotte er gerüstet sein will.
+// MUSS serverseitig gelesen werden, sonst hätte die Wahl im PvP - dem einzigen Kampf, in dem ein
+// echter Gegner die Zusammensetzung wählt - überhaupt keine Wirkung.
+const DEFENSE_FORMATIONS = {
+  ausgewogen: { stark: null, schwach: null },
+  schilde: { stark: 'bomber', schwach: 'abfang' },
+  geschuetze: { stark: 'abfang', schwach: 'bomber' }
+};
+const FORMATION_BONUS = 0.15, FORMATION_MALUS = 0.10;
+function formationDefenseMult(attackerFleet, formationKey) {
+  const f = DEFENSE_FORMATIONS[formationKey || 'ausgewogen'];
+  if (!f || !f.stark || !attackerFleet) return 1;
+  let total = 0; const perRole = {};
+  for (const [k, atk] of Object.entries(COUNTER_ROLE_ATK)) {
+    const rolle = COUNTER_ROLE_OF[k]; if (!rolle) continue;
+    const n = attackerFleet[k] || 0; if (!(n > 0)) continue;
+    const g = n * (atk || 1);
+    perRole[rolle] = (perRole[rolle] || 0) + g; total += g;
+  }
+  if (total <= 0) return 1;
+  return 1 + ((perRole[f.stark] || 0) / total) * FORMATION_BONUS - ((perRole[f.schwach] || 0) / total) * FORMATION_MALUS;
+}
 const COUNTER_BONUS = 0.25, COUNTER_MALUS = 0.15;
 function counterMultiplier(ownFleet, enemyFleet) {
   if (!ownFleet || !enemyFleet) return 1;
@@ -2205,9 +2270,21 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   // Kontersystem: die Zusammensetzung der Angreifer-Flotte gegen die des Ziels bestimmt einen
   // Bonus/Malus. Bei echtem PvP sind (anders als bei NPC-Kämpfen) beide Flotten bekannt.
   const attackPower = computeAttackPower(attacker, targetFleetSummary);
-  const defensePower = computeDefensePower(target);
-  const chance = Math.max(0.1, Math.min(0.9, attackPower / (attackPower + defensePower)));
-  const success = Math.random() < chance;
+  // Für die Phasen wird die Kontergewichtung je Phase eigen gesetzt - dafür braucht es die
+  // Angriffskraft OHNE Konter und den effektiven Konterfaktor getrennt. computeAttackPower wendet
+  // den Konter pro Teilflotte an; das Verhältnis der beiden Aufrufe ist genau der aggregierte
+  // Faktor, ohne dass die Funktion selbst umgebaut werden muss.
+  const attackPowerRoh = computeAttackPower(attacker, null);
+  const effektiverKonter = attackPowerRoh > 0 ? attackPower / attackPowerRoh : 1;
+  // Verteidigungs-Aufstellung des ZIELS: die Wahl des Verteidigers wirkt genau hier, im einzigen
+  // Kampf, in dem ein echter Gegner die Angriffszusammensetzung bestimmt.
+  const attackerFleetForFormation = fleetSummary(attacker);
+  const formationKey = target.defenseFormation || 'ausgewogen';
+  const formationMult = formationDefenseMult(attackerFleetForFormation, formationKey);
+  const defensePower = Math.round(computeDefensePower(target) * formationMult);
+  const phasenErgebnis = resolveBattlePhases(attackPowerRoh, defensePower, effektiverKonter, PVP_PHASE_MIN, PVP_PHASE_MAX);
+  const chance = battleWinChance(attackPowerRoh, defensePower, effektiverKonter, PVP_PHASE_MIN, PVP_PHASE_MAX);
+  const success = phasenErgebnis.success;
 
   const defenseBefore = defenseBreakdown(target);
 
@@ -2261,11 +2338,11 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
 
     addReport(req.userId, {
       type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt',
-      attackPower, defensePower, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary
+      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary
     });
     addReport(targetUserId, {
       type: 'attack-received', result: 'loss', attackerName: req.username,
-      attackPower, defensePower, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary
+      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary
     });
     // Verteidiger benachrichtigen (Retention-Trigger 21.07.2026): angegriffen zu werden ist einer der
     // stärksten Rückkehr-Anlässe. Server hat den Kampf ohnehin aufgelöst - hier nur der Push obendrauf.
@@ -2278,11 +2355,11 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
 
     addReport(req.userId, {
       type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt',
-      attackPower, defensePower, defenseBefore, fleet: attackerFleetSummary
+      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary
     });
     addReport(targetUserId, {
       type: 'attack-received', result: 'win', attackerName: req.username,
-      attackPower, defensePower, defenseBefore, fleet: attackerFleetSummary
+      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary
     });
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: true, looted: false }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     await saveDb();

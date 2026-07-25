@@ -206,6 +206,20 @@ function authMiddleware(req, res, next) {
     if (user && (user.tokenVersion || 0) !== (payload.tv || 0)) {
       return res.status(401).json({ error: 'Sitzung abgelaufen oder ungültig.' });
     }
+    // Sitzungs-Prüfung (25.07.2026): pro Konto ist immer nur EINE Sitzung aktiv. Jede Anmeldung
+    // vergibt eine neue Sitzungs-ID (user.activeSessionId) und schreibt sie als sid ins Token; ein
+    // Token mit abweichender/fehlender sid gehört damit zu einem älteren Gerät und wird hier
+    // abgewiesen. Das Frontend erkennt sessionSuperseded und meldet das alte Gerät sauber ab -
+    // vorher liefen zwei Geräte parallel weiter und überschrieben sich gegenseitig den Spielstand.
+    // Bestandskonten, die sich seit dem Update noch nie angemeldet haben, haben kein
+    // activeSessionId und bleiben mit ihrem alten (sid-losen) Token gültig - der Umstieg passiert
+    // beim nächsten Login von selbst, niemand wird durch das Deployment ausgeloggt.
+    if (user && user.activeSessionId && payload.sid !== user.activeSessionId) {
+      return res.status(401).json({
+        error: 'Dieses Konto ist inzwischen auf einem anderen Gerät angemeldet.',
+        sessionSuperseded: true
+      });
+    }
     req.userId = payload.userId;
     req.username = payload.username;
     next();
@@ -1267,14 +1281,26 @@ app.post('/api/login', authRateLimit, async (req, res) => {
   // tv (tokenVersion) wird bei jedem Passwort-Reset hochgezählt und in authMiddleware gegengeprüft -
   // dadurch werden nach einem Passwortwechsel ALLE zuvor ausgestellten (bis zu 180 Tage gültigen)
   // Tokens sofort ungültig. Bestandskonten ohne Feld gelten als Version 0 (kein Zwangs-Logout).
-  const token = jwt.sign({ userId: user.userId, username: user.username, tv: user.tokenVersion || 0 }, JWT_SECRET, { expiresIn: '180d' });
+  // sid (Sitzungs-ID) macht diese Anmeldung zur einzig gültigen: authMiddleware vergleicht die sid
+  // im Token mit user.activeSessionId, ältere Geräte fliegen dadurch sofort raus (siehe dort).
+  const sid = crypto.randomBytes(16).toString('hex');
+  const previousSessionAt = user.activeSessionAt || null;
+  user.activeSessionId = sid;
+  user.activeSessionAt = Date.now();
+  const token = jwt.sign({ userId: user.userId, username: user.username, tv: user.tokenVersion || 0, sid }, JWT_SECRET, { expiresIn: '180d' });
+  await saveDb();
   recordAnalyticsEvent(user.userId, 'funnel:login'); // Onboarding-Trichter: erfolgreiche Anmeldung
-  res.json({ token, userId: user.userId, username: user.username });
+  // supersededPrevious sagt dem Frontend, dass diese Anmeldung ein anderes Gerät verdrängt hat -
+  // damit kann es einen Hinweis zeigen, statt dass der Spieler am alten Gerät rätselt.
+  res.json({ token, userId: user.userId, username: user.username, supersededPrevious: !!previousSessionAt });
 });
 
-// Hinweis Mehrgeräte-Login: JWTs werden hier nicht serverseitig "verbraucht" oder invalidiert -
-// jede Anmeldung erzeugt ein unabhängiges, gültiges Token. Man kann sich also auf beliebig
-// vielen Geräten gleichzeitig einloggen, ohne dass sich die Geräte gegenseitig ausloggen.
+// Hinweis Mehrgeräte-Login: seit 25.07.2026 ist pro Konto immer nur EINE Sitzung aktiv. Jede
+// Anmeldung erzeugt eine neue Sitzungs-ID (oben) und entwertet damit das Token des zuvor
+// angemeldeten Geräts; authMiddleware antwortet diesem Gerät mit 401 + sessionSuperseded:true.
+// Mehrere Tabs auf DEMSELBEN Gerät teilen sich localStorage und damit dasselbe Token - sie
+// verdrängen sich gegenseitig also nicht. Nur ein erneuter Login (anderes Gerät, anderer Browser,
+// privates Fenster) erzeugt eine neue Sitzung.
 
 // Maskiert eine E-Mail für die Anzeige im Frontend (z.B. "an***@example.com"), damit sie nicht im
 // Klartext über die API rausgeht, aber trotzdem wiedererkennbar bleibt.
@@ -1402,6 +1428,10 @@ app.post('/api/reset-password', authRateLimit, async (req, res) => {
   // Alle bisher ausgestellten Tokens dieses Kontos ungültig machen (siehe authMiddleware) - wer das
   // Passwort zurücksetzt, wirft damit auch mögliche fremde/gekaperte Sitzungen sofort raus.
   user.tokenVersion = (user.tokenVersion || 0) + 1;
+  // Auch die aktive Sitzung zurücksetzen: nach dem Reset ist kein Gerät mehr angemeldet, die
+  // nächste Anmeldung startet also sauber (und meldet nicht fälschlich "anderes Gerät verdrängt").
+  delete user.activeSessionId;
+  delete user.activeSessionAt;
   delete db.resetTokens[token];
   await saveDb();
   res.json({ ok: true });

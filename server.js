@@ -1822,16 +1822,28 @@ const SHIP_SCORE_WEIGHTS = {
 // Browser-Entwicklertools einen beliebigen Score eintragen und sich damit auch die wöchentliche
 // Liga-Einstufung (samt echter Belohnung) erschummeln können. Rechnet jetzt exakt dieselbe Formel wie
 // computeScore() im Frontend nach, aber aus dem tatsächlichen gespeicherten Spielstand.
+// 50 Punkte je Rekordtiefe im Abgrund - identisch zu ABGRUND_SCORE_JE_TIEFE im Frontend.
+const ABGRUND_SCORE_JE_TIEFE = 50;
 function computeScoreServer(save) {
   const buildLvl = allBuildingsOf(save).reduce((sum, b) => sum + Object.values(b).reduce((a, v) => a + (Number(v) || 0), 0), 0);
+  // Werftmarken (31.07.2026): Ein Mk X-Jaeger zaehlt +27% - derselbe Faktor, den auch rawFleetPower()
+  // auf die Angriffskraft legt (shipMarkAtkMult). Ohne ihn wuerde der Server jedem Spieler mit
+  // aufgeruesteter Flotte einen zu NIEDRIGEN Score validieren und den eingereichten ueberschreiben:
+  // exakt der CLAUDE.md-Fallstrick "Backend-Kopie mitpflegen", der hier schon zweimal zugeschlagen hat.
+  const marks = save.shipMarks;
   let shipScore = 0;
-  for (const f of allFleetsOf(save)) for (const [key, weight] of Object.entries(SHIP_SCORE_WEIGHTS)) shipScore += (f[key] || 0) * weight;
+  for (const f of allFleetsOf(save)) for (const [key, weight] of Object.entries(SHIP_SCORE_WEIGHTS)) shipScore += (f[key] || 0) * weight * shipMarkAtkMult(marks, key);
   const researchScore = Object.values(save.research || {}).reduce((a, lvl) => a + (Number(lvl) || 0), 0) * 8;
   const colonyKeys = Object.keys(save.colonies || {});
   const moonCount = colonyKeys.filter(k => typeof k === 'string' && k.indexOf('moon_') === 0).length;
   const colonyCount = colonyKeys.length - moonCount;
   const expansionScore = colonyCount * 200 + moonCount * 150;
-  return Math.floor(buildLvl * 10 + shipScore + researchScore + expansionScore + (save.battlePoints || 0) * 3 + (save.prestige || 0) * 500 + ((save.ascension && save.ascension.count) || 0) * 5000);
+  // Rekordtiefe im Abgrund. FEHLTE HIER SEIT v8.343.0: Das Frontend vergibt 50 Punkte je Tiefe, der
+  // Server kannte den Abgrund gar nicht und hat den eingereichten Score entsprechend nach unten
+  // korrigiert - wer Tiefe 60 erreicht hatte, verlor in der Bestenliste stillschweigend 3.000 Punkte.
+  // Aufgefallen beim Nachziehen der Werftmarken in genau dieser Funktion.
+  const abgrundScore = Number((save.abgrund && save.abgrund.best) || 0) * ABGRUND_SCORE_JE_TIEFE;
+  return Math.floor(buildLvl * 10 + shipScore + researchScore + expansionScore + abgrundScore + (save.battlePoints || 0) * 3 + (save.prestige || 0) * 500 + ((save.ascension && save.ascension.count) || 0) * 5000);
 }
 
 // Schiffs-Kontersystem (Schere-Stein-Papier) – identisch zum Frontend. Bei echtem PvP sind BEIDE

@@ -1742,7 +1742,8 @@ const BUILDING_SHIELD_FACTOR = 1.4;
 // Schiffs-Schildpunkte – wie im Frontend (SHIP_DEFS): explizite Werte, sonst round(atk*0.5).
 const SHIP_SHIELD_EXPLICIT = { enterschiff: 32, phantomschiff: 5, waechter: 14, quantenkreuzer: 20, metamaterialtitan: 80, superschlachtschiff: 110 };
 function shipShield(k) { return SHIP_SHIELD_EXPLICIT[k] !== undefined ? SHIP_SHIELD_EXPLICIT[k] : Math.round((SHIP_ATK_VALUES[k] || 0) * 0.5); }
-function fleetShieldSum(f) { if (!f) return 0; let s = 0; for (const k of Object.keys(SHIP_ATK_VALUES)) s += (f[k] || 0) * shipShield(k); return s; }
+// marks (31.07.2026): +3% Schild je Werftmarke, identisch zum Frontend (defensePower/shieldSum).
+function fleetShieldSum(f, marks) { if (!f) return 0; let s = 0; for (const k of Object.keys(SHIP_ATK_VALUES)) s += (f[k] || 0) * shipShield(k) * shipMarkShieldMult(marks, k); return s; }
 // Doktrin-Multiplikatoren (DOCTRINE_DEFS im Frontend). Neutral, wenn keine Doktrin aktiv.
 const DOCTRINE_MULTS = { doc_offensive: { atk: 1.20, def: 0.85 }, doc_defensive: { atk: 0.85, def: 1.20 }, doc_logistics: { atk: 1, def: 1 } };
 function doctrineMult(save, side) { const d = DOCTRINE_MULTS[save && save.doctrine]; return d ? d[side] : 1; }
@@ -2001,7 +2002,13 @@ const SAVE_SANITY_LIMITS = {
   maxResourceValue: 1e15,
   maxCredits: 1e12,
   maxPrestige: 100000,
-  maxXp: 1e14
+  maxXp: 1e14,
+  // Werftmarken (31.07.2026): Das Frontend deckelt bei 10 (SHIP_MARK_MAX) und schreibt nie mehr.
+  // Hier steht trotzdem 1000 und nicht 10 - nach demselben Grundsatz wie die Werte darueber: Ein
+  // zu enges Limit sperrt im Zweifel einen echten Spieler komplett vom Speichern aus, ein
+  // grosszuegiges faengt offensichtliche Faelschungen trotzdem ab. Sollte der Deckel im Spiel
+  // jemals ueber 1000 steigen, muss dieser Wert VORHER mitwachsen.
+  maxShipMark: 1000
 };
 function numberOutOfRange(v, max) {
   return typeof v === 'number' && (!Number.isFinite(v) || v < 0 || v > max);
@@ -2027,6 +2034,9 @@ function saveSanityViolation(save) {
   if (numberOutOfRange(save.credits, SAVE_SANITY_LIMITS.maxCredits)) return 'Kredite unplausibel: ' + save.credits;
   if (numberOutOfRange(save.prestige, SAVE_SANITY_LIMITS.maxPrestige)) return 'Prestige unplausibel: ' + save.prestige;
   if (numberOutOfRange(save.xp, SAVE_SANITY_LIMITS.maxXp)) return 'XP unplausibel: ' + save.xp;
+  for (const [k, v] of Object.entries(save.shipMarks || {})) {
+    if (numberOutOfRange(v, SAVE_SANITY_LIMITS.maxShipMark)) return 'Werftmarke "' + k + '" unplausibel: ' + v;
+  }
   return null;
 }
 // Rohe Flottenkraft EINES Flottenobjekts, mit Grenznutzen-Deckel, aber OHNE Taktik-Haltung/Konter –
@@ -2037,29 +2047,50 @@ function saveSanityViolation(save) {
 // (Zielcomputer auf Schlachtschiffe, Singularitäts-Fokusarray auf die Tier-2-Klasse) - werden nur
 // von computeAttackPower() mit echten Werten befüllt (aus save.equippedShipModules), alle anderen
 // Aufrufer (Verteidigungsbeitrag, Raid-/Muster-Kompositionen) bleiben neutral bei 1.
-function rawFleetPower(f, ssAtkMult, t2AtkMult) {
+// Werftmarken (31.07.2026, Frontend v8.350.0): Jede Schiffsklasse hat zehn Ausbaustufen, jede gibt
+// +3% Angriff und +3% Schild. Der Wert steht als save.shipMarks[schluessel] im Spielstand, genau wie
+// equippedShipModules - der Server liest ihn und rechnet ihn selbst nach.
+//
+// Ohne diesen Spiegel wuerde die Frontend-Vorschau mehr Angriffskraft anzeigen, als der Server im
+// PvP tatsaechlich rechnet: attackPowerRaw() im Frontend und rawFleetPower() hier MUESSEN dieselbe
+// Zahl liefern. Genau diese Sorte Abweichung ist im Projekt schon mehrfach als Bug aufgeschlagen
+// (siehe die Kommentare zum Bug-Sweep 20.07.2026 weiter unten).
+const SHIP_MARK_MAX = 10;
+const SHIP_MARK_ATK_PER_STEP = 0.03;
+const SHIP_MARK_SHIELD_PER_STEP = 0.03;
+function shipMarkLevel(marks, key) {
+  const v = marks && marks[key];
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 1;
+  return Math.max(1, Math.min(SHIP_MARK_MAX, Math.floor(v)));
+}
+function shipMarkAtkMult(marks, key) { return 1 + (shipMarkLevel(marks, key) - 1) * SHIP_MARK_ATK_PER_STEP; }
+function shipMarkShieldMult(marks, key) { return 1 + (shipMarkLevel(marks, key) - 1) * SHIP_MARK_SHIELD_PER_STEP; }
+function rawFleetPower(f, ssAtkMult, t2AtkMult, marks) {
   if (!f) return 0;
   const ssM = ssAtkMult || 1, t2M = t2AtkMult || 1;
-  return diminishingShipCount(f.cruisers || 0) * 20 + diminishingShipCount(f.destroyers || 0) * 45 + diminishingShipCount(f.ships || 0) * 5 +
-    diminishingShipCount(f.jaeger || 0) * 10 + diminishingShipCount(f.bomber || 0) * 60 + diminishingShipCount(f.schlachtschiff || 0) * 90 * ssM +
-    diminishingShipCount(f.carrier || 0) * 15 + diminishingShipCount(f.superschlachtschiff || 0) * 220 + diminishingShipCount(f.waechter || 0) * 8 +
-    (diminishingShipCount(f.nanoklinge || 0) * 55 + diminishingShipCount(f.quantenkreuzer || 0) * 80 + diminishingShipCount(f.fusionsdreadnought || 0) * 180) * t2M +
+  // dm() ist diminishingShipCount() plus dem Markenfaktor DIESER Klasse - dieselbe Konstruktion wie
+  // im Frontend, damit jede Zeile ihren Angriffswert exakt dort behaelt, wo er vorher stand.
+  const dm = (key, count) => diminishingShipCount(count || 0) * shipMarkAtkMult(marks, key);
+  return dm('cruisers', f.cruisers) * 20 + dm('destroyers', f.destroyers) * 45 + dm('ships', f.ships) * 5 +
+    dm('jaeger', f.jaeger) * 10 + dm('bomber', f.bomber) * 60 + dm('schlachtschiff', f.schlachtschiff) * 90 * ssM +
+    dm('carrier', f.carrier) * 15 + dm('superschlachtschiff', f.superschlachtschiff) * 220 + dm('waechter', f.waechter) * 8 +
+    (dm('nanoklinge', f.nanoklinge) * 55 + dm('quantenkreuzer', f.quantenkreuzer) * 80 + dm('fusionsdreadnought', f.fusionsdreadnought) * 180) * t2M +
     // Leerenjäger + Event-Kampfschiffe (19.07.2026, Balance-Entscheidung Sascha: "Ja in Tabelle") -
     // Angriffswerte identisch zum Frontend (SHIP_DEFS). Die beiden reinen Utility-Event-Schiffe
     // (gesandtenschiff/schuerfschiff, atk 0, nicht in ATTACK_SHIP_KEYS des Frontends) bleiben
     // bewusst draußen - sie kämpfen auch clientseitig nicht.
-    diminishingShipCount(f.leerenjaeger || 0) * 140 + diminishingShipCount(f.kometenjaeger || 0) * 18 +
-    diminishingShipCount(f.enterschiff || 0) * 25 + diminishingShipCount(f.phantomschiff || 0) * 35 +
-    diminishingShipCount(f.riftwaechter || 0) * 20 +
+    dm('leerenjaeger', f.leerenjaeger) * 140 + dm('kometenjaeger', f.kometenjaeger) * 18 +
+    dm('enterschiff', f.enterschiff) * 25 + dm('phantomschiff', f.phantomschiff) * 35 +
+    dm('riftwaechter', f.riftwaechter) * 20 +
     // Tier-2-Hyperjäger/-bomber (22.07.2026, Spieler-Wunsch) - Angriffswerte identisch zum Frontend
     // (SHIP_DEFS). Anders als reguläre Jäger/Bomber KEIN Trägerhangar nötig, daher hier ohne
     // deployableFighters-Kappung direkt gewertet (das Backend kennt den Hangar-Mechanismus ohnehin nicht).
-    diminishingShipCount(f.hyperjaeger || 0) * 30 + diminishingShipCount(f.hyperbomber || 0) * 130 +
+    dm('hyperjaeger', f.hyperjaeger) * 30 + dm('hyperbomber', f.hyperbomber) * 130 +
     // Singularitäts-Vernichter (24.07.2026, Balance-Entscheidung Sascha: "Ja, angreifen lassen") -
     // Apex-Flaggschiff, stärkster regulärer Angriffswert (280). War bisher NUR in der Verteidigung
     // (SHIP_ATK_VALUES/SHIP_DEF_WEIGHTS), trug hier 0 Angriff bei - identisch zum Frontend nachgezogen
     // (attackPowerRaw/ATTACK_SHIP_KEYS). Metamaterial-Titan bleibt bewusst draußen (reine Verteidigung).
-    diminishingShipCount(f.singularitaetsvernichter || 0) * 280 * t2M;
+    dm('singularitaetsvernichter', f.singularitaetsvernichter) * 280 * t2M;
 }
 // Verteidigungsspezialisierung (13.07.2026) - defWeight-Gewichte identisch zum Frontend (SHIP_DEFS),
 // wirken NUR hier auf die Verteidigung, nie auf die Angriffskraft. Keine Schilde hier (der Backend-
@@ -2071,13 +2102,15 @@ function rawFleetPower(f, ssAtkMult, t2AtkMult) {
 // rawFleetPower, exakt wie das Frontend beide aus attackPowerRaw/ATTACK_SHIP_KEYS ausschließt.
 const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5, leerenjaeger:1.1, kometenjaeger:0.6, enterschiff:1.6, phantomschiff:0.3, riftwaechter:0.8, hyperjaeger:0.6, hyperbomber:0.9, metamaterialtitan:2.0, singularitaetsvernichter:1.6 };
 const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130, metamaterialtitan:150, singularitaetsvernichter:280 };
-function weightedFleetDefensePower(f) {
+// marks (31.07.2026): derselbe atk-Markenfaktor wie in rawFleetPower - es ist derselbe
+// Angriffswert, hier nur mit defWeight verrechnet.
+function weightedFleetDefensePower(f, marks) {
   if (!f) return 0;
   let sum = 0;
   for (const [k, atk] of Object.entries(SHIP_ATK_VALUES)) {
     const count = f[k] || 0;
     if (!count) continue;
-    sum += diminishingShipCount(count) * atk * (SHIP_DEF_WEIGHTS[k] !== undefined ? SHIP_DEF_WEIGHTS[k] : 1);
+    sum += diminishingShipCount(count) * atk * (SHIP_DEF_WEIGHTS[k] !== undefined ? SHIP_DEF_WEIGHTS[k] : 1) * shipMarkAtkMult(marks, k);
   }
   return sum;
 }
@@ -2140,7 +2173,7 @@ function computeAttackPower(save, enemyFleetForCounter) {
   const t2AtkMult = 1 + shipModuleBonus(save, 'raffiniert', 'atk');
   let power = 0;
   for (const f of allFleetsOf(save)) {
-    let fp = rawFleetPower(f, ssAtkMult, t2AtkMult) * fleetDiversityMult(f);
+    let fp = rawFleetPower(f, ssAtkMult, t2AtkMult, save.shipMarks) * fleetDiversityMult(f);
     if (enemyFleetForCounter) fp *= counterMultiplier(f, enemyFleetForCounter);
     power += fp;
   }
@@ -2169,10 +2202,10 @@ function computeDefensePower(save) {
     power += sub * BUILDING_SHIELD_FACTOR;
   }
   // Flotten-Verteidigung = Angriffs-abgeleiteter Anteil (×0,4) + Schildsumme, wie im Frontend.
-  power += Math.round((weightedFleetDefensePower(save.fleet) * 0.4 + fleetShieldSum(save.fleet)) * fleetDiversityMult(save.fleet)) * HOME_DEFENSE_BONUS;
+  power += Math.round((weightedFleetDefensePower(save.fleet, save.shipMarks) * 0.4 + fleetShieldSum(save.fleet, save.shipMarks)) * fleetDiversityMult(save.fleet)) * HOME_DEFENSE_BONUS;
   for (const c of Object.values(save.colonies || {})) {
     if (!c || !c.fleet) continue;
-    power += Math.round((weightedFleetDefensePower(c.fleet) * 0.4 + fleetShieldSum(c.fleet)) * fleetDiversityMult(c.fleet));
+    power += Math.round((weightedFleetDefensePower(c.fleet, save.shipMarks) * 0.4 + fleetShieldSum(c.fleet, save.shipMarks)) * fleetDiversityMult(c.fleet));
   }
   const p = research.rpanzer || 0, s = research.rschildmatrix || 0;
   if (p) power *= (1 + p * 0.02);
@@ -4258,7 +4291,7 @@ function fleetHasShipType(fleet, type) {
 }
 function computeAttackPowerFromComposition(save, composition, bossLevel) {
   const research = save.research || {};
-  let power = rawFleetPower(composition) * fleetDiversityMult(composition);
+  let power = rawFleetPower(composition, 1, 1, save.shipMarks) * fleetDiversityMult(composition);
   const k = research.rkampf || 0, k2 = research.rkampf2 || 0;
   if (k) power *= (1 + k * 0.02);
   if (k2) power *= (1 + k2 * 0.02);
@@ -4391,7 +4424,7 @@ function allianceRaidDampenLoss(pct) {
 }
 function computeAllianceRaidPower(save, composition) {
   const research = save.research || {};
-  let power = rawFleetPower(composition) * fleetDiversityMult(composition);
+  let power = rawFleetPower(composition, 1, 1, save.shipMarks) * fleetDiversityMult(composition);
   if (research.rkampf) power *= (1 + research.rkampf * 0.02);
   if (research.rkampf2) power *= (1 + research.rkampf2 * 0.02);
   power *= stanceOf(save).atkMult;
@@ -4835,6 +4868,10 @@ function allianceMusterDefenseApprox(tag) {
     if (!k.startsWith(prefix)) continue;
     try { const d = JSON.parse(db.shared[k]); for (const [sk, v] of Object.entries(d)) if (typeof v === 'number' && v > 0) combined[sk] = (combined[sk] || 0) + v; } catch (e) {}
   }
+  // BEWUSST ohne Werftmarken: combined addiert die basedef-Flotten MEHRERER Allianzmitglieder in
+  // ein Objekt. Es gibt hier keinen einzelnen Spielstand und damit keine eine richtige Markenstufe -
+  // die eines beliebigen Mitglieds anzusetzen waere schlechter als gar keine. Das ist keine
+  // vergessene Stelle, sondern die einzige, an der die Marke nicht bestimmbar ist.
   return Math.round(rawFleetPower(combined) * 0.4);
 }
 function getMusterAttackDoc(tag) {

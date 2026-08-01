@@ -2105,9 +2105,18 @@ function saveSanityViolation(save) {
 // (Zielcomputer auf Schlachtschiffe, Singularitäts-Fokusarray auf die Tier-2-Klasse) - werden nur
 // von computeAttackPower() mit echten Werten befüllt (aus save.equippedShipModules), alle anderen
 // Aufrufer (Verteidigungsbeitrag, Raid-/Muster-Kompositionen) bleiben neutral bei 1.
-// Werftmarken (31.07.2026, Frontend v8.350.0): Jede Schiffsklasse hat zehn Ausbaustufen, jede gibt
-// +3% Angriff und +3% Schild. Der Wert steht als save.shipMarks[schluessel] im Spielstand, genau wie
-// equippedShipModules - der Server liest ihn und rechnet ihn selbst nach.
+// Werftmarken (31.07.2026, Frontend v8.350.0): Jede Schiffsklasse hat zehn Ausbaustufen. Der Wert
+// steht als save.shipMarks[schluessel] im Spielstand, genau wie equippedShipModules - der Server
+// liest ihn und rechnet ihn selbst nach.
+//
+// SEIT 01.08.2026 HAENGT DER ZUWACHS AN DER SCHIFFSFAMILIE (Frontend v8.370.0). Fuer den Server
+// sind nur atk und shield relevant - Tempo, Treibstoff und Bauzeit rechnet er nie nach. Von den
+// sechs Familien des Frontends weichen bei diesen beiden Feldern GENAU ZWEI vom Vorgabewert 0.03
+// ab: der Bomber beim Angriff und das Grosskampfschiff beim Schild. Beide kennt der Server ueber
+// sein eigenes COUNTER_ROLE_OF (weiter oben, gespiegelt gegen das Frontend).
+// Alle uebrigen Familien - Tiefe, Spaeher, Zivil und der Abfangjaeger - liegen bei atk/shield
+// unveraendert auf 0.03 und werden hier vom Fallback korrekt bedient. Deshalb braucht der Server
+// KEINE eigene Familientabelle; kaeme eine dazu, waere sie sofort die zweite Liste, die veraltet.
 //
 // Ohne diesen Spiegel wuerde die Frontend-Vorschau mehr Angriffskraft anzeigen, als der Server im
 // PvP tatsaechlich rechnet: attackPowerRaw() im Frontend und rawFleetPower() hier MUESSEN dieselbe
@@ -2116,13 +2125,28 @@ function saveSanityViolation(save) {
 const SHIP_MARK_MAX = 10;
 const SHIP_MARK_ATK_PER_STEP = 0.03;
 const SHIP_MARK_SHIELD_PER_STEP = 0.03;
+// Abweichungen vom Vorgabewert, nach Konterrolle. Wer hier etwas aendert, MUSS
+// SHIP_MARK_PER_STEP_FAMILIE im Frontend mitziehen - tests/test_werftmarken.js prueft beide Seiten
+// gegeneinander und schlaegt sonst an.
+const SHIP_MARK_ROLE_ATK_PER_STEP = { bomber: 0.04 };
+const SHIP_MARK_ROLE_SHIELD_PER_STEP = { kapital: 0.04 };
+function shipMarkAtkPerStep(key) {
+  const rolle = COUNTER_ROLE_OF[key];
+  const v = rolle && SHIP_MARK_ROLE_ATK_PER_STEP[rolle];
+  return (typeof v === 'number') ? v : SHIP_MARK_ATK_PER_STEP;
+}
+function shipMarkShieldPerStep(key) {
+  const rolle = COUNTER_ROLE_OF[key];
+  const v = rolle && SHIP_MARK_ROLE_SHIELD_PER_STEP[rolle];
+  return (typeof v === 'number') ? v : SHIP_MARK_SHIELD_PER_STEP;
+}
 function shipMarkLevel(marks, key) {
   const v = marks && marks[key];
   if (typeof v !== 'number' || !Number.isFinite(v)) return 1;
   return Math.max(1, Math.min(SHIP_MARK_MAX, Math.floor(v)));
 }
-function shipMarkAtkMult(marks, key) { return 1 + (shipMarkLevel(marks, key) - 1) * SHIP_MARK_ATK_PER_STEP; }
-function shipMarkShieldMult(marks, key) { return 1 + (shipMarkLevel(marks, key) - 1) * SHIP_MARK_SHIELD_PER_STEP; }
+function shipMarkAtkMult(marks, key) { return 1 + (shipMarkLevel(marks, key) - 1) * shipMarkAtkPerStep(key); }
+function shipMarkShieldMult(marks, key) { return 1 + (shipMarkLevel(marks, key) - 1) * shipMarkShieldPerStep(key); }
 function rawFleetPower(f, ssAtkMult, t2AtkMult, marks) {
   if (!f) return 0;
   const ssM = ssAtkMult || 1, t2M = t2AtkMult || 1;

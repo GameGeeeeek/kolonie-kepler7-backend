@@ -1762,7 +1762,29 @@ function shipShield(k) { return SHIP_SHIELD_EXPLICIT[k] !== undefined ? SHIP_SHI
 function fleetShieldSum(f, marks) { if (!f) return 0; let s = 0; for (const k of Object.keys(SHIP_ATK_VALUES)) s += (f[k] || 0) * shipShield(k) * shipMarkShieldMult(marks, k); return s; }
 // Doktrin-Multiplikatoren (DOCTRINE_DEFS im Frontend). Neutral, wenn keine Doktrin aktiv.
 const DOCTRINE_MULTS = { doc_offensive: { atk: 1.20, def: 0.85 }, doc_defensive: { atk: 0.85, def: 1.20 }, doc_logistics: { atk: 1, def: 1 } };
-function doctrineMult(save, side) { const d = DOCTRINE_MULTS[save && save.doctrine]; return d ? d[side] : 1; }
+// Doktrin-Synergie (01.08.2026, Frontend: DOCTRINE_DEFS[].syn + doctrineMultOf/doctrineSynActive).
+// Greift nur, wenn IRGENDEINE Welt des Spielers die passende Rolle hat - im Frontend hasRoleAnywhere(),
+// hier dieselbe Prüfung über save.planetSpecialization. Der Logistik-Zweig hat serverseitig keine
+// Wirkung (seine Synergie sind Treibstoff und Lager, die der Server nicht rechnet) und steht hier
+// trotzdem, damit die Tabelle vollständig neben der Frontend-Kopie liegt und beim nächsten
+// Balance-Pass nicht der Eindruck entsteht, doc_logistics habe gar keine.
+const DOCTRINE_SYN = {
+  doc_offensive: { rolle: 'shipyard', atk: 1.08, def: 1 },
+  doc_defensive: { rolle: 'fortress', atk: 1, def: 1.08 },
+  doc_logistics: { rolle: 'trade', atk: 1, def: 1 }
+};
+function hasRoleAnywhereServer(save, roleKey) {
+  const spec = (save && save.planetSpecialization) || {};
+  for (const k in spec) if (spec[k] === roleKey) return true;
+  return false;
+}
+function doctrineMult(save, side) {
+  const d = DOCTRINE_MULTS[save && save.doctrine];
+  if (!d) return 1;
+  const syn = DOCTRINE_SYN[save.doctrine];
+  const synMult = (syn && hasRoleAnywhereServer(save, syn.rolle)) ? (syn[side] || 1) : 1;
+  return d[side] * synMult;
+}
 // Temporäre Buffs (state.buffs) – atk/def-Multiplikatoren, solange nicht abgelaufen. Wie im Frontend.
 function buffMult(save, kind) { let m = 1; const now = Date.now(); for (const b of (save && save.buffs) || []) { if (b && b.kind === kind && b.expiresAt > now && typeof b.mult === 'number') m *= b.mult; } return m; }
 // Gedeckelte Kampf-Bonus-Gruppen – die serverseitig zuverlässig aus dem Save ableitbaren, GLOBALEN Terme
@@ -1798,7 +1820,34 @@ function combatBonusCommon(save) {
   const vt = save.veteranTraining || {};
   for (const k in VETERAN_COMBAT_BONUS) if (vt[k]) b += VETERAN_COMBAT_BONUS[k];
   if (save.achievements && save.achievements.artifactset) b += 0.05;
+  b += legionAllianceBonus(save);
   return b;
+}
+// Bündnis mit der Eisenlegion (01.08.2026, Frontend: FACTION_OUTSIDE.legion + factionOutsideBonus()).
+// Der einzige der vier neuen "Wirkung außerhalb des Fraktionsreiters"-Effekte, der hier auftaucht -
+// die anderen drei (Handelsrouten, Abgrundsplitter, Spionage-Tarnung) rechnet ausschließlich der
+// Client. Dieser hier MUSS gespiegelt werden, weil der PvP-Kampf serverseitig entschieden wird und
+// eine nur im Frontend addierte Kampfkraft eine Vorschau wäre, die der Kampf nicht einlöst.
+// Die Schwellen 30/70 sind dieselben wie in repTierOf()/factionEffectLevel() im Frontend.
+const LEGION_ALLY_ATK = { freundlich: 0.03, verbuendet: 0.06 };
+function legionAllianceBonus(save) {
+  const rep = Math.max(-100, Math.min(100, (save.factionRep && save.factionRep.legion) || 0));
+  if (rep >= 70) return LEGION_ALLY_ATK.verbuendet;
+  if (rep >= 30) return LEGION_ALLY_ATK.freundlich;
+  return 0;
+}
+// Aufklärungsvorteil (01.08.2026, Frontend: SPY_EDGE_BONUS/spyIntelEdge()). Zielabhängig, deshalb
+// NICHT in combatBonusCommon: computeAttackPower() kennt nur den eigenen Spielstand. Er wird in
+// resolveAttack auf die rohe Angriffskraft angewandt, an genau der Stelle, an der die Vorschau im
+// Spielerprofil ihn auch anwendet. Entdeckte Aufklärung zählt bewusst nicht - der ertappte Späher
+// bekommt vom Ziel ohnehin aufgeblähte Verteidigungswerte untergeschoben.
+const SPY_EDGE_MS = 30 * 60 * 1000;
+const SPY_EDGE_BONUS = 0.08;
+function spyIntelEdge(save, targetUserId) {
+  const it = (save && save.spyIntel) ? save.spyIntel[targetUserId] : null;
+  if (!it || it.detected) return 0;
+  if (Date.now() - (it.capturedAt || 0) >= SPY_EDGE_MS) return 0;
+  return SPY_EDGE_BONUS;
 }
 function attackBonusGroup(save) {
   let b = combatBonusCommon(save);
@@ -2443,12 +2492,16 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   const targetFleetSummary = fleetSummary(target);
   // Kontersystem: die Zusammensetzung der Angreifer-Flotte gegen die des Ziels bestimmt einen
   // Bonus/Malus. Bei echtem PvP sind (anders als bei NPC-Kämpfen) beide Flotten bekannt.
-  const attackPower = computeAttackPower(attacker, targetFleetSummary);
+  // Aufklärungsvorteil: frische, unentdeckte Spionage gegen genau dieses Ziel. Wird auf BEIDE
+  // Angriffskraft-Werte angewandt (mit und ohne Konter), damit der abgeleitete Konterfaktor
+  // unverändert bleibt - er ist das Verhältnis der beiden und darf sich davon nicht verschieben.
+  const spyEdgeMult = 1 + spyIntelEdge(attacker, targetUserId);
+  const attackPower = Math.round(computeAttackPower(attacker, targetFleetSummary) * spyEdgeMult);
   // Für die Phasen wird die Kontergewichtung je Phase eigen gesetzt - dafür braucht es die
   // Angriffskraft OHNE Konter und den effektiven Konterfaktor getrennt. computeAttackPower wendet
   // den Konter pro Teilflotte an; das Verhältnis der beiden Aufrufe ist genau der aggregierte
   // Faktor, ohne dass die Funktion selbst umgebaut werden muss.
-  const attackPowerRoh = computeAttackPower(attacker, null);
+  const attackPowerRoh = Math.round(computeAttackPower(attacker, null) * spyEdgeMult);
   const effektiverKonter = attackPowerRoh > 0 ? attackPower / attackPowerRoh : 1;
   // Verteidigungs-Aufstellung des ZIELS: die Wahl des Verteidigers wirkt genau hier, im einzigen
   // Kampf, in dem ein echter Gegner die Angriffszusammensetzung bestimmt.

@@ -1812,6 +1812,15 @@ function admiralBonus(save) {
 function combatBonusCommon(save) {
   let b = 0;
   b += ((save.prestigePerks || []).filter(k => k === 'combat').length) * 0.03;
+  // Die beiden Perks mit Preis (Fehlerbehebung 01.08.2026): "Schwarmtaktiker" gibt Angriff und
+  // kostet Verteidigung, "Sparwerft" macht Schiffe billiger und schwächer. Beide stehen im Frontend
+  // in attackCombatBonusRaw UND defenseCombatBonusRaw, beide sind STAPELBAR (prestigePerkCount zählt
+  // Vorkommen) - hier fehlten sie komplett. Bei drei Stapeln Schwarmtaktiker rechnete der Server die
+  // Angriffskraft um 30 Prozentpunkte niedriger als die Vorschau anzeigte, also das Zehnfache der
+  // Abweichung, die der Legion-Bonus daneben verursacht hätte. Gefunden bei der Nachprüfung von
+  // v8.372.0; der Fehler ist deutlich älter als dieser Änderungssatz.
+  b += ((save.prestigePerks || []).filter(k => k === 'schwarm').length) * 0.10;
+  b -= ((save.prestigePerks || []).filter(k => k === 'sparwerft').length) * 0.05;
   b += (((save.flagship && save.flagship.level) || 0)) * FLAGSHIP_BONUS_PER_LEVEL;
   b += (((save.ascension && save.ascension.tree && save.ascension.tree.combat) || 0)) * 0.02;
   const st = save.skillTree || {};
@@ -2341,6 +2350,11 @@ function computeDefensePower(save) {
   const p = research.rpanzer || 0, s = research.rschildmatrix || 0;
   if (p) power *= (1 + p * 0.02);
   if (s) power *= (1 + s * 0.02);
+  // Kehrseite des Perks "Schwarmtaktiker" (Fehlerbehebung 01.08.2026): Angriff rauf, Verteidigung
+  // runter. Steht im Frontend (defensePower) als eigener Multiplikator AUSSERHALB der gedeckelten
+  // Gruppe, mit derselben Untergrenze 0.5 - hier fehlte er, der Server hielt die Verteidigung eines
+  // Schwarmtaktikers also für höher, als sie im Spiel ausgewiesen wird.
+  power *= Math.max(0.5, 1 - ((save.prestigePerks || []).filter(k => k === 'schwarm').length) * 0.06);
   power *= doctrineMult(save, 'def');
   power *= stanceOf(save).defMult;
   power *= (1 + defenseBonusGroup(save)); // gedeckelte Verteidigungs-Bonus-Gruppe (Teil-Port, siehe Kommentar)

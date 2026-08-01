@@ -400,6 +400,11 @@ const ALLIANCE_STRUCTURE_COSTS = {
   a_atk:{cost:28000,costMult:2.0,maxLevel:20}, a_res:{cost:36000,costMult:2.0,maxLevel:20},
   a_trade:{cost:20000,costMult:2.0,maxLevel:20}, a_storage:{cost:24000,costMult:2.0,maxLevel:20},
   a_speed:{cost:34000,costMult:2.0,maxLevel:20}, a_scanner:{cost:40000,costMult:2.0,maxLevel:20},
+  // a_abgrund (Tiefenkartierung) fehlte hier bis zum 01.08.2026 - als einzige der 23
+  // Allianz-Strukturen. Die Freischaltpruefung ueberspringt unbekannte Schluessel stillschweigend
+  // (`if (!def) continue;`), die Tech wurde also nie gegen die echten Allianzbeitraege validiert,
+  // obwohl sie im Frontend voll wirkt. Werte zeichengleich zur Frontend-Definition.
+  a_abgrund:{cost:45000,costMult:2.0,maxLevel:20},
   a_atk2:{cost:75000,costMult:2.0,maxLevel:20,requires:'a_atk'}, a_def2:{cost:70000,costMult:2.0,maxLevel:20,requires:'a_def'},
   a_expand1:{cost:60000}, a_expand2:{cost:150000,requires:'a_expand1'}, a_expand3:{cost:350000,requires:'a_expand2'},
   a_expand4:{cost:800000,requires:'a_expand3'}, a_expand5:{cost:2500000,requires:'a_expand4'},
@@ -1734,7 +1739,18 @@ app.delete('/api/reports', authMiddleware, async (req, res) => {
 const DEFENSE_VALUES = {
   turm: 15, flak: 10, schild: 30, ionenschild: 45, laser: 25, plasma: 50, raketen: 40, gauss: 65,
   railgun: 85, voidbarriere: 110, festung: 350, bunker: 135, nanoplattform: 150, sensorphalanx: 20,
-  schildkuppel: 220, fusionsbastion: 250, kiverteidigung: 300, metamaterialwall: 340, singularitaetsturm: 330
+  schildkuppel: 220, fusionsbastion: 250, kiverteidigung: 300, metamaterialwall: 340, singularitaetsturm: 330,
+  // 01.08.2026: resonanzschild fehlte hier - mit defVal 420 der HOECHSTE Verteidigungswert des
+  // ganzen Spiels (ueber Festung 350 und Metamaterialwall 340). Da das server-autoritative PvP
+  // ausschliesslich ueber Object.entries(DEFENSE_VALUES) summiert, zaehlte das teuerste
+  // Verteidigungsgebaeude im echten Kampf mit NULL - samt des 40%-Schildzuschlags darauf. Das
+  // Frontend zeigte es in der Verteidigungssumme an (es summiert ueber BUILDING_DEFS selbst), der
+  // Angreifer raeumte den Spieler trotzdem ab.
+  resonanzschild: 420,
+  // Diese beiden haben defVal 0 und aendern die Summe nicht - sie stehen hier, damit die
+  // Schluesselmenge beider Seiten deckungsgleich ist und der Paritaetstest sie vergleichen kann.
+  // Ohne sie muesste der Test eine Ausnahmeliste pflegen, und genau solche Listen veralten.
+  abhorchposten: 0, mondschild: 0
 };
 // Gebäude-Schildanteil: im Frontend trägt jedes Verteidigungsgebäude defVal + round(defVal*0.4) bei
 // (der Schild-Zuschlag). Serverseitig als Faktor 1.4 auf die Gebäude-Summe abgebildet.
@@ -1832,7 +1848,10 @@ function computeScoreServer(save) {
   // exakt der CLAUDE.md-Fallstrick "Backend-Kopie mitpflegen", der hier schon zweimal zugeschlagen hat.
   const marks = save.shipMarks;
   let shipScore = 0;
-  for (const f of allFleetsOf(save)) for (const [key, weight] of Object.entries(SHIP_SCORE_WEIGHTS)) shipScore += (f[key] || 0) * weight * shipMarkAtkMult(marks, key);
+  // Schiffe unterwegs zaehlen mit (01.08.2026) - siehe awayShipTotalsServer(). Bewusst als eigener
+  // Eintrag in derselben Schleifenquelle statt als zweite Summenzeile: So kann keine kuenftige
+  // Aenderung an der Gewichtung die eine Haelfte treffen und die andere vergessen.
+  for (const f of allFleetsOf(save).concat([awayShipTotalsServer(save)])) for (const [key, weight] of Object.entries(SHIP_SCORE_WEIGHTS)) shipScore += (f[key] || 0) * weight * shipMarkAtkMult(marks, key);
   const researchScore = Object.values(save.research || {}).reduce((a, lvl) => a + (Number(lvl) || 0), 0) * 8;
   const colonyKeys = Object.keys(save.colonies || {});
   const moonCount = colonyKeys.filter(k => typeof k === 'string' && k.indexOf('moon_') === 0).length;
@@ -1983,6 +2002,33 @@ function allFleetsOf(save) {
   const list = [save.fleet].filter(Boolean);
   for (const c of Object.values(save.colonies || {})) if (c && c.fleet) list.push(c.fleet);
   return list;
+}
+// Schiffe, die gerade NICHT an einem Standort stehen (01.08.2026). Spiegelung von
+// awayShipTotalsForScore() im Frontend - dort steht der Kommentar, dass der Punktestand sonst
+// "scheinbar grundlos um zehntausende Punkte" faellt.
+//
+// Warum das zaehlt: allFleetsOf() kennt nur save.fleet plus die Koloniefloten. Wer Schiffe verlegt,
+// sie an die Allianzbasis schickt oder einem Musterangriff beitritt, dessen Schiffe sind aus dieser
+// Sicht verschwunden. Da der Server den eingereichten Punktestand BEDINGUNGSLOS ueberschreibt
+// (`submitted.score = correctScore;`), war das kein reiner Anzeigefehler: Der Spieler verlor die
+// Punkte in der Bestenliste real, solange seine Flotte unterwegs war, und bekam sie erst bei
+// Rueckkehr wieder. Genau dagegen zaehlt das Frontend sie mit - der Server tat es nicht.
+function awayShipTotalsServer(save) {
+  const away = {};
+  const add = (k, v) => { if (typeof v === 'number' && v > 0) away[k] = (away[k] || 0) + v; };
+  for (const fleet of allFleetsOf(save)) {
+    for (const m of (fleet.missions || [])) {
+      if (!m) continue;
+      if (m.type === 'relocate') add(m.shipKey, m.qty);
+      else if (m.type === 'defend-base' || m.type === 'defend-base-return' || m.type === 'attack-alliance-base') {
+        for (const [k, v] of Object.entries(m.composition || {})) add(k, v);
+      }
+    }
+  }
+  for (const [k, v] of Object.entries(save.shipsAtAllianceBase || {})) add(k, v);
+  const contrib = save.allianceMusterContribution;
+  if (contrib && contrib.composition) for (const [k, v] of Object.entries(contrib.composition)) add(k, v);
+  return away;
 }
 function allBuildingsOf(save) {
   const list = [save.buildings].filter(Boolean);

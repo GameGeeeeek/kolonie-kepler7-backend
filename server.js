@@ -4618,6 +4618,17 @@ const ALLIANCE_RAID_ATTACK_SHIP_KEYS = ['jaeger', 'bomber', 'cruisers', 'destroy
 const ALLIANCE_RAID_RETREAT_THRESHOLD = 0.4, ALLIANCE_RAID_RETREAT_SAVE_FACTOR = 0.5;
 function allianceRaidHpFor(level) { return Math.round(ALLIANCE_RAID_HP_BASE * Math.pow(ALLIANCE_RAID_HP_GROWTH, Math.max(0, level - 1))); }
 function allianceRaidCounterFor(level) { return Math.round(ALLIANCE_RAID_COUNTER_BASE * Math.pow(ALLIANCE_RAID_HP_GROWTH, Math.max(0, level - 1))); }
+// Raid-Bosse (02.08.2026): Spiegel von ALLIANCE_RAID_BOSSE im Frontend, dort steht die ausfuehrliche
+// Begruendung. Keine Regel fasst die Lebenspunkte an - die Belohnung faellt je WELLE an, ein zaeherer
+// Boss braucht mehr Wellen und zahlt damit oefter.
+const ALLIANCE_RAID_BOSSES = [
+  { key: 'sternenfresser', schwaeche: null,             ohneMult: 1.0,  verlustMult: 1.0  },
+  { key: 'panzerhuelle',   schwaeche: 'bomber',         ohneMult: 0.75, verlustMult: 0.90 },
+  { key: 'schwarmmutter',  schwaeche: 'jaeger',         ohneMult: 0.80, verlustMult: 1.25 },
+  { key: 'phasenwandler',  schwaeche: 'destroyers',     ohneMult: 0.75, verlustMult: 0.90 },
+  { key: 'gluthorn',       schwaeche: 'schlachtschiff', ohneMult: 0.80, verlustMult: 1.20 }
+];
+function allianceRaidBossOf(level) { return ALLIANCE_RAID_BOSSES[(Math.max(1, level | 0) - 1) % ALLIANCE_RAID_BOSSES.length]; }
 function allianceRaidDampenLoss(pct) {
   if (pct <= ALLIANCE_RAID_RETREAT_THRESHOLD) return pct;
   const excess = pct - ALLIANCE_RAID_RETREAT_THRESHOLD;
@@ -4873,11 +4884,22 @@ app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
   if (!doc || doc.phase !== 'enroute' || !doc.dispatch || doc.dispatch.arrivalAt > Date.now()) return res.json({ ok: true, doc });
 
   const power = doc.dispatch.totalPower;
-  const damage = Math.min(doc.hp, power);
+  // Raid-Boss-Regel (02.08.2026, Frontend: ALLIANCE_RAID_BOSSE - dort steht die Begruendung).
+  // Deterministisch aus der Stufe, nicht aus einem Feld des Dokuments: Das Raid-Dokument liegt im
+  // geteilten Speicher und wird von Clients geschrieben, ein dort mitgefuehrter Boss waere faelschbar.
+  // Die Trefferschwaeche ist bewusst ein MALUS bei fehlendem Schiffstyp und kein Bonus bei
+  // vorhandenem: Ein gut zusammengestellter Verband richtet genau so viel Schaden an wie vorher.
+  const raidBoss = allianceRaidBossOf(doc.level);
+  const comp = (doc.dispatch && doc.dispatch.totalComposition) || {};
+  const hatSchwaeche = !raidBoss.schwaeche || (comp[raidBoss.schwaeche] || 0) > 0;
+  const schadenMult = hatSchwaeche ? 1 : raidBoss.ohneMult;
+  const damage = Math.min(doc.hp, Math.round(power * schadenMult));
   const newHp = Math.max(0, doc.hp - damage);
   const destroyed = newHp <= 0;
   const counter = allianceRaidCounterFor(doc.level);
-  const rawLossPct = Math.max(0.05, Math.min(0.6, counter / (counter + power)));
+  // Verlustquote mit dem Boss-Faktor, die alte Spanne [0,05; 0,60] bleibt aussen: Auch der haerteste
+  // Boss kann den Verband nicht ueber die bisherige Obergrenze hinaus abraeumen.
+  const rawLossPct = Math.max(0.05, Math.min(0.6, (counter / (counter + power)) * raidBoss.verlustMult));
   const lossPct = allianceRaidDampenLoss(rawLossPct);
   const now = Date.now();
 

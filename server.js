@@ -2689,6 +2689,37 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
 
   const defenseBefore = defenseBreakdown(target);
 
+  // Kampf-Einzelheiten für den Bericht des Angreifers (02.08.2026).
+  //
+  // WARUM: All das wurde hier schon immer BERECHNET und in die serverseitigen Berichte geschrieben -
+  // die Antwort an den Client enthielt es aber nicht. Der Angreifer bekam nur "gewonnen/verloren"
+  // samt zweier Kraftzahlen zurück, weshalb ein `player-attack`-Bericht als einziger Kampftyp weder
+  // die Flotte des Gegners noch dessen Anlagen noch die drei Phasenurteile führte. Für jede Anzeige,
+  // die den Kampf nachzeichnet, war PvP damit der ärmste Fall - obwohl der Server am meisten weiß.
+  //
+  // KEINE Balance-Änderung: Es wird nichts neu gewürfelt und nichts anders gerechnet, es wird
+  // ausgeliefert, was ohnehin entstand.
+  //
+  // BEWUSSTE SPIELENTSCHEIDUNG: Damit erfährt der Angreifer die Flottenzusammensetzung des Ziels
+  // NACH dem Kampf, ohne vorher spioniert zu haben. Das ist gewollt (der Kampf hat stattgefunden,
+  // man hat gesehen, was einem gegenüberstand) und entspricht dem, was ein eingehender Überfall dem
+  // Verteidigern längst zeigt. Es entwertet die Spionage nicht, weil die VOR dem Angriff aufklärt -
+  // genau dann, wenn die Auskunft die Entscheidung noch beeinflussen kann.
+  //
+  // NICHT enthalten: Verluste der Verteidigerflotte. Es gibt sie im Modell nicht - ein PvP-Angriff
+  // zerstört Verteidigungs-GEBÄUDE (destroyedBuilding/-Count), aber kein einziges Schiff des Ziels.
+  // Ein Feld `defenderLostShips` würde also entweder immer leer sein oder eine Zahl behaupten, die
+  // nirgends gewürfelt wurde. Wer das ändern will, ändert die Kampfmechanik, nicht den Bericht.
+  const kampfDetails = () => ({
+    phasen: phasenErgebnis.phasen,
+    chancePct: Math.round(chance * 100),
+    counterMult: effektiverKonter,
+    formation: formationKey,
+    formationMult,
+    defenseBefore,
+    defenderFleet: targetFleetSummary
+  });
+
   if (success) {
     const lootPct = 0.12 + Math.random() * 0.13; // 12-25%
     // Anti-Farming: deutlich stärkere Angreifer bekommen anteilig weniger Beute (nie unter 30%).
@@ -2739,17 +2770,17 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
 
     addReport(req.userId, {
       type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt',
-      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary
+      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
     });
     addReport(targetUserId, {
       type: 'attack-received', result: 'loss', attackerName: req.username,
-      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary
+      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
     });
     // Verteidiger benachrichtigen (Retention-Trigger 21.07.2026): angegriffen zu werden ist einer der
     // stärksten Rückkehr-Anlässe. Server hat den Kampf ohnehin aufgelöst - hier nur der Push obendrauf.
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: false, looted: Object.keys(stolen).length > 0 }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     await saveDb();
-    return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, saveVersion: mySaveVersion });
+    return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, saveVersion: mySaveVersion, ...kampfDetails() });
   } else {
     attacker.battlePoints = (attacker.battlePoints || 0) + 3;
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
@@ -2782,15 +2813,15 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
 
     addReport(req.userId, {
       type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt',
-      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary
+      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
     });
     addReport(targetUserId, {
       type: 'attack-received', result: 'win', attackerName: req.username, defendReward: abwehrCp,
-      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary
+      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
     });
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: true, looted: false }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     await saveDb();
-    return res.json({ success: false, attackPower, defensePower, saveVersion: mySaveVersion });
+    return res.json({ success: false, attackPower, defensePower, saveVersion: mySaveVersion, ...kampfDetails() });
   }
 });
 

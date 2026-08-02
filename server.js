@@ -1940,8 +1940,17 @@ const COUNTER_ROLE_OF = {
   jaeger: 'abfang', hyperjaeger: 'abfang', kometenjaeger: 'abfang', phantomschiff: 'abfang', leerenjaeger: 'abfang',
   bomber: 'bomber', hyperbomber: 'bomber', nanoklinge: 'bomber', singularitaetsvernichter: 'bomber', mondzerstoerer: 'bomber',
   cruisers: 'kapital', destroyers: 'kapital', schlachtschiff: 'kapital', superschlachtschiff: 'kapital',
-  carrier: 'kapital', waechter: 'kapital', quantenkreuzer: 'kapital', fusionsdreadnought: 'kapital',
-  metamaterialtitan: 'kapital', enterschiff: 'kapital', riftwaechter: 'kapital'
+  waechter: 'kapital', quantenkreuzer: 'kapital', fusionsdreadnought: 'kapital', metamaterialtitan: 'kapital',
+  // Umwidmung 02.08.2026 (Frontend: COUNTER_ROLE_OF, dort steht die ausfuehrliche Begruendung).
+  // Kurz: Die Verteilung war 5/5/11, und die elf Grosskampfschiffe waren ausgerechnet die spaeten
+  // Klassen - im Endspiel fiel Schere-Stein-Papier damit auf "Stein gegen Stein" zusammen. Carrier
+  // (Traeger, bringt Jaeger ins Gefecht) und Riftwaechter (leichter, schneller Rumpf) sind jetzt
+  // Abfangjaeger, das Enterschiff (greift grosse, traege Ziele an) ein Bomber. Neu: 7/6/8.
+  //
+  // ACHTUNG: Diese Tabelle bestimmt im Frontend AUCH die Werftmarken-Familie (shipMarkFamily liest
+  // sie als Erstes) und damit die Zuwaechse je Marke - shipMarkAtkPerStep/shipMarkShieldPerStep hier
+  // haengen an derselben Rolle. Ein Rollenwechsel muss deshalb immer auf beiden Seiten passieren.
+  carrier: 'abfang', riftwaechter: 'abfang', enterschiff: 'bomber'
 };
 const SHIP_COUNTERS = (() => {
   const byRole = {}; for (const r of COUNTER_ROLE_DEFS) byRole[r.key] = [];

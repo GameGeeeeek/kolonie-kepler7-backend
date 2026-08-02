@@ -391,6 +391,21 @@ function allianceAdminsAndOfficers(tag) {
   }
   return out;
 }
+// Alle AKTIVEN Mitglieder einer Allianz (Rolle 'left' zaehlt nicht mehr mit - dieselbe Regel wie in
+// allianceRoleOf). Die Schluessel sind mit der Konto-userId gebildet, nicht mit einer separaten
+// Spieler-Id: Das Frontend setzt state.player.id beim Anmelden auf data.userId.
+function allianceMemberIds(tag) {
+  const prefix = 'alliance:' + tag + ':role:';
+  const out = [];
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix)) continue;
+    try {
+      const r = JSON.parse(db.shared[k]);
+      if (r.role && r.role !== 'left') out.push(k.slice(prefix.length));
+    } catch (e) {}
+  }
+  return out;
+}
 // Minimale Kopie der Kostendaten aus ALLIANCE_TECH_DEFS/ALLIANCE_BUILDING_DEFS im Frontend - nur die
 // für die Validierung nötigen Zahlen (Namen/Beschreibungen bleiben reine Frontend-Sache). MUSS bei
 // Kostenänderungen im Frontend mitgepflegt werden, sonst lehnt der Server sonst legitime
@@ -844,6 +859,11 @@ function getNotifPrefs(user) {
     pact: p.pact !== false,
     weltboss: p.weltboss !== false,
     raid: p.raid !== false,
+    // 'allianceraid' = Aufruf einer Allianz-Raid-Welle (02.08.2026). Bewusst eine EIGENE Kategorie
+    // und nicht unter 'raid' mitgeführt: 'raid' meint den anfliegenden Überfall auf die eigene
+    // Kolonie - eine Warnung. Der Allianz-Raid ist das Gegenteil, nämlich eine Einladung, und wer
+    // Angriffswarnungen abschaltet, will deshalb nicht zwangsläufig auch die Einladungen los sein.
+    allianceraid: p.allianceraid !== false,
     patchnotes: p.patchnotes !== false,
     application: p.application !== false,
     spy: p.spy !== false,
@@ -897,6 +917,17 @@ function pushNotificationText(type, payload) {
   if (type === 'message') return { title: 'Neue Nachricht', body: (payload.fromName || 'Ein Spieler') + ' hat dir geschrieben.' };
   if (type === 'patchnotes') return { title: 'Kolonie Kepler-7 aktualisiert', body: 'Version ' + (payload.version || '') + ' ist da - tippen für die Neuigkeiten.' };
   if (type === 'alliance-application') return { title: 'Neue Bewerbung', body: (payload.name || 'Ein Spieler') + ' möchte [' + (payload.tag || '') + '] beitreten.' };
+  // Die Sammelphase ist der eigentliche Inhalt der Meldung: Sie ist der Grund, warum diese
+  // Benachrichtigung ueberhaupt eine sein muss und kein Eintrag im Chat, den man spaeter liest.
+  // Wer sie verpasst, ist bei der Welle nicht dabei - die Flotte muss vorher an der Basis sein.
+  if (type === 'alliance-raid') {
+    const min = Math.max(1, Math.round((payload.gatherSeconds || 0) / 60));
+    return {
+      title: payload.waveNumber > 1 ? 'Nächste Raid-Welle!' : 'Allianz-Raid ausgerufen!',
+      body: (payload.byName || 'Ein Kommandant') + ' ruft ' + (payload.waveNumber > 1 ? 'die nächste Welle gegen' : 'zum Angriff auf') + ' "' +
+            (payload.bossName || 'den Sternenfresser') + '" - Sammelphase ' + min + ' Min. Schließ deine Flotte an!'
+    };
+  }
   if (type === 'feedback-received') {
     const label = payload.type === 'idee' ? 'Verbesserungsvorschlag' : 'Bug-Report';
     return { title: 'Neuer ' + label, body: (payload.username || 'Ein Spieler') + ': ' + (payload.text || '') };
@@ -3167,6 +3198,10 @@ app.post('/api/notification-prefs', authMiddleware, async (req, res) => {
     pact: b.pact !== false,
     weltboss: b.weltboss !== false,
     raid: b.raid !== false,
+    // Muss hier UND in getNotifPrefs() stehen: Diese Route baut die Einstellungen komplett neu auf,
+    // ein hier fehlender Schlüssel würde beim ersten Speichern still auf die Vorgabe zurückfallen -
+    // der Schalter im Spiel ließe sich dann scheinbar umlegen, ohne Wirkung.
+    allianceraid: b.allianceraid !== false,
     patchnotes: b.patchnotes !== false,
     application: b.application !== false,
     spy: b.spy !== false,
@@ -4630,12 +4665,16 @@ function allianceRaidCounterFor(level) { return Math.round(ALLIANCE_RAID_COUNTER
 // Raid-Bosse (02.08.2026): Spiegel von ALLIANCE_RAID_BOSSE im Frontend, dort steht die ausfuehrliche
 // Begruendung. Keine Regel fasst die Lebenspunkte an - die Belohnung faellt je WELLE an, ein zaeherer
 // Boss braucht mehr Wellen und zahlt damit oefter.
+// `name` nur für den Text der Push-Benachrichtigung (02.08.2026) - die Mechanik braucht ihn nicht.
+// Die Namen MÜSSEN mit ALLIANCE_RAID_BOSSE im Frontend übereinstimmen, sonst kündigt die Push einen
+// anderen Gegner an als der, der im Spiel steht. tests/test_allianzraid_anzeige.js im Frontend-Repo
+// vergleicht beide Listen Eintrag für Eintrag.
 const ALLIANCE_RAID_BOSSES = [
-  { key: 'sternenfresser', schwaeche: null,             ohneMult: 1.0,  verlustMult: 1.0  },
-  { key: 'panzerhuelle',   schwaeche: 'bomber',         ohneMult: 0.75, verlustMult: 0.90 },
-  { key: 'schwarmmutter',  schwaeche: 'jaeger',         ohneMult: 0.80, verlustMult: 1.25 },
-  { key: 'phasenwandler',  schwaeche: 'destroyers',     ohneMult: 0.75, verlustMult: 0.90 },
-  { key: 'gluthorn',       schwaeche: 'schlachtschiff', ohneMult: 0.80, verlustMult: 1.20 }
+  { key: 'sternenfresser', name: 'Sternenfresser', schwaeche: null,             ohneMult: 1.0,  verlustMult: 1.0  },
+  { key: 'panzerhuelle',   name: 'Panzerhülle',    schwaeche: 'bomber',         ohneMult: 0.75, verlustMult: 0.90 },
+  { key: 'schwarmmutter',  name: 'Schwarmmutter',  schwaeche: 'jaeger',         ohneMult: 0.80, verlustMult: 1.25 },
+  { key: 'phasenwandler',  name: 'Phasenwandler',  schwaeche: 'destroyers',     ohneMult: 0.75, verlustMult: 0.90 },
+  { key: 'gluthorn',       name: 'Gluthorn',       schwaeche: 'schlachtschiff', ohneMult: 0.80, verlustMult: 1.20 }
 ];
 function allianceRaidBossOf(level) { return ALLIANCE_RAID_BOSSES[(Math.max(1, level | 0) - 1) % ALLIANCE_RAID_BOSSES.length]; }
 function allianceRaidDampenLoss(pct) {
@@ -4748,6 +4787,35 @@ app.post('/api/allianceraid/create', authMiddleware, async (req, res) => {
   }
   setAllianceRaidDoc(tag, doc);
   await saveDb();
+
+  // Alle Mitglieder benachrichtigen (02.08.2026, Wunsch).
+  //
+  // WARUM GERADE HIER: Ein Allianz-Raid hat als einziges Gemeinschaftsereignis eine harte Frist, die
+  // man verpassen kann, ohne etwas falsch gemacht zu haben - die Sammelphase dauert 30 bis 120
+  // Minuten, und wer seine Flotte nicht rechtzeitig an der Basis hat, ist bei der Welle nicht dabei.
+  // Bis hierher wurde der Aufruf ausschließlich in den Allianz-Chat geschrieben, also genau dorthin,
+  // wo man ihn nur sieht, wenn man ohnehin schon im Spiel ist. Für jeden, der es nicht ist - und das
+  // sind bei einem Idle-Spiel die meisten - existierte der Aufruf schlicht nicht.
+  //
+  // NICHT an den Ausrufenden selbst: Er hat den Knopf gerade gedrückt.
+  // Der Versand steht bewusst NACH saveDb() und ohne await: Eine hängende Push-Zustellung darf die
+  // Antwort auf den Ausruf nicht verzögern, und der Raid ist zu diesem Zeitpunkt schon sicher
+  // gespeichert. sendWebPushToUser() schluckt seine Fehler ohnehin selbst.
+  try {
+    const boss = allianceRaidBossOf(doc.level);
+    for (const memberId of allianceMemberIds(tag)) {
+      if (memberId === req.userId) continue;
+      const user = findUserById(memberId);
+      if (!user) continue;
+      const prefs = getNotifPrefs(user);
+      if (!prefs.enabled || !prefs.allianceraid) continue;
+      pushNotificationEvent(memberId, 'alliance-raid', {
+        tag, byName: req.username, bossName: (boss && boss.name) || 'Sternenfresser',
+        level: doc.level, waveNumber: doc.waveNumber, gatherSeconds
+      });
+    }
+  } catch (e) { console.error('Raid-Benachrichtigung fehlgeschlagen (der Raid selbst läuft):', e.message); }
+
   res.json({ ok: true, doc });
 });
 

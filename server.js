@@ -2706,10 +2706,35 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   // Verteidigern längst zeigt. Es entwertet die Spionage nicht, weil die VOR dem Angriff aufklärt -
   // genau dann, wenn die Auskunft die Entscheidung noch beeinflussen kann.
   //
-  // NICHT enthalten: Verluste der Verteidigerflotte. Es gibt sie im Modell nicht - ein PvP-Angriff
-  // zerstört Verteidigungs-GEBÄUDE (destroyedBuilding/-Count), aber kein einziges Schiff des Ziels.
-  // Ein Feld `defenderLostShips` würde also entweder immer leer sein oder eine Zahl behaupten, die
-  // nirgends gewürfelt wurde. Wer das ändern will, ändert die Kampfmechanik, nicht den Bericht.
+  // Verluste der Verteidigerflotte (02.08.2026): Ein gewonnener Angriff kostet das Ziel seit jetzt
+  // auch SCHIFFE, nicht mehr nur Verteidigungsgebäude.
+  //
+  // WARUM NUR EIN PROZENTSATZ UND KEINE STÜCKZAHLEN, und warum der Server sie NICHT selbst abzieht -
+  // beides folgt aus zwei harten Gegebenheiten dieses Projekts:
+  //
+  // (1) Ein direkter Eingriff in den Spielstand des Ziels wird still zurückgenommen, sobald das Ziel
+  //     online ist. saveGameStateVersioned() im Frontend lädt bei HTTP 409 nur die neue
+  //     Versionsnummer nach und schickt seinen EIGENEN, älteren Wert erneut - bis zu drei Mal, und
+  //     der dritte Versuch gelingt. Die Schiffe wären wieder da. Genau dafür gibt es hier bereits
+  //     die etablierte Warteschlange (siehe die Begründung beim Modulbörsen-Erlös weiter unten):
+  //     der Server sagt WAS passiert ist, der Client des Betroffenen wendet es an.
+  // (2) Stückzahlen würden eine zweite Kopie der Schiffsliste (ATTACK_SHIP_KEYS) im Backend
+  //     erzwingen. SHIP_SCORE_WEIGHTS ist hier schon zweimal aus genau diesem Grund veraltet; ein
+  //     künftiges Schiff, das nur im Frontend in die Liste wandert, wäre im PvP unzerstörbar.
+  //     Der Prozentsatz braucht keine Liste und kann nicht veralten.
+  //
+  // Die Höhe ist von der bestehenden Überfall-Regel abgeleitet, nicht erfunden: Dort verliert die
+  // stationierte Flotte die HÄLFTE des Ressourcenverlust-Prozentsatzes. lootPct liegt hier bei
+  // 12-25%, macht also 6-12,5% Flottenverlust. Der Client dämpft zusätzlich wie beim Überfall
+  // (Rückzugs-Mechanik) und deckelt an seinem echten Bestand - eine eingereihte Meldung kann also
+  // niemals mehr Schiffe kosten, als wirklich dastehen.
+  //
+  // `defenderLostShips` gibt es weiterhin NICHT: Der Server kennt zum Zeitpunkt des Kampfes keine
+  // verlässlichen Stückzahlen für einen Abzug, der erst später beim Ziel stattfindet. Eine Zahl in
+  // den Bericht des Angreifers zu schreiben, die beim Verteidiger anders ausfällt, wäre schlechter
+  // als der ehrliche Prozentsatz.
+  // Bleibt im Niederlage-Zweig null: Ein abgewehrter Angriff kostet die Verteidigerflotte nichts.
+  let defenderLossPct = null;
   const kampfDetails = () => ({
     phasen: phasenErgebnis.phasen,
     chancePct: Math.round(chance * 100),
@@ -2717,11 +2742,19 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     formation: formationKey,
     formationMult,
     defenseBefore,
-    defenderFleet: targetFleetSummary
+    defenderFleet: targetFleetSummary,
+    // Nur im Sieg-Zweig belegt; im Niederlage-Zweig bleibt es undefiniert, weil ein
+    // abgewehrter Angriff der Verteidigerflotte nichts kostet.
+    defenderLossPct: defenderLossPct === null ? undefined : defenderLossPct
   });
 
   if (success) {
     const lootPct = 0.12 + Math.random() * 0.13; // 12-25%
+    // Flottenverlust des Verteidigers: halber Ressourcenverlust, wie beim Ueberfall.
+    // Die Variable ist WEITER OBEN deklariert, damit kampfDetails() sie sieht - eine hier
+    // deklarierte const laege ausserhalb der Sichtbarkeit dieser Funktion, und `typeof` haette
+    // dort still "undefined" geliefert, ohne Fehler und ohne Wirkung.
+    defenderLossPct = Math.round(lootPct * 0.5 * 1000) / 1000;
     // Anti-Farming: deutlich stärkere Angreifer bekommen anteilig weniger Beute (nie unter 30%).
     const farmPenalty = farmingPenaltyFor(req.userId, targetUserId);
     // Schildmodule des Ziels senken die Beute (siehe raidlossProtectionMult - vorher wirkungslos im PvP).
@@ -2755,8 +2788,22 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
 
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     setSaveValue(targetUserId, JSON.stringify(target));
-    // Opfer wurde beraubt -> Schutzschild gewähren (nur wenn tatsächlich Beute floss).
-    if (Object.keys(stolen).length > 0) grantAttackShield(targetUserId);
+    // Der Flottenverlust wird EINGEREIHT, nicht in den fremden Spielstand geschrieben - siehe die
+    // ausführliche Begründung bei kampfDetails() weiter oben (der Client des Ziels würde einen
+    // direkten Eingriff bei seinem nächsten Auto-Save still zurücknehmen).
+    if (defenderLossPct > 0) {
+      pushPendingReward(targetUserId, {
+        type: 'pvp-fleet-loss',
+        pct: defenderLossPct,
+        attackerName: req.username,
+        at: Date.now()
+      });
+    }
+    // Opfer wurde beraubt ODER hat Schiffe verloren -> Schutzschild gewähren.
+    // Die zweite Bedingung ist seit dem Flottenverlust nötig: Ein leergeräumtes Ziel hat keine
+    // Beute mehr, wäre ohne sie also ab jetzt unbegrenzt auf reine Schiffszerstörung farmbar -
+    // genau das Dauer-Farmen schwächerer Konten, gegen das der Schild eingeführt wurde.
+    if (Object.keys(stolen).length > 0 || defenderLossPct > 0) grantAttackShield(targetUserId);
     // Kopfgeld (#2): Wer den aktuellen Kopfgeld-Träger (Bestenlisten-Erster) schlägt, kassiert die Prämie
     // - nur einmal pro Woche, nicht auf sich selbst.
     {
@@ -2770,11 +2817,11 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
 
     addReport(req.userId, {
       type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt',
-      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
+      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct
     });
     addReport(targetUserId, {
       type: 'attack-received', result: 'loss', attackerName: req.username,
-      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
+      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct
     });
     // Verteidiger benachrichtigen (Retention-Trigger 21.07.2026): angegriffen zu werden ist einer der
     // stärksten Rückkehr-Anlässe. Server hat den Kampf ohnehin aufgelöst - hier nur der Push obendrauf.

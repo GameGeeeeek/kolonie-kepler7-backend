@@ -919,6 +919,8 @@ function pushNotificationText(type, payload) {
     return { title: 'Kolonie Kepler-7', body: (labels[payload.jobType] || 'Etwas in deiner Kolonie ist fertig') + ' - komm zurück und mach weiter!' };
   }
   if (type === 'message') return { title: 'Neue Nachricht', body: (payload.fromName || 'Ein Spieler') + ' hat dir geschrieben.' };
+  if (type === 'weltboss-spawn') return { title: 'Neuer Weltboss!', body: 'Leviathan Stufe ' + (payload.level || 1) +
+    ' ist erschienen - schließ dich dem Angriff an, bevor er wieder verschwindet.' };
   if (type === 'alliance-muster') {
     const min = Math.max(1, Math.round((payload.gatherSeconds || 0) / 60));
     return { title: 'Koordinierter Angriff!', body: (payload.byName || 'Ein Kommandant') + ' greift [' + (payload.targetTag || '?') +
@@ -972,6 +974,7 @@ function notificationTarget(type, payload) {
   switch (type) {
     case 'pact-offer': return 'galaxie:diplo';
     case 'weltboss-kill': return 'galaxie:kampf';
+    case 'weltboss-spawn': return 'galaxie:kampf';
     case 'leaderboard-overtaken': return 'galaxie:rang';
     case 'raid-incoming': return 'verteidigung';
     case 'spy-detected': return 'verteidigung';
@@ -1085,6 +1088,33 @@ function handleSharedStorageWrite(key, prevRaw, newRaw) {
           if (!prefs.enabled || !prefs.weltboss) continue;
           const share = Math.round(((contrib.dmg || 0) / total) * 100);
           pushNotificationEvent(contribUserId, 'weltboss-kill', { level: next.level || 1, share });
+        }
+      }
+      // Ein NEUER Weltboss ist erschienen (02.08.2026). Bisher gab es nur die Meldung nach dem Kill
+      // - also ausgerechnet für die, die ohnehin dabei waren. Wer nicht zufällig online war, hat den
+      // Boss nie gesehen: Er ist serverweit und hat ein Zeitfenster.
+      //
+      // Erkannt an der gewechselten bossId bei noch nicht besiegtem Boss. Kein eigener Endpunkt
+      // nötig, weil das Dokument ohnehin vom Client geschrieben wird (loadWorldBoss legt den
+      // Nachfolger an, sobald die Respawn-Sperre abgelaufen ist).
+      //
+      // NUR AN AKTIVE KONTEN: Eine serverweite Push an jeden je registrierten Spieler wäre bei einem
+      // Ereignis, das sich regelmäßig wiederholt, keine Information mehr, sondern Werbung. Wer seit
+      // über einer Woche nicht da war, bekommt sie nicht - `weltboss` ist ohnehin einzeln
+      // abschaltbar, aber eine Kategorie, die man erst abschalten MUSS, ist schon zu viel.
+      const wechsel = next.bossId && (!prev || prev.bossId !== next.bossId);
+      if (wechsel && !next.defeatedAt) {
+        const AKTIV_MS = 7 * 24 * 60 * 60 * 1000;
+        const jetzt = Date.now();
+        for (const [userId] of Object.entries(db.users).map(([, u]) => [u.userId]).filter(([id]) => id)) {
+          let lastSeen = 0;
+          try { lastSeen = JSON.parse(db.shared['leaderboard:' + userId] || '{}').lastSeen || 0; } catch (e) {}
+          if (jetzt - lastSeen > AKTIV_MS) continue;
+          const user = findUserById(userId);
+          if (!user) continue;
+          const prefs = getNotifPrefs(user);
+          if (!prefs.enabled || !prefs.weltboss) continue;
+          pushNotificationEvent(userId, 'weltboss-spawn', { level: next.level || 1, maxHp: next.maxHp || 0 });
         }
       }
     } else {

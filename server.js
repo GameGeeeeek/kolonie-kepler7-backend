@@ -2594,12 +2594,38 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     attacker.battlePoints = (attacker.battlePoints || 0) + 3;
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
 
+    // ===== Der erfolgreiche Verteidiger bekommt endlich etwas (02.08.2026) =====
+    // Bis hierher war die Belohnungslage grotesk: Der siegreiche Angreifer bekam +25 Kampfpunkte,
+    // der GESCHLAGENE Angreifer +3 (Zeile darüber) - und der erfolgreiche Verteidiger nichts.
+    // Der Verlierer wurde also besser bezahlt als der Sieger. Es gab im ganzen Spiel keine andere
+    // gewonnene Auseinandersetzung ohne Ertrag.
+    //
+    // Bewusst KOMMANDOPUNKTE statt Kampfpunkte: Kampfpunkte gehen in den Punktestand und damit in
+    // die Bestenliste - eine Verteidigung, die den Rang hebt, würde zum Anreiz, sich angreifen zu
+    // lassen (und wäre über abgesprochene Angriffe farmbar). Kommandopunkte sind punkteneutral und
+    // die Währung, mit der das Spiel den Offiziersausbau bezahlt: Damit steht das Offizierssystem
+    // erstmals auch dem Spieler offen, der nie selbst angreift.
+    //
+    // Die Höhe richtet sich danach, WIE STARK der abgewehrte Angriff im Verhältnis zur eigenen
+    // Verteidigung war - eine chancenlose Belästigung bringt das Minimum, ein knapp gescheiterter
+    // Großangriff das Maximum. Hart gedeckelt und ausdrücklich NICHT nach dem Muster "N Minuten
+    // eigene Produktion" gebaut (CLAUDE.md-Verbot): Die Spanne ist eine feste Zahl, unabhängig
+    // davon, wie weit das Konto entwickelt ist.
+    const DEFEND_CP_MIN = 5, DEFEND_CP_MAX = 40;
+    const abwehrVerhaeltnis = defensePower > 0 ? Math.min(2, attackPower / defensePower) : 0;
+    const abwehrCp = Math.round(DEFEND_CP_MIN + (DEFEND_CP_MAX - DEFEND_CP_MIN) * (abwehrVerhaeltnis / 2));
+    target.commandPoints = (target.commandPoints || 0) + abwehrCp;
+    // Zähler für abgewehrte Spielerangriffe. Er hat von Anfang an einen Abnehmer (die Kampf-Bilanz
+    // im Berichte-Reiter zeigt ihn an) - ein Zähler ohne Anzeige wäre nur Ballast im Spielstand.
+    target.pvpDefended = (target.pvpDefended || 0) + 1;
+    setSaveValue(targetUserId, JSON.stringify(target));
+
     addReport(req.userId, {
       type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt',
       attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary
     });
     addReport(targetUserId, {
-      type: 'attack-received', result: 'win', attackerName: req.username,
+      type: 'attack-received', result: 'win', attackerName: req.username, defendReward: abwehrCp,
       attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary
     });
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: true, looted: false }, { skipWebPush: !allowAttackPush(targetUserId) }); }
@@ -4433,6 +4459,26 @@ const WORLDBOSS_KEY = 'worldboss:current';
 // Schaden bei passendem Schiffstyp in der Zusammensetzung.
 const WORLDBOSS_WEAKNESS = ['jaeger','cruiser','bomber','destroyer','jaeger','schlachtschiff','cruiser','bomber','destroyer','jaeger'];
 function worldBossWeakness(level) { return WORLDBOSS_WEAKNESS[(Math.max(1,level)-1) % WORLDBOSS_WEAKNESS.length]; }
+// Archetypen des ANGREIFBAREN Weltbosses (02.08.2026). Spiegel von WORLDBOSS_ARCHETYPEN im Frontend -
+// dort steht die ausführliche Begründung. Kurz: Die vier Varianten gab es bisher nur beim
+// Galaxie-Nachrichten-Boss (spawnWorldBoss weiter oben), den niemand angreifen kann; der angreifbare
+// Boss hatte genau eine Ausprägung, obwohl Patchnote v8.211.0 die Varianten als Kampf-Feature
+// angekündigt hatte.
+//
+// Ableitung DETERMINISTISCH aus der Stufe, nicht aus einem Feld des Boss-Dokuments: Das Dokument
+// liegt im geteilten Speicher und wird von Clients geschrieben - ein dort mitgeführter Archetyp wäre
+// fälschbar. Aus der Stufe gerechnet sind Client und Server zwangsläufig einig.
+//
+// Die HP bleiben bewusst unberührt (kein hpMult): Die Belohnung hängt an der Stufe, nicht an den HP -
+// ein zäherer oder dünnerer Boss würde also still die Belohnungsrate verschieben. Die Varianten
+// wirken stattdessen auf Schwächen-Bonus und Verlustquote, beides ertragsneutral.
+const WORLDBOSS_ARCHETYPES_PLAYABLE = [
+  { key: 'koloss',  schwaecheMult: 1.25, verlustMult: 1.0  },
+  { key: 'bastion', schwaecheMult: 1.15, verlustMult: 1.35 },
+  { key: 'schwarm', schwaecheMult: 1.25, verlustMult: 0.70 },
+  { key: 'phantom', schwaecheMult: 1.50, verlustMult: 1.0  }
+];
+function worldBossArchetypeOf(level) { return WORLDBOSS_ARCHETYPES_PLAYABLE[(Math.max(1, level | 0) - 1) % WORLDBOSS_ARCHETYPES_PLAYABLE.length]; }
 function fleetHasShipType(fleet, type) {
   if (!fleet) return false;
   const fleetKey = { jaeger:'jaeger', bomber:'bomber', cruiser:'cruisers', destroyer:'destroyers', schlachtschiff:'schlachtschiff' }[type] || type;
@@ -4445,7 +4491,10 @@ function computeAttackPowerFromComposition(save, composition, bossLevel) {
   if (k) power *= (1 + k * 0.02);
   if (k2) power *= (1 + k2 * 0.02);
   power *= stanceOf(save).atkMult;
-  if (bossLevel && fleetHasShipType(composition, worldBossWeakness(bossLevel))) power *= 1.25;
+  // Der Schwächen-Bonus richtet sich seit dem 02.08.2026 nach dem Archetyp der Stufe: 1,15 beim
+  // Panzer-Bastion, 1,50 beim Phasen-Phantom, sonst die bisherigen 1,25. Das Frontend zeigt genau
+  // diese Zahl vor dem Angriff an (renderWorldBoss).
+  if (bossLevel && fleetHasShipType(composition, worldBossWeakness(bossLevel))) power *= worldBossArchetypeOf(bossLevel).schwaecheMult;
   return Math.round(power);
 }
 app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
@@ -4511,7 +4560,10 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
 
     // Verluste (8+Stufe% bis 15+Stufe%, gedeckelt bei 50%) - Prozentsatz aus der beim Start
     // eingefrorenen Zusammensetzung, angewendet auf die AKTUELLE Flotte am Standort.
-    const lossPct = Math.min(0.5, (0.08 + bLevel * 0.01) + Math.random() * 0.07);
+    // Verlustquote mit dem Archetyp-Faktor (02.08.2026): Panzer-Bastion +35%, Schwarm-Titan -30%.
+    // Der 50%-Deckel bleibt außen, damit auch die Bastion die Flotte nicht über die alte Obergrenze
+    // hinaus abräumen kann.
+    const lossPct = Math.min(0.5, ((0.08 + bLevel * 0.01) + Math.random() * 0.07) * worldBossArchetypeOf(bLevel).verlustMult);
     for (const k of ['jaeger','cruisers','destroyers','bomber','schlachtschiff','carrier','superschlachtschiff','frachter','frachtergross','waechter']) {
       const sentCount = composition[k] || 0;
       if (sentCount <= 0) continue;

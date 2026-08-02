@@ -4661,6 +4661,24 @@ function getAllianceRaidDoc(tag) {
   try { return JSON.parse(raw); } catch (e) { return null; }
 }
 function setAllianceRaidDoc(tag, doc) { db.shared['alliance:' + tag + ':raid'] = JSON.stringify(doc); }
+// Spiegel von allianceRaidVorbei() im Frontend (02.08.2026). Beide Seiten MUESSEN dieselbe Antwort
+// geben: Die Oberflaeche entscheidet damit, ob sie "Raid ausrufen" anbietet, der Server, ob er es
+// erlaubt und ob /cleanup aufraeumen darf. Laufen sie auseinander, zeigt das Spiel einen Knopf, den
+// der Server ablehnt - oder umgekehrt.
+//
+// Positiv formuliert: NUR die erkennbar laufenden Faelle gelten als laufend. Ein unbekannter oder
+// halb geschriebener Zustand faellt damit automatisch auf "vorbei", statt in einer Sackgasse zu
+// enden. Das ist die sichere Richtung, denn "vorbei" heisst hier nur "ein neuer Raid darf
+// ausgerufen werden" - Belohnungen haengen ausschliesslich an lastWaveResult/result.
+function allianceRaidVorbeiServer(doc) {
+  if (!doc) return true;
+  if (doc.phase === 'gathering') return false;
+  if (doc.phase === 'enroute' && doc.dispatch) return false;
+  if (doc.phase === 'resolved') return true;
+  if ((doc.hp || 0) <= 0) return true;
+  if ((doc.expiresAt || 0) <= Date.now()) return true;
+  return doc.phase !== 'idle';
+}
 function allianceRaidWaveKey(doc) { return doc ? doc.id + '-w' + (doc.waveNumber || 1) : null; }
 function listAllianceRaidJoins(tag, waveKey) {
   const prefix = 'alliance:' + tag + ':raidjoin:' + waveKey + ':';
@@ -4691,7 +4709,16 @@ app.post('/api/allianceraid/create', authMiddleware, async (req, res) => {
 
   const now = Date.now();
   const existing = getAllianceRaidDoc(tag);
-  if (existing && (existing.phase === 'gathering' || existing.phase === 'enroute')) {
+  // "Laeuft schon eine Welle?" - ein 'enroute' OHNE dispatch zaehlt NICHT als laufend (02.08.2026,
+  // Spieler-Report "Allianz-Raid nicht startbar"). Ein solches Dokument beschreibt keinen fliegenden
+  // Verband: Es gibt keine Ankunftszeit, keine Teilnehmer und keine Zusammensetzung, /resolve kann
+  // damit nichts anfangen (`doc.phase !== 'enroute' || !doc.dispatch` -> Abbruch) und bleibt deshalb
+  // fuer immer stehen. Bisher lehnte /create trotzdem mit 409 ab, womit die Allianz dauerhaft ohne
+  // Raid dastand. Das Frontend beurteilt es seit v8.379.1 genauso (allianceRaidVorbei) - beide
+  // Seiten muessen dieselbe Antwort geben, sonst zeigt die Oberflaeche einen Knopf, den der Server
+  // ablehnt.
+  const laeuftNoch = existing && (existing.phase === 'gathering' || (existing.phase === 'enroute' && existing.dispatch));
+  if (laeuftNoch) {
     return res.status(409).json({ error: 'Es läuft bereits eine Angriffswelle gegen den Sternenfresser.' });
   }
   let doc;
@@ -4702,7 +4729,11 @@ app.post('/api/allianceraid/create', authMiddleware, async (req, res) => {
     doc.waveNumber = (doc.waveNumber || 1) + 1;
     doc.phase = 'gathering'; doc.gatherEndsAt = now + gatherSeconds * 1000; doc.dispatch = null;
   } else {
-    const endedAt = existing ? (existing.result ? existing.result.resolvedAt : existing.expiresAt) : 0;
+    // Ohne `result` auf "jetzt" begrenzen (02.08.2026) - gleiche Korrektur wie im Frontend. Ein
+    // kaputtes Dokument, dessen Zeitfenster noch in der Zukunft liegt, haette sonst eine Sperre von
+    // 6 Stunden AB diesem kuenftigen Zeitpunkt erzeugt, also eine Wartezeit, die es nie gab. Fuer
+    // regulaer beendete Raids aendert sich nichts: die haben immer ein `result` mit `resolvedAt`.
+    const endedAt = existing ? (existing.result ? existing.result.resolvedAt : Math.min(existing.expiresAt || 0, now)) : 0;
     const restartCdLeft = existing ? Math.max(0, (endedAt || 0) + ALLIANCE_RAID_RESTART_COOLDOWN_MS - now) : 0;
     if (restartCdLeft > 0) return res.status(429).json({ error: 'Nächster Allianz-Raid noch nicht bereit.', restartCdLeft });
     const level = existing && existing.result && existing.result.destroyed ? (existing.level || 1) + 1 : (existing ? (existing.level || 1) : 1);
@@ -4718,6 +4749,36 @@ app.post('/api/allianceraid/create', authMiddleware, async (req, res) => {
   setAllianceRaidDoc(tag, doc);
   await saveDb();
   res.json({ ok: true, doc });
+});
+
+// Abgelaufenen/toten Raid abschließen (02.08.2026, Spieler-Report "Allianz-Raid nicht startbar").
+//
+// WARUM ES DEN ENDPUNKT BRAUCHT: Das Frontend hat ein abgelaufenes Raid-Dokument bisher SELBST auf
+// 'resolved' gesetzt und per PUT /api/storage/alliance:<TAG>:raid zurückgeschrieben. Seit der
+// Härtung vom 19.07.2026 lehnt checkAllianceKeyPermission genau diesen Schreibvorgang mit 403 ab
+// ("Allianz-Raid-Daten werden nur über die dedizierten Endpunkte geschrieben") - richtig so, aber
+// die aufrufende Stelle im Frontend fing den Fehler stillschweigend ab, setzte ihren LOKALEN Cache
+// trotzdem auf 'resolved' und schrieb sogar eine Chat-Meldung "ist ungenutzt entkommen". Für den
+// einzelnen Spieler sah es damit aufgeräumt aus, im geteilten Speicher blieb das Dokument aber
+// unverändert stehen - für die ganze Allianz, dauerhaft. Empirisch bestätigt (403 auf PUT).
+//
+// Die Prüfung liegt bewusst hier und nicht beim Aufrufer: allianceRaidVorbeiServer() entscheidet
+// serverseitig, ob wirklich nichts mehr läuft. Ein Mitglied kann damit KEINE laufende Welle
+// abbrechen - dafür gibt es keinen Weg, auch nicht über einen manipulierten Client.
+app.post('/api/allianceraid/cleanup', authMiddleware, async (req, res) => {
+  const { tag } = req.body || {};
+  if (!tag) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!allianceRoleOf(tag, req.userId)) return res.status(403).json({ error: 'Nur Mitglieder dieser Allianz.' });
+  const doc = getAllianceRaidDoc(tag);
+  // Nichts zu tun ist kein Fehler: Mehrere Clients pollen gleichzeitig, der zweite soll denselben
+  // aufgeräumten Zustand zurückbekommen statt einer Fehlermeldung (idempotent wie /checkdispatch).
+  if (!doc || doc.result) return res.json({ ok: true, doc: doc || null, changed: false });
+  if (!allianceRaidVorbeiServer(doc)) return res.json({ ok: true, doc, changed: false });
+  doc.result = { destroyed: false, escaped: true, resolvedAt: Date.now() };
+  doc.phase = 'resolved';
+  setAllianceRaidDoc(tag, doc);
+  await saveDb();
+  res.json({ ok: true, doc, changed: true });
 });
 
 // Flotte der Sammelphase anschließen: Schiffszahlen werden auf das gekappt, was am gemeldeten

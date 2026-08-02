@@ -864,6 +864,10 @@ function getNotifPrefs(user) {
     // Kolonie - eine Warnung. Der Allianz-Raid ist das Gegenteil, nämlich eine Einladung, und wer
     // Angriffswarnungen abschaltet, will deshalb nicht zwangsläufig auch die Einladungen los sein.
     allianceraid: p.allianceraid !== false,
+    // 'alliancebase' = Angriff auf die Allianzbasis und "Ressourcen der nächsten Stufe vollständig".
+    // Getrennt von 'attack' (das ist der Angriff auf die eigene Kolonie): Wer die PvP-Meldungen satt
+    // hat, will die gemeinsame Basis trotzdem nicht stillschweigend verlieren.
+    alliancebase: p.alliancebase !== false,
     patchnotes: p.patchnotes !== false,
     application: p.application !== false,
     spy: p.spy !== false,
@@ -915,6 +919,16 @@ function pushNotificationText(type, payload) {
     return { title: 'Kolonie Kepler-7', body: (labels[payload.jobType] || 'Etwas in deiner Kolonie ist fertig') + ' - komm zurück und mach weiter!' };
   }
   if (type === 'message') return { title: 'Neue Nachricht', body: (payload.fromName || 'Ein Spieler') + ' hat dir geschrieben.' };
+  if (type === 'alliance-muster') {
+    const min = Math.max(1, Math.round((payload.gatherSeconds || 0) / 60));
+    return { title: 'Koordinierter Angriff!', body: (payload.byName || 'Ein Kommandant') + ' greift [' + (payload.targetTag || '?') +
+      '] an - Sammelphase ' + min + ' Min. Schließ deine Flotte an!' };
+  }
+  if (type === 'alliance-base-attacked') return payload.destroyed
+    ? { title: 'Allianzbasis ZERSTÖRT!', body: '[' + (payload.attackerTag || '?') + '] hat eure Basis zerstört - alle Boni sind deaktiviert, bis sie repariert ist.' }
+    : { title: 'Allianzbasis angegriffen!', body: '[' + (payload.attackerTag || '?') + '] hat eure Basis angegriffen. Schickt Schiffe zur Verteidigung.' };
+  if (type === 'alliance-base-ready') return { title: 'Allianzbasis baubereit', body: 'Die Ressourcen für Stufe ' + (payload.level || '?') +
+    ' sind vollständig - die Bauzeit läuft jetzt.' };
   if (type === 'patchnotes') return { title: 'Kolonie Kepler-7 aktualisiert', body: 'Version ' + (payload.version || '') + ' ist da - tippen für die Neuigkeiten.' };
   if (type === 'alliance-application') return { title: 'Neue Bewerbung', body: (payload.name || 'Ein Spieler') + ' möchte [' + (payload.tag || '') + '] beitreten.' };
   // Die Sammelphase ist der eigentliche Inhalt der Meldung: Sie ist der Grund, warum diese
@@ -937,6 +951,47 @@ function pushNotificationText(type, payload) {
   if (type === 'player-reported') return { title: 'Spieler gemeldet', body: (payload.reporterName||'Jemand') + ' hat ' + (payload.targetName||'einen Spieler') + ' gemeldet: ' + (payload.reason||'') };
   return { title: 'Kolonie Kepler-7', body: 'Es gibt Neuigkeiten.' };
 }
+// Wohin führt ein Ereignis? (02.08.2026, Wunsch: "wenn man auf die Push klickt, das entsprechende
+// öffnen - Expedition fertig drückt man drauf, geht Expedition auf")
+//
+// Format: '<reiter>' oder '<reiter>:<unterreiter>'. null heißt "kein sinnvolles Ziel" - dann bleibt
+// es beim bisherigen Verhalten (Fenster nur in den Vordergrund holen).
+//
+// Die Abbildung liegt bewusst HIER und nicht im Service Worker oder im Spiel:
+//   - Der Service Worker ist eine eigene Datei ohne Zugriff auf die Spiellogik. Eine Tabelle dort
+//     wäre eine zweite Kopie, die beim nächsten neuen Ereignistyp veraltet.
+//   - Das Postfach im Spiel braucht dasselbe Ziel. Der Server berechnet es beim AUSLIEFERN
+//     (GET /api/notifications) und nicht beim Speichern, damit auch alte, vor dieser Änderung
+//     abgelegte Ereignisse ein Ziel bekommen, statt tot im Postfach zu liegen.
+//
+// Die Reiter- und Unterreiter-Namen stammen aus weltraum_kolonie.html (id="tab-…",
+// data-alliance-subtab, data-galaxy-subtab); tests/test_pushziele.js im Frontend-Repo prüft jeden
+// hier genannten Namen gegen die Spieldatei - ein Tippfehler wäre sonst ein Klick ins Leere.
+function notificationTarget(type, payload) {
+  const p = payload || {};
+  switch (type) {
+    case 'pact-offer': return 'galaxie:diplo';
+    case 'weltboss-kill': return 'galaxie:kampf';
+    case 'leaderboard-overtaken': return 'galaxie:rang';
+    case 'raid-incoming': return 'verteidigung';
+    case 'spy-detected': return 'verteidigung';
+    case 'attack-received': return 'berichte';
+    case 'sabotaged': return 'berichte';
+    case 'message': return 'berichte';
+    case 'alliance-application': return 'allianz:verwaltung';
+    case 'alliance-raid': return 'allianz:uebersicht';
+    case 'alliance-muster': return 'allianz:uebersicht';
+    case 'alliance-base-attacked': return 'allianz:uebersicht';
+    case 'alliance-base-ready': return 'allianz:uebersicht';
+    case 'referral-redeemed': return 'fortschritt';
+    case 'referral-milestone': return 'fortschritt';
+    case 'job-complete': return {
+      research: 'forschung', construction: 'basis', expedition: 'expedition',
+      mission: 'flotte', terraform: 'basis', exotic: 'forschung', veteran: 'flotte'
+    }[p.jobType] || null;
+    default: return null;   // patchnotes, feedback-received, player-reported
+  }
+}
 // Verschickt eine echte Push-Benachrichtigung an ALLE registrierten Geräte eines Spielers. Abgelaufene
 // Abos (Browser deinstalliert, Berechtigung entzogen - erkennbar an HTTP 404/410 vom Push-Dienst)
 // werden automatisch aus der DB entfernt, damit die Liste nicht endlos mit toten Einträgen wächst.
@@ -945,7 +1000,9 @@ async function sendWebPushToUser(userId, type, payload) {
     const subs = (db.private[userId] && db.private[userId].__pushSubscriptions) || [];
     if (!subs.length) return;
     const { title, body } = pushNotificationText(type, payload);
-    const message = JSON.stringify({ title, body, type, payload, time: Date.now() });
+    // `ziel` reist mit der Push mit, damit der Service Worker beim Klick weiß, wohin - ohne eine
+    // eigene Tabelle führen zu müssen, die still veraltet.
+    const message = JSON.stringify({ title, body, type, payload, ziel: notificationTarget(type, payload), time: Date.now() });
     let changed = false;
     const survivors = [];
     for (const sub of subs) {
@@ -962,6 +1019,39 @@ async function sendWebPushToUser(userId, type, payload) {
 }
 function handleSharedStorageWrite(key, prevRaw, newRaw) {
   try {
+    // Allianzbasis: Ressourcen für die nächste Ausbaustufe sind vollständig (02.08.2026).
+    //
+    // Warum das eine Meldung wert ist: Die Bauzeit einer Stufe startet ERST, wenn ihre Ressourcen
+    // komplett beisammen sind - und sie ist lang (ab 8 Std., je Stufe ×1,5, Stufe 10 allein rund 19
+    // Tage). Wer den Moment verpasst, verschenkt nichts Geringeres als diese Zeit. Bisher stand er
+    // nur als System-Nachricht im Allianz-Chat.
+    //
+    // Abgeleitet aus dem Schreibvorgang und nicht aus einem eigenen Endpunkt, weil dieses Dokument
+    // vom Client geschrieben wird (maybeMarkAllianceBaseResourcesReady): Ein neuer Schlüssel in
+    // readyAtByLevel ist genau das Ereignis. Nur ECHTE Zuwächse zählen - beim allerersten Schreiben
+    // einer Bestandsbasis trägt der Client rückwirkend alle bereits erfüllten Stufen auf einmal
+    // ein, und daraus zehn Meldungen zu machen wäre das Gegenteil von hilfreich.
+    const baseMatch = /^alliance:([A-Z0-9]+):base$/.exec(key);
+    if (baseMatch) {
+      let prev = null, next = null;
+      try { prev = prevRaw ? JSON.parse(prevRaw) : null; } catch (e) {}
+      try { next = JSON.parse(newRaw); } catch (e) { return; }
+      if (!next || !next.readyAtByLevel) return;
+      const vorher = Object.keys((prev && prev.readyAtByLevel) || {});
+      const nachher = Object.keys(next.readyAtByLevel);
+      const neueStufen = nachher.filter(l => !vorher.includes(l)).map(Number).filter(n => n > 0);
+      // Erstmalige Rückdatierung einer Bestandsbasis (mehrere Stufen auf einen Schlag): still.
+      if (!neueStufen.length || (!vorher.length && neueStufen.length > 1)) return;
+      const stufe = Math.max(...neueStufen);
+      for (const memberId of allianceMemberIds(baseMatch[1])) {
+        const user = findUserById(memberId);
+        if (!user) continue;
+        const prefs = getNotifPrefs(user);
+        if (!prefs.enabled || !prefs.alliancebase) continue;
+        pushNotificationEvent(memberId, 'alliance-base-ready', { tag: baseMatch[1], level: stufe });
+      }
+      return;
+    }
     if (key.startsWith('pact:')) {
       let prev = null, next = null;
       try { prev = prevRaw ? JSON.parse(prevRaw) : null; } catch (e) {}
@@ -3202,6 +3292,7 @@ app.post('/api/notification-prefs', authMiddleware, async (req, res) => {
     // ein hier fehlender Schlüssel würde beim ersten Speichern still auf die Vorgabe zurückfallen -
     // der Schalter im Spiel ließe sich dann scheinbar umlegen, ohne Wirkung.
     allianceraid: b.allianceraid !== false,
+    alliancebase: b.alliancebase !== false,
     patchnotes: b.patchnotes !== false,
     application: b.application !== false,
     spy: b.spy !== false,
@@ -3214,7 +3305,11 @@ app.post('/api/notification-prefs', authMiddleware, async (req, res) => {
 });
 app.get('/api/notifications', authMiddleware, (req, res) => {
   const list = (db.private[req.userId] && db.private[req.userId].__notificationEvents) || [];
-  res.json({ notifications: list });
+  // `ziel` wird beim Ausliefern berechnet und nicht beim Speichern (02.08.2026): So bekommen auch
+  // die Ereignisse ein Ziel, die vor dieser Änderung abgelegt wurden - sonst läge im Postfach jedes
+  // Mitglied älteren Datums unanklickbar herum. Kostet nichts (die Liste ist auf 30 Einträge
+  // begrenzt) und kann nicht veralten.
+  res.json({ notifications: list.map(n => Object.assign({}, n, { ziel: notificationTarget(n.type, n.payload) })) });
 });
 app.post('/api/notifications/dismiss', authMiddleware, async (req, res) => {
   const ids = Array.isArray((req.body || {}).ids) ? req.body.ids : [];
@@ -5283,6 +5378,25 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
   };
   setMusterAttackDoc(tag, doc);
   await saveDb();
+
+  // Dieselbe Begründung wie beim Allianz-Raid (02.08.2026): eine Sammelphase mit harter Frist, die
+  // bisher nur im Allianz-Chat stand. Wer nicht ohnehin gerade spielt, hat vom Aufruf nie erfahren.
+  // Bewusst dieselbe Einstellungs-Kategorie 'allianceraid' wie der Raid: Für den Spieler ist beides
+  // dasselbe Bedürfnis ("sag mir Bescheid, wenn meine Allianz gemeinsam losschlägt") - zwei
+  // Schalter dafür wären eine Unterscheidung ohne Unterschied.
+  try {
+    for (const memberId of allianceMemberIds(tag)) {
+      if (memberId === req.userId) continue;
+      const user = findUserById(memberId);
+      if (!user) continue;
+      const prefs = getNotifPrefs(user);
+      if (!prefs.enabled || !prefs.allianceraid) continue;
+      pushNotificationEvent(memberId, 'alliance-muster', {
+        tag, byName: req.username, targetTag, gatherSeconds
+      });
+    }
+  } catch (e) { console.error('Musterangriff-Benachrichtigung fehlgeschlagen (der Angriff selbst läuft):', e.message); }
+
   res.json({ ok: true, doc });
 });
 
@@ -5487,6 +5601,30 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
   } catch (e) {}
 
   await saveDb();
+
+  // Die ANGEGRIFFENE Allianz benachrichtigen (02.08.2026). Bisher erfuhr sie es nur über eine
+  // System-Nachricht im eigenen Chat - also erst beim nächsten Blick ins Spiel, unter Umständen
+  // Stunden später und mit zerstörter Basis.
+  //
+  // Was auf dem Spiel steht, rechtfertigt die Meldung: Fällt die Hülle auf 0, sind ALLE Boni der
+  // Allianz deaktiviert, bis 30% der kumulierten Baukosten gemeinsam wieder aufgebracht sind.
+  // Mitglieder können Schiffe zur Basis entsenden - aber nur, wenn sie rechtzeitig davon erfahren.
+  //
+  // Eigene Kategorie 'alliancebase' statt 'attack': 'attack' meint den Angriff auf die eigene
+  // Kolonie. Wer den abschaltet, weil er die PvP-Meldungen satt hat, will die Basis trotzdem nicht
+  // stillschweigend verlieren.
+  try {
+    for (const memberId of allianceMemberIds(targetTag)) {
+      const user = findUserById(memberId);
+      if (!user) continue;
+      const prefs = getNotifPrefs(user);
+      if (!prefs.enabled || !prefs.alliancebase) continue;
+      pushNotificationEvent(memberId, 'alliance-base-attacked', {
+        attackerTag: tag, destroyed, damage: dealt, level: targetLevel
+      });
+    }
+  } catch (e) { console.error('Basis-Angriffs-Benachrichtigung fehlgeschlagen (der Angriff selbst ist ausgewertet):', e.message); }
+
   res.json({ ok: true, doc });
 });
 

@@ -3570,6 +3570,10 @@ app.get('/health', (req, res) => {
 
 const httpServer = app.listen(PORT, () => {
   console.log('Kepler-7 Server läuft auf Port ' + PORT);
+  // Läuft bei jedem Start, tut aber nur beim ersten Mal etwas (siehe `braucht`-Prüfung darin) -
+  // eine Migration, die man von Hand anstoßen muss, wird auf einem Pi ohne Wartungsfenster nie
+  // angestoßen.
+  try { kofiSupporterMigration(); } catch (e) { console.error('[kofi-migration] fehlgeschlagen:', e.message); }
 });
 
 // --- Sauberes Herunterfahren: bei Neustart/Stop ausstehende In-Memory-Änderungen flushen ---
@@ -6117,6 +6121,36 @@ function verifyKofiToken(given) {
   const b = Buffer.from(KOFI_VERIFICATION_TOKEN);
   try { return a.length === b.length && crypto.timingSafeEqual(a, b); } catch (e) { return false; }
 }
+// Ein Eintrag in db.kofiSupporters. Die ALTE Form war eine nackte Zahl unter dem Namen als
+// Schlüssel, die neue ein { name, total } unter dem kleingeschriebenen Namen. Diese Funktion liest
+// beide - so ist kein Datenverlust möglich, falls die Zusammenführung unten je übersprungen wird.
+function kofiSupporterRec(v, key) {
+  if (typeof v === 'number') return { name: key || '', total: v };
+  if (v && typeof v === 'object') return { name: v.name || key || '', total: Number(v.total) || 0 };
+  return { name: key || '', total: 0 };
+}
+// Einmalige Zusammenführung beim Serverstart: Was durch die frühere Groß-/Kleinschreibung auf zwei
+// Einträge aufgeteilt wurde, wird addiert. Ohne diesen Schritt blieben bereits entstandene
+// Doppeleinträge für immer getrennt - der Fehler ist behoben, seine Spuren wären geblieben.
+function kofiSupporterMigration() {
+  const alt = db.kofiSupporters;
+  if (!alt || !Object.keys(alt).length) return;
+  const braucht = Object.entries(alt).some(([k, v]) => typeof v === 'number' || k !== k.toLowerCase());
+  if (!braucht) return;
+  const neu = {};
+  for (const [k, v] of Object.entries(alt)) {
+    const rec = kofiSupporterRec(v, k);
+    const key = (rec.name || k).toLowerCase();
+    const bisher = neu[key];
+    neu[key] = { name: rec.name || k, total: (bisher ? bisher.total : 0) + rec.total };
+  }
+  const vorher = Object.keys(alt).length, nachher = Object.keys(neu).length;
+  db.kofiSupporters = neu;
+  console.log('[kofi-migration] Unterstützer-Namen vereinheitlicht: ' + vorher + ' Einträge -> ' + nachher +
+    (vorher !== nachher ? ' (' + (vorher - nachher) + ' Doppeleintrag/Doppeleinträge zusammengeführt)' : ''));
+  saveDb();
+}
+
 app.post('/api/kofi-webhook', express.urlencoded({ extended: true, limit: '256kb' }), (req, res) => {
   // Sofort antworten, wie beim Deploy-Webhook - Ko-fi erwartet eine schnelle Antwort und markiert
   // den Webhook sonst als fehlgeschlagen. Die eigentliche Verarbeitung läuft danach.
@@ -6132,8 +6166,21 @@ app.post('/api/kofi-webhook', express.urlencoded({ extended: true, limit: '256kb
     if (!isFinite(amount) || amount <= 0) return;
     if (!db.kofiSupporters) db.kofiSupporters = {};
     if (payload.is_public && payload.from_name) {
+      // ===== Der Schlüssel wird kleingeschrieben, der Anzeigename nicht (05.08.2026) =====
+      // Elf Zeilen tiefer wird die E-Mail sauber mit .trim().toLowerCase() normalisiert, der Name
+      // hier bisher nur mit .trim(). Bei Gast-Zahlungen ohne Ko-fi-Konto tippt der Zahler seinen
+      // Namen jedes Mal neu ein - "Max Mustermann" und "max mustermann" landeten deshalb unter zwei
+      // Schlüsseln und ihre Summen addierten sich nicht. Folge: Der Kasten "Aktueller
+      // Top-Unterstützer" nennt eine zu kleine Summe und kann bei mehreren Spendern den Falschen an
+      // die Spitze setzen, weil der wahre Spitzenreiter auf zwei Einträge aufgeteilt ist.
+      // Abzeichen und Medaillenstufe waren davon NICHT betroffen (die hängen an der E-Mail).
+      //
+      // Der Anzeigename wird bewusst mit der ZULETZT gesehenen Schreibweise überschrieben - so
+      // gewinnt die aktuellste Eingabe des Spenders, statt dass die erste für immer festklebt.
       const name = String(payload.from_name).trim().slice(0, 60) || 'Anonym';
-      db.kofiSupporters[name] = (db.kofiSupporters[name] || 0) + amount;
+      const key = name.toLowerCase();
+      const rec = kofiSupporterRec(db.kofiSupporters[key]);
+      db.kofiSupporters[key] = { name, total: rec.total + amount };
     } else {
       db.kofiSupportersAnonymousTotal = (db.kofiSupportersAnonymousTotal || 0) + amount;
     }
@@ -6200,10 +6247,10 @@ app.post('/api/kofi-webhook', express.urlencoded({ extended: true, limit: '256kb
 // Top-Unterstützers, keine sensiblen Daten wie E-Mail oder einzelne Zahlungen.
 app.get('/api/kofi-top-supporter', (req, res) => {
   const supporters = db.kofiSupporters || {};
-  const entries = Object.entries(supporters).sort((a, b) => b[1] - a[1]);
+  const entries = Object.entries(supporters).map(([k, v]) => kofiSupporterRec(v, k));
   if (!entries.length) return res.json({ topSupporter: null });
-  const [name, total] = entries[0];
-  res.json({ topSupporter: { name, total: Math.round(total * 100) / 100 } });
+  entries.sort((a, b) => b.total - a.total);
+  res.json({ topSupporter: { name: entries[0].name, total: Math.round(entries[0].total * 100) / 100 } });
 });
 // Unterstützer-Abzeichen (20.07.2026, Spieler-Wunsch "farblich/mit Medaille kennzeichnen", Verknüpfung
 // C "E-Mail-Verifizierung"): bewusst zeitlich befristet (30 Tage ab der letzten Spende) statt

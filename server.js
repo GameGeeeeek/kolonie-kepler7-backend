@@ -4918,14 +4918,33 @@ function allianceRaidCounterFor(level) { return Math.round(ALLIANCE_RAID_COUNTER
 // Die Namen MÜSSEN mit ALLIANCE_RAID_BOSSE im Frontend übereinstimmen, sonst kündigt die Push einen
 // anderen Gegner an als der, der im Spiel steht. tests/test_allianzraid_anzeige.js im Frontend-Repo
 // vergleicht beide Listen Eintrag für Eintrag.
+// beuteMult/schwerpunkt (05.08.2026, Wunsch Sascha "mehrere raid bosse auswaehlbar mit
+// verschiedenen belohnungen"): Seit die Allianz den Gegner WAEHLEN kann, braucht die Wahl einen
+// Grund - sonst nimmt jeder immer den mit den geringsten Verlusten.
+//   beuteMult  folgt dem RISIKO: Wer sich den haerteren Gegner vornimmt (hoeherer verlustMult),
+//              bekommt mehr. Die zahmen 0,90er zahlen entsprechend etwas weniger.
+//   schwerpunkt verschiebt, WAS faellt - diese Ressource kommt reichlicher, die uebrigen etwas
+//              knapper. Die Gesamtmenge bleibt dadurch ungefaehr gleich; die Wahl ist also eine
+//              Frage des Bedarfs ("wir brauchen diese Woche Kristalle"), nicht des Ertrags.
 const ALLIANCE_RAID_BOSSES = [
-  { key: 'sternenfresser', name: 'Sternenfresser', schwaeche: null,             ohneMult: 1.0,  verlustMult: 1.0  },
-  { key: 'panzerhuelle',   name: 'Panzerhülle',    schwaeche: 'bomber',         ohneMult: 0.75, verlustMult: 0.90 },
-  { key: 'schwarmmutter',  name: 'Schwarmmutter',  schwaeche: 'jaeger',         ohneMult: 0.80, verlustMult: 1.25 },
-  { key: 'phasenwandler',  name: 'Phasenwandler',  schwaeche: 'destroyers',     ohneMult: 0.75, verlustMult: 0.90 },
-  { key: 'gluthorn',       name: 'Gluthorn',       schwaeche: 'schlachtschiff', ohneMult: 0.80, verlustMult: 1.20 }
+  { key: 'sternenfresser', name: 'Sternenfresser', schwaeche: null,             ohneMult: 1.0,  verlustMult: 1.0,  beuteMult: 1.00, schwerpunkt: null },
+  { key: 'panzerhuelle',   name: 'Panzerhülle',    schwaeche: 'bomber',         ohneMult: 0.75, verlustMult: 0.90, beuteMult: 0.92, schwerpunkt: 'erz' },
+  { key: 'schwarmmutter',  name: 'Schwarmmutter',  schwaeche: 'jaeger',         ohneMult: 0.80, verlustMult: 1.25, beuteMult: 1.20, schwerpunkt: 'kristalle' },
+  { key: 'phasenwandler',  name: 'Phasenwandler',  schwaeche: 'destroyers',     ohneMult: 0.75, verlustMult: 0.90, beuteMult: 0.92, schwerpunkt: 'deuterium' },
+  { key: 'gluthorn',       name: 'Gluthorn',       schwaeche: 'schlachtschiff', ohneMult: 0.80, verlustMult: 1.20, beuteMult: 1.15, schwerpunkt: 'antimaterie' }
 ];
 function allianceRaidBossOf(level) { return ALLIANCE_RAID_BOSSES[(Math.max(1, level | 0) - 1) % ALLIANCE_RAID_BOSSES.length]; }
+// Der Boss EINES Dokuments. Die gewaehlte Sorte steht in doc.bossKey - das ist seit dem 19.07.2026
+// gefahrlos, weil `alliance:<TAG>:raid` fuer Clients SCHREIBGESCHUETZT ist (siehe
+// checkAllianceKeyPermission: "Allianz-Raid-Daten werden nur ueber die dedizierten Endpunkte
+// geschrieben"). Vorher waere ein im Dokument mitgefuehrter Boss faelschbar gewesen, und genau
+// deshalb leitete er sich stur aus der Stufe ab.
+// Ohne bossKey bleibt es bei der Stufen-Ableitung: alte, noch laufende Raids aendern ihren Gegner
+// nicht mitten im Zeitfenster.
+function allianceRaidBossFor(doc) {
+  const gewaehlt = doc && doc.bossKey && ALLIANCE_RAID_BOSSES.find(b => b.key === doc.bossKey);
+  return gewaehlt || allianceRaidBossOf(doc ? doc.level : 1);
+}
 
 // ===== Raid-Belohnung nach RANG (05.08.2026, Wunsch Sascha) =====
 //
@@ -4976,13 +4995,43 @@ function allianceRaidRankShare(platz, anzahl) {
 // dass sie ausschliesslich aus den eigenen Fabriken kommen und nicht einmal handelbar sind - eine
 // Raid-Ausschuettung wuerde genau diese Regel aushebeln. Stattdessen Antimaterie (knapp, und aus
 // einem Kampf zu holen ist stimmig) und Modulfragmente.
-function allianceRaidRewardFor(level, share, platz, anzahl, destroyed) {
+function allianceRaidRewardFor(level, share, platz, anzahl, destroyed, boss) {
   const lvl = Math.max(1, level | 0);
   const rang = allianceRaidRankFactor(platz, anzahl);
   const rShare = allianceRaidRankShare(platz, anzahl);
   const anteil = 0.35 + 0.65 * Math.max(0, Math.min(1, share));
   const siegMult = destroyed ? 1 : 0.6;
-  const gesamt = anteil * rang * siegMult;
+  // Boss-Faktoren (05.08.2026). Ohne uebergebenen Boss bleibt alles wie vorher - der Parameter ist
+  // optional, damit ein Aufrufer ohne Boss-Kenntnis (und der Test) weiterhin rechnen kann.
+  const bMult = (boss && boss.beuteMult) || 1;
+  const schwer = (boss && boss.schwerpunkt) || null;
+  const gesamt = anteil * rang * siegMult * bMult;
+  // ===== Der Schwerpunkt verschiebt die ZUSAMMENSETZUNG, nicht die Gesamtmenge =====
+  // ERSTER ANLAUF WAR FALSCH und der eigene Test hat es gefangen: feste Faktoren (betonte
+  // Ressource x1,7, uebrige x0,8) sind NICHT mengenneutral, weil die drei Grundmengen sehr
+  // verschieden gross sind (Erz 600+500L gegen Deuterium 180+160L). Erz zu betonen brachte dadurch
+  // +26 % Gesamtertrag, Deuterium nur +5 % - die Panzerhuelle waere stillschweigend die beste
+  // Ressourcenwahl gewesen, und die Boss-Wahl haette wieder eine offensichtlich richtige Antwort
+  // gehabt.
+  // Jetzt wird UMVERTEILT: Die betonte Ressource bekommt 70 % ihrer eigenen Grundmenge dazu, und
+  // genau dieser Betrag wird den anderen beiden im Verhaeltnis ihrer Grundmengen abgezogen. Die
+  // Summe der drei bleibt damit exakt gleich, egal welche betont wird.
+  const basis = { erz: 600 + lvl * 500, kristalle: 380 + lvl * 320, deuterium: 180 + lvl * 160 };
+  const anteilig = Object.assign({}, basis);
+  if (schwer && basis[schwer] !== undefined){
+    const extra = basis[schwer] * 0.7;
+    const restSumme = Object.keys(basis).reduce((s, k) => k === schwer ? s : s + basis[k], 0);
+    anteilig[schwer] = basis[schwer] + extra;
+    for (const k of Object.keys(basis)){
+      if (k === schwer) continue;
+      anteilig[k] = Math.max(0, basis[k] - extra * (basis[k] / restSumme));
+    }
+  }
+  // Antimaterie steht ausserhalb dieser Umverteilung: Sie faellt nur bei erlegtem Boss und ist
+  // die knappste Belohnung ueberhaupt. Ein Gegner mit Antimaterie-Schwerpunkt betont sie deshalb
+  // zusaetzlich, ohne den drei Grundressourcen etwas wegzunehmen - das ist gewollt und der Grund,
+  // warum genau dieser Gegner den zweithoechsten Ertragsfaktor traegt.
+  const amFaktor = schwer === 'antimaterie' ? 1.7 : 1;
   return {
     credits: Math.round((300 + lvl * 150) * gesamt),
     battlePoints: Math.round((8 + lvl * 4) * gesamt),
@@ -4990,16 +5039,18 @@ function allianceRaidRewardFor(level, share, platz, anzahl, destroyed) {
     // Stufe-20-Boss gab genauso viel wie Stufe 1. Jetzt an beidem haengend.
     xp: Math.round((10 + lvl * 6) * gesamt),
     resources: {
-      erz: Math.round((600 + lvl * 500) * gesamt),
-      kristalle: Math.round((380 + lvl * 320) * gesamt),
-      deuterium: Math.round((180 + lvl * 160) * gesamt),
+      erz: Math.round(anteilig.erz * gesamt),
+      kristalle: Math.round(anteilig.kristalle * gesamt),
+      deuterium: Math.round(anteilig.deuterium * gesamt),
       // Antimaterie nur bei erlegtem Boss. Die 0,15 als Sockel: Auch der Letzte bekommt etwas,
       // aber die Spitze bekommt ein Vielfaches - das ist der Anreiz, wirklich Flotte zu schicken.
-      antimaterie: destroyed ? Math.round((2 + lvl * 1.2) * (0.15 + 0.85 * rShare)) : 0
+      // Math.ceil statt round beim Sockel: Bei kleinen Stufen wuerde der letzte Platz sonst auf 0
+      // abgerundet, und die Zusage "auch der Schwaechste bekommt etwas" waere gebrochen.
+      antimaterie: destroyed ? Math.max(1, Math.round((2 + lvl * 1.2) * (0.15 + 0.85 * rShare) * bMult * amFaktor)) : 0
     },
     // Modulfragmente: die eigentliche "wertvolle" Beute. Sie zahlen direkt auf Modul-Aufwertung,
     // Neu-Wuerfeln und Schmelze ein und sind sonst nur muehsam zu bekommen.
-    fragments: destroyed ? (1 + Math.round((2 + lvl * 0.7) * rShare)) : 0
+    fragments: destroyed ? (1 + Math.round((2 + lvl * 0.7) * rShare * bMult)) : 0
   };
 }
 // Modulfund: Chance und Seltenheit entscheidet ab jetzt der SERVER.
@@ -5080,9 +5131,15 @@ function listAllianceRaidJoins(tag, waveKey) {
 // Admin/Offizier, exakt dieselbe Zustandsmaschine wie vorher im Frontend (Stufe steigt nur nach
 // echtem Sieg, kein Straf-Sprung bei ungenutztem Entkommen).
 app.post('/api/allianceraid/create', authMiddleware, async (req, res) => {
-  const { tag, gatherSeconds } = req.body || {};
+  const { tag, gatherSeconds, bossKey } = req.body || {};
   const gatherOk = ALLIANCE_RAID_GATHER_DURATIONS.includes(gatherSeconds) || (ALLIANCE_RAID_TEST_MODE && Number(gatherSeconds) > 0);
   if (!tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  // Gegner-Wahl (05.08.2026). Gegen die feste Liste geprueft statt uebernommen - ein erfundener
+  // Schluessel wuerde sonst in allianceRaidBossFor auf die Stufen-Ableitung zurueckfallen und dort
+  // still einen anderen Gegner ergeben, als die Allianz gewaehlt hat.
+  if (bossKey !== undefined && bossKey !== null && bossKey !== '' && !ALLIANCE_RAID_BOSSES.some(b => b.key === bossKey)) {
+    return res.status(400).json({ error: 'Unbekannter Raid-Gegner.' });
+  }
   const myRole = allianceRoleOf(tag, req.userId);
   if (myRole !== 'admin' && myRole !== 'officer') return res.status(403).json({ error: 'Nur Admins/Offiziere können einen Allianz-Raid ausrufen.' });
   const baseRaw = db.shared['alliance:' + tag + ':base'];
@@ -5111,6 +5168,10 @@ app.post('/api/allianceraid/create', authMiddleware, async (req, res) => {
     doc = existing;
     doc.waveNumber = (doc.waveNumber || 1) + 1;
     doc.phase = 'gathering'; doc.gatherEndsAt = now + gatherSeconds * 1000; doc.dispatch = null;
+    // bossKey wird hier ABSICHTLICH NICHT uebernommen: Das ist eine Folgewelle gegen denselben,
+    // bereits angeschlagenen Gegner. Ihn zwischen zwei Wellen zu tauschen waere weder erklaerbar
+    // (die HP laufen weiter) noch fair - man koennte sich nach der ersten Welle den Gegner mit der
+    // besseren Beute aussuchen. Gewaehlt wird beim AUSRUFEN eines neuen Raids.
   } else {
     // Ohne `result` auf "jetzt" begrenzen (02.08.2026) - gleiche Korrektur wie im Frontend. Ein
     // kaputtes Dokument, dessen Zeitfenster noch in der Zukunft liegt, haette sonst eine Sperre von
@@ -5126,7 +5187,10 @@ app.post('/api/allianceraid/create', authMiddleware, async (req, res) => {
     doc = {
       id: 'raid' + now, level, maxHp: allianceRaidHpFor(level), hp: allianceRaidHpFor(level), targetSector,
       waveNumber: 1, startedAt: now, expiresAt: now + ALLIANCE_RAID_DURATION_MS, gatherEndsAt: now + gatherSeconds * 1000,
-      phase: 'gathering', dispatch: null, lastWaveResult: null, lastWaveEndedAt: null, result: null
+      phase: 'gathering', dispatch: null, lastWaveResult: null, lastWaveEndedAt: null, result: null,
+      // Ohne Wahl bleibt es bei der bisherigen Ableitung aus der Stufe - wer nichts auswaehlt,
+      // bekommt genau das, was er vor dem Update bekommen haette.
+      bossKey: bossKey || allianceRaidBossOf(level).key
     };
   }
   setAllianceRaidDoc(tag, doc);
@@ -5146,7 +5210,7 @@ app.post('/api/allianceraid/create', authMiddleware, async (req, res) => {
   // Antwort auf den Ausruf nicht verzögern, und der Raid ist zu diesem Zeitpunkt schon sicher
   // gespeichert. sendWebPushToUser() schluckt seine Fehler ohnehin selbst.
   try {
-    const boss = allianceRaidBossOf(doc.level);
+    const boss = allianceRaidBossFor(doc);   // die GEWAEHLTE Sorte, sonst kuendigt die Push einen anderen Gegner an
     for (const memberId of allianceMemberIds(tag)) {
       if (memberId === req.userId) continue;
       const user = findUserById(memberId);
@@ -5381,7 +5445,9 @@ app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
   // geteilten Speicher und wird von Clients geschrieben, ein dort mitgefuehrter Boss waere faelschbar.
   // Die Trefferschwaeche ist bewusst ein MALUS bei fehlendem Schiffstyp und kein Bonus bei
   // vorhandenem: Ein gut zusammengestellter Verband richtet genau so viel Schaden an wie vorher.
-  const raidBoss = allianceRaidBossOf(doc.level);
+  // 05.08.2026: die GEWAEHLTE Sorte (doc.bossKey), sonst kaempft der Verband gegen einen anderen
+  // Gegner als den, der beim Ausrufen angekuendigt und in der Karte angezeigt wurde.
+  const raidBoss = allianceRaidBossFor(doc);
   const comp = (doc.dispatch && doc.dispatch.totalComposition) || {};
   const hatSchwaeche = !raidBoss.schwaeche || (comp[raidBoss.schwaeche] || 0) > 0;
   const schadenMult = hatSchwaeche ? 1 : raidBoss.ohneMult;
@@ -5478,7 +5544,11 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
   const anzahl = rangListe.length || 1;
   const idx = rangListe.findIndex(e => e && e.id === req.userId);
   const platz = idx >= 0 ? idx + 1 : anzahl;   // nicht gefunden -> hinten einsortieren
-  const lohn = allianceRaidRewardFor(level, share, platz, anzahl, res_.destroyed);
+  // Der Boss bestimmt Ertrag und Schwerpunkt der Beute (beuteMult/schwerpunkt). Er kommt aus
+  // demselben allianceRaidBossFor wie der Kampf selbst - sonst kaempfte man gegen den einen und
+  // wuerde nach dem anderen bezahlt.
+  const lohnBoss = allianceRaidBossFor(doc);
+  const lohn = allianceRaidRewardFor(level, share, platz, anzahl, res_.destroyed, lohnBoss);
   const credits = lohn.credits;
   const bp = lohn.battlePoints;
   // WICHTIG: anders als beim Weltboss (wo die Flotte bis zur Missionsauflösung im Spielstand bleibt
@@ -5521,6 +5591,8 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
     ok: true, missedWave: false, destroyed: res_.destroyed, isTop, share: Math.round(share * 100),
     credits, battlePoints: bp, xp: lohn.xp, lostShips,
     platz, teilnehmer: anzahl,
+    // Welcher Gegner es war - die Meldung im Spiel nennt ihn, und die Beute haengt an ihm.
+    boss: { key: lohnBoss.key, name: lohnBoss.name, schwerpunkt: lohnBoss.schwerpunkt || null },
     resources: lohn.resources, fragmente: lohn.fragments,
     modulSeltenheit,
     // Die ganze Tafel mit - so kann das Spiel zeigen, wer wo stand, ohne 20 Profile nachzuladen.

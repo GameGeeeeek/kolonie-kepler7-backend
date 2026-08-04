@@ -5334,7 +5334,17 @@ app.post('/api/allianceraid/checkdispatch', authMiddleware, async (req, res) => 
     // sich hierauf stützen, nicht erneut alle Beitritts-Dokumente der Welle auflisten, sonst würden
     // Zuspätkommer (die beim Dispatch korrekt ausgeschlossen wurden) trotzdem eine Belohnung/Verluste
     // aus der Wellen-Auflösung bekommen, obwohl sie nie am Kampf teilgenommen haben.
-    participantIds: onTime.map(p => p.playerId)
+    participantIds: onTime.map(p => p.playerId),
+    // ===== Die Rangliste des Verbands (05.08.2026, Wunsch Sascha) =====
+    // Hier und nirgends sonst: Der Rang muss im Moment des ABFLUGS feststehen, aus denselben
+    // serverseitig berechneten Angriffskräften, die auch den Kampf entscheiden. Später aus den
+    // Beitritts-Dokumenten nachzuzählen wäre nicht dasselbe - wer nach dem Abflug beitritt oder
+    // storniert, dürfte die Platzierung der anderen nicht mehr verschieben.
+    // `name` kommt aus dem Beitritts-Dokument (dort vom Server aus req.username gesetzt), damit die
+    // Wiedergabe im Spiel die Rangliste zeigen kann, ohne 20 Profile nachzuladen.
+    ranking: onTime.slice()
+      .sort((a, b) => (b.power || 0) - (a.power || 0))
+      .map(p => ({ id: p.playerId, name: p.name || 'Kommandant', power: Math.round(p.power || 0) }))
   };
   doc.phase = 'enroute';
   setAllianceRaidDoc(tag, doc);
@@ -5389,7 +5399,11 @@ app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
   const waveResult = {
     waveNumber: doc.waveNumber, damage: Math.round(damage), destroyed, lossPct,
     totalPower: power, totalShips: doc.dispatch.totalShips, participantCount: doc.dispatch.participantCount,
-    topParticipantId: doc.dispatch.topParticipantId, resolvedAt: now
+    topParticipantId: doc.dispatch.topParticipantId, resolvedAt: now,
+    // Die beim Abflug festgehaltene Rangliste wandert ins Wellen-Ergebnis: /claim liest den eigenen
+    // Platz daraus, und die Anzeige im Spiel zeigt die ganze Tafel. Ohne diese Kopie muesste /claim
+    // auf doc.dispatch zugreifen - das aber schon der naechsten Welle gehoeren kann.
+    ranking: (doc.dispatch.ranking || []).slice()
   };
   doc.lastWaveResult = waveResult;
   doc.lastWaveEndedAt = now;
@@ -5456,8 +5470,17 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
   const share = res_.totalPower > 0 ? Math.min(1, (join.power || 0) / res_.totalPower) : 0;
   const isTop = res_.topParticipantId === req.userId;
   const level = doc.level;
-  const credits = Math.round((300 + level * 150) * (0.4 + 0.6 * share) * (isTop ? 1.5 : 1) * (res_.destroyed ? 1 : 0.6));
-  const bp = Math.round((8 + level * 4) * (0.4 + 0.6 * share) * (res_.destroyed ? 1 : 0.6));
+  // ===== Platzierung im Verband (05.08.2026) =====
+  // Aus der beim Abflug festgehaltenen Rangliste. Fehlt sie (Welle war schon vor dem Update
+  // unterwegs), faellt die Rechnung auf "einziger Teilnehmer" zurueck - das ergibt denselben
+  // Faktor wie frueher der Top-Bonus und benachteiligt niemanden waehrend des Uebergangs.
+  const rangListe = Array.isArray(res_.ranking) ? res_.ranking : [];
+  const anzahl = rangListe.length || 1;
+  const idx = rangListe.findIndex(e => e && e.id === req.userId);
+  const platz = idx >= 0 ? idx + 1 : anzahl;   // nicht gefunden -> hinten einsortieren
+  const lohn = allianceRaidRewardFor(level, share, platz, anzahl, res_.destroyed);
+  const credits = lohn.credits;
+  const bp = lohn.battlePoints;
   // WICHTIG: anders als beim Weltboss (wo die Flotte bis zur Missionsauflösung im Spielstand bleibt
   // und Verluste von dort abgezogen werden) wurden die gesendeten Schiffe hier bereits BEIM BEITRITT
   // aus fleetObj entfernt (siehe /join). Der Verlust wird deshalb direkt aus der gesendeten Menge
@@ -5475,14 +5498,33 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
   }
   save.credits = (save.credits || 0) + credits;
   save.battlePoints = (save.battlePoints || 0) + bp;
-  save.xp = (save.xp || 0) + (res_.destroyed ? 20 : 12);
+  save.xp = (save.xp || 0) + lohn.xp;
+  // Ressourcen: DIREKT im Spielstand gutschreiben, damit sie nicht vom Client "nachgetragen" werden
+  // muessen. Der Lagerdeckel wird hier bewusst NICHT nachgebildet - er haengt an Gebaeuden, Schiffen,
+  // Modulen und Planetenrollen, und eine zweite Kopie dieser Formel im Backend waere genau die Art
+  // von Doppelpflege, vor der CLAUDE.md warnt. Das Frontend deckelt beim naechsten Tick ohnehin.
+  save.resources = save.resources || {};
+  for (const [res, menge] of Object.entries(lohn.resources)){
+    if (menge > 0) save.resources[res] = (save.resources[res] || 0) + menge;
+  }
+  if (lohn.fragments > 0) save.moduleFragments = (save.moduleFragments || 0) + lohn.fragments;
+  // Modulfund: Chance UND Seltenheit entscheidet der Server (siehe allianceRaidModuleDrop). Den
+  // konkreten Typ zieht der Client aus seinen eigenen Tabellen - eine Spiegelung der 21 Modul-
+  // Definitionen samt Herkunfts-Filtern hierher waere eine zweite Kopie, die stillschweigend
+  // veraltet. Balancerelevant ist, OB und WIE SELTEN etwas faellt, und das steht jetzt hier.
+  const modulSeltenheit = allianceRaidModuleDrop(level, platz, anzahl, res_.destroyed);
   join.claimed = true;
   db.shared[joinKey] = JSON.stringify(join);
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
   await saveDb();
   res.json({
     ok: true, missedWave: false, destroyed: res_.destroyed, isTop, share: Math.round(share * 100),
-    credits, battlePoints: bp, xp: res_.destroyed ? 20 : 12, lostShips,
+    credits, battlePoints: bp, xp: lohn.xp, lostShips,
+    platz, teilnehmer: anzahl,
+    resources: lohn.resources, fragmente: lohn.fragments,
+    modulSeltenheit,
+    // Die ganze Tafel mit - so kann das Spiel zeigen, wer wo stand, ohne 20 Profile nachzuladen.
+    ranking: rangListe.map((e, i) => ({ platz: i + 1, name: e.name, power: e.power, ich: e.id === req.userId })),
     saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints
   });
 });

@@ -6151,6 +6151,46 @@ app.post('/api/kofi-webhook', express.urlencoded({ extended: true, limit: '256kb
       rec.total += amount;
       rec.lastDonationAt = Date.now();
       db.kofiDonationsByEmail[email] = rec;
+    } else {
+      // ===== Spende ohne E-Mail (05.08.2026, Spieler-Report über Sascha) =====
+      //
+      // GEMESSEN AUF DEM PI: db.kofiDonationsByEmail hatte 0 Einträge, db.kofiSupporters 2 Namen.
+      // Beide entstehen in DIESEM Handler, wenige Zeilen auseinander - der Name wurde also verbucht,
+      // die E-Mail nie. Der `if (email)` darüber wurde kein einziges Mal betreten. Folge: Niemand
+      // konnte je das Unterstützer-Abzeichen bekommen, obwohl die Spende ankam und in der
+      // Unterstützer-Box erschien. Aufgefallen ist es erst, weil ein Spender (lumekx) in der Box
+      // stand, in der Bestenliste aber keine Tasse trug.
+      //
+      // Der Fehler war nicht die fehlende E-Mail, sondern dass NICHTS es gemeldet hat: Der Zweig
+      // fiel still durch, und beide Hälften derselben Spende widersprachen sich, ohne dass es je
+      // irgendwo auftauchte. Seit dem 05.08.2026 hängen zudem drei Spielfunktionen am Rang - eine
+      // stille Lücke kostet einen Spender jetzt Funktionen, für die er bezahlt hat.
+      //
+      // WARUM NICHT EINFACH ÜBER DEN NAMEN VERKNÜPFEN: Der Kommandantenname ist frei wählbar. Wer
+      // sich in "lumekx" umbenennt, bekäme dessen Rang. Genau deshalb fiel die Wahl damals auf die
+      // E-Mail. Die Zuordnung bleibt deshalb eine bewusste Entscheidung eines Menschen - der Server
+      // legt sie nur vor.
+      //
+      // `felder` speichert ausschließlich die NAMEN der vom Webhook gelieferten Felder, nie deren
+      // Inhalte. Das beantwortet beim nächsten Fall in einem Blick, ob Ko-fi das Feld überhaupt
+      // schickt und wie es heißt - ohne irgendwelche personenbezogenen Daten aufzubewahren.
+      // Der Spendername wird NUR bei öffentlichen Spenden übernommen; bei anonymen bleibt er leer,
+      // wie überall sonst in dieser Datei auch.
+      if (!db.kofiUnlinked) db.kofiUnlinked = [];
+      db.kofiUnlinked.unshift({
+        id: crypto.randomUUID(),
+        at: Date.now(),
+        name: (payload.is_public && payload.from_name) ? String(payload.from_name).trim().slice(0, 60) : null,
+        amount,
+        currency: String(payload.currency || '').slice(0, 8),
+        type: String(payload.type || '').slice(0, 32),
+        felder: Object.keys(payload || {}).slice(0, 40)
+      });
+      db.kofiUnlinked = db.kofiUnlinked.slice(0, 200);
+      console.warn('[kofi-ohne-email] Spende über ' + amount + ' ' + (payload.currency || '') +
+        ' verbucht, aber OHNE E-Mail - der Unterstützer-Rang lässt sich nicht automatisch zuordnen.' +
+        ' Gelieferte Felder: ' + Object.keys(payload || {}).join(',') +
+        ' | Zuordnung von Hand im Admin-Bereich unter "Unterstützer".');
     }
     saveDb();
     console.log('Ko-fi-Webhook verarbeitet: ' + (payload.type || 'Zahlung') + ' über ' + amount + ' ' + (payload.currency || '') + (payload.is_public ? ' von ' + payload.from_name : ' (anonym)'));
@@ -6260,6 +6300,19 @@ app.post('/api/admin/revoke-supporter', authMiddleware, async (req, res) => {
   // Eine per Ko-fi verdiente Unterstützung bleibt davon unberührt - deshalb wird der verbleibende
   // Stand zurückgemeldet und nicht einfach "weg" behauptet.
   res.json({ ok: true, username: target.username, nochAktiv: supporterStatusCombined(target.userId).active });
+});
+// Spenden, die ohne E-Mail ankamen und deshalb keinem Konto zugeordnet werden konnten. Liegt
+// bewusst neben der Rang-Vergabe: Die Liste ist keine Statistik, sie ist eine Arbeitsliste.
+app.get('/api/admin/kofi-unlinked', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  res.json({ offen: (db.kofiUnlinked || []).slice(0, 100) });
+});
+app.post('/api/admin/kofi-unlinked/dismiss', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const id = String((req.body || {}).id || '');
+  db.kofiUnlinked = (db.kofiUnlinked || []).filter(e => e.id !== id);
+  await saveDb();
+  res.json({ ok: true, offen: db.kofiUnlinked.length });
 });
 app.get('/api/admin/supporters', authMiddleware, (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });

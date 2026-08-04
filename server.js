@@ -4926,6 +4926,101 @@ const ALLIANCE_RAID_BOSSES = [
   { key: 'gluthorn',       name: 'Gluthorn',       schwaeche: 'schlachtschiff', ohneMult: 0.80, verlustMult: 1.20 }
 ];
 function allianceRaidBossOf(level) { return ALLIANCE_RAID_BOSSES[(Math.max(1, level | 0) - 1) % ALLIANCE_RAID_BOSSES.length]; }
+
+// ===== Raid-Belohnung nach RANG (05.08.2026, Wunsch Sascha) =====
+//
+// WUNSCH: "platz 1 bekommt am meisten nach unten immer weniger auch der schwächste bekommt
+// belohnung ... es soll dort wertvolle belohnungen geben".
+//
+// BEFUND VORHER, nachgerechnet mit der alten Formel (Stufe 8, zehn Teilnehmer mit realistischen
+// Anteilen 22/16/13/11/9/8/7/6/5/3 %):
+//     Platz  1 ....... 1197 Kredite   (1,00x)
+//     Platz  2 .......  744           (0,62x)
+//     Platz 10 .......  627           (0,52x)
+// Eine Staffelung GAB es also rechnerisch - aber Platz 2 bis Platz 10 lagen nur 19 % auseinander.
+// Das ganze Gefaelle steckte in einem einzigen Sprung bei Platz 1 (`isTop ? x1,5`), danach war die
+// Kurve flach: Wer Zweiter wurde, merkte keinen Unterschied zum Letzten.
+//
+// JETZT zwei Faktoren, die sich multiplizieren:
+//   ANTEIL  (0,35 .. 1,00) - was jemand tatsaechlich beigetragen hat. Bleibt drin, damit nicht
+//           zehn Mitlaeufer dasselbe bekommen wie zehn, die wirklich Flotte geschickt haben.
+//   RANG    (1,00 .. 1,90) - gleitend ueber die Platzierung. Platz 1 bekommt das obere Ende, der
+//           LETZTE genau 1,00 - nicht 0. Das ist die Zusage "auch der Schwaechste bekommt etwas":
+//           Sie ist jetzt eine feste Untergrenze und keine Nebenwirkung der Anteilsformel mehr.
+// Damit spannt sich Platz 2 bis Letzter ueber rund 120 % statt ueber 19 %, und jeder Platz
+// unterscheidet sich sichtbar vom naechsten.
+//
+// DECKELUNG (bewusst, siehe CLAUDE.md-Fallstrick "N Minuten eigene Produktion"): Alle Mengen
+// haengen NUR an der Bossstufe und am Rang, NIE an der eigenen Wirtschaft. Eine starke Allianz
+// bekommt fuer denselben Boss dasselbe wie eine schwache - der Raid kann sich also nicht mit dem
+// Reichtum der Teilnehmer aufschaukeln.
+const ALLIANCE_RAID_RANK_SPREAD = 0.9;
+// Rangfaktor: Platz 1 -> 1 + SPREAD, letzter Platz -> exakt 1. Bei nur einem Teilnehmer gibt es
+// keine Rangordnung, der bekommt das obere Ende (er ist Erster UND Letzter, und er hat den Boss
+// allein gestellt).
+function allianceRaidRankFactor(platz, anzahl) {
+  if (!(anzahl > 1)) return 1 + ALLIANCE_RAID_RANK_SPREAD;
+  const p = Math.max(1, Math.min(anzahl, platz | 0));
+  return 1 + ALLIANCE_RAID_RANK_SPREAD * ((anzahl - p) / (anzahl - 1));
+}
+// Rang-Anteil 0..1 (letzter = 0, erster = 1) - fuer die Beute, die es NUR oben gibt.
+function allianceRaidRankShare(platz, anzahl) {
+  if (!(anzahl > 1)) return 1;
+  return (anzahl - Math.max(1, Math.min(anzahl, platz | 0))) / (anzahl - 1);
+}
+// Die vollstaendige Belohnung eines Teilnehmers. Eine Funktion, ein Rueckgabewert - damit die
+// Vorschau im Spiel (Frontend) und die Auszahlung nicht auseinanderlaufen koennen, und damit ein
+// Test sie ohne HTTP-Aufruf durchrechnen kann.
+//
+// ABSICHTLICH NICHT DABEI: Tier-2-Ressourcen. Das Spiel sagt an mehreren Stellen ausdruecklich zu,
+// dass sie ausschliesslich aus den eigenen Fabriken kommen und nicht einmal handelbar sind - eine
+// Raid-Ausschuettung wuerde genau diese Regel aushebeln. Stattdessen Antimaterie (knapp, und aus
+// einem Kampf zu holen ist stimmig) und Modulfragmente.
+function allianceRaidRewardFor(level, share, platz, anzahl, destroyed) {
+  const lvl = Math.max(1, level | 0);
+  const rang = allianceRaidRankFactor(platz, anzahl);
+  const rShare = allianceRaidRankShare(platz, anzahl);
+  const anteil = 0.35 + 0.65 * Math.max(0, Math.min(1, share));
+  const siegMult = destroyed ? 1 : 0.6;
+  const gesamt = anteil * rang * siegMult;
+  return {
+    credits: Math.round((300 + lvl * 150) * gesamt),
+    battlePoints: Math.round((8 + lvl * 4) * gesamt),
+    // War bis hierher FLACH: 20 bei Sieg, 12 sonst - unabhaengig von Bossstufe UND Beitrag. Ein
+    // Stufe-20-Boss gab genauso viel wie Stufe 1. Jetzt an beidem haengend.
+    xp: Math.round((10 + lvl * 6) * gesamt),
+    resources: {
+      erz: Math.round((600 + lvl * 500) * gesamt),
+      kristalle: Math.round((380 + lvl * 320) * gesamt),
+      deuterium: Math.round((180 + lvl * 160) * gesamt),
+      // Antimaterie nur bei erlegtem Boss. Die 0,15 als Sockel: Auch der Letzte bekommt etwas,
+      // aber die Spitze bekommt ein Vielfaches - das ist der Anreiz, wirklich Flotte zu schicken.
+      antimaterie: destroyed ? Math.round((2 + lvl * 1.2) * (0.15 + 0.85 * rShare)) : 0
+    },
+    // Modulfragmente: die eigentliche "wertvolle" Beute. Sie zahlen direkt auf Modul-Aufwertung,
+    // Neu-Wuerfeln und Schmelze ein und sind sonst nur muehsam zu bekommen.
+    fragments: destroyed ? (1 + Math.round((2 + lvl * 0.7) * rShare)) : 0
+  };
+}
+// Modulfund: Chance und Seltenheit entscheidet ab jetzt der SERVER.
+// Vorher lag beides im Browser (`Math.random()` im Client, und der Client vergab das Modul selbst) -
+// als einziges Stueck einer sonst durchgehend server-autoritativen Kette. Der Client zieht weiterhin
+// den konkreten TYP aus seinen eigenen Tabellen (MODULE_DEFS samt Herkunfts-Filtern); ihn hierher zu
+// spiegeln waere eine zweite Kopie einer Frontend-Tabelle, und genau davor warnt CLAUDE.md. Die
+// balancerelevanten Groessen - ob ueberhaupt etwas faellt und wie selten - liegen jetzt hier.
+function allianceRaidModuleDrop(level, platz, anzahl, destroyed) {
+  if (!destroyed) return null;
+  const rShare = allianceRaidRankShare(platz, anzahl);
+  const chance = Math.min(0.75, 0.15 + 0.45 * rShare + Math.max(1, level | 0) * 0.01);
+  if (Math.random() >= chance) return null;
+  // Auftrieb der Seltenheit durch Rang und Bossstufe. 'mythisch' faellt hier bewusst NIE - die
+  // Stufe ist im ganzen Spiel kein Fundgegenstand (siehe MODULE_RARITY im Frontend).
+  const roll = Math.random() + rShare * 0.18 + Math.max(1, level | 0) * 0.004;
+  if (roll > 1.02) return 'legendaer';
+  if (roll > 0.86) return 'episch';
+  if (roll > 0.55) return 'selten';
+  return 'gewoehnlich';
+}
 function allianceRaidDampenLoss(pct) {
   if (pct <= ALLIANCE_RAID_RETREAT_THRESHOLD) return pct;
   const excess = pct - ALLIANCE_RAID_RETREAT_THRESHOLD;

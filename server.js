@@ -1529,7 +1529,10 @@ app.get('/api/me', authMiddleware, (req, res) => {
     lastLoginAt: (user && user.activeSessionAt) || null,
     homeSystem: user && user.homeSystem, homeSlot: user && user.homeSlot,
     attackShieldMs: attackShieldRemaining(req.userId),
-    season: seasonInfoForUser(req.userId)
+    season: seasonInfoForUser(req.userId),
+    // Unterstützer-Rang (05.08.2026): schaltet die drei Automatiken im Verteidigung-Tab frei.
+    // Der Server ist hier die Autorität - siehe supporterFeaturesFor().
+    supporter: supporterFeaturesFor(req.userId)
   });
 });
 
@@ -1691,7 +1694,10 @@ app.get('/api/storage/:key', authMiddleware, (req, res) => {
   if (shared && key.startsWith('leaderboard:') && typeof entry === 'string') {
     try {
       const parsed = JSON.parse(entry);
-      const status = supporterStatusFor(key.slice('leaderboard:'.length));
+      // supporterStatusCombined (05.08.2026): Spende ODER manuell vergebener Rang - beides ist ein
+      // Rang und traegt deshalb dasselbe Abzeichen. Die gamegeeeeek-Ausnahme steckt bewusst NICHT
+      // darin, die schaltet nur Funktionen frei.
+      const status = supporterStatusCombined(key.slice('leaderboard:'.length));
       parsed.isSupporter = status.active;
       parsed.supporterTier = status.active ? status.tier : null;
       return res.json({ key, value: JSON.stringify(parsed), shared, version: 0 });
@@ -1773,7 +1779,7 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
           // Wie Score/Wochenscore darüber: der Client könnte isSupporter sonst einfach selbst auf
           // true setzen. GET überschreibt das ohnehin bei jedem Lesen erneut (siehe oben), das hier
           // ist nur Verteidigung in der Tiefe, damit der gespeicherte Wert auch für sich stimmt.
-          const submittedStatus = supporterStatusFor(targetId);
+          const submittedStatus = supporterStatusCombined(targetId);
           submitted.isSupporter = submittedStatus.active;
           submitted.supporterTier = submittedStatus.active ? submittedStatus.tier : null;
           finalValue = JSON.stringify(submitted);
@@ -1907,7 +1913,7 @@ const DEFENSE_VALUES = {
 // (der Schild-Zuschlag). Serverseitig als Faktor 1.4 auf die Gebäude-Summe abgebildet.
 const BUILDING_SHIELD_FACTOR = 1.4;
 // Schiffs-Schildpunkte – wie im Frontend (SHIP_DEFS): explizite Werte, sonst round(atk*0.5).
-const SHIP_SHIELD_EXPLICIT = { enterschiff: 32, phantomschiff: 5, waechter: 14, quantenkreuzer: 20, metamaterialtitan: 80, superschlachtschiff: 110 };
+const SHIP_SHIELD_EXPLICIT = { enterschiff: 32, phantomschiff: 5, waechter: 14, quantenkreuzer: 20, metamaterialtitan: 80, superschlachtschiff: 110, paktkorvette: 14, bundeskreuzer: 60, sternenbanner: 100 };
 function shipShield(k) { return SHIP_SHIELD_EXPLICIT[k] !== undefined ? SHIP_SHIELD_EXPLICIT[k] : Math.round((SHIP_ATK_VALUES[k] || 0) * 0.5); }
 // marks (31.07.2026): +3% Schild je Werftmarke, identisch zum Frontend (defensePower/shieldSum).
 function fleetShieldSum(f, marks) { if (!f) return 0; let s = 0; for (const k of Object.keys(SHIP_ATK_VALUES)) s += (f[k] || 0) * shipShield(k) * shipMarkShieldMult(marks, k); return s; }
@@ -2009,15 +2015,39 @@ function spyIntelEdge(save, targetUserId) {
   if (Date.now() - (it.capturedAt || 0) >= SPY_EDGE_MS) return 0;
   return SPY_EDGE_BONUS;
 }
+// ===== Allianzforschung (05.08.2026, Frontend: ALLIANCE_RESEARCH_DEFS/allianzForschungFrac) =====
+//
+// Diese fünf Zweige werden vom Spieler SELBST erforscht und liegen deshalb - anders als die
+// Allianz-Techs (a_atk/a_def/…), die aus geteilten Beiträgen entstehen - direkt in save.research.
+// Sie brauchen keinen Shared-Storage-Lookup und sind hier deshalb spiegelbar, während der Kommentar
+// über combatBonusCommon für die alten Allianz-Techs unverändert gilt.
+//
+// Die Wirkung hängt an der MITGLIEDSCHAFT, nicht nur an der Stufe: Wer die Allianz verlässt, behält
+// die erforschten Stufen, aber nicht ihren Nutzen. Genauso rechnet das Frontend.
+const ALLIANZ_FORSCHUNG_MAX = 10;
+const ALLIANZ_FORSCHUNG_ATK = { ra_verbund: 0.08, ra_sternenschmiede: 0.12 };
+const ALLIANZ_FORSCHUNG_DEF = { ra_schildnetz: 0.12 };
+function allianzForschungBonus(save, tabelle) {
+  const tag = ((save.player && save.player.allianceTag) || '').trim();
+  if (!tag) return 0;
+  let b = 0;
+  for (const [key, voll] of Object.entries(tabelle)) {
+    const lvl = Math.max(0, Math.min(ALLIANZ_FORSCHUNG_MAX, ((save.research || {})[key]) || 0));
+    b += voll * (lvl / ALLIANZ_FORSCHUNG_MAX);
+  }
+  return b;
+}
 function attackBonusGroup(save) {
   let b = combatBonusCommon(save);
   b += Math.min(5, save.pirateLairPrestige || 0) * 0.02; // Piratennest-Prestige: NUR Angriff
   b += admiralBonus(save);                               // Admiral: voll auf Angriff
+  b += allianzForschungBonus(save, ALLIANZ_FORSCHUNG_ATK);
   return Math.min(1.0, b);
 }
 function defenseBonusGroup(save) {
   let b = combatBonusCommon(save);
   b += admiralBonus(save) * 0.5; // Admiral: halbe Rate auf Verteidigung
+  b += allianzForschungBonus(save, ALLIANZ_FORSCHUNG_DEF);
   return Math.min(1.0, b);
 }
 // Muss exakt synchron zu SHIP_SCORE_WEIGHTS im Frontend bleiben (dort die eigentliche Quelle für
@@ -2040,7 +2070,9 @@ const SHIP_SCORE_WEIGHTS = {
   // Bugfix (20.07.2026, Bug-Sweep): mondzerstoerer fehlte komplett - maxOwned:1, 10 Tage Bauzeit,
   // Top-Tier-Forschung nötig, atk 300 (höchster Wert im Spiel), Gewicht identisch zur Frontend-Kopie
   // (weltraum_kolonie.html SHIP_SCORE_WEIGHTS) synchron gehalten.
-  mondzerstoerer:250
+  mondzerstoerer:250,
+  // Allianzflotte (05.08.2026) - Gewichte identisch zur Frontend-Kopie SHIP_SCORE_WEIGHTS.
+  paktkorvette:42, bundeskreuzer:105, sternenbanner:195
 };
 // Bug/Sicherheitslücke behoben (13.07.2026, danke an Sascha für den Hinweis): der Bestenlisten-Score
 // wurde bisher komplett clientseitig berechnet und ungeprüft übernommen - jeder hätte sich per
@@ -2101,7 +2133,10 @@ const COUNTER_ROLE_OF = {
   // ACHTUNG: Diese Tabelle bestimmt im Frontend AUCH die Werftmarken-Familie (shipMarkFamily liest
   // sie als Erstes) und damit die Zuwaechse je Marke - shipMarkAtkPerStep/shipMarkShieldPerStep hier
   // haengen an derselben Rolle. Ein Rollenwechsel muss deshalb immer auf beiden Seiten passieren.
-  carrier: 'abfang', riftwaechter: 'abfang', enterschiff: 'bomber'
+  carrier: 'abfang', riftwaechter: 'abfang', enterschiff: 'bomber',
+  // Allianzflotte (05.08.2026): bewusst auf alle drei Rollen verteilt statt geschlossen ins
+  // Kapital-Lager - sonst waere die muehsam auf 7/6/8 gebrachte Verteilung sofort wieder schief.
+  paktkorvette: 'abfang', bundeskreuzer: 'kapital', sternenbanner: 'bomber'
 };
 const SHIP_COUNTERS = (() => {
   const byRole = {}; for (const r of COUNTER_ROLE_DEFS) byRole[r.key] = [];
@@ -2400,8 +2435,14 @@ function rawFleetPower(f, ssAtkMult, t2AtkMult, marks) {
 // obwohl der Metamaterial-Titan der schwerste Verteidigungs-Titan des Spiels ist. Werte NUR für die
 // Verteidigungs-/Schildberechnung (weightedFleetDefensePower/fleetShieldSum) - bewusst NICHT in
 // rawFleetPower, exakt wie das Frontend beide aus attackPowerRaw/ATTACK_SHIP_KEYS ausschließt.
-const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5, leerenjaeger:1.1, kometenjaeger:0.6, enterschiff:1.6, phantomschiff:0.3, riftwaechter:0.8, hyperjaeger:0.6, hyperbomber:0.9, metamaterialtitan:2.0, singularitaetsvernichter:1.6 };
-const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130, metamaterialtitan:150, singularitaetsvernichter:280 };
+// Allianzflotte (05.08.2026): Paktkorvette/Bundeskreuzer/Sternenbanner. Sie sind im Frontend an
+// Allianzmitgliedschaft, Allianzforschung und die Stufe der Gemeinsamen Flottenwerft gebunden -
+// dieser Server prueft das NICHT nach (der Schiffsbau ist wie bei allen anderen Klassen
+// clientseitig). Was er tut, ist dasselbe wie fuer jede andere Klasse: Er kennt ihre Kampf- und
+// Punktwerte, damit ein PvP-Angriff und der Bestenlisten-Score sie nicht stillschweigend mit 0
+// bewerten - genau der Fallstrick, an dem SHIP_SCORE_WEIGHTS hier schon dreimal veraltet ist.
+const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5, leerenjaeger:1.1, kometenjaeger:0.6, enterschiff:1.6, phantomschiff:0.3, riftwaechter:0.8, hyperjaeger:0.6, hyperbomber:0.9, metamaterialtitan:2.0, singularitaetsvernichter:1.6, paktkorvette:0.7, bundeskreuzer:1.7, sternenbanner:1.5 };
+const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130, metamaterialtitan:150, singularitaetsvernichter:280, paktkorvette:40, bundeskreuzer:110, sternenbanner:240 };
 // marks (31.07.2026): derselbe atk-Markenfaktor wie in rawFleetPower - es ist derselbe
 // Angriffswert, hier nur mit defWeight verrechnet.
 function weightedFleetDefensePower(f, marks) {
@@ -2429,7 +2470,8 @@ const COUNTER_ROLE_ATK = {
   bomber: 60, hyperbomber: 130, nanoklinge: 55, singularitaetsvernichter: 280, mondzerstoerer: 300,
   cruisers: 20, destroyers: 45, schlachtschiff: 90, superschlachtschiff: 220, carrier: 15,
   waechter: 8, quantenkreuzer: 80, fusionsdreadnought: 180, metamaterialtitan: 150,
-  enterschiff: 25, riftwaechter: 20
+  enterschiff: 25, riftwaechter: 20,
+  paktkorvette: 40, bundeskreuzer: 110, sternenbanner: 240
 };
 function fleetDiversityMult(fleet) {
   if (!fleet) return 1;
@@ -6144,6 +6186,106 @@ function supporterStatusFor(userId) {
   const ageDays = (Date.now() - rec.lastDonationAt) / 86400000;
   return { active: ageDays <= SUPPORTER_BADGE_DAYS, lastDonationAt: rec.lastDonationAt, tier: supporterTierFor(rec.total) };
 }
+// ===== Unterstützer-Funktionen (05.08.2026) =====
+// Die drei Automatiken im Verteidigung-Tab (Automatische Verstärkung, Automatische Reparatur,
+// KI-Abfangautomatik) sind seit heute an den Unterstützer-Rang gebunden. Die Entscheidung fällt
+// HIER und nicht im Frontend: `state` liegt beim Spieler und ist frei bearbeitbar, das
+// Spendenverzeichnis liegt nur hier. Das Frontend liest die Antwort von /api/me und richtet
+// ausschließlich die Anzeige danach.
+//
+// Die Ausnahme ist namentlich und bewusst hart verdrahtet: Der Betreiber des Spiels braucht die
+// Automatiken zum Prüfen, ohne an sich selbst zu spenden. Sie hängt am Benutzernamen, weil
+// Benutzernamen eindeutig vergeben werden - der echte Name ist damit belegt und niemand kann ihn
+// sich nachträglich zulegen (Groß-/Kleinschreibung wird ignoriert, siehe Vergleich unten).
+const SUPPORTER_EXEMPT_USERNAMES = ['gamegeeeeek'];
+// ===== Manuell vergebener Unterstützer-Rang (05.08.2026) =====
+// Zweiter Weg zum Rang neben der Ko-fi-Spende: Der Admin kann ihn direkt vergeben - für Spenden,
+// die außerhalb von Ko-fi ankamen (Überweisung, bar, Sachleistung), für Fehlerfälle bei der
+// E-Mail-Zuordnung und als Dankeschön. Bewusst BEFRISTET wie die gespendete Variante, sonst wäre
+// er eine dauerhafte Sonderklasse, die niemand mehr überblickt. Ein zweiter Aufruf verlängert
+// nicht, sondern SETZT NEU - das ist beim Korrigieren eines Vertippers das erwartete Verhalten.
+const SUPPORTER_GRANT_DAYS = [30, 60, 90];
+function supporterGrantActive(user) { return !!(user && (user.supporterGrantUntil || 0) > Date.now()); }
+// Der RANG (Abzeichen in der Bestenliste): Spende oder manuelle Vergabe. Die gamegeeeeek-Ausnahme
+// gehört hier ausdrücklich NICHT hinein - sie schaltet Funktionen frei, sie ist keine Spende, und
+// ein Abzeichen dafür wäre schlicht unwahr.
+function supporterStatusCombined(userId) {
+  const st = supporterStatusFor(userId);
+  if (st.active) return st;
+  const user = findUserById(userId);
+  if (supporterGrantActive(user)) {
+    return { active: true, lastDonationAt: 0, tier: user.supporterGrantTier || 'bronze', granted: true, until: user.supporterGrantUntil };
+  }
+  return { active: false };
+}
+// Die FUNKTIONSFREIGABE (die drei Automatiken): Rang oder Ausnahme.
+function supporterFeaturesFor(userId) {
+  const user = findUserById(userId);
+  const name = String((user && user.username) || '').trim().toLowerCase();
+  if (SUPPORTER_EXEMPT_USERNAMES.indexOf(name) !== -1) return { active: true, tier: 'gold', exempt: true, until: 0 };
+  const st = supporterStatusCombined(userId);
+  if (!st.active) return { active: false, tier: null, exempt: false, until: 0 };
+  const until = st.granted ? st.until : ((st.lastDonationAt || 0) + SUPPORTER_BADGE_DAYS * 86400000);
+  return { active: true, tier: st.tier || 'bronze', exempt: false, granted: !!st.granted, until };
+}
+// --- Admin: Rang vergeben / entziehen / auflisten ---
+app.post('/api/admin/grant-supporter', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const { targetUsername, days, tier } = req.body || {};
+  const target = db.users[String(targetUsername || '').trim().toLowerCase()];
+  if (!target) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const tage = Number(days);
+  // Nur die drei vorgesehenen Laufzeiten. Ein freies Zahlenfeld hätte hier nichts gewonnen und
+  // wäre die Stelle, an der ein Vertipper einen Rang auf 3000 Tage setzt.
+  if (SUPPORTER_GRANT_DAYS.indexOf(tage) === -1) {
+    return res.status(400).json({ error: 'Laufzeit muss 30, 60 oder 90 Tage sein.' });
+  }
+  const stufe = ['bronze', 'silver', 'gold'].indexOf(String(tier || '')) !== -1 ? String(tier) : 'bronze';
+  target.supporterGrantUntil = Date.now() + tage * 86400000;
+  target.supporterGrantTier = stufe;
+  target.supporterGrantBy = req.username;
+  target.supporterGrantAt = Date.now();
+  await saveDb();
+  res.json({ ok: true, username: target.username, until: target.supporterGrantUntil, tier: stufe, days: tage });
+});
+app.post('/api/admin/revoke-supporter', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const target = db.users[String((req.body || {}).targetUsername || '').trim().toLowerCase()];
+  if (!target) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  delete target.supporterGrantUntil;
+  delete target.supporterGrantTier;
+  delete target.supporterGrantBy;
+  delete target.supporterGrantAt;
+  await saveDb();
+  // Eine per Ko-fi verdiente Unterstützung bleibt davon unberührt - deshalb wird der verbleibende
+  // Stand zurückgemeldet und nicht einfach "weg" behauptet.
+  res.json({ ok: true, username: target.username, nochAktiv: supporterStatusCombined(target.userId).active });
+});
+app.get('/api/admin/supporters', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const jetzt = Date.now();
+  const liste = [];
+  for (const key of Object.keys(db.users)) {
+    const u = db.users[key];
+    if (!u) continue;
+    const gespendet = supporterStatusFor(u.userId);
+    const vergeben = (u.supporterGrantUntil || 0) > 0;
+    if (!gespendet.active && !vergeben) continue;
+    liste.push({
+      username: u.username,
+      gespendet: !!gespendet.active,
+      gespendetStufe: gespendet.active ? gespendet.tier : null,
+      gespendetBis: gespendet.active ? (gespendet.lastDonationAt + SUPPORTER_BADGE_DAYS * 86400000) : 0,
+      vergeben,
+      vergebenAktiv: (u.supporterGrantUntil || 0) > jetzt,
+      vergebenBis: u.supporterGrantUntil || 0,
+      vergebenStufe: u.supporterGrantTier || null,
+      vergebenVon: u.supporterGrantBy || null
+    });
+  }
+  liste.sort((a, b) => Math.max(b.vergebenBis, b.gespendetBis) - Math.max(a.vergebenBis, a.gespendetBis));
+  res.json({ supporters: liste.slice(0, 200), laufzeiten: SUPPORTER_GRANT_DAYS });
+});
 // Authentifizierter Selbstbedienungs-Endpunkt: Spieler trägt seine Ko-fi-E-Mail ein, Server gleicht
 // sie mit den beim Webhook gespeicherten Spenden ab. Absichtlich KEIN Enumerations-Leck - die
 // Fehlermeldung bei Nichttreffer verrät nicht, ob die E-Mail überhaupt schon einmal gespendet hat vs.

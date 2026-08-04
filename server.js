@@ -6343,7 +6343,7 @@ app.get('/api/admin/supporters', authMiddleware, (req, res) => {
 // sie mit den beim Webhook gespeicherten Spenden ab. Absichtlich KEIN Enumerations-Leck - die
 // Fehlermeldung bei Nichttreffer verrät nicht, ob die E-Mail überhaupt schon einmal gespendet hat vs.
 // falsch geschrieben wurde, beides derselbe generische Text.
-app.post('/api/claim-supporter', authMiddleware, async (req, res) => {
+app.post('/api/claim-supporter', authMiddleware, authRateLimit, async (req, res) => {
   const email = String((req.body && req.body.email) || '').trim().toLowerCase();
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return res.status(400).json({ error: 'Bitte eine gültige E-Mail-Adresse angeben.' });
@@ -6352,6 +6352,28 @@ app.post('/api/claim-supporter', authMiddleware, async (req, res) => {
   if (!rec) return res.status(404).json({ error: 'Keine Ko-fi-Spende mit dieser E-Mail-Adresse gefunden.' });
   const user = findUserById(req.userId);
   if (!user) return res.status(404).json({ error: 'Account nicht gefunden.' });
+  // ===== Eine Spende gehört zu EINEM Konto (05.08.2026) =====
+  //
+  // Bis hierher schrieb diese Route user.kofiEmail ohne zu prüfen, ob dieselbe Adresse schon einem
+  // anderen Konto zugeordnet ist. Mit zwei Konten nachgestellt: Konto A spendet, Konto B trägt
+  // dieselbe Adresse ein und bekommt Abzeichen UND - seit dem 05.08.2026 - die drei Automatiken,
+  // ohne einen Cent gezahlt zu haben. Beliebig oft wiederholbar: Eine einmal bekannt gewordene
+  // Spender-Adresse hätte unbegrenzt viele Konten freigeschaltet.
+  //
+  // Das widerspricht direkt der Zusicherung im Kommentar beim Webhook, die E-Mail sei "die
+  // zuverlässige, nicht fälschbare Verknüpfung zu einem Spiel-Account" - fälschungssicher ist sie
+  // nur, wenn sie auch EXKLUSIV ist. Ohne diese Prüfung war die E-Mail gegenüber dem verworfenen
+  // Namens-Abgleich kein bisschen sicherer, sie war nur unbequemer.
+  //
+  // Der Fehlerfall (Adresse aus Versehen doppelt, Konto neu angelegt) ist kein Sackgassenfall:
+  // Der Betreiber kann den Rang über /api/admin/grant-supporter direkt vergeben, und die Meldung
+  // sagt genau das.
+  const belegt = Object.values(db.users || {}).find(u => u && u.kofiEmail === email && u.userId !== req.userId);
+  if (belegt) {
+    console.warn('[claim-reject] userId=' + req.userId + ' username=' + req.username +
+      ' wollte eine bereits vergebene Ko-fi-Adresse beanspruchen (gehört zu userId=' + belegt.userId + ').');
+    return res.status(409).json({ error: 'Diese Ko-fi-Adresse ist bereits einem anderen Konto zugeordnet. Wenn das ein Versehen ist, melde dich beim Betreiber - er kann den Rang direkt vergeben.' });
+  }
   user.kofiEmail = email;
   await saveDb();
   const status = supporterStatusFor(req.userId);

@@ -6279,9 +6279,39 @@ app.post('/api/faction/attack', authMiddleware, async (req, res) => {
 // Injection über einen manipulierten Payload, selbst wenn die Signaturprüfung umgangen würde.
 const { exec } = require('child_process');
 const DEPLOY_WEBHOOK_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
+// Die Kopierliste war bis zum 05.08.2026 von Hand gepflegt - und genau deshalb veraltet. Gemessen
+// am echten Ausgabeverzeichnis (`docker exec kepler7-nginx ls -la /usr/share/nginx/html/`) lagen
+// dort nur weltraum_kolonie.html, die Icons, manifest.json und service-worker.js. Von den ACHT
+// Seiten, die die Spieldatei verlinkt, war KEINE EINZIGE vorhanden: impressum.html,
+// datenschutzerklaerung.html, nutzungsbedingungen.html, patchnotes.html, spielanleitung.html und
+// die drei SEO-Seiten liefen alle ins Leere. Bei Impressum und Datenschutzerklaerung ist das kein
+// Schoenheitsfehler, sondern eine Pflichtangabe. Dazu stand index.html noch auf dem Stand vom
+// 21.07.2026 (Handkopie, an den Besitzverhaeltnissen erkennbar: uid 1000 statt root).
+//
+// Deshalb jetzt MUSTER statt einer Aufzaehlung: Jede neue Seite und jedes neue Bild wird von selbst
+// mit ausgeliefert. Eine Liste, die jemand pflegen muss, veraltet wieder - das ist der eigentliche
+// Fehler gewesen, nicht die einzelne fehlende Zeile.
+// Die vier namentlich genannten Dateien sind stabil und rechtfertigen keinen *.js/*.json-Platzhalter:
+// der wuerde die Bauskripte (check-icons.js, build-patchnotes.js, build-icon-subset.js) mit auf den
+// oeffentlichen Server legen.
+// `|| true` an jedem Schritt: Fehlt eine der Einzeldateien im Repo, soll trotzdem alles andere
+// ausgeliefert werden - ein Teil-Deploy ist besser als gar keiner.
+// Die Seiten sind der eigentliche Deploy und bleiben deshalb UNGESCHUETZT: Scheitert dieser Schritt,
+// soll der Webhook den Fehler melden statt einen halben Erfolg zu protokollieren. Alles danach ist
+// einzeln abgesichert - `cp` bricht mit Fehlercode ab, sobald EINE Quelle fehlt, und ohne die
+// Trennung haette ein fehlendes Bild die Auslieferung von robots.txt und manifest.json verhindert.
+const DEPLOY_WEB_COPY = 'cp -f *.html /deploy/web/ && (cp -f *.png /deploy/web/ || true) && (cp -f robots.txt sitemap.xml /deploy/web/ || true) && (cp -f manifest.json service-worker.js /deploy/web/ || true)';
 const DEPLOY_TARGETS = {
-  'kolonie-kepler7': 'cd /deploy/kolonie-kepler7 && git pull -q && cp weltraum_kolonie.html /deploy/web/ && (cp manifest.json /deploy/web/ || true) && (cp icon-*.png /deploy/web/ || true) && (cp apple-touch-icon.png /deploy/web/ || true) && (cp service-worker.js /deploy/web/ || true)',
-  'kolonie-kepler7-backend': 'cd /app && git pull -q'
+  'kolonie-kepler7': 'cd /deploy/kolonie-kepler7 && git pull -q && ' + DEPLOY_WEB_COPY,
+  // `chown` nach dem Pull, weil dieser Container als root laeuft und /app per Bind-Mount
+  // /DATA/kepler7/backend auf dem Host IST. Ohne die Zeile gehoeren die von hier erzeugten Objekte
+  // in .git/objects root - und Sascha kann in seinem eigenen Repo kein git mehr ausfuehren
+  // ("Unzureichende Berechtigung zum Hinzufuegen eines Objektes zur Repository-Datenbank").
+  // Genau so entstand am 05.08.2026 ein Zustand, in dem der Pi 16 Commits zurueckhing: ein
+  // abgebrochener Webhook-Pull hinterliess Sperrdateien und einen halb angewendeten, vorgemerkten
+  // Stand, den niemand mehr aufraeumen konnte. uid/gid 1000 ist Sascha (am Ausgabeverzeichnis
+  // verifiziert). Numerisch und nicht per Name, weil der Container den Benutzer nicht kennt.
+  'kolonie-kepler7-backend': 'cd /app && git pull -q && (chown -R 1000:1000 .git || true)'
 };
 function verifyGithubSignature(req) {
   if (!DEPLOY_WEBHOOK_SECRET) return false;

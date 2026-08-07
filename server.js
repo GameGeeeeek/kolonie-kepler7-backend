@@ -4920,6 +4920,22 @@ const ALLIANCE_RAID_TEST_DISPATCH_SEC = 2;
 // ohne Angriffswert (gesandtenschiff/schuerfschiff) bewusst weiterhin nicht.
 const ALLIANCE_RAID_ATTACK_SHIP_KEYS = ['jaeger', 'bomber', 'cruisers', 'destroyers', 'schlachtschiff', 'carrier', 'superschlachtschiff', 'waechter', 'nanoklinge', 'quantenkreuzer', 'fusionsdreadnought', 'leerenjaeger', 'kometenjaeger', 'enterschiff', 'phantomschiff', 'riftwaechter', 'hyperjaeger', 'hyperbomber'];
 const ALLIANCE_RAID_RETREAT_THRESHOLD = 0.4, ALLIANCE_RAID_RETREAT_SAVE_FACTOR = 0.5;
+// ===== Boss-Statuseffekte (07.08.2026, Frontend v8.438.0, Modul-Ausbau Etappe 2) =====
+// Haengen an der VERBANDSZUSAMMENSETZUNG - dieselbe Sprache wie die Trefferschwaeche: Was die
+// Allianz schickt, entscheidet, nicht wie viel. Beim Aufloesen einer Welle wird geprueft, ob die
+// Schiffsanteile die Schwellen reissen; der Status wirkt dann in der NAECHSTEN Welle desselben
+// Raids und wird dort verbraucht. Vollstaendig server-autoritativ: /resolve rechnet alles aus
+// doc.dispatch.totalComposition, der Client zeigt nur die server-gesetzten Felder an (doc.status,
+// waveResult.brandSchaden/statusVorher/statusNeu) - kein Spiegel, der driften kann. doc.status
+// teilt das Vertrauensmodell von doc.hp (siehe Kommentar am Boss: das Dokument liegt im geteilten
+// Speicher; belohnungsrelevant bleibt allein die server-gerechnete power).
+// WER DIESE WERTE AENDERT, zieht den Status-Absatz der Allianz-Raid-Hilfe im Frontend mit -
+// tests/test_bossstatus.js prueft die Prozentzahlen beider Seiten gegeneinander.
+const ALLIANCE_RAID_STATUS = {
+  brand:  { schiffe: ['bomber', 'hyperbomber'],  anteil: 0.15, wirkung: 0.06 }, // Boss verliert 6% Rest-HP zu Beginn der naechsten Welle
+  frost:  { schiffe: ['cruisers', 'destroyers'], anteil: 0.25, wirkung: 0.20 }, // Gegenwehr der naechsten Welle -20% (weniger Verluste)
+  schock: { schiffe: ['jaeger', 'hyperjaeger'],  anteil: 0.30 }                 // Trefferschwaeche gilt in der naechsten Welle als gedeckt
+};
 function allianceRaidHpFor(level) { return Math.round(ALLIANCE_RAID_HP_BASE * Math.pow(ALLIANCE_RAID_HP_GROWTH, Math.max(0, level - 1))); }
 function allianceRaidCounterFor(level) { return Math.round(ALLIANCE_RAID_COUNTER_BASE * Math.pow(ALLIANCE_RAID_HP_GROWTH, Math.max(0, level - 1))); }
 // Raid-Bosse (02.08.2026): Spiegel von ALLIANCE_RAID_BOSSE im Frontend, dort steht die ausfuehrliche
@@ -5460,19 +5476,41 @@ app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
   // Gegner als den, der beim Ausrufen angekuendigt und in der Karte angezeigt wurde.
   const raidBoss = allianceRaidBossFor(doc);
   const comp = (doc.dispatch && doc.dispatch.totalComposition) || {};
-  const hatSchwaeche = !raidBoss.schwaeche || (comp[raidBoss.schwaeche] || 0) > 0;
+  // ===== Boss-Status der VORHERIGEN Welle anwenden und verbrauchen (v8.438.0) =====
+  // Brand frisst Rest-HP, BEVOR der Verband schiesst (der Boss brannte waehrend des Cooldowns);
+  // Schock deckt die Trefferschwaeche unabhaengig von der Zusammensetzung; Frost senkt unten die
+  // Gegenwehr. Alle drei stammen aus dem Aufloesen der Welle davor (doc.status) und gelten genau
+  // einmal - am Ende dieses Handlers wird doc.status mit den NEUEN Ausloesern ueberschrieben.
+  const statusVorher = (doc.status && typeof doc.status === 'object') ? doc.status : {};
+  const hpVorBrand = doc.hp;
+  let brandSchaden = 0;
+  if (statusVorher.brand) {
+    brandSchaden = Math.min(doc.hp, Math.round(doc.hp * ALLIANCE_RAID_STATUS.brand.wirkung));
+    doc.hp = Math.max(0, doc.hp - brandSchaden);
+  }
+  const hatSchwaeche = statusVorher.schock ? true : (!raidBoss.schwaeche || (comp[raidBoss.schwaeche] || 0) > 0);
   const schadenMult = hatSchwaeche ? 1 : raidBoss.ohneMult;
   const damage = Math.min(doc.hp, Math.round(power * schadenMult));
   const newHp = Math.max(0, doc.hp - damage);
   const destroyed = newHp <= 0;
-  const counter = allianceRaidCounterFor(doc.level);
+  const counterRoh = allianceRaidCounterFor(doc.level);
+  const counter = statusVorher.frost ? Math.round(counterRoh * (1 - ALLIANCE_RAID_STATUS.frost.wirkung)) : counterRoh;
   // Verlustquote mit dem Boss-Faktor, die alte Spanne [0,05; 0,60] bleibt aussen: Auch der haerteste
   // Boss kann den Verband nicht ueber die bisherige Obergrenze hinaus abraeumen.
   const rawLossPct = Math.max(0.05, Math.min(0.6, (counter / (counter + power)) * raidBoss.verlustMult));
   const lossPct = allianceRaidDampenLoss(rawLossPct);
   const now = Date.now();
 
-  const hpVorher = doc.hp;
+  // Neue Status aus DIESER Welle fuer die naechste: Anteile an der Gesamtschiffszahl des Verbands.
+  const gesamtSchiffe = Math.max(1, doc.dispatch.totalShips || 0);
+  const statusNeu = {};
+  for (const [sk, sdef] of Object.entries(ALLIANCE_RAID_STATUS)) {
+    const n = sdef.schiffe.reduce((a, k) => a + (comp[k] || 0), 0);
+    if (n / gesamtSchiffe >= sdef.anteil) statusNeu[sk] = true;
+  }
+  doc.status = destroyed ? null : statusNeu;
+
+  const hpVorher = hpVorBrand;
   doc.hp = newHp;
   const waveResult = {
     waveNumber: doc.waveNumber, damage: Math.round(damage), destroyed, lossPct,
@@ -5483,6 +5521,10 @@ app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
     // Raid-Dokument - fuer die Anzeige "Rest-Huelle X von Y" soll Y die echte Groesse sein.
     totalComposition: comp, bossKey: raidBoss.key, bossName: raidBoss.name,
     hatSchwaeche, schadenMult, hpVorher, hpNachher: newHp, maxHp: allianceRaidHpFor(doc.level),
+    // Boss-Status (v8.438.0): was aus der Vorwelle WIRKTE und was diese Welle fuer die naechste
+    // HINTERLAESST - beides fuer den Bericht; brandSchaden ist der HP-Verlust vor dem Beschuss.
+    brandSchaden, statusVorher: Object.keys(statusVorher).filter(k => statusVorher[k]),
+    statusNeu: Object.keys(statusNeu),
     totalPower: power, totalShips: doc.dispatch.totalShips, participantCount: doc.dispatch.participantCount,
     topParticipantId: doc.dispatch.topParticipantId, resolvedAt: now,
     // Die beim Abflug festgehaltene Rangliste wandert ins Wellen-Ergebnis: /claim liest den eigenen
@@ -5620,6 +5662,9 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
     schadenMult: (typeof res_.schadenMult === 'number') ? res_.schadenMult : null,
     hpNachher: (typeof res_.hpNachher === 'number') ? res_.hpNachher : null,
     maxHp: (typeof res_.maxHp === 'number') ? res_.maxHp : null,
+    brandSchaden: (typeof res_.brandSchaden === 'number') ? res_.brandSchaden : 0,
+    statusVorher: Array.isArray(res_.statusVorher) ? res_.statusVorher : [],
+    statusNeu: Array.isArray(res_.statusNeu) ? res_.statusNeu : [],
     platz, teilnehmer: anzahl,
     // Welcher Gegner es war - die Meldung im Spiel nennt ihn, und die Beute haengt an ihm.
     boss: { key: lohnBoss.key, name: lohnBoss.name, schwerpunkt: lohnBoss.schwerpunkt || null },

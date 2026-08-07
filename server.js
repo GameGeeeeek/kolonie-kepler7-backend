@@ -5472,9 +5472,17 @@ app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
   const lossPct = allianceRaidDampenLoss(rawLossPct);
   const now = Date.now();
 
+  const hpVorher = doc.hp;
   doc.hp = newHp;
   const waveResult = {
     waveNumber: doc.waveNumber, damage: Math.round(damage), destroyed, lossPct,
+    // ===== Kampfdaten fuer den klassischen Bericht (07.08.2026, Frontend v8.430.0) =====
+    // Reine Durchreichung bereits berechneter Groessen ins Wellen-Ergebnis - /claim liest NUR
+    // dieses Dokument (doc.dispatch kann dort schon der naechsten Welle gehoeren, siehe den
+    // ranking-Kommentar unten). maxHp aus der Server-Formel, nicht aus dem client-geschriebenen
+    // Raid-Dokument - fuer die Anzeige "Rest-Huelle X von Y" soll Y die echte Groesse sein.
+    totalComposition: comp, bossKey: raidBoss.key, bossName: raidBoss.name,
+    hatSchwaeche, schadenMult, hpVorher, hpNachher: newHp, maxHp: allianceRaidHpFor(doc.level),
     totalPower: power, totalShips: doc.dispatch.totalShips, participantCount: doc.dispatch.participantCount,
     topParticipantId: doc.dispatch.topParticipantId, resolvedAt: now,
     // Die beim Abflug festgehaltene Rangliste wandert ins Wellen-Ergebnis: /claim liest den eigenen
@@ -5601,6 +5609,17 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
   res.json({
     ok: true, missedWave: false, destroyed: res_.destroyed, isTop, share: Math.round(share * 100),
     credits, battlePoints: bp, xp: lohn.xp, lostShips,
+    // ===== Kampfdaten fuer den klassischen Bericht (07.08.2026, Frontend v8.430.0) =====
+    // Durchreichung aus dem Wellen-Ergebnis. Wellen, die VOR diesem Update aufgeloest wurden,
+    // haben die Felder nicht - dann null, der Client prueft jedes Feld einzeln (kein Erfinden).
+    damage: (typeof res_.damage === 'number') ? res_.damage : null,
+    lossPct: (typeof res_.lossPct === 'number') ? res_.lossPct : null,
+    totalPower: res_.totalPower || 0, totalShips: res_.totalShips || 0, participantCount: res_.participantCount || 0,
+    totalComposition: res_.totalComposition || null,
+    hatSchwaeche: (typeof res_.hatSchwaeche === 'boolean') ? res_.hatSchwaeche : null,
+    schadenMult: (typeof res_.schadenMult === 'number') ? res_.schadenMult : null,
+    hpNachher: (typeof res_.hpNachher === 'number') ? res_.hpNachher : null,
+    maxHp: (typeof res_.maxHp === 'number') ? res_.maxHp : null,
     platz, teilnehmer: anzahl,
     // Welcher Gegner es war - die Meldung im Spiel nennt ihn, und die Beute haengt an ihm.
     boss: { key: lohnBoss.key, name: lohnBoss.name, schwerpunkt: lohnBoss.schwerpunkt || null },

@@ -1949,14 +1949,20 @@ function buffMult(save, kind) { let m = 1; const now = Date.now(); for (const b 
 // (identische Logik: 1 + Math.min(1.0, ...)). Angriff und Verteidigung sind bewusst NICHT identisch:
 // Piratennest-Prestige wirkt nur auf Angriff, der Admiral voll auf Angriff und nur halb auf Verteidigung.
 // Portierte Konstanten identisch zum Frontend (FLAGSHIP_BONUS_PER_LEVEL, VETERAN_TRAINING, SKILL_TREE
-// 'war', OFFICER_BONUS_PER_LEVEL/OFFICER_TALENT_LEVEL, Mega-Projekt 'voidreaktor' +10%).
+// 'war', OFFICER_BONUS_PER_LEVEL/OFFICER_TALENT_LEVEL, Mega-Projekt 'voidreaktor' +10% bis +20%
+// je nach Ausbaustufe - Stufenkurve identisch zum Frontend-megaStageFactor).
 // Weiterhin NICHT gespiegelt (bräuchten Allianz-Shared-Storage-Lookups bzw. per-Planet-Granularität, die
 // die aggregierten compute*-Funktionen nicht haben): Allianz-Kampftechs (a_atk/a_def/…), Allianz-Projekte
 // (ap_kriegsrat, ep_verteidigung), Allianzbasis-Verteidigungsbonus, Veteranen-Rang je Planet, Schiffs-
 // Module je Planet.
 const FLAGSHIP_BONUS_PER_LEVEL = 0.015;
 const VETERAN_COMBAT_BONUS = { vet1: 0.02, vet2: 0.02, vet3: 0.03 };
-const SKILL_WAR_BONUS = { war1: 0.02, war2: 0.02, war3: 0.03 };
+// war4/war5 kamen im Frontend am 01.08.2026 dazu (zweite Baumstufe) und fehlten hier bis zum
+// 07.08.2026 - der Server rechnete die Kampfkraft ausgebauter Konten um bis zu 7 Prozentpunkte zu
+// niedrig. Die Knoten war6/war7 der dritten Baumstufe sind ABSICHTLICH nicht dabei: sie geben
+// Veteranen-XP bzw. Vorwarnzeit, keine Kampfkraft (bonus:0 im Frontend-SKILL_TREE).
+// tests/test_faehigkeitsbaum.js im Frontend-Repo prueft diese Liste gegen SKILL_TREE.
+const SKILL_WAR_BONUS = { war1: 0.02, war2: 0.02, war3: 0.03, war4: 0.03, war5: 0.04 };
 const OFFICER_BONUS_PER_LEVEL = 0.02, OFFICER_TALENT_LEVEL = 5;
 function admiralBonus(save) {
   const lvl = (save.officers || {}).admiral || 0;
@@ -1982,7 +1988,12 @@ function combatBonusCommon(save) {
   b += (((save.ascension && save.ascension.tree && save.ascension.tree.combat) || 0)) * 0.02;
   const st = save.skillTree || {};
   for (const k in SKILL_WAR_BONUS) if (st[k]) b += SKILL_WAR_BONUS[k];
-  if (save.megaProjects && save.megaProjects.voidreaktor) b += 0.10; // megaProjectCombatMult()-1
+  // Void-Reaktor MIT Ausbaustufen (Frontend megaStageFactor: Stufe n gibt Faktor 2 - 0.5^(n-1),
+  // konvergiert gegen 2 - der Bonus laeuft also von +10% auf bis zu +20%). Hier stand pauschal
+  // +0.10, der Server rechnete ausgebaute Reaktoren zu niedrig. Stufenquelle wie im Frontend:
+  // megaProjectStages[key], Altstaende ohne Stufenfeld zaehlen als Stufe 1.
+  const vrStage = ((save.megaProjectStages || {}).voidreaktor) || ((save.megaProjects && save.megaProjects.voidreaktor) ? 1 : 0);
+  if (vrStage > 0) b += 0.10 * (2 - Math.pow(0.5, vrStage - 1));
   const vt = save.veteranTraining || {};
   for (const k in VETERAN_COMBAT_BONUS) if (vt[k]) b += VETERAN_COMBAT_BONUS[k];
   if (save.achievements && save.achievements.artifactset) b += 0.05;

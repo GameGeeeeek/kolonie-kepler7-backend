@@ -2632,6 +2632,17 @@ function moduleLevelMultServer(instKey) {
   const lvl = Math.max(1, Math.min(MODULE_LEVEL_MAX, isNaN(l) ? 1 : l));
   return 1 + (lvl - 1) * MODULE_LEVEL_PER;
 }
+// Hauptwert-Streuung (FE v8.444.0, Build-System Etappe 2): Funde tragen ein "wNN"-Token
+// (90..110) im Substat-Segment; gefertigte Module und Altbestand haben keins und gelten
+// als 100%. MUSS ueberall dort mitmultipliziert werden, wo der Server Modulwirkung aus dem
+// instKey nachrechnet (PvP-Kampfmodule, Ueberfall-Schutz) - sonst zeigte der Client einen
+// Wurf, den der Server nie auszahlt. Spanne identisch zu MODULE_WERT_MIN/MAX im Frontend.
+function moduleWertMultServer(instKey) {
+  const seg = String(instKey).split(':')[3] || '';
+  const m = seg.match(/(?:^|\.)w(\d{2,3})(?:\.|$)/);
+  if (!m) return 1;
+  return Math.max(90, Math.min(110, parseInt(m[1], 10))) / 100;
+}
 function shipModuleBonus(save, klasse, effect) {
   let sum = 0;
   for (const instKey of (((save || {}).equippedShipModules || {})[klasse] || [])) {
@@ -2639,7 +2650,7 @@ function shipModuleBonus(save, klasse, effect) {
     const [key, rarity] = instKey.split(':');
     const def = SHIP_MODULE_COMBAT_BASE[key];
     if (!def || def.klasse !== klasse || def.effect !== effect) continue;
-    sum += def.base * (MODULE_RARITY_MULT[rarity] || 1) * moduleLevelMultServer(instKey);
+    sum += def.base * (MODULE_RARITY_MULT[rarity] || 1) * moduleLevelMultServer(instKey) * moduleWertMultServer(instKey);
   }
   return effect === 'atk' ? Math.min(1.0, sum) : sum;
 }
@@ -2652,7 +2663,7 @@ function raidlossProtectionMult(save) {
       if (typeof instKey !== 'string') continue;
       const [type, rarity] = instKey.split(':');
       if (type !== 'schild') continue;
-      total += RAIDLOSS_MODULE_BASE * (MODULE_RARITY_MULT[rarity] || 1) * moduleLevelMultServer(instKey);
+      total += RAIDLOSS_MODULE_BASE * (MODULE_RARITY_MULT[rarity] || 1) * moduleLevelMultServer(instKey) * moduleWertMultServer(instKey);
     }
   }
   return Math.max(0.4, 1 - (locations > 0 ? total / locations : 0));

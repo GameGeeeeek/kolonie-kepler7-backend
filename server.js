@@ -2603,7 +2603,11 @@ function farmingPenaltyFor(attackerUserId, targetUserId) {
 // Standorte (Heimat + Kolonien) angewendet - ein voll bestücktes Lager schützt also anteilig,
 // kann aber nicht das ganze Imperium mit den Modulen EINES Standorts abdecken. Gleicher
 // 0.4-Boden wie im Frontend. Modul-Instanzen sind als "typ:seltenheit" kodiert.
-const MODULE_RARITY_MULT = { gewoehnlich: 1.0, selten: 1.6, episch: 2.4, legendaer: 3.5, mythisch: 5.0 };
+// Sieben Stufen seit v8.443.0 (Build-System Etappe 1): ungewoehnlich und exotisch ergaenzt.
+// Diese Kopie MUSS mit MODULE_RARITY im Frontend uebereinstimmen - der ||1-Fallback wuerde
+// eine fehlende Stufe sonst still mit Faktor 1 auszahlen (tests/test_seltenheiten.js im
+// Frontend-Repo prueft beide Seiten gegeneinander).
+const MODULE_RARITY_MULT = { gewoehnlich: 1.0, ungewoehnlich: 1.3, selten: 1.6, episch: 2.4, legendaer: 3.5, mythisch: 5.0, exotisch: 7.0 };
 const RAIDLOSS_MODULE_BASE = 0.05;
 // Schiffsklassen-Kampfmodule (SHIP_MODULE_DEFS im Frontend, nur die kampfrelevanten Einträge).
 // Bugfix (24.07.2026, Modul-Text-Audit): Zielcomputer wirkte nur in der Client-Vorschau, Reaktorkern-

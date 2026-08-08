@@ -36,4 +36,18 @@ Gilt für **jedes** Skript, auch neue Standalone-Skripte (wie `thank_bugreporter
 
 ## Deploy
 
-Push nach `master` ändert von hier aus nichts automatisch (diese Session hat keinen Zugriff auf den Pi). Container-Setup auf dem Pi (per `docker inspect` verifiziert, 19.07.2026): `/DATA/kepler7/backend` ist per Bind-Mount als `/app` eingehängt, Startbefehl ist `npm install && npx nodemon --watch . --ext js,json server.js` – der Container beobachtet also selbst Code-Änderungen im Bind-Mount und startet `server.js` automatisch neu. Ein reines `git pull` auf dem Host reicht daher für die meisten Deploys; nur bei geänderter `package.json`/`package-lock.json` braucht es zusätzlich `docker restart kepler7-backend` (nodemon installiert keine neuen Abhängigkeiten nach). Optionales Auto-Pull-Skript dafür liegt unter `deploy/autodeploy.sh`. Einrichtung ist manuell und einmalig (siehe Kommentarkopf der Datei); ohne diese Einrichtung bleibt es beim bisherigen Modell: Sascha zieht und startet den Container auf dem Pi manuell per SSH neu.
+**Ein Push nach `master` geht von selbst live.** Bis zum 05.08.2026 stand hier „ändert von hier aus nichts automatisch" – das war überholt und hat zu falschen Auskünften geführt.
+
+Der Weg: GitHub ruft nach jedem Push den **Deploy-Webhook** dieses Backends auf (`POST /api/deploy-webhook`, abgesichert per HMAC-SHA256 gegen `DEPLOY_WEBHOOK_SECRET`). Der Repo-**Name** aus dem Payload wählt einen von zwei **fest verdrahteten** Befehlen aus `DEPLOY_TARGETS` – nie etwas aus dem Request-Body, das schützt gegen Command-Injection. Für dieses Repo lautet er:
+
+```
+cd /app && git pull -q && (chown -R 1000:1000 .git || true)
+```
+
+Der Server antwortet sofort und lässt `git pull` asynchron weiterlaufen, weil GitHub eine schnelle Antwort erwartet. Das `chown` ist Pflicht: Der Container läuft als root und `/app` **ist** der Bind-Mount `/DATA/kepler7/backend` – ohne die Zeile gehören die erzeugten `.git/objects` root und Sascha kann in seinem eigenen Repo kein `git` mehr ausführen. Genau so hing der Pi am 05.08.2026 sechzehn Commits zurück.
+
+Container-Setup (per `docker inspect` verifiziert, 19.07.2026): Startbefehl ist `npm install && npx nodemon --watch . --ext js,json server.js` – der Container beobachtet Code-Änderungen im Bind-Mount selbst und startet `server.js` automatisch neu. Der Webhook-Pull genügt deshalb für die meisten Deploys; **nur bei geänderter `package.json`/`package-lock.json` braucht es zusätzlich `docker restart kepler7-backend`**, weil nodemon keine neuen Abhängigkeiten nachinstalliert. Das ist der einzige Fall, der noch einen manuellen Schritt von Sascha verlangt.
+
+Das ältere Auto-Pull-Skript unter `deploy/autodeploy.sh` ist damit **hinfällig** – es löste dasselbe Problem vor dem Webhook und braucht keine Einrichtung mehr.
+
+**Folge für PRs:** Der Merge ist nicht der Zwischenschritt zu einem späteren Deploy, sondern die Auslieferung selbst – was gemerged wird, läuft Sekunden später auf dem Pi. Offene PRs trotzdem sofort mergen statt sie liegen zu lassen, aber erst nach grünem Prüflauf.

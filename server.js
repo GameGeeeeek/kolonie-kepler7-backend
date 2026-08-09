@@ -18,7 +18,7 @@ const SECRET_FILE = process.env.SECRET_FILE || path.join(__dirname, 'jwt-secret.
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const MAIL_FROM = process.env.MAIL_FROM || 'Kolonie Kepler-7 <onboarding@resend.dev>';
 const PUBLIC_URL = process.env.PUBLIC_URL || 'https://gamegeeeeek.de';
-const FEEDBACK_EMAIL = process.env.FEEDBACK_EMAIL || 'gamegeeeeek@outlook.de'; // Empfänger für Bug-Reports & Vorschläge aus dem Spiel (per .env überschreibbar)
+const FEEDBACK_EMAIL = process.env.FEEDBACK_EMAIL || ''; // Empfänger für Bug-Reports & Vorschläge aus dem Spiel - BEWUSST ohne Vorgabe im Repo (Adresse gehört in die .env auf dem Pi, nicht in den öffentlichen Quelltext). Fehlt sie, wird Feedback weiterhin gespeichert und per Push gemeldet, nur nicht per Mail zugestellt.
 
 for (const f of [DB_FILE, SECRET_FILE]) {
   const dir = path.dirname(f);
@@ -49,7 +49,11 @@ function loadOrCreateVapidKeys() {
   return keys;
 }
 const VAPID_KEYS = loadOrCreateVapidKeys();
-webpush.setVapidDetails('mailto:' + FEEDBACK_EMAIL, VAPID_KEYS.publicKey, VAPID_KEYS.privateKey);
+// VAPID-Subject: laut Spezifikation ist eine mailto:- ODER https-Adresse zulässig. Bewusst die
+// öffentliche Spiel-Adresse statt einer E-Mail - so steht im Quelltext keine Kontaktadresse, und
+// ein leeres FEEDBACK_EMAIL (siehe oben) kann kein ungültiges 'mailto:' erzeugen, das der
+// Push-Dienst zurückweisen würde.
+webpush.setVapidDetails(PUBLIC_URL, VAPID_KEYS.publicKey, VAPID_KEYS.privateKey);
 
 function loadDb() {
   if (!fs.existsSync(DB_FILE)) return { users: {}, private: {}, shared: {}, resetTokens: {} };

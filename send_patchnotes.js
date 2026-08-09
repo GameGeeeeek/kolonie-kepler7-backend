@@ -102,7 +102,11 @@ async function main(){
     console.log('Kein Push-Versand: VAPID-Schlüssel nicht gefunden (Server muss mindestens einmal gelaufen sein).');
     return;
   }
-  webpush.setVapidDetails('mailto:' + (process.env.FEEDBACK_EMAIL || 'gamegeeeeek@outlook.de'), vapid.publicKey, vapid.privateKey);
+  // VAPID-Subject wie in server.js: die öffentliche Spiel-Adresse statt einer E-Mail. Die
+  // Spezifikation erlaubt beides, und so steht im öffentlichen Quelltext keine Kontaktadresse -
+  // und ein leeres FEEDBACK_EMAIL kann kein ungültiges 'mailto:' erzeugen, das der Push-Dienst
+  // zurückweisen würde.
+  webpush.setVapidDetails(process.env.PUBLIC_URL || 'https://gamegeeeeek.de', vapid.publicKey, vapid.privateKey);
   const priv = db.private || {};
   let pushOk = 0, pushFailed = 0, pushSkipped = 0;
   for (const [userId, bucket] of Object.entries(priv)) {

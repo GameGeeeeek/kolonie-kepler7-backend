@@ -103,9 +103,9 @@ async function main(){
     return;
   }
   // VAPID-Subject wie in server.js: die öffentliche Spiel-Adresse statt einer E-Mail. Die
-  // Spezifikation erlaubt beides, und so steht im öffentlichen Quelltext keine Kontaktadresse -
-  // und ein leeres FEEDBACK_EMAIL kann kein ungültiges 'mailto:' erzeugen, das der Push-Dienst
-  // zurückweisen würde.
+  // Spezifikation erlaubt beides; die URL hängt an keiner Konfiguration und kann deshalb nie
+  // leer sein - ein per Env geleertes FEEDBACK_EMAIL hätte hier ein ungültiges 'mailto:'
+  // erzeugt, das der Push-Dienst zurückweist.
   webpush.setVapidDetails(process.env.PUBLIC_URL || 'https://gamegeeeeek.de', vapid.publicKey, vapid.privateKey);
   const priv = db.private || {};
   let pushOk = 0, pushFailed = 0, pushSkipped = 0;

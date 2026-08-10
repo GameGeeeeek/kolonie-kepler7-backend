@@ -4000,6 +4000,102 @@ function pushGalaxyNews(icon, text) {
 function occupiedSystems() {
   return new Set(Object.values(db.users).filter(u => u.homeSystem).map(u => u.homeSystem));
 }
+// ===== Fraktionskrieg mit echtem Einsatz (10.08.2026) ==========================================
+// Vorher war activeWar Kulisse. Diese beiden Funktionen verbinden ihn mit f.systems.
+//
+// Ein Krieg braucht einen Ort, um den es sich zu streiten LOHNT: ein Grenzsystem, das eine der
+// beiden Parteien haelt und das an das Gebiet der anderen grenzt. Nur dann verschiebt ein Sieg die
+// Grenze wirklich. Findet sich keine solche Grenze - etwa weil die Gebiete weit auseinanderliegen -,
+// gibt es weiterhin das alte Scharmuetzel ohne Einsatz; es faerbt die Galaxie, behauptet aber nichts.
+function findWarBorder(g, factions) {
+  const occupiedByPlayers = occupiedSystems();
+  const controlled = g.controlledSystems || {};
+  const tabu = new Set([...occupiedByPlayers, ...Object.keys(controlled)]);
+  const ownership = systemOwnershipMap(g);
+  const kandidaten = [];
+  for (const halter of Object.values(factions)) {
+    for (const sys of halter.systems) {
+      if (tabu.has(sys) || g.collapsedSystems[sys]) continue;
+      // Wer das System haelt, muss noch ein zweites besitzen - sonst wuerde ein verlorener Krieg
+      // eine Fraktion von der Karte loeschen, und das Spiel haette drei statt vier.
+      if (halter.systems.length < 2) continue;
+      for (const nb of (SYSTEM_NEIGHBORS[sys] || [])) {
+        const nachbarId = ownership[nb];
+        if (!nachbarId || nachbarId === halter.id) continue;
+        const angreifer = factions[nachbarId];
+        if (!angreifer) continue;
+        kandidaten.push({ halter, angreifer, system: sys });
+      }
+    }
+  }
+  if (!kandidaten.length) return null;
+  return kandidaten[Math.floor(Math.random() * kandidaten.length)];
+}
+function startFactionWar(g) {
+  const factions = loadOrInitFactions(g);
+  const grenze = findWarBorder(g, factions);
+  if (grenze) {
+    g.activeWar = {
+      factionA: grenze.angreifer.name, factionB: grenze.halter.name,
+      aId: grenze.angreifer.id, bId: grenze.halter.id,
+      holderId: grenze.halter.id,
+      system: grenze.system, stakes: true,
+      expiresAt: Date.now() + 36 * 3600 * 1000
+    };
+    pushGalaxyNews('ti-sword', grenze.angreifer.name + ' greift ' + grenze.halter.name
+      + ' an: Um ' + grenze.system + ' wird gekämpft. Wer das System nach 36 Stunden hält, behält es.');
+    return;
+  }
+  // Rueckfall: keine gemeinsame Grenze. Dann bleibt es beim Scharmuetzel von frueher - aber ohne
+  // zu behaupten, es ginge um Besitz.
+  const a = NPC_FACTION_NAMES[Math.floor(Math.random() * NPC_FACTION_NAMES.length)];
+  let b = NPC_FACTION_NAMES[Math.floor(Math.random() * NPC_FACTION_NAMES.length)];
+  if (b === a) b = NPC_FACTION_NAMES[(NPC_FACTION_NAMES.indexOf(a) + 1) % NPC_FACTION_NAMES.length];
+  const sys = pickRandomFreeSystem();
+  g.activeWar = { factionA: a, factionB: b, system: sys, stakes: false,
+    expiresAt: Date.now() + 36 * 3600 * 1000 };
+  pushGalaxyNews('ti-sword', 'Krieg ausgebrochen: ' + a + ' und ' + b + ' liefern sich Gefechte um ' + sys + '.');
+}
+function resolveFactionWar(g) {
+  const w = g.activeWar;
+  g.activeWar = null;
+  if (!w) return;
+  if (!w.stakes) {
+    pushGalaxyNews('ti-flag', 'Das Gefecht um ' + w.system + ' ist ohne Ergebnis beigelegt.');
+    return;
+  }
+  const factions = loadOrInitFactions(g);
+  const angreifer = factions[w.aId], halter = factions[w.bId];
+  // Zwischen Kriegsbeginn und Ablauf liegen 36 Stunden. In der Zeit kann sich viel geaendert haben:
+  // Der Halter kann das System laengst an eine dritte Fraktion verloren haben, ein Spieler kann es
+  // erobert haben, es kann kollabiert sein. Der Ausgang wird deshalb gegen den JETZIGEN Zustand
+  // geprueft, nie gegen den beim Kriegsbeginn gemerkten.
+  const ownership = systemOwnershipMap(g);
+  const jetzigerHalter = ownership[w.system];
+  const tabu = new Set([...occupiedSystems(), ...Object.keys(g.controlledSystems || {})]);
+  if (!angreifer || !halter || tabu.has(w.system) || g.collapsedSystems[w.system]
+      || (jetzigerHalter !== w.aId && jetzigerHalter !== w.bId)) {
+    pushGalaxyNews('ti-flag', 'Der Krieg um ' + w.system + ' ist ohne Entscheidung ausgelaufen - '
+      + 'die Lage vor Ort hat sich inzwischen geändert.');
+    return;
+  }
+  const verteidiger = factions[jetzigerHalter];
+  const herausforderer = jetzigerHalter === w.aId ? halter : angreifer;
+  // Der Verteidiger hat einen Standvorteil: Er muss nur halten, der Angreifer muss nehmen. Ohne ihn
+  // wechselte fast jedes Grenzsystem bei jedem Krieg den Besitzer, und die Karte fluete.
+  const staerkeA = (herausforderer.strength || 1);
+  const staerkeV = (verteidiger.strength || 1) * 1.35;
+  const chance = staerkeA / (staerkeA + staerkeV);
+  if (Math.random() < chance && verteidiger.systems.length >= 2) {
+    verteidiger.systems = verteidiger.systems.filter(x => x !== w.system);
+    herausforderer.systems.push(w.system);
+    pushGalaxyNews('ti-sword', herausforderer.name + ' hat den Krieg um ' + w.system + ' gewonnen und '
+      + 'das System von ' + verteidiger.name + ' übernommen.');
+  } else {
+    pushGalaxyNews('ti-shield', verteidiger.name + ' hat ' + w.system + ' gegen '
+      + herausforderer.name + ' gehalten.');
+  }
+}
 function pickRandomFreeSystem() {
   const occupied = occupiedSystems();
   const free = SYSTEMS.filter(s => !occupied.has(s));
@@ -4365,22 +4461,25 @@ function galaxyTick() {
     pushGalaxyNews('ti-infinity', 'Das Wurmloch nach ' + g.activeWormhole.to + ' hat sich wieder geschlossen.');
     g.activeWormhole = null;
   }
-  // Abgelaufenen Krieg beilegen.
+  // Abgelaufenen Krieg beilegen - und ihn erstmals ENTSCHEIDEN.
+  //
+  // Bis zum 10.08.2026 war activeWar reine Kulisse: Die Parteien kamen aus NPC_FACTION_NAMES (sechs
+  // Namen, zwei davon ohne Fraktionseintrag), der Krieg spielte in einem zufaellig gewaehlten
+  // System, und er veraenderte f.systems mit KEINER Zeile. Krieg und Territorium waren vollstaendig
+  // entkoppelt - man konnte 36 Stunden zusehen, wie zwei Namen um ein System "kaempfen", das
+  // danach genauso dastand wie vorher.
+  //
+  // Jetzt hat ein Krieg zwischen zwei ECHTEN Fraktionen einen Einsatz (stakes). Laeuft er ab,
+  // entscheidet das Staerkeverhaeltnis, wer das umkaempfte System haelt.
   if (g.activeWar && g.activeWar.expiresAt < Date.now()) {
-    pushGalaxyNews('ti-flag', 'Der Krieg um ' + g.activeWar.system + ' ist beigelegt.');
-    g.activeWar = null;
+    resolveFactionWar(g);
   }
 
   // Zufällige galaktische Ereignisse, jeweils unabhängige Chance pro Tick (alle 15 Min.). Jedes
   // ortsgebundene Ereignis bekommt jetzt ein echtes, freies (unbesiedeltes) System zugewiesen, damit
   // es auf der Sektorkarte sichtbar gemacht werden kann.
   if (Math.random() < 0.12 && !g.activeWar) {
-    const a = NPC_FACTION_NAMES[Math.floor(Math.random() * NPC_FACTION_NAMES.length)];
-    let b = NPC_FACTION_NAMES[Math.floor(Math.random() * NPC_FACTION_NAMES.length)];
-    if (b === a) b = NPC_FACTION_NAMES[(NPC_FACTION_NAMES.indexOf(a) + 1) % NPC_FACTION_NAMES.length];
-    const sys = pickRandomFreeSystem();
-    g.activeWar = { factionA: a, factionB: b, system: sys, expiresAt: Date.now() + 36 * 3600 * 1000 };
-    pushGalaxyNews('ti-sword', 'Krieg ausgebrochen: ' + a + ' und ' + b + ' liefern sich Gefechte um ' + sys + '.');
+    startFactionWar(g);
   }
   if (Math.random() < 0.06 && g.unlockedAlienRaces.length < ALIEN_RACE_NAMES.length) {
     const next = ALIEN_RACE_NAMES[g.unlockedAlienRaces.length];
@@ -4422,6 +4521,11 @@ function galaxyTick() {
   const controlled = g.controlledSystems || {};
   // Vom Spieler eroberte Systeme sind für Fraktionen ebenfalls tabu (wie Heimatsysteme).
   const playerBlocked = new Set([...occupiedByPlayers, ...Object.keys(controlled)]);
+  // Das umkaempfte System waehrend eines Krieges mit Einsatz aus der normalen Expansion nehmen.
+  // Ohne diese Zeile koennte es der Expansionsschleife im selben Takt beilaeufig zufallen - der
+  // Krieg waere dann schon entschieden, bevor er ueberhaupt ablaeuft, und die Meldung am Ende
+  // wuerde etwas verkuenden, das gar nicht mehr zur Debatte stand.
+  if (g.activeWar && g.activeWar.stakes && g.activeWar.system) playerBlocked.add(g.activeWar.system);
   for (const f of Object.values(factions)) {
     // Stärke wächst langsam, skaliert leicht mit Territoriumsgröße (größere Reiche werden stärker).
     f.strength = Math.min(6.0, f.strength * (1 + 0.01 + Math.random() * 0.02) + f.systems.length * 0.002);

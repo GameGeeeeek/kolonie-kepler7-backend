@@ -4187,6 +4187,71 @@ function rkBeitrag(g, seiteId, userId, rohPunkte, opt) {
   eintrag.beitragende[userId] = { seite: seiteId, ts: Date.now() };
   return { sys: eintrag.sys, punkte: wirksam, roh: rohPunkte, tagesSumme: konto[frontKey] };
 }
+
+// ===== Die fuenf uebrigen Handlungen (10.08.2026) ==============================================
+// Das Bollwerk ist server-autoritativ, weil sein Ausgang hier faellt. Die uebrigen Handlungen
+// passieren im Client. Statt eine Scheinvalidierung zu bauen, misst der Server sie so, wie es das
+// Spiel bei den Fraktionsauftraegen seit dem 26.07.2026 schon tut: ueber die DIFFERENZ eines
+// Lebenszeit-Zaehlers im gespeicherten Spielstand. Der Client kann den Zaehler faelschen - aber
+// nur in seinem eigenen, dauerhaft gespeicherten Spielstand, und das ist derselbe Vertrauensrahmen
+// wie fuer alles andere im Spiel. Er kann die Handlung nicht WIEDERHOLEN, ohne dass der Zaehler
+// weiterlaeuft, und genau das ist der Punkt.
+//
+// DER BASISWERT LIEGT IM PRIVATEN SERVERBEREICH, NICHT IM SPIELSTAND. Stuende er im Save, wuerde
+// der Client ihn mitschreiben und die Differenz sich selbst messen. db.private[userId].__rkBasis
+// folgt dem etablierten __-Feld-Muster (__lastAttackPush, __lastChatPush, __sabotageCooldowns).
+//
+// VERWORFENE ALTERNATIVE: Der Server bekommt jede aufgeloeste Expedition ohnehin als Bericht
+// (POST /api/reports -> db.private[userId].__reports). Man koennte statt der Save-Differenz die
+// Berichte seit einem gemerkten Zeitstempel zaehlen - das braeuchte keine Reset-Erkennung. Dagegen
+// spricht: die Liste ist auf 40 Eintraege gedeckelt (addReport), ein Rueckstand ginge also still
+// verloren, sie deckt nur eine der fuenf Handlungen ab, und der Bericht wird vom selben Client
+// geschickt, ist also kein Stueck vertrauenswuerdiger. Die Save-Differenz bleibt.
+const RK_HANDLUNGEN = {
+  // einheit = wie viel Zaehlerfortschritt EINE Handlung ist. Bei Konvois ist das ein Kreditbetrag,
+  // bei allem anderen ein Stueck.
+  aufklaerung: { feld: 'expeditionsCompleted',      einheit: 1,    punkte: 40, name: 'Aufklärungsertrag' },
+  fundmeldung: { feld: 'fundmeldungenGesamt',       einheit: 1,    punkte: 45, name: 'Fundmeldung' },
+  piratennest: { feld: 'piratennesterGeraeumt',     einheit: 1,    punkte: 30, name: 'geräumtes Piratennest' },
+  konvoi:      { feld: 'tradeRouteLifetimeCredits', einheit: 2000, punkte: 25, name: 'umgeleiteter Konvoi' }
+};
+// Die Nachschubspende ist die einzige der fuenf, die der Server WIRKLICH pruefen kann: Er haelt den
+// Spielstand, kann die Rohstoffe darin nachzaehlen und selbst abbuchen - dieselbe Bauform wie beim
+// Markt (save.resources[resource] -= amt) und beim Fraktionsangriff, der Flottenverluste
+// serverseitig bucht und dem Client die neue saveVersion zurueckgibt.
+// Feste Mengen, keine "N Minuten Produktion": Das Muster ist im Projekt als explosiv vermerkt.
+const RK_NACHSCHUB_KOSTEN = { erz: 4000, kristalle: 2500, deuterium: 1200 };
+const RK_NACHSCHUB_PUNKTE = 60;
+const RK_NACHSCHUB_SPERRE_MS = 4 * 3600 * 1000;
+
+function rkBasisVon(userId) {
+  if (!db.private[userId]) db.private[userId] = {};
+  if (!db.private[userId].__rkBasis) db.private[userId].__rkBasis = {};
+  return db.private[userId].__rkBasis;
+}
+// Wie viele ROHE Kriegspunkte an dieser Front heute ueberhaupt noch etwas bewirken. Alles darueber
+// hinaus faellt in die Nullstufe der Degression. Der Wert wird gebraucht, damit ein Rueckstand
+// nicht in einem Zug verbrannt wird: Es wird nur so viel Zaehlerfortschritt VERBRAUCHT, wie heute
+// noch wirken kann - der Rest bleibt liegen und ist morgen wieder da.
+function rkTagesRoh(rk, userId, frontKey) {
+  const tag = (rk.tag && rk.tag.stempel === rkTagesSchluessel()) ? rk.tag : null;
+  return (tag && tag.konten && tag.konten[userId] && tag.konten[userId][frontKey]) || 0;
+}
+function rkNochNutzbar(rk, userId, frontKey) {
+  const breite = RK_TAGESSTUFEN.reduce((a, st) => a + st[0], 0);
+  return Math.max(0, breite - rkTagesRoh(rk, userId, frontKey));
+}
+// Was ein Beitrag HEUTE noch brächte, ohne ihn zu buchen. Gebraucht, weil rkBeitrag das Tageskonto
+// auch dann belastet, wenn nach der Degression nichts mehr uebrig bleibt - eine Nachschubspende
+// wuerde sonst 4.000 Erz kosten und null Kriegspunkte bringen. Geprueft wird deshalb VOR jeder
+// Handlung, ob wenigstens ein ganzer Punkt herauskommt.
+function rkVorschau(rk, userId, frontKey, rohPunkte) {
+  return Math.round(rkDegression(rkTagesRoh(rk, userId, frontKey), rohPunkte));
+}
+function rkFrontKeyFuer(seiteId) {
+  const paar = RK_FRONT_PAARE.find(p => p[0] === seiteId || p[1] === seiteId);
+  return paar ? paar[0] + '|' + paar[1] : null;
+}
 // Ein Takt der Front. Reihenfolge ist wichtig:
 //   1. ungueltig gewordene Frontsysteme ersetzen (Besitzer gewechselt, kollabiert, Spieler drauf)
 //   2. auffuellen, falls die Front noch nicht fuenf Systeme hat
@@ -5068,7 +5133,18 @@ function galaxyFuerClient(g, userId) {
   }));
   const tag = (rk.tag && rk.tag.stempel === rkTagesSchluessel()) ? rk.tag : null;
   const meinTag = (tag && tag.konten && tag.konten[userId]) || {};
-  return Object.assign({}, g, { randkriege: { stand: rk.stand, fronten, meinTag } });
+  // Der Client soll ohne zweite Anfrage anzeigen koennen, wie viel Zaehlerfortschritt noch offen
+  // ist. Dafuer bekommt er SEINEN Basiswert (nicht den anderer Konten) und die Breite der
+  // Tagesstufen - er rechnet die offene Menge dann gegen seinen eigenen, lebenden Spielstand aus.
+  // Der Basiswert bleibt dabei serverseitig gefuehrt; was hier rausgeht, ist eine Kopie zur Anzeige.
+  const basis = (db.private[userId] && db.private[userId].__rkBasis) || {};
+  const meineBasis = {};
+  for (const h of Object.values(RK_HANDLUNGEN)) meineBasis[h.feld] = basis[h.feld] || 0;
+  return Object.assign({}, g, { randkriege: {
+    stand: rk.stand, fronten, meinTag, meineBasis,
+    tagesBreite: RK_TAGESSTUFEN.reduce((a, st) => a + st[0], 0),
+    nachschubZuletzt: (db.private[userId] && db.private[userId].__rkNachschubAt) || 0
+  } });
 }
 app.get('/api/galaxy', authMiddleware, (req, res) => {
   res.json(galaxyFuerClient(loadOrInitGalaxy(), req.userId));
@@ -6964,6 +7040,93 @@ app.post('/api/faction/attack', authMiddleware, async (req, res) => {
     await saveDb();
     return res.json({ success: false, systemId, attackPower, factionDefense, lost, factionName: owner.name, saveVersion: mySaveVersion, front: rkErgebnis });
   }
+});
+
+// ===== Die fuenf Handlungen an der Front =======================================================
+// EIN Endpunkt fuer alle, weil sie sich nur in Traeger und Gewicht unterscheiden. Was fuer jede
+// gilt: Der Beitrag wird ERST verbucht, wenn rkBeitrag ihn angenommen hat - gibt es die Front noch
+// gar nicht, bleibt der Zaehlerfortschritt (bzw. das Rohstofflager) unangetastet. Ein Beitrag darf
+// nie verschwinden, nur weil der Weltentakt noch keine Front aufgebaut hat.
+app.post('/api/randkriege/handlung', authMiddleware, async (req, res) => {
+  const art = String((req.body || {}).art || '');
+  const fraktion = String((req.body || {}).fraktion || '');
+  if (!FACTION_RIVALS[fraktion]) return res.status(400).json({ error: 'Unbekannte Fraktion.' });
+  const frontKey = rkFrontKeyFuer(fraktion);
+  if (!frontKey) return res.status(400).json({ error: 'Diese Fraktion steht an keiner Front.' });
+
+  if (art !== 'nachschub' && !RK_HANDLUNGEN[art]) return res.status(400).json({ error: 'Unbekannte Handlung.' });
+
+  const g = loadOrInitGalaxy();
+  const rk = loadOrInitRandkriege(g);
+  const nutzbar = rkNochNutzbar(rk, req.userId, frontKey);
+  if (nutzbar <= 0) return res.json({ ok: true, punkte: 0, grund: 'tagesdeckel' });
+
+  const rohSave = getSaveValue(req.userId);
+  if (!rohSave) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save;
+  try { save = JSON.parse(rohSave); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+
+  // ---- Nachschubspende: der Server zaehlt nach und bucht selbst ab -----------------------------
+  if (art === 'nachschub') {
+    const zuletzt = (db.private[req.userId] && db.private[req.userId].__rkNachschubAt) || 0;
+    const wartet = zuletzt + RK_NACHSCHUB_SPERRE_MS - Date.now();
+    if (wartet > 0) return res.status(429).json({ error: 'Der nächste Nachschub geht erst später raus.', wartetMs: wartet });
+    save.resources = save.resources || {};
+    for (const [r, menge] of Object.entries(RK_NACHSCHUB_KOSTEN)) {
+      if ((save.resources[r] || 0) < menge) {
+        return res.status(400).json({ error: 'Nicht genug ' + r + ' für den Nachschub.', kosten: RK_NACHSCHUB_KOSTEN });
+      }
+    }
+    // Erst rechnen, dann abbuchen: Bringt die Spende heute keinen ganzen Punkt mehr, kostet sie
+    // auch nichts. Sonst waere der Tagesdeckel eine Falle statt einer Grenze.
+    if (rkVorschau(rk, req.userId, frontKey, RK_NACHSCHUB_PUNKTE) <= 0) {
+      return res.json({ ok: true, art, punkte: 0, grund: 'tagesdeckel' });
+    }
+    const erg = rkBeitrag(g, fraktion, req.userId, RK_NACHSCHUB_PUNKTE, {});
+    if (!erg) return res.status(409).json({ error: 'An dieser Front wird gerade nicht gekämpft.' });
+    for (const [r, menge] of Object.entries(RK_NACHSCHUB_KOSTEN)) save.resources[r] -= menge;
+    if (!db.private[req.userId]) db.private[req.userId] = {};
+    db.private[req.userId].__rkNachschubAt = Date.now();
+    const saveVersion = setSaveValue(req.userId, JSON.stringify(save));
+    await saveDb();
+    return res.json({ ok: true, art, punkte: erg.punkte, roh: erg.roh, sys: erg.sys,
+      kosten: RK_NACHSCHUB_KOSTEN, saveVersion, naechsteSperreMs: RK_NACHSCHUB_SPERRE_MS });
+  }
+
+  // ---- Die vier Differenz-Handlungen -----------------------------------------------------------
+  const def = RK_HANDLUNGEN[art];
+  if (!def) return res.status(400).json({ error: 'Unbekannte Handlung.' });
+  const basis = rkBasisVon(req.userId);
+  const jetzt = Number(save[def.feld]) || 0;
+  const gemerkt = Number(basis[def.feld]) || 0;
+
+  // RESET-ERKENNUNG. Prestige, Aufstieg und der Zuruecksetzen-Knopf bauen den Spielstand neu auf
+  // und setzen diese Zaehler auf 0. Ohne diesen Zweig waere ein Konto nach dem Prestige so lange
+  // gesperrt, bis es seinen alten Stand wieder erreicht hat - bei 400 Expeditionen dauerhaft.
+  // Der Basiswert wandert dann einfach nach unten mit; gutgeschrieben wird dabei nichts.
+  if (jetzt < gemerkt) {
+    basis[def.feld] = jetzt;
+    await saveDb();
+    return res.json({ ok: true, art, punkte: 0, grund: 'zurueckgesetzt', offen: 0 });
+  }
+
+  const offen = Math.floor((jetzt - gemerkt) / def.einheit);
+  if (offen <= 0) return res.json({ ok: true, art, punkte: 0, grund: 'nichts_offen', offen: 0 });
+  // Nur so viel verbrauchen, wie heute noch wirken kann - der Rest bleibt liegen und ist morgen
+  // wieder da. Eine einzelne Einheit darf den Rest ueberschiessen (Math.max(1, ...)), sonst bliebe
+  // ein knappes Restbudget fuer immer unbenutzbar; mehr als eine Einheit wird nie verbrannt.
+  const maxEinheiten = Math.max(1, Math.ceil(nutzbar / def.punkte));
+  const einheiten = Math.min(offen, maxEinheiten);
+  if (rkVorschau(rk, req.userId, frontKey, einheiten * def.punkte) <= 0) {
+    return res.json({ ok: true, art, punkte: 0, grund: 'tagesdeckel', offen });
+  }
+
+  const erg = rkBeitrag(g, fraktion, req.userId, einheiten * def.punkte, {});
+  if (!erg) return res.status(409).json({ error: 'An dieser Front wird gerade nicht gekämpft.' });
+  basis[def.feld] = gemerkt + einheiten * def.einheit;
+  await saveDb();
+  return res.json({ ok: true, art, punkte: erg.punkte, roh: erg.roh, sys: erg.sys,
+    einheiten, offenDanach: offen - einheiten, name: def.name });
 });
 
 // ============ GitHub-Deploy-Webhook: sofortiges Update statt Warten auf den Cron-Job ============

@@ -872,6 +872,11 @@ function getNotifPrefs(user) {
     // Getrennt von 'attack' (das ist der Angriff auf die eigene Kolonie): Wer die PvP-Meldungen satt
     // hat, will die gemeinsame Basis trotzdem nicht stillschweigend verlieren.
     alliancebase: p.alliancebase !== false,
+    // 'chat' = jemand hat im GLOBALEN Chat geschrieben (10.08.2026, Wunsch Sascha). Eigene
+    // Kategorie und bewusst NICHT unter 'messages' geführt: 'messages' ist eine Nachricht AN DICH,
+    // der globale Chat ist ein öffentlicher Raum. Wer Direktnachrichten will, will deshalb nicht
+    // zwangsläufig jedes Wort im Chat - und umgekehrt.
+    chat: p.chat !== false,
     patchnotes: p.patchnotes !== false,
     application: p.application !== false,
     spy: p.spy !== false,
@@ -902,6 +907,23 @@ function allowAttackPush(targetUserId) {
   db.private[targetUserId].__lastAttackPush = now;
   return true;
 }
+// Dasselbe Ruhefenster für den globalen Chat (10.08.2026). Ein Chat ist naturgemäß gesprächig:
+// Ohne Drosselung würde eine lebhafte Viertelstunde zwanzig Pushes auf jedem Handy erzeugen, und
+// das Ergebnis wäre nicht mehr Beteiligung, sondern eine abgeschaltete Kategorie. Eine Meldung je
+// halbe Stunde reicht für den Zweck - sie sagt "im Chat ist etwas los", den Rest liest man dort.
+//
+// UNTERSCHIED ZU allowAttackPush: Dort wird bei gesperrter Push der Postfach-Eintrag TROTZDEM
+// geschrieben, weil der Angriff sonst spurlos bliebe. Beim Chat wäre das falsch - die Nachrichten
+// stehen ja im Chat, ein zweiter Eintrag je Nachricht wäre reine Dopplung. Hier entfällt deshalb
+// der ganze Vorgang, nicht nur die Push.
+const CHAT_PUSH_COOLDOWN_MS = 30 * 60 * 1000;
+function allowChatPush(targetUserId) {
+  if (!db.private[targetUserId]) db.private[targetUserId] = {};
+  const now = Date.now();
+  if (now - (db.private[targetUserId].__lastChatPush || 0) < CHAT_PUSH_COOLDOWN_MS) return false;
+  db.private[targetUserId].__lastChatPush = now;
+  return true;
+}
 // Lesbarer Titel/Text je Ereignistyp für die eigentliche Push-Nachricht (Postfach-Anzeige im
 // Client hat ihre eigene, leicht andere Formulierung - hier bewusst kompakter fürs Benachrichtigungsfenster).
 function pushNotificationText(type, payload) {
@@ -923,6 +945,12 @@ function pushNotificationText(type, payload) {
     return { title: 'Kolonie Kepler-7', body: (labels[payload.jobType] || 'Etwas in deiner Kolonie ist fertig') + ' - komm zurück und mach weiter!' };
   }
   if (type === 'message') return { title: 'Neue Nachricht', body: (payload.fromName || 'Ein Spieler') + ' hat dir geschrieben.' };
+  // BEWUSST OHNE DEN NACHRICHTENTEXT. Der Text ist frei tippbar und ginge damit ungefiltert auf
+  // die Sperrbildschirme aller Spieler - eine Beleidigung im Chat wäre eine Beleidigung auf jedem
+  // Handy. Der Name steht ohnehin im Chat neben jeder Zeile und ist hart gekappt (siehe
+  // handleSharedStorageWrite). Dieselbe Zurückhaltung wie bei 'message' oben, die den Text von
+  // Direktnachrichten ebenfalls nicht mitschickt.
+  if (type === 'chat') return { title: 'Globaler Chat', body: (payload.authorName || 'Jemand') + ' hat im globalen Chat geschrieben.' };
   if (type === 'weltboss-spawn') return { title: 'Neuer Weltboss!', body: 'Leviathan Stufe ' + (payload.level || 1) +
     ' ist erschienen - schließ dich dem Angriff an, bevor er wieder verschwindet.' };
   if (type === 'alliance-muster') {
@@ -985,6 +1013,9 @@ function notificationTarget(type, payload) {
     case 'attack-received': return 'berichte';
     case 'sabotaged': return 'berichte';
     case 'message': return 'berichte';
+    // Der Chat ist kein Reiter, sondern ein Einschub-Fenster - 'chat:global' oeffnet es und stellt
+    // auf den globalen Kanal um (geheZuZiel im Frontend kennt diesen Sonderfall).
+    case 'chat': return 'chat:global';
     case 'alliance-application': return 'allianz:verwaltung';
     case 'alliance-raid': return 'allianz:uebersicht';
     case 'alliance-muster': return 'allianz:uebersicht';
@@ -1056,6 +1087,41 @@ function handleSharedStorageWrite(key, prevRaw, newRaw) {
         const prefs = getNotifPrefs(user);
         if (!prefs.enabled || !prefs.alliancebase) continue;
         pushNotificationEvent(memberId, 'alliance-base-ready', { tag: baseMatch[1], level: stufe });
+      }
+      return;
+    }
+    // Globaler Chat: jemand hat geschrieben (10.08.2026, Wunsch Sascha).
+    //
+    // Jede Nachricht legt einen EIGENEN Schlüssel an (globalchat:msg:<ts>-<zufall>), ein Schreiben
+    // mit prevRaw === undefined ist also genau eine neue Nachricht. Ein vorhandener prevRaw wäre
+    // eine Änderung an einer bestehenden - dafür gibt es keinen legitimen Weg im Spiel, und eine
+    // Push dafür schon gar nicht.
+    if (key.startsWith('globalchat:msg:') && !prevRaw) {
+      let msg = null;
+      try { msg = JSON.parse(newRaw); } catch (e) { return; }
+      if (!msg || !msg.authorId) return;
+      // Der Name kommt aus der Nachricht (dort steht der Kommandantenname, den auch der Chat
+      // anzeigt - der Registrierungsname wäre für Mitleser ein anderer und damit verwirrend).
+      // Er ist frei wählbar, deshalb hart gekappt und von Steuerzeichen befreit, bevor er auf
+      // einem fremden Sperrbildschirm landet.
+      const autor = String(msg.authorName || 'Jemand').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 24) || 'Jemand';
+      const AKTIV_MS = 7 * 24 * 60 * 60 * 1000;
+      const jetzt = Date.now();
+      for (const user of Object.values(db.users)) {
+        if (!user || !user.userId) continue;
+        if (user.userId === msg.authorId) continue;          // nie an den Verfasser selbst
+        const prefs = getNotifPrefs(user);
+        if (!prefs.enabled || !prefs.chat) continue;
+        // Wer gerade spielt, sieht die Nachricht im Chat - eine Push wäre dann nur ein Duplikat
+        // auf dem Handy, das direkt daneben liegt.
+        if (userIsOnline(user.userId)) continue;
+        // Und wer seit über einer Woche nicht da war, bekommt keine - das wäre keine Information
+        // mehr, sondern Werbung (dieselbe Abwägung wie beim Weltboss-Spawn weiter unten).
+        let lastSeen = 0;
+        try { lastSeen = JSON.parse(db.shared['leaderboard:' + user.userId] || '{}').lastSeen || 0; } catch (e) {}
+        if (jetzt - lastSeen > AKTIV_MS) continue;
+        if (!allowChatPush(user.userId)) continue;           // höchstens eine je halbe Stunde
+        pushNotificationEvent(user.userId, 'chat', { authorName: autor });
       }
       return;
     }
@@ -3582,6 +3648,7 @@ app.post('/api/notification-prefs', authMiddleware, async (req, res) => {
     // der Schalter im Spiel ließe sich dann scheinbar umlegen, ohne Wirkung.
     allianceraid: b.allianceraid !== false,
     alliancebase: b.alliancebase !== false,
+    chat: b.chat !== false,
     patchnotes: b.patchnotes !== false,
     application: b.application !== false,
     spy: b.spy !== false,

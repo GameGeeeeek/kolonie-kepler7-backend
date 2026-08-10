@@ -1210,69 +1210,178 @@ function setSaveValue(userId, jsonString) {
 }
 
 // --- Zufalls-Spawn für neue Spieler ---
-// Muss zur STAR_SYSTEMS-Liste im Frontend (weltraum_kolonie.html) passen.
-// Vollständige Systemliste mit Karten-Koordinaten (identisch zu STAR_SYSTEMS im Frontend), damit die
-// NPC-Territorium-Simulation Nachbarschaften über die tatsächliche Kartenposition berechnen kann.
+// Vollständige Systemliste mit Karten-Koordinaten, identisch zu STAR_SYSTEMS im Frontend
+// (weltraum_kolonie.html), damit die NPC-Territorium-Simulation Nachbarschaften über die
+// tatsächliche Kartenposition berechnen kann.
+//
+// HIER LAG EIN ECHTER FEHLER, behoben am 10.08.2026. Die Liste kannte 41 der 69 Basissysteme;
+// es fehlten alle acht äußersten (sys_pandora_saum … sys_meridian_kern) und alle 20 sysn_*.
+// Der Kommentar darüber behauptete dagegen Gleichheit, und test_paritaet_tabellen.js deckte die
+// Systemliste als einzige der gespiegelten Tabellen NICHT ab.
+//
+// Die Folge war groß und still: In diesen 28 Systemen konnte kein neuer Spieler spawnen, keine
+// Fraktion Territorium halten oder expandieren, keine Supernova und kein Wurmloch entstehen,
+// keine Piratenbasis gegründet und kein Allianz-Raid angesetzt werden. Rund 40 % der Karte waren
+// für jeden serverseitigen Galaxie-Inhalt tot – und zwar genau die äußeren Randsektoren.
+//
+// Auffällig ist, WIE die 41 zustande kamen: Es sind exakt die Systeme, die es vor der letzten
+// Karten-Erweiterung gab. Die Liste ist nie falsch geschrieben, sondern schlicht nicht
+// mitgewachsen worden. Genau dagegen prüft jetzt test_systemparitaet.js.
 const SYSTEM_COORDS = [
   { id: 'kepler', gx: 510.2, gy: 242.9 },
   { id: 'vega', gx: 518.3, gy: 276.5 },
   { id: 'orion', gx: 455.8, gy: 296.2 },
-  { id: 'nebel', gx: 348.6, gy: 270.0 },
+  { id: 'nebel', gx: 348.6, gy: 270 },
   { id: 'rand', gx: 309.1, gy: 181.4 },
-  { id: 'krux', gx: 462.3, gy: 272.0 },
+  { id: 'krux', gx: 462.3, gy: 272 },
   { id: 'aether', gx: 395.9, gy: 244.7 },
   { id: 'vortex', gx: 393.1, gy: 211.1 },
   { id: 'chronos', gx: 477.5, gy: 144.9 },
-  { id: 'solmark', gx: 635.0, gy: 153.5 },
+  { id: 'solmark', gx: 635, gy: 153.5 },
   { id: 'drachenmark', gx: 457.9, gy: 207.4 },
-  { id: 'abyss', gx: 505.0, gy: 192.9 },
+  { id: 'abyss', gx: 505, gy: 192.9 },
   { id: 'nyra', gx: 599.5, gy: 218.5 },
   { id: 'pulsar', gx: 593.8, gy: 304.9 },
   { id: 'sigma', gx: 466.2, gy: 355.9 },
   { id: 'sys_corvus_weite', gx: 688.4, gy: 236.9 },
   { id: 'sys_halcyon_feld', gx: 669.7, gy: 350.1 },
-  { id: 'sys_meridian_bogen', gx: 500.0, gy: 416.3 },
+  { id: 'sys_meridian_bogen', gx: 500, gy: 416.3 },
   { id: 'sys_thule_reichweite', gx: 295.4, gy: 412.2 },
   { id: 'sys_oort_schleuse', gx: 142.3, gy: 282.3 },
   { id: 'sys_xerxes_zone', gx: 152.5, gy: 112.5 },
-  { id: 'sys_ashen_grat', gx: 493.4, gy: 359.0 },
+  { id: 'sys_ashen_grat', gx: 493.4, gy: 359 },
   { id: 'sys_ilyra_strom', gx: 321.5, gy: 342.1 },
   { id: 'sys_kessel_anomalie', gx: 206.6, gy: 274.6 },
-  { id: 'sys_vantar_riff', gx: 215.0, gy: 145.2 },
+  { id: 'sys_vantar_riff', gx: 215, gy: 145.2 },
   { id: 'sys_quorin_passage', gx: 377.6, gy: 35.1 },
   { id: 'sys_ember_reichweite', gx: 651.5, gy: 24.5 },
   { id: 'sys_silberbach', gx: 280.9, gy: 255.9 },
   { id: 'sys_nachtsegel_zone', gx: 292.5, gy: 145.9 },
   { id: 'sys_grendel_feld', gx: 426.9, gy: 73.3 },
-  { id: 'sys_aurelia_bogen', gx: 660.0, gy: 91.3 },
-  { id: 'sys_marek_schneise', gx: 832.0, gy: 175.7 },
+  { id: 'sys_aurelia_bogen', gx: 660, gy: 91.3 },
+  { id: 'sys_marek_schneise', gx: 832, gy: 175.7 },
   { id: 'sys_talon_ring', gx: 826.1, gy: 352.3 },
   { id: 'sys_wispern_nebel', gx: 448.8, gy: 100.5 },
   { id: 'sys_cinder_reichweite', gx: 602.4, gy: 98.3 },
   { id: 'sys_obsidian_guertel', gx: 760.4, gy: 181.7 },
   { id: 'sys_halvar_weite', gx: 757.8, gy: 322.9 },
-  { id: 'sys_sernova_feld', gx: 628.0, gy: 429.2 },
+  { id: 'sys_sernova_feld', gx: 628, gy: 429.2 },
   { id: 'sys_dunwich_passage', gx: 352.7, gy: 470.5 },
+  { id: 'sys_pandora_saum', gx: 800, gy: 60 },
+  { id: 'sys_tychos_kluft', gx: 807.3, gy: 207 },
+  { id: 'sys_ashen_bogen', gx: 814.6, gy: 354 },
+  { id: 'sys_valeska_spirale', gx: 821.9, gy: 461 },
+  { id: 'sys_boreas_schwelle', gx: 829.2, gy: 88 },
+  { id: 'sys_indra_tiefe', gx: 836.5, gy: 195 },
+  { id: 'sys_calyx_grat', gx: 843.8, gy: 342 },
+  { id: 'sys_meridian_kern', gx: 851.1, gy: 489 },
   { id: 'zenith', gx: 671.2, gy: 219.1 },
-  { id: 'tiefsee', gx: 279.1, gy: 230.3 }
+  { id: 'tiefsee', gx: 279.1, gy: 230.3 },
+  { id: 'sysn_zephond', gx: 177.1, gy: 345.2 },
+  { id: 'sysn_draora', gx: 581.5, gy: 274.6 },
+  { id: 'sysn_selion', gx: 689.5, gy: 381.6 },
+  { id: 'sysn_obenael', gx: 704.7, gy: 50.7 },
+  { id: 'sysn_xenax', gx: 425.3, gy: 327.8 },
+  { id: 'sysn_kelyra', gx: 627.7, gy: 339.6 },
+  { id: 'sysn_ivaris', gx: 249.1, gy: 131.7 },
+  { id: 'sysn_kazael', gx: 531.9, gy: 328.6 },
+  { id: 'sysn_xenoth', gx: 161.1, gy: 149.8 },
+  { id: 'sysn_veloth', gx: 378.1, gy: 111.5 },
+  { id: 'sysn_noresh', gx: 551.3, gy: 368 },
+  { id: 'sysn_lunyra', gx: 109.4, gy: 503.3 },
+  { id: 'sysn_raelese', gx: 257.7, gy: 85.6 },
+  { id: 'sysn_fenonde', gx: 252, gy: 393 },
+  { id: 'sysn_selyx', gx: 534.5, gy: 71.1 },
+  { id: 'sysn_vexora', gx: 568.2, gy: 236.3 },
+  { id: 'sysn_joryn', gx: 438.4, gy: 391.6 },
+  { id: 'sysn_karis', gx: 183.6, gy: 303.4 },
+  { id: 'sysn_voroth', gx: 769.5, gy: 498.9 },
+  { id: 'sysn_ophiar', gx: 445.9, gy: 448.9 }
 ];
-const SYSTEMS = SYSTEM_COORDS.map(s => s.id);
+const BASE_SYSTEM_COUNT = SYSTEM_COORDS.length;
+// --- Wöchentlich wachsende Galaxie, serverseitig nachgerechnet ---------------------------------
+// Das Frontend hängt jeden Montag zwei Systeme an (Abschnitt „Wöchentlich wachsende Galaxie" in
+// weltraum_kolonie.html). Die 69 Basissysteme nachzutragen allein hätte die Lücke deshalb nur für
+// einen Moment geschlossen: Heute laufen bereits Wochensysteme mit, und es werden jede Woche zwei
+// mehr, bis zum Deckel 208. Ein Paritätstest über die statischen Listen hätte am Montag darauf
+// nicht angeschlagen, obwohl die Galaxien wieder auseinandergelaufen wären.
+//
+// Übernommen wird NUR, was der Server braucht: id, gx, gy. Namen und Planeten bleiben im Frontend.
+// Die hängen an einem Zufallsgenerator mit festem Startwert, und den hier zu spiegeln hieße, eine
+// zweite Kopie zu pflegen, die abdriften kann – genau der Fallstrick, der diese Datei schon dreimal
+// erwischt hat. Position und ID dagegen sind reine Geometrie aus dem Index und deshalb beidseitig
+// gefahrlos berechenbar; test_systemparitaet.js vergleicht sie Zahl für Zahl.
+const WEEKLY_SYSTEMS_PER_WEEK = 2;
+const WEEKLY_SYSTEM_EPOCH = Date.UTC(2026, 6, 20);   // Montag, 20.07.2026, 00:00 UTC – wie im Frontend
+const WEEKLY_SYSTEM_MAX = 208;
+const WEEK_MS = 7 * 24 * 3600 * 1000;
+function weeklySystemCount(now) {
+  const wochen = Math.floor(((now || Date.now()) - WEEKLY_SYSTEM_EPOCH) / WEEK_MS);
+  if (wochen < 0) return 0;
+  return Math.min(WEEKLY_SYSTEM_MAX, (wochen + 1) * WEEKLY_SYSTEMS_PER_WEEK);
+}
+// Mittelpunkt und Außenradius der BASIS-Galaxie. Bewusst über die ersten BASE_SYSTEM_COUNT
+// Einträge statt über SYSTEM_COORDS: Sonst würde der Ring mit jedem angehängten Wochensystem
+// wandern, und dieselbe Systemnummer läge nächste Woche woanders als im Frontend.
+const WEEKLY_RING = (function () {
+  const basis = SYSTEM_COORDS.slice(0, BASE_SYSTEM_COUNT);
+  let sx = 0, sy = 0;
+  for (const s of basis) { sx += s.gx; sy += s.gy; }
+  const cx = sx / basis.length, cy = sy / basis.length;
+  let rMax = 0;
+  for (const s of basis) rMax = Math.max(rMax, Math.hypot(s.gx - cx, s.gy - cy));
+  return { cx, cy, r0: rMax + 45 };
+})();
+// Goldener Winkel auf einem Ring, dessen Fläche linear mit der Systemzahl wächst – Zeile für Zeile
+// dieselbe Formel wie buildWeeklySystem() im Frontend.
+function weeklySystemCoord(i) {
+  const winkel = i * 2.39996323;
+  const radius = Math.sqrt(WEEKLY_RING.r0 * WEEKLY_RING.r0 + (i + 1) * 700);
+  return {
+    id: 'sysw_' + i,
+    gx: Math.round((WEEKLY_RING.cx + Math.cos(winkel) * radius) * 10) / 10,
+    gy: Math.round((WEEKLY_RING.cy + Math.sin(winkel) * radius) * 10) / 10
+  };
+}
+
+const SYSTEMS = [];
 // Nachbarn eines Systems: die k nächstgelegenen anderen Systeme (euklidische Distanz auf der Karte).
 // Wird für Fraktions-Expansion (nur in benachbarte Systeme) genutzt.
 const SYSTEM_NEIGHBORS = {};
-(function computeNeighbors() {
-  const K = 4;
+const SYSTEM_COORD_BY_ID = {};
+const SYSTEM_NEIGHBOR_K = 4;
+// Die drei Tabellen werden IN PLACE neu befüllt, nie neu zugewiesen: An einem Dutzend Stellen im
+// Server hängen Referenzen genau auf diese Objekte. Ein `SYSTEMS = [...]` ließe sie alle auf den
+// alten Stand zeigen, und der Fehler wäre erst Wochen später an einer Expansion zu sehen.
+function rebuildSystemTables() {
+  SYSTEMS.length = 0;
+  for (const k in SYSTEM_NEIGHBORS) delete SYSTEM_NEIGHBORS[k];
+  for (const k in SYSTEM_COORD_BY_ID) delete SYSTEM_COORD_BY_ID[k];
+  for (const s of SYSTEM_COORDS) { SYSTEMS.push(s.id); SYSTEM_COORD_BY_ID[s.id] = s; }
   for (const s of SYSTEM_COORDS) {
     const dists = SYSTEM_COORDS
       .filter(o => o.id !== s.id)
       .map(o => ({ id: o.id, d: Math.hypot(o.gx - s.gx, o.gy - s.gy) }))
       .sort((a, b) => a.d - b.d);
-    SYSTEM_NEIGHBORS[s.id] = dists.slice(0, K).map(x => x.id);
+    SYSTEM_NEIGHBORS[s.id] = dists.slice(0, SYSTEM_NEIGHBOR_K).map(x => x.id);
   }
-})();
+}
+// Hängt die bis jetzt fälligen Wochensysteme an – nur anhängen, nie entfernen, damit ein einmal
+// erobertes oder besiedeltes System nie unter jemandem weggeräumt wird. Der Neuaufbau der
+// Nachbarschaften ist O(n²) und läuft deshalb nur beim Wochenwechsel, nicht in jedem Takt.
+let weeklySystemsBuilt = 0;
+function syncWeeklySystems(now) {
+  const soll = weeklySystemCount(now);
+  if (soll <= weeklySystemsBuilt) return 0;
+  for (let i = weeklySystemsBuilt; i < soll; i++) SYSTEM_COORDS.push(weeklySystemCoord(i));
+  const dazu = soll - weeklySystemsBuilt;
+  weeklySystemsBuilt = soll;
+  rebuildSystemTables();
+  return dazu;
+}
+rebuildSystemTables();
+syncWeeklySystems(Date.now());
 const HOME_SLOTS_PER_SYSTEM = 8;
-const SYSTEM_COORD_BY_ID = {};
-for (const s of SYSTEM_COORDS) SYSTEM_COORD_BY_ID[s.id] = s;
 // Neue Spieler bewusst weit weg von bestehenden Kolonien einteilen, statt gleichverteilt-zufällig.
 // Regeln (in dieser Reihenfolge): (1) Systeme mit den WENIGSTEN Bewohnern zuerst – so bekommt jedes
 // System erst einen Spieler, bevor sich zwei ein System teilen; (2) bei gleicher Bewohnerzahl das
@@ -1291,7 +1400,7 @@ function assignHomeSlot() {
   // Systeme mit noch freiem Slot
   const candidates = SYSTEMS.filter(sys => (occupancy[sys] || 0) < HOME_SLOTS_PER_SYSTEM);
   if (!candidates.length) {
-    // Alle Systeme voll (praktisch nie: 41 Systeme × 8 Slots) – irgendeinen Slot vergeben.
+    // Alle Systeme voll (praktisch nie: 69+ Systeme × 8 Slots) – irgendeinen Slot vergeben.
     return { system: SYSTEMS[Math.floor(Math.random() * SYSTEMS.length)], slot: Math.floor(Math.random() * HOME_SLOTS_PER_SYSTEM) };
   }
 
@@ -4093,6 +4202,12 @@ function resolveBountyServer() {
 function galaxyTick() {
   const g = loadOrInitGalaxy();
   g.lastTick = Date.now();
+  // Wochenwechsel im laufenden Server: Ohne diese Zeile kämen die neuen Systeme erst beim nächsten
+  // Neustart dazu – und der Server läuft zwischen zwei Deploys durchaus wochenlang durch. Dann
+  // hätte das Frontend Montagfrüh zwei Systeme mehr als der Server, also wieder genau die Lücke,
+  // die hier gerade geschlossen wurde.
+  const neueSysteme = syncWeeklySystems(Date.now());
+  if (neueSysteme) console.log(`[galaxy] ${neueSysteme} Wochensystem(e) nachgezogen, jetzt ${SYSTEMS.length} Systeme`);
   pruneChatKeys();   // alte Chat-Schlüssel wegräumen - siehe CHAT_KEEP_PER_CHANNEL
   updateHallOfFameServer();
   resolveWeeklyLeagueServer();

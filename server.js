@@ -4144,6 +4144,101 @@ const RK_BOLLWERK_FEHLSCHLAG = 60;
 
 // Bewusst mehrzeilig: Der Testextraktor schneidet Funktionen bis zur ersten Zeile, die nur aus `}`
 // besteht - eine Einzeiler-Funktion wuerde die naechste mitverschlucken.
+// ===== Dienstgrade, Frontmarken, Wochendeckel (10.08.2026) ====================================
+// Die sechs Handlungen zahlen Kriegspunkte an die Front. Sie erzeugen aber bisher nichts, was ueber
+// den einzelnen Frontabschnitt hinaus BLEIBT - und ein Balken, der irgendwann kippt, ist als
+// einziges Langzeitziel duenn. Zwei Groessen kommen deshalb dazu, beide serverseitig gefuehrt:
+//
+//   DIENSTPUNKTE je Fraktion (rk.dienst[userId][fid]) - die Lebenszeitsumme aller WIRKSAMEN
+//   Kriegspunkte, die ein Konto fuer diese Fraktion beigetragen hat. Sie wird nie zurueckgesetzt.
+//   Daraus faellt der Dienstgrad, sechs Stufen.
+//
+//   FRONTMARKEN (rk.marken[userId]) - eine Waehrung mit WOCHENdeckel. Sie ist der Grund, ueberhaupt
+//   weiterzumachen, wenn die Front gerade steht.
+//
+// WARUM IN db.galaxy UND NICHT IN db.private: Beides ist wertvoll und darf vom Client nicht
+// beschreibbar sein. db.galaxy wird von keinem Request-Body angefasst. Der private Bereich war es
+// bis heute ebenfalls nicht - genau das hat sich als falsch herausgestellt (siehe die '__'-Sperre
+// in PUT /api/storage/:key); der Weltzustand ist der prinzipiell richtige Ort und braucht kein
+// zusaetzliches Vertrauen in eine Praefix-Regel.
+//
+// Die Schwellen stehen bewusst hoch. Ein Konto kann an EINER Front hoechstens 210 wirksame Punkte
+// am Tag beitragen (Tagesdegression), der Marschall bei 11.000 ist damit rund zweiundfuenfzig Tage
+// taeglichen Beitragens fuer EINE Fraktion. Das Konzeptpapier nannte 25/75/175/350/650/1100 - diese
+// Zahlen waeren in weniger als einem Tag durchlaufen gewesen; korrigiert und im Papier vermerkt.
+const RK_DIENSTGRADE = [
+  { nr: 1, key: 'melder',     name: 'Melder',              schwelle: 250 },
+  { nr: 2, key: 'feldwacht',  name: 'Feldwacht',           schwelle: 750 },
+  { nr: 3, key: 'grenzwacht', name: 'Grenzwächter',        schwelle: 1750 },
+  { nr: 4, key: 'hauptmann',  name: 'Frontenhauptmann',    schwelle: 3500 },
+  { nr: 5, key: 'oberst',     name: 'Frontoberst',         schwelle: 6500 },
+  { nr: 6, key: 'marschall',  name: 'Marschall der Ränder', schwelle: 11000 }
+];
+// Eine Frontmarke je 200 wirksame Kriegspunkte, hoechstens zwoelf in der Woche. Ein Konto, das an
+// beiden Fronten taeglich ausschoepft, kommt auf rund 420 wirksame Punkte am Tag und damit nach gut
+// fuenf Tagen an den Wochendeckel - wer gelegentlich beitraegt, sammelt drei bis sechs.
+const RK_MARKE_JE_PUNKTE = 200;
+const RK_MARKEN_WOCHE = 12;
+// Das Frontlager. Hier stehen nur PREIS und Dienstgrad-Schranke; WAS ein Posten gibt, weiss allein
+// das Frontend (FRONT_LAGER). Der Server muss den Inhalt nicht kennen, um die Waehrung zu
+// schuetzen - und eine zweite Katalogkopie waere genau die Doppelpflege, vor der die Hausregeln
+// warnen. Geprueft wird die Uebereinstimmung in tests/test_randkriege_dienstgrade.js.
+const RK_LAGER = {
+  depot:      { kosten: 2,  grad: 1 },
+  patrouille: { kosten: 3,  grad: 2 },
+  peilung:    { kosten: 3,  grad: 3 },
+  lazarett:   { kosten: 4,  grad: 3 },
+  bergung:    { kosten: 5,  grad: 4 },
+  anleihe:    { kosten: 6,  grad: 5 },
+  abzeichen:  { kosten: 10, grad: 6 }
+};
+function rkGradAus(punkte) {
+  let treffer = 0;
+  for (const g of RK_DIENSTGRADE) if ((punkte || 0) >= g.schwelle) treffer = g.nr;
+  return treffer;
+}
+// Der hoechste Dienstgrad ueber alle Fraktionen. Die Grade selbst sind je Fraktion getrennt - das
+// Lager oeffnet aber, sobald man IRGENDWO so weit ist; sonst muesste man sich fuer eine Fraktion
+// entscheiden, bevor man weiss, was es dort zu holen gibt.
+function rkBesterGrad(rk, userId) {
+  const d = (rk.dienst || {})[userId] || {};
+  let best = 0;
+  for (const fid in d) best = Math.max(best, rkGradAus(d[fid]));
+  return best;
+}
+// Wochenkonto, gebaut wie rkTagesKonto - nur mit serverWeekKey als Stempel. Es zaehlt, wie viele
+// Marken in dieser Woche schon verdient wurden; der Bestand selbst liegt daneben in rk.marken und
+// wird vom Wochenwechsel NICHT angefasst.
+function rkWochenKonto(rk) {
+  const woche = serverWeekKey(Date.now());
+  if (!rk.woche || rk.woche.stempel !== woche) rk.woche = { stempel: woche, konten: {} };
+  if (!rk.woche.konten) rk.woche.konten = {};
+  return rk.woche;
+}
+// Schreibt beides fort. Wird NUR aus rkBeitrag heraus aufgerufen, unmittelbar nachdem der Beitrag
+// wirklich im Puffer gelandet ist - eine zweite Aufrufstelle waere die naechste Doppelbuchung.
+function rkGutschrift(rk, userId, seiteId, wirksam) {
+  if (!(wirksam > 0)) return;
+  if (!rk.dienst) rk.dienst = {};
+  const d = rk.dienst[userId] || (rk.dienst[userId] = {});
+  d[seiteId] = (d[seiteId] || 0) + wirksam;
+
+  const w = rkWochenKonto(rk);
+  const k = w.konten[userId] || (w.konten[userId] = { marken: 0, rest: 0 });
+  if (k.marken >= RK_MARKEN_WOCHE) return;   // am Deckel laeuft nichts mehr auf
+  k.rest += wirksam;
+  while (k.rest >= RK_MARKE_JE_PUNKTE && k.marken < RK_MARKEN_WOCHE) {
+    k.rest -= RK_MARKE_JE_PUNKTE;
+    k.marken++;
+    if (!rk.marken) rk.marken = {};
+    rk.marken[userId] = (rk.marken[userId] || 0) + 1;
+  }
+  // Der Rest wird MITGENOMMEN, nicht verworfen: Wer 199 Punkte beitraegt, hat sie beim naechsten
+  // Mal noch. Nur am Wochendeckel bleibt er stehen, sonst spraenge in der neuen Woche sofort eine
+  // Marke heraus, die niemand in dieser Woche verdient hat.
+  if (k.marken >= RK_MARKEN_WOCHE) k.rest = 0;
+}
+
 function rkTagesSchluessel() {
   return new Date().toISOString().slice(0, 10);   // UTC-Tag, damit der Schnitt fuer alle gleich faellt
 }
@@ -4217,6 +4312,10 @@ function rkBeitrag(g, seiteId, userId, rohPunkte, opt) {
   // nicht fuer die Mehr-Konten-Sperre im Tick.
   if (!eintrag.beitragende) eintrag.beitragende = {};
   eintrag.beitragende[userId] = { seite: seiteId, ts: Date.now() };
+  // Dienstpunkte und Frontmarken haengen an genau dieser Stelle - hier ist der Beitrag angekommen.
+  // Nicht in den Endpunkten: es gibt zwei davon (Bollwerk und Handlungen), und der naechste haette
+  // es vergessen.
+  rkGutschrift(rk, userId, seiteId, wirksam);
   return { sys: eintrag.sys, punkte: wirksam, roh: rohPunkte, tagesSumme: konto[frontKey] };
 }
 
@@ -5172,8 +5271,19 @@ function galaxyFuerClient(g, userId) {
   const basis = (db.private[userId] && db.private[userId].__rkBasis) || {};
   const meineBasis = {};
   for (const h of Object.values(RK_HANDLUNGEN)) meineBasis[h.feld] = basis[h.feld] || 0;
+  // Dienstpunkte und Markenbestand gehen NUR fuer den Abrufenden raus - fremde Staende sind
+  // niemandes Sache und waeren zugleich eine Einladung, Konten gezielt auszusitzen.
+  const wocheKonto = (rk.woche && rk.woche.stempel === serverWeekKey(Date.now())
+    && rk.woche.konten && rk.woche.konten[userId]) || { marken: 0, rest: 0 };
+  const meinKonto = {
+    marken: (rk.marken || {})[userId] || 0,
+    dienst: Object.assign({}, (rk.dienst || {})[userId] || {}),
+    wocheMarken: wocheKonto.marken || 0,
+    wocheDeckel: RK_MARKEN_WOCHE,
+    markeJePunkte: RK_MARKE_JE_PUNKTE
+  };
   return Object.assign({}, g, { randkriege: {
-    stand: rk.stand, fronten, meinTag, meineBasis,
+    stand: rk.stand, fronten, meinTag, meineBasis, meinKonto,
     tagesBreite: RK_TAGESSTUFEN.reduce((a, st) => a + st[0], 0),
     nachschubZuletzt: (db.private[userId] && db.private[userId].__rkNachschubAt) || 0
   } });
@@ -7159,6 +7269,33 @@ app.post('/api/randkriege/handlung', authMiddleware, async (req, res) => {
   await saveDb();
   return res.json({ ok: true, art, punkte: erg.punkte, roh: erg.roh, sys: erg.sys,
     einheiten, offenDanach: offen - einheiten, name: def.name });
+});
+
+// ===== Das Frontlager: Frontmarken gegen Sachwerte ==============================================
+// Der Server prueft Dienstgrad und Preis und bucht ab. WAS der Posten gibt, wendet der Client an -
+// dieselbe Aufteilung wie beim Fraktionsladen, nur dass die Waehrung hier serverseitig gefuehrt
+// wird. Wer den Preis unterschieben wollte, kommt nicht durch: er steht in RK_LAGER, nicht im
+// Request. Was der Client mit dem gekauften Posten macht, ist wie ueberall im Spiel seine Sache -
+// die knappe Groesse ist die Marke, und die kontrolliert der Server.
+app.post('/api/randkriege/lager', authMiddleware, async (req, res) => {
+  const posten = String((req.body || {}).posten || '');
+  const def = RK_LAGER[posten];
+  if (!def) return res.status(400).json({ error: 'Unbekannter Posten.' });
+
+  const g = loadOrInitGalaxy();
+  const rk = loadOrInitRandkriege(g);
+  const grad = rkBesterGrad(rk, req.userId);
+  if (grad < def.grad) {
+    return res.status(403).json({ error: 'Dafür fehlt dir der Dienstgrad.', noetig: def.grad, deiner: grad });
+  }
+  const bestand = (rk.marken || {})[req.userId] || 0;
+  if (bestand < def.kosten) {
+    return res.status(400).json({ error: 'Nicht genug Frontmarken.', kosten: def.kosten, bestand });
+  }
+  if (!rk.marken) rk.marken = {};
+  rk.marken[req.userId] = bestand - def.kosten;
+  await saveDb();
+  return res.json({ ok: true, posten, kosten: def.kosten, bestand: rk.marken[req.userId] });
 });
 
 // ============ GitHub-Deploy-Webhook: sofortiges Update statt Warten auf den Cron-Job ============

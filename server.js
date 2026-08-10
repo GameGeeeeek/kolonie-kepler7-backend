@@ -4026,6 +4026,151 @@ function pushGalaxyNews(icon, text) {
 function occupiedSystems() {
   return new Set(Object.values(db.users).filter(u => u.homeSystem).map(u => u.homeSystem));
 }
+// ===== Die Randkriege: Kontrollpunkte an zwei Fronten (10.08.2026) =============================
+//
+// Bis hierher bewegte sich Territorium in Spruengen: Expansion nimmt ein System, ein Krieg nimmt
+// eines. Dazwischen passiert nichts Sichtbares. Die Randkriege legen eine LANGSAME Groesse darueber:
+// je umkaempftem Grenzsystem ein Wert von 0 bis 1000, der sich im Weltentakt bewegt.
+//
+//    0 ────────── 300 ─────────────────── 700 ────────── 1000
+//    Seite B haelt   umkaempft: niemand zieht Nutzen     Seite A haelt
+//
+// Die breite Mitte ist Absicht: Dem Gegner ein System WEGzunehmen kostet 300 Punkte und ist damit
+// ein erreichbares Zwischenziel; es zu HALTEN verlangt 700. Fronten bewegen sich dadurch spuerbar,
+// ohne dass Besitz staendig hin- und herkippt.
+//
+// Die Paarungen stehen fest (FACTION_RIVALS, gespiegelt aus dem Frontend): Kartell gegen Schatten,
+// Legion gegen Void. Zwei Fronten statt sechs Paarungen - das haelt die Karte lesbar.
+const FACTION_RIVALS = { kartell: 'schatten', schatten: 'kartell', legion: 'void', void: 'legion' };
+const RK_FRONT_PAARE = [['kartell', 'schatten'], ['legion', 'void']];
+const RK_SYSTEME_JE_FRONT = 5;
+const RK_MAX = 1000;
+const RK_UNTEN = 300, RK_OBEN = 700;
+const RK_TICK_DECKEL = 3;        // hoechstens 3 Kontrollpunkte je System und Weltentakt
+const RK_MIN_BEITRAGENDE = 3;    // verschiedene Spieler, damit eine Schwelle faellt
+const RK_BEITRAG_FENSTER = 24 * 3600 * 1000;
+
+// Grenzsysteme zwischen zwei Fraktionen: gehalten von einer, angrenzend an die andere. Dieselbe
+// Bedingung wie beim Krieg - nur dort verschiebt eine Bewegung wirklich eine Grenze.
+function rkGrenzsysteme(g, factions, aId, bId) {
+  const a = factions[aId], b = factions[bId];
+  if (!a || !b) return [];
+  const tabu = new Set([...occupiedSystems(), ...Object.keys(g.controlledSystems || {})]);
+  const treffer = [];
+  for (const [halter, gegner] of [[a, b], [b, a]]) {
+    for (const sys of halter.systems) {
+      if (tabu.has(sys) || g.collapsedSystems[sys]) continue;
+      if ((SYSTEM_NEIGHBORS[sys] || []).some(nb => gegner.systems.includes(nb))) {
+        treffer.push({ sys, halter: halter.id });
+      }
+    }
+  }
+  return treffer;
+}
+function loadOrInitRandkriege(g) {
+  if (!g.randkriege) g.randkriege = { fronten: [], stand: 0 };
+  if (!Array.isArray(g.randkriege.fronten)) g.randkriege.fronten = [];
+  return g.randkriege;
+}
+// Wie viele verschiedene Konten in den letzten 24 Stunden ueberhaupt gespielt haben. Die Sperre
+// gegen das Grosskonto skaliert damit - dasselbe Vorgehen wie bei Wochen- und Saisonliga, die
+// ihre Teilnehmerschwellen ebenfalls an der tatsaechlichen Beteiligung ausrichten. Auf einem
+// kleinen Server soll eine Front nicht deshalb stillstehen, weil es gar keine drei Spieler gibt.
+function rkAktiveSpieler() {
+  const grenze = Date.now() - RK_BEITRAG_FENSTER;
+  let n = 0;
+  for (const u of Object.values(db.users)) if ((u.lastSeen || 0) > grenze) n++;
+  return n;
+}
+// Ein Takt der Front. Reihenfolge ist wichtig:
+//   1. ungueltig gewordene Frontsysteme ersetzen (Besitzer gewechselt, kollabiert, Spieler drauf)
+//   2. auffuellen, falls die Front noch nicht fuenf Systeme hat
+//   3. Puffer beider Seiten gegeneinander AUSLOESCHEN - gleich starke Gegenseiten bewegen nichts
+//   4. Grundbewegung aus dem Staerkeverhaeltnis dazu, alles zusammen auf den Tickdeckel klemmen
+//   5. Schwellen pruefen
+function rkTick(g) {
+  const rk = loadOrInitRandkriege(g);
+  const factions = loadOrInitFactions(g);
+  const aktive = rkAktiveSpieler();
+  const jetzt = Date.now();
+  rk.stand = jetzt;
+
+  for (const [aId, bId] of RK_FRONT_PAARE) {
+    let front = rk.fronten.find(f => f.a === aId && f.b === bId);
+    if (!front) { front = { a: aId, b: bId, systeme: [] }; rk.fronten.push(front); }
+    const grenze = rkGrenzsysteme(g, factions, aId, bId);
+    const gueltig = new Set(grenze.map(x => x.sys));
+
+    // (1) Was keine Grenze mehr ist, faellt raus. Der Wert wandert NICHT mit an ein anderes System -
+    // er gehoert zu diesem einen Sektor, und das Ringen darum ist vorbei.
+    front.systeme = front.systeme.filter(e => gueltig.has(e.sys));
+
+    // (2) Auffuellen. Die Reihenfolge der Kandidaten ist stabil (Systemliste), damit dieselbe Lage
+    // nicht bei jedem Takt eine andere Front ergibt.
+    for (const kand of grenze) {
+      if (front.systeme.length >= RK_SYSTEME_JE_FRONT) break;
+      if (front.systeme.some(e => e.sys === kand.sys)) continue;
+      // Startwert: knapp im Besitz dessen, der es haelt - nicht am Anschlag, damit die erste
+      // Bewegung sofort sichtbar ist.
+      front.systeme.push({ sys: kand.sys, kp: kand.halter === aId ? RK_OBEN + 50 : RK_UNTEN - 50,
+        puffer: { a: 0, b: 0 }, beitragende: {} });
+    }
+
+    const strA = (factions[aId] || {}).strength || 1;
+    const strB = (factions[bId] || {}).strength || 1;
+    for (const e of front.systeme) {
+      if (!e.puffer) e.puffer = { a: 0, b: 0 };
+      if (!e.beitragende) e.beitragende = {};
+      // (3) Ausloeschen. Was uebrig bleibt, sind Kriegspunkte; vier davon ergeben einen Kontrollpunkt.
+      const netto = (e.puffer.a - e.puffer.b) / 4;
+      e.puffer.a = 0; e.puffer.b = 0;
+      // (4) Grundbewegung aus dem Staerkeverhaeltnis. Ohne sie stuende jede Front still, solange
+      // niemand beitraegt - und der Spieler saehe eine Anzeige, die sich nie ruehrt.
+      const grund = Math.max(-1, Math.min(1, (strA - strB) * 0.25));
+      const bewegung = Math.max(-RK_TICK_DECKEL, Math.min(RK_TICK_DECKEL, netto + grund));
+      const vorher = e.kp;
+      e.kp = Math.max(0, Math.min(RK_MAX, e.kp + bewegung));
+
+      // Alte Beitraege aus dem 24-Stunden-Fenster werfen. Format je Eintrag: { seite, ts } - die
+      // Seite wird gebraucht, weil die Sperre unten nur die GEWINNENDE Seite zaehlt.
+      for (const uid in e.beitragende) {
+        const b = e.beitragende[uid];
+        if (!b || typeof b !== 'object' || (b.ts || 0) < jetzt - RK_BEITRAG_FENSTER) delete e.beitragende[uid];
+      }
+
+      // (5) Schwellen. Geprueft wird nur der UEBERGANG, nicht der Zustand - sonst wuerde bei jedem
+      // Takt erneut eine Meldung erzeugt, solange der Wert oben steht.
+      const zielId = e.kp >= RK_OBEN && vorher < RK_OBEN ? aId
+                   : (e.kp <= RK_UNTEN && vorher > RK_UNTEN ? bId : null);
+      if (!zielId) continue;
+      const gewinner = factions[zielId], verlierer = factions[zielId === aId ? bId : aId];
+      if (!gewinner || !verlierer || !verlierer.systems.includes(e.sys)) continue;
+      if (verlierer.systems.length < 2) continue;   // niemand wird von der Karte geloescht
+
+      // Die strukturelle Sperre: Ein Besitzwechsel, an dem Spieler beteiligt waren, braucht
+      // MEHRERE. Ein Einzelkonto drueckt bis 699 und bleibt dort stehen.
+      //
+      // Gezaehlt wird nur die GEWINNENDE Seite. Wuerde man alle Beitragenden zaehlen, koennte ein
+      // einzelner Gegner die Front einfrieren, indem er einen einzigen Punkt beitraegt.
+      //
+      // Und die Schranke skaliert mit der Beteiligung: min(3, aktive Spieler). Auf einem Server mit
+      // zwei aktiven Konten soll die Front nicht deshalb stehenbleiben, weil es gar keine drei gibt.
+      const aufGewinnerseite = Object.values(e.beitragende).filter(v => v && v.seite === zielId).length;
+      const gebraucht = Math.min(RK_MIN_BEITRAGENDE, Math.max(1, aktive));
+      const spielerBeteiligt = Object.keys(e.beitragende).length > 0;
+      if (spielerBeteiligt && aufGewinnerseite < gebraucht) {
+        // Kurz unter der Schwelle festhalten, sonst laeuft der Wert an den Anschlag und die Sperre
+        // waere beim naechsten Beitrag sofort wieder ueberschritten.
+        e.kp = zielId === aId ? RK_OBEN - 1 : RK_UNTEN + 1;
+        continue;
+      }
+      verlierer.systems = verlierer.systems.filter(x => x !== e.sys);
+      gewinner.systems.push(e.sys);
+      pushGalaxyNews('ti-flag', gewinner.name + ' hat die Front bei ' + e.sys + ' durchbrochen und das System von ' + verlierer.name + ' übernommen.');
+    }
+  }
+}
+
 // ===== Fraktionskrieg mit echtem Einsatz (10.08.2026) ==========================================
 // Vorher war activeWar Kulisse. Diese beiden Funktionen verbinden ihn mit f.systems.
 //
@@ -4630,6 +4775,12 @@ function galaxyTick() {
     g.worldBoss = null;
   }
   if (!g.worldBoss && Math.random() < 0.10) spawnWorldBoss(g);
+
+  // Die Front zuletzt: Expansion, Rueckeroberung und Kriegsauflösung haben den Besitzstand dieses
+  // Takts bereits festgelegt. Rechnete die Front davor, wuerde sie auf einem Stand arbeiten, den es
+  // am Ende des Takts gar nicht mehr gibt - und ein gerade eroberter Sektor stuende einen Takt lang
+  // mit dem Kontrollwert seines Vorbesitzers da.
+  rkTick(g);
 
   checkLeaderboardOvertakes();
 

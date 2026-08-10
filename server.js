@@ -2227,18 +2227,36 @@ function allianzForschungBonus(save, tabelle) {
   }
   return b;
 }
+// WEICHER DECKEL - MUSS ZEICHENGLEICH ZUM FRONTEND BLEIBEN (weltraum_kolonie.html,
+// `function weicherDeckel`). Seit v8.468.0 laufen dort die Nicht-PvP-Töpfe darüber; die
+// PvP-Töpfe (Angriff, Verteidigung, Schiffsmodul-Angriff, Überfall-Schutz) blieben bewusst hart,
+// WEIL dieser Server sie mitrechnet und eine einseitige Umstellung Client und Server im Kampf
+// verschieden rechnen ließe. Mit dieser Änderung wechseln beide Seiten gemeinsam.
+//
+// Wer die Formel hier ODER dort anfasst, muss die andere Seite mitziehen - tests/test_pvp_deckel.js
+// im Frontend zieht BEIDE Fassungen aus den Dateien und vergleicht sie über einen Wertebereich,
+// schlägt also an, sobald sie auseinanderlaufen.
+const UEBERLAUF_ANTEIL = 0.25;
+function weicherDeckel(roh, deckel, spielraum) {
+  const r = Math.max(0, roh || 0);
+  if (!(deckel > 0)) return r;
+  if (r <= deckel) return r;
+  const sp = (spielraum === undefined) ? deckel * UEBERLAUF_ANTEIL : spielraum;
+  if (!(sp > 0)) return deckel;
+  return deckel + sp * (1 - Math.exp(-(r - deckel) / sp));
+}
 function attackBonusGroup(save) {
   let b = combatBonusCommon(save);
   b += Math.min(5, save.pirateLairPrestige || 0) * 0.02; // Piratennest-Prestige: NUR Angriff
   b += admiralBonus(save);                               // Admiral: voll auf Angriff
   b += allianzForschungBonus(save, ALLIANZ_FORSCHUNG_ATK);
-  return Math.min(1.0, b);
+  return weicherDeckel(b, 1.0);
 }
 function defenseBonusGroup(save) {
   let b = combatBonusCommon(save);
   b += admiralBonus(save) * 0.5; // Admiral: halbe Rate auf Verteidigung
   b += allianzForschungBonus(save, ALLIANZ_FORSCHUNG_DEF);
-  return Math.min(1.0, b);
+  return weicherDeckel(b, 1.0);
 }
 // Muss exakt synchron zu SHIP_SCORE_WEIGHTS im Frontend bleiben (dort die eigentliche Quelle für
 // computeScore()) - bei Änderungen dort immer auch hier nachpflegen, sonst weicht der serverseitig
@@ -2831,7 +2849,9 @@ function shipModuleBonus(save, klasse, effect) {
     if (!def || def.klasse !== klasse || def.effect !== effect) continue;
     sum += def.base * (MODULE_RARITY_MULT[rarity] || 1) * moduleLevelMultServer(instKey) * moduleWertMultServer(instKey);
   }
-  return effect === 'atk' ? Math.min(1.0, sum) : sum;
+  // Schiffsmodul-Angriff: derselbe Deckel wie im Frontend an seinen beiden Verbrauchsstellen
+  // (schlachtschiffAtkMult, t2AtkMult) - dort steht dieselbe Umstellung.
+  return effect === 'atk' ? weicherDeckel(sum, 1.0) : sum;
 }
 function raidlossProtectionMult(save) {
   const eq = save.equippedModules || {};
@@ -2845,7 +2865,13 @@ function raidlossProtectionMult(save) {
       total += RAIDLOSS_MODULE_BASE * (MODULE_RARITY_MULT[rarity] || 1) * moduleLevelMultServer(instKey) * moduleWertMultServer(instKey);
     }
   }
-  return Math.max(0.4, 1 - (locations > 0 ? total / locations : 0));
+  // Überfall-Schutz: Der Boden 0,4 auf dem Multiplikator entsprach einem harten Deckel von 60 %
+  // auf dem BONUS. Jetzt derselbe weiche Deckel wie überall - am Bonus gerechnet, nicht am
+  // Multiplikator (sonst am falschen Ende, siehe die vier Zeit-Ersparnisse in v8.468.0).
+  // Der Multiplikator kann dadurch bis 0,25 sinken statt nur bis 0,40; erreicht wird das erst
+  // mit weit über der bisherigen Obergrenze gestapelten Schildmodulen.
+  const roh = locations > 0 ? total / locations : 0;
+  return 1 - weicherDeckel(roh, 0.6);
 }
 function defenseBreakdown(save) {
   const totals = {};

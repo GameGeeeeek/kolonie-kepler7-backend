@@ -2277,18 +2277,36 @@ function weicherDeckel(roh, deckel, spielraum) {
   if (!(sp > 0)) return deckel;
   return deckel + sp * (1 - Math.exp(-(r - deckel) / sp));
 }
+// AUSBAUBARER DECKEL (Schritt 2) - MUSS zeichengleich zum Frontend bleiben (dort ascBonus() und
+// deckelAusbauFn). Der Aufstiegs-Zweig 'grenzen' hebt jede Bonus-Obergrenze an; da der Server die
+// PvP-Toepfe mitrechnet, MUSS er denselben Faktor kennen - sonst gilt die verschobene Grenze nur
+// in der Anzeige und nicht im Kampf.
+//
+// Der Faktor steht bewusst an den AUFRUFSTELLEN und nicht in weicherDeckel: Die Paritaetspruefung
+// vergleicht genau diese Funktion. Steckte der Ausbau darin und auf der anderen Seite nicht, waeren
+// beide ohne Aufstieg identisch und mit Aufstieg verschieden - eine Abweichung, die der Test nicht
+// faende.
+const ASCENSION_SOFT_CAP = 10;
+const ASCENSION_LATE_RATE = 0.2;
+const DECKEL_AUSBAU_PRO_STUFE = 0.03;
+function ascBonusServer(save, key) {
+  const lvl = ((save && save.ascension && save.ascension.tree) || {})[key] || 0;
+  return lvl <= ASCENSION_SOFT_CAP ? lvl
+       : ASCENSION_SOFT_CAP + (lvl - ASCENSION_SOFT_CAP) * ASCENSION_LATE_RATE;
+}
+function deckelAusbauServer(save) { return 1 + DECKEL_AUSBAU_PRO_STUFE * ascBonusServer(save, 'grenzen'); }
 function attackBonusGroup(save) {
   let b = combatBonusCommon(save);
   b += Math.min(5, save.pirateLairPrestige || 0) * 0.02; // Piratennest-Prestige: NUR Angriff
   b += admiralBonus(save);                               // Admiral: voll auf Angriff
   b += allianzForschungBonus(save, ALLIANZ_FORSCHUNG_ATK);
-  return weicherDeckel(b, 1.0);
+  return weicherDeckel(b, 1.0 * deckelAusbauServer(save));
 }
 function defenseBonusGroup(save) {
   let b = combatBonusCommon(save);
   b += admiralBonus(save) * 0.5; // Admiral: halbe Rate auf Verteidigung
   b += allianzForschungBonus(save, ALLIANZ_FORSCHUNG_DEF);
-  return weicherDeckel(b, 1.0);
+  return weicherDeckel(b, 1.0 * deckelAusbauServer(save));
 }
 // Muss exakt synchron zu SHIP_SCORE_WEIGHTS im Frontend bleiben (dort die eigentliche Quelle für
 // computeScore()) - bei Änderungen dort immer auch hier nachpflegen, sonst weicht der serverseitig
@@ -2883,7 +2901,7 @@ function shipModuleBonus(save, klasse, effect) {
   }
   // Schiffsmodul-Angriff: derselbe Deckel wie im Frontend an seinen beiden Verbrauchsstellen
   // (schlachtschiffAtkMult, t2AtkMult) - dort steht dieselbe Umstellung.
-  return effect === 'atk' ? weicherDeckel(sum, 1.0) : sum;
+  return effect === 'atk' ? weicherDeckel(sum, 1.0 * deckelAusbauServer(save)) : sum;
 }
 function raidlossProtectionMult(save) {
   const eq = save.equippedModules || {};
@@ -2903,7 +2921,7 @@ function raidlossProtectionMult(save) {
   // Der Multiplikator kann dadurch bis 0,25 sinken statt nur bis 0,40; erreicht wird das erst
   // mit weit über der bisherigen Obergrenze gestapelten Schildmodulen.
   const roh = locations > 0 ? total / locations : 0;
-  return 1 - weicherDeckel(roh, 0.6);
+  return 1 - weicherDeckel(roh, 0.6 * deckelAusbauServer(save));
 }
 function defenseBreakdown(save) {
   const totals = {};

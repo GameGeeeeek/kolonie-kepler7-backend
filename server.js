@@ -1972,9 +1972,41 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
     return res.json({ key, value: finalValue, shared });
   }
 
+  // ===== Serverinterne Felder sind für den Client tabu (10.08.2026) ==============================
+  // Der private Bereich enthält nicht nur den Spielstand des Kontos, sondern siebzehn Felder, die
+  // AUSSCHLIESSLICH der Server führt und denen er beim Lesen vertraut: __rkBasis (wie viel
+  // Zählerfortschritt schon in Kriegspunkte umgetauscht wurde), __rkNachschubAt (die
+  // Vier-Stunden-Sperre der Nachschubspende), __pendingRewards (die Belohnungs-Warteschlange, deren
+  // ganzer Zweck es ist, dass der Server entscheidet und der Client nur ausführt),
+  // __attackShieldUntil, __lastAttackPush, __sabotageCooldowns und weitere.
+  //
+  // Diese Route schrieb bis heute JEDEN Schlüssel. Gemessen (tests/test_privatschluessel_http.js,
+  // Lauf am alten Stand) waren die Folgen konkret:
+  //   - Nach `PUT /api/storage/__rkBasis` mit {} ließ sich derselbe Zählerstand ein zweites Mal in
+  //     Kriegspunkte umtauschen (72 Punkte für Expeditionen, die schon abgerechnet waren) - der
+  //     Zusammenhang "du musst wirklich gespielt haben" war damit aufgehoben.
+  //   - Nach `PUT /api/storage/__rkNachschubAt` mit 0 lief die Nachschubspende erneut durch: Der
+  //     gefälschte Wert wird als { value, version } abgelegt, der Server rechnet damit
+  //     `objekt + MS - Date.now()`, das ergibt NaN, und `NaN > 0` ist falsch - der Vergleich fällt
+  //     also nach DURCHLASSEN.
+  //   - `GET /api/pending-rewards` lieferte danach `{ rewards: { value:"0", version:0 } }` statt
+  //     einer Liste. Fremde Belohnungen lassen sich so zwar nicht erzeugen (die Abholroute prüft
+  //     `list.length` und liefert dann null), aber die eigene Warteschlange wird zerstört.
+  //
+  // Die Sperre ist eng gezogen: Sie trifft nur das '__'-Präfix, unter dem der Server seine eigenen
+  // Felder führt. Der Spielstand (kepler7-save-v3) und jeder gewöhnliche Schlüssel bleiben
+  // schreibbar - nachgeprüft ist auch, dass das Frontend keinen einzigen '__'-Schlüssel schreibt
+  // (Suche in weltraum_kolonie.html: null Treffer). LESEN bleibt erlaubt: Es sind die eigenen Daten
+  // des Kontos, ein Lesezugriff ist keine Rechteausweitung, und eine Sperre dort würde nur
+  // Angriffsfläche gegen eine Funktion schaffen, die niemandem etwas gibt.
+  if (key.startsWith('__')) {
+    console.warn('[privat-reject] userId=' + req.userId + ' key=' + key);
+    return res.status(403).json({ error: 'Dieser Schlüssel wird vom Server geführt und kann nicht überschrieben werden.' });
+  }
+
   // Plausibilitäts-Check NUR für den eigentlichen Spielstand (siehe saveSanityViolation oben) - andere
-  // private Schlüssel (__reports, __pushSubscriptions, Einstellungen o.ä.) sind kein PvP-/Bestenlisten-
-  // relevanter Zustand und werden bewusst nicht eingeschränkt.
+  // private Schlüssel (Einstellungen o.ä.) sind kein PvP-/Bestenlisten-relevanter Zustand und werden
+  // bewusst nicht eingeschränkt.
   if (key === SAVE_KEY) {
     try {
       const violation = saveSanityViolation(JSON.parse(value));

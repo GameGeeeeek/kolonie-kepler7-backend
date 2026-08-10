@@ -4076,11 +4076,116 @@ function loadOrInitRandkriege(g) {
 // gegen das Grosskonto skaliert damit - dasselbe Vorgehen wie bei Wochen- und Saisonliga, die
 // ihre Teilnehmerschwellen ebenfalls an der tatsaechlichen Beteiligung ausrichten. Auf einem
 // kleinen Server soll eine Front nicht deshalb stillstehen, weil es gar keine drei Spieler gibt.
+//
+// FEHLER AUS DEM EIGENEN VORLAUF (behoben 10.08.2026): Hier stand `u.lastSeen`. Dieses Feld gibt es
+// auf den Benutzerobjekten gar nicht - der Zeitstempel liegt in db.shared['leaderboard:<id>'], und
+// jede andere Stelle im Server liest ihn ueber getUserLastSeen(). Die Funktion lieferte deshalb
+// IMMER 0, damit war `gebraucht` im Tick auf 1 geklemmt und die staerkste Sperre des ganzen
+// Entwurfs - "eine Schwelle faellt nur mit mehreren Konten" - praktisch aus. Der zugehoerige Test
+// hat es nicht gemerkt, weil sein Fixture das erfundene Feld einfach mitgesetzt hat: eine Annahme
+// gegen sich selbst geprueft. Seit der Behebung liest der Test denselben Weg wie der Server.
 function rkAktiveSpieler() {
   const grenze = Date.now() - RK_BEITRAG_FENSTER;
   let n = 0;
-  for (const u of Object.values(db.users)) if ((u.lastSeen || 0) > grenze) n++;
+  for (const u of Object.values(db.users)) if (getUserLastSeen(u.userId) > grenze) n++;
   return n;
+}
+
+// ===== Wie ein Spieler auf die Front wirkt (10.08.2026) =======================================
+// Ein Beitrag bewegt NIE sofort einen Kontrollpunkt. Er landet im Puffer seiner Seite und wird erst
+// im naechsten Weltentakt gegen den Puffer der Gegenseite ausgeloescht (rkTick, Schritt 3). Wer
+// zuletzt klickt, gewinnt dadurch nichts, und ein Ansturm auf die letzte Minute vor dem Takt bringt
+// genauso viel wie derselbe Beitrag eine Viertelstunde vorher.
+//
+// Tagesdegression: die ersten hundert Kriegspunkte je Front und Tag zaehlen voll, die naechsten
+// hundert zu 70 %, die dritten zu 40 %, danach nichts mehr. Der wirksame Tagesdeckel je Konto und
+// Front ist damit 100 + 70 + 40 = 210 Kriegspunkte, also gut 52 Kontrollpunkte (vier Kriegspunkte
+// ergeben einen). Der Entwurf hatte hier "265" stehen - das war schlicht falsch gerechnet und ist
+// im Konzeptpapier korrigiert; die Zahl steht jetzt an genau EINER Stelle, naemlich hier.
+const RK_TAGESSTUFEN = [[100, 1.0], [100, 0.7], [100, 0.4]];
+// Das Bollwerk ist die einzige Handlung, deren Ausgang ohnehin serverseitig faellt (Angriffskraft
+// gegen Fraktionsverteidigung in /api/faction/attack). Nur deshalb darf sie schwer wiegen. Alle
+// uebrigen Handlungen haengen am clientseitig gefuehrten Spielstand und bekommen bewusst kleine
+// Gewichte, statt einer Scheinvalidierung, die keine waere.
+const RK_BOLLWERK_ERFOLG = 250;
+const RK_BOLLWERK_FEHLSCHLAG = 60;
+
+// Bewusst mehrzeilig: Der Testextraktor schneidet Funktionen bis zur ersten Zeile, die nur aus `}`
+// besteht - eine Einzeiler-Funktion wuerde die naechste mitverschlucken.
+function rkTagesSchluessel() {
+  return new Date().toISOString().slice(0, 10);   // UTC-Tag, damit der Schnitt fuer alle gleich faellt
+}
+function rkTagesKonto(rk) {
+  const heute = rkTagesSchluessel();
+  if (!rk.tag || rk.tag.stempel !== heute) rk.tag = { stempel: heute, konten: {} };
+  if (!rk.tag.konten) rk.tag.konten = {};
+  return rk.tag;
+}
+// Wirksame Punkte aus rohen, gegeben was das Konto heute an dieser Front schon beigetragen hat.
+// Rein rechnend, ohne Zustand - deshalb einzeln pruefbar.
+function rkDegression(bisher, roh) {
+  let rest = roh, ab = Math.max(0, bisher), wirksam = 0;
+  for (const [breite, faktor] of RK_TAGESSTUFEN) {
+    if (rest <= 0) break;
+    const belegt = Math.min(breite, ab);
+    ab -= belegt;
+    const nimm = Math.min(rest, breite - belegt);
+    wirksam += nimm * faktor;
+    rest -= nimm;
+  }
+  return wirksam;
+}
+// Welcher Frontabschnitt bekommt den Beitrag? Erste Wahl ist das System, an dem der Spieler wirklich
+// gehandelt hat. Fehlt es (weil er es gerade selbst erobert hat und es damit aus der Front faellt),
+// geht der Beitrag an den Abschnitt, an dem die eigene Seite dem naechsten Schritt am naechsten ist -
+// so verfaellt kein Beitrag stillschweigend. Steht die eigene Seite ueberall schon oben, stuetzt er
+// den schwaechsten Abschnitt.
+function rkZielEintrag(front, seiteId, opt) {
+  const o = opt || {};
+  const kandidaten = (front.systeme || []).filter(e => e.sys !== o.ausserSys);
+  if (!kandidaten.length) return null;
+  if (o.wunschSys) {
+    const treffer = kandidaten.find(e => e.sys === o.wunschSys);
+    if (treffer) return treffer;
+  }
+  const istA = front.a === seiteId;
+  const offen = kandidaten.filter(e => istA ? e.kp < RK_OBEN : e.kp > RK_UNTEN);
+  const menge = offen.length ? offen : kandidaten;
+  return menge.reduce((best, e) => {
+    if (!best) return e;
+    if (offen.length) return (istA ? e.kp > best.kp : e.kp < best.kp) ? e : best;
+    return (istA ? e.kp < best.kp : e.kp > best.kp) ? e : best;
+  }, null);
+}
+// Traegt fuer `seiteId` bei. Gibt zurueck, was wirklich angekommen ist - der Aufrufer soll dem
+// Spieler die wirksame Zahl zeigen koennen und nicht die rohe, sonst waere die Degression unsichtbar.
+function rkBeitrag(g, seiteId, userId, rohPunkte, opt) {
+  if (!userId || !(rohPunkte > 0)) return null;
+  const paar = RK_FRONT_PAARE.find(p => p[0] === seiteId || p[1] === seiteId);
+  if (!paar) return null;
+  const rk = loadOrInitRandkriege(g);
+  const front = rk.fronten.find(f => f.a === paar[0] && f.b === paar[1]);
+  // Vor dem ersten Weltentakt gibt es die Front noch nicht. Dann gibt es auch nichts zu bewegen -
+  // ein Beitrag auf Vorrat waere eine Zahl ohne Ort.
+  if (!front || !(front.systeme || []).length) return null;
+  const eintrag = rkZielEintrag(front, seiteId, opt);
+  if (!eintrag) return null;
+
+  const frontKey = paar[0] + '|' + paar[1];
+  const tag = rkTagesKonto(rk);
+  const konto = tag.konten[userId] || (tag.konten[userId] = {});
+  const bisher = konto[frontKey] || 0;
+  const wirksam = Math.round(rkDegression(bisher, rohPunkte));
+  konto[frontKey] = bisher + rohPunkte;
+  if (wirksam <= 0) return { sys: eintrag.sys, punkte: 0, roh: rohPunkte, tagesSumme: konto[frontKey] };
+
+  if (!eintrag.puffer) eintrag.puffer = { a: 0, b: 0 };
+  if (seiteId === front.a) eintrag.puffer.a += wirksam; else eintrag.puffer.b += wirksam;
+  // Erst hier wird das Konto als Beitragender gefuehrt - wer nichts Wirksames beitraegt, zaehlt auch
+  // nicht fuer die Mehr-Konten-Sperre im Tick.
+  if (!eintrag.beitragende) eintrag.beitragende = {};
+  eintrag.beitragende[userId] = { seite: seiteId, ts: Date.now() };
+  return { sys: eintrag.sys, punkte: wirksam, roh: rohPunkte, tagesSumme: konto[frontKey] };
 }
 // Ein Takt der Front. Reihenfolge ist wichtig:
 //   1. ungueltig gewordene Frontsysteme ersetzen (Besitzer gewechselt, kollabiert, Spieler drauf)
@@ -4940,8 +5045,33 @@ setTimeout(checkDormantWinback, 2 * 60 * 1000);     // erster Lauf ~2 Min nach S
 setInterval(galaxyTick, GALAXY_TICK_MS);
 galaxyTick(); // einmal sofort beim Serverstart, damit nicht 15 Min. auf den ersten Zustand gewartet wird
 
+// Die Front fuehrt zwei Dinge, die ausserhalb des Servers niemanden etwas angehen: die Pufferstaende
+// beider Seiten (wer sie sieht, kennt das Ergebnis des naechsten Takts, bevor er faellt) und je Konto
+// den Zeitpunkt seines letzten Beitrags samt Tagessumme. Bis hierher ging das Galaxie-Objekt 1:1 an
+// jeden eingeloggten Client. Statt der Rohdaten bekommt jeder Aufrufer jetzt genau das, was seine
+// Anzeige braucht: den Stand, wie viele verschiedene Konten je Seite dahinterstehen, und was er
+// SELBST heute beigetragen hat.
+function galaxyFuerClient(g, userId) {
+  const rk = g.randkriege;
+  if (!rk || !Array.isArray(rk.fronten)) return g;
+  const fronten = rk.fronten.map(f => ({
+    a: f.a, b: f.b,
+    systeme: (f.systeme || []).map(e => {
+      const bei = Object.values(e.beitragende || {});
+      return {
+        sys: e.sys, kp: e.kp,
+        beitragendeA: bei.filter(v => v && v.seite === f.a).length,
+        beitragendeB: bei.filter(v => v && v.seite === f.b).length,
+        dabei: !!(e.beitragende && e.beitragende[userId])
+      };
+    })
+  }));
+  const tag = (rk.tag && rk.tag.stempel === rkTagesSchluessel()) ? rk.tag : null;
+  const meinTag = (tag && tag.konten && tag.konten[userId]) || {};
+  return Object.assign({}, g, { randkriege: { stand: rk.stand, fronten, meinTag } });
+}
 app.get('/api/galaxy', authMiddleware, (req, res) => {
-  res.json(loadOrInitGalaxy());
+  res.json(galaxyFuerClient(loadOrInitGalaxy(), req.userId));
 });
 
 // Aktuelle Marktpreise abrufen (inkl. Normalpreis, damit das Frontend "teuer/billig" anzeigen kann).
@@ -6798,6 +6928,15 @@ app.post('/api/faction/attack', authMiddleware, async (req, res) => {
   const chance = Math.max(0.08, Math.min(0.92, attackPower / (attackPower + factionDefense)));
   const success = Math.random() < chance;
 
+  // Bollwerk schleifen: Der Angriff drueckt die Front gegen den Besitzer, also fuer dessen Rivalen.
+  // Bei Erfolg faellt das System an den Spieler und damit aus der Front heraus (rkGrenzsysteme
+  // schliesst controlledSystems aus) - der Beitrag geht dann an den naechstgelegenen Abschnitt
+  // derselben Front, statt in einem Eintrag zu verpuffen, den der naechste Takt ohnehin wegwirft.
+  const rkSeite = FACTION_RIVALS[owner.id];
+  const rkErgebnis = rkSeite ? rkBeitrag(g, rkSeite, req.userId,
+    success ? RK_BOLLWERK_ERFOLG : RK_BOLLWERK_FEHLSCHLAG,
+    success ? { ausserSys: systemId } : { wunschSys: systemId }) : null;
+
   if (success) {
     // System der Fraktion entziehen und dem Spieler zuschreiben.
     owner.systems = owner.systems.filter(s => s !== systemId);
@@ -6809,7 +6948,7 @@ app.post('/api/faction/attack', authMiddleware, async (req, res) => {
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     pushGalaxyNews('ti-flag', (req.username || 'Ein Kommandant') + ' hat ' + systemId + ' von den ' + owner.name + ' erobert!');
     await saveDb();
-    return res.json({ success: true, systemId, attackPower, factionDefense, creditReward, factionName: owner.name, saveVersion: mySaveVersion });
+    return res.json({ success: true, systemId, attackPower, factionDefense, creditReward, factionName: owner.name, saveVersion: mySaveVersion, front: rkErgebnis });
   } else {
     // Misserfolg: Flottenverluste (10-25% jeder Schiffsart der Heimatflotte).
     const lossPct = 0.10 + Math.random() * 0.15;
@@ -6823,7 +6962,7 @@ app.post('/api/faction/attack', authMiddleware, async (req, res) => {
     attacker.battlePoints = (attacker.battlePoints || 0) + 5;
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     await saveDb();
-    return res.json({ success: false, systemId, attackPower, factionDefense, lost, factionName: owner.name, saveVersion: mySaveVersion });
+    return res.json({ success: false, systemId, attackPower, factionDefense, lost, factionName: owner.name, saveVersion: mySaveVersion, front: rkErgebnis });
   }
 });
 

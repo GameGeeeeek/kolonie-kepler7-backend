@@ -610,6 +610,77 @@ function checkMoonDefensePermission(req, key, isWrite) {
   }
   return null;
 }
+// missions:<playerId> (10.08.2026, derselbe Audit): die Flottenbewegungen, die die Abhorchposten
+// anderer Spieler anzeigen. Lief ebenfalls ohne jede Regel - jeder konnte unter FREMDEM Namen
+// beliebige Flottenbewegungen veröffentlichen und damit in den Abhorchposten der ganzen Galaxie
+// Angriffe erscheinen lassen, die es nie gab (oder die echten eines Dritten überschreiben).
+// Lesen bleibt offen: Die Auswertung, welcher Posten was sieht, macht der Client (loadDetectedFleets)
+// und braucht dafür die Liste aller Meldungen.
+function checkMissionsKeyPermission(req, key, isWrite) {
+  if (!key.startsWith('missions:')) return null;
+  if (!isWrite) return null;
+  const targetId = key.slice('missions:'.length);
+  return targetId === req.userId ? null : 'Du kannst nur deine eigenen Flottenbewegungen melden.';
+}
+// worldboss:current (10.08.2026, Fund beim Audit des geteilten Speichers): der gemeinsame Weltboss
+// lief bisher durch KEINE der Rechteprüfungen - jeder eingeloggte Nutzer konnte das Dokument
+// vollständig überschreiben. Die Schadensauflösung ist zwar seit dem 13.07.2026 serverseitig
+// (/api/worldboss/resolve), der Schlüssel selbst blieb dabei aber offen. Drei Folgen, alle gemessen
+// in tests/test_weltboss_schluessel_http.js:
+//   1. Ein Boss mit erfundener Stufe hat 50000*1,6^(Stufe-1) HP (Stufe 200 = 2,08e45) und ist nie
+//      tötbar. Da das Frontend einen neuen Boss NUR nach einem Kill setzt (loadWorldBoss), wäre der
+//      Weltboss damit für ALLE Spieler dauerhaft erledigt - eine einzige Anfrage genügt.
+//   2. In `contributions` ließen sich fremde Konten mit beliebigem Schaden eintragen. Die
+//      Auszahlung (Kredite, Kampfpunkte, Modulwurf, Unikat "Leviathanherz") läuft rein im Frontend
+//      über maybeClaimWorldBossReward() und liest genau diese Liste.
+//   3. `defeatedAt` ließ sich ohne einen einzigen Kampf setzen.
+// Der eigene Spielstand ist in diesem Spiel bauartbedingt klientenautoritativ - wer sich SELBST
+// bereichern will, braucht dafür keine Lücke hier. Was diese Prüfung schützt, ist der gemeinsame
+// Zustand, also dieselbe Grenze wie bei Pakt, Chat, Bestenliste und Mondverteidigung.
+//
+// Erlaubt bleibt genau das, was das Frontend legitim tut: den ERSTEN Boss anlegen und nach einem
+// gefallenen Boss den Nachfolger setzen (beides in loadWorldBoss, die einzigen zwei Aufrufer von
+// saveWorldBoss). Alles andere am laufenden Boss - Schaden, Beiträge, Kill - schreibt
+// /api/worldboss/resolve direkt in db.shared und läuft an dieser Prüfung ohnehin vorbei.
+const WORLDBOSS_BASE_HP = 50000;                  // Spiegel von WORLDBOSS_BASE_HP im Frontend
+const WORLDBOSS_RESPAWN_DELAY_MS = 10 * 60 * 1000; // Spiegel von WORLDBOSS_RESPAWN_DELAY_MS
+// Zeitzugeständnis für die Respawn-Frist: Die Frist läuft im Frontend gegen die Uhr des SPIELERS.
+// Geht die ein paar Sekunden vor, hielte der Server den Respawn sonst für verfrüht und lehnte ihn
+// ab. Das wäre kein Beinbruch (loadWorldBoss versucht es beim nächsten Durchlauf erneut), aber es
+// gibt keinen Grund, es überhaupt eng zu machen - eine Minute Vorlauf verschenkt nichts.
+const WORLDBOSS_RESPAWN_TOLERANZ_MS = 60 * 1000;
+function worldBossHpForLevel(level) {
+  return Math.round(WORLDBOSS_BASE_HP * Math.pow(1.6, Math.max(0, level - 1)));
+}
+function checkWorldBossPermission(req, key, isWrite) {
+  if (key !== 'worldboss:current') return null;
+  if (!isWrite) return null; // Lesen bleibt offen - jeder sieht denselben Boss
+
+  let neu = null;
+  try { neu = JSON.parse(req.body && req.body.value); } catch (e) { return 'Ungültiges Format.'; }
+  if (!neu || typeof neu !== 'object') return 'Ungültiges Format.';
+
+  let alt = null;
+  try { const roh = db.shared[key]; alt = roh ? JSON.parse(roh) : null; } catch (e) {}
+
+  // Welche Stufe darf an dieser Stelle überhaupt geschrieben werden?
+  let erlaubteStufe;
+  if (!alt || !alt.bossId) {
+    erlaubteStufe = 1; // noch nie ein Boss da gewesen
+  } else if (alt.defeatedAt && Date.now() - alt.defeatedAt > WORLDBOSS_RESPAWN_DELAY_MS - WORLDBOSS_RESPAWN_TOLERANZ_MS) {
+    erlaubteStufe = (alt.level || 1) + 1;
+  } else {
+    return 'Der laufende Weltboss wird nur über den Kampf verändert.';
+  }
+
+  if (typeof neu.bossId !== 'string' || !neu.bossId) return 'Dem Weltboss fehlt eine Kennung.';
+  if (neu.level !== erlaubteStufe) return 'Der nächste Weltboss steht auf Stufe ' + erlaubteStufe + '.';
+  const sollHp = worldBossHpForLevel(erlaubteStufe);
+  if (neu.maxHp !== sollHp || neu.hp !== sollHp) return 'Der Weltboss der Stufe ' + erlaubteStufe + ' startet mit ' + sollHp + ' HP.';
+  if (neu.defeatedAt) return 'Ein frisch erschienener Weltboss gilt nicht als besiegt.';
+  if (neu.contributions && Object.keys(neu.contributions).length) return 'Ein frisch erschienener Weltboss hat noch keine Beitragenden.';
+  return null;
+}
 // Gibt bei erlaubtem Zugriff null zurück, sonst einen Fehlertext für die 403-Antwort.
 function checkAllianceKeyPermission(req, key, isWrite) {
   const m = key.match(/^alliance:([^:]+):(.+)$/);
@@ -1861,7 +1932,7 @@ app.get('/api/storage/:key', authMiddleware, (req, res) => {
   const shared = req.query.shared === 'true';
   const key = req.params.key;
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false) || checkChatKeyPermission(req, key, false) || checkHallOfFamePermission(req, key, false) || checkMoonDefensePermission(req, key, false);
+    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false) || checkChatKeyPermission(req, key, false) || checkHallOfFamePermission(req, key, false) || checkMoonDefensePermission(req, key, false) || checkWorldBossPermission(req, key, false) || checkMissionsKeyPermission(req, key, false);
     if (denyReason) return res.status(403).json({ error: denyReason });
   }
   const store = shared ? db.shared : (db.private[req.userId] || {});
@@ -1893,7 +1964,7 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   const expectedVersion = req.body ? req.body.expectedVersion : undefined;
 
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true);
+    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true) || checkWorldBossPermission(req, key, true) || checkMissionsKeyPermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
     // Mengenschutz (siehe MAX_SHARED_VALUE_BYTES oben). Bewusst NACH der Rechteprüfung und VOR jedem
     // Schreibzugriff - und bewusst nur für NEUE Schlüssel, damit die normale Spielschleife

@@ -34,6 +34,13 @@
 //      aus save.asteroidEskorten übernommen, nie aus dem Request; release macht den Platz wieder
 //      für alle abbaubar.
 //
+//   9. Anfechtung (Phase 5): Der Server rechnet die Angriffsstärke aus der MISSION im gespeicherten
+//      Spielstand nach (unterwegs steht sie nicht in save.fleet); jede Sperre nennt ihren Grund
+//      (Schutzfrist, Abklingzeit, Allianz, eigenes Recht); derselbe Anflug lässt sich nicht zweimal
+//      einlösen; bei Sieg wechselt der Halter samt Schutzfrist, bei Niederlage schrumpft nur die
+//      Eskorte - der VORRAT bleibt in beiden Fällen unangetastet (man erobert eine Quelle, keine
+//      Beute). Der Server schreibt dabei keinen Spielstand.
+//
 // GEGENPROBE (in beide Richtungen ausgeführt): Gegen den alten server.js antworten beide Endpunkte
 // mit 404 - 1a fällt sofort. Ersetzt man die Klemmung `Math.min(wunsch, vork.vorrat, obergrenze)`
 // durch `wunsch`, fallen 3c/3d (Summe > Ausgangsvorrat) und 4b. Für Abschnitt 8: Gegen den Stand
@@ -250,8 +257,8 @@ async function starteServer() {
   for (const x of f4.body.systeme) for (const [platz, p] of Object.entries(f4.body.felder[x].plaetze)) {
     if (p && !p.frei && !p.halter && p.vorrat > 3000) volle.push({ sys: x, platz, vorrat: p.vorrat });
   }
-  check('8-0: mindestens vier volle, freie Vorkommen gefunden', volle.length >= 4, volle.length);
-  const [Z1, Z2, Z3, Z4] = volle;
+  check('8-0: mindestens fünf volle, freie Vorkommen gefunden', volle.length >= 5, volle.length);
+  const [Z1, Z2, Z3, Z4, Z5] = volle;
 
   // anna reserviert Z1 - und die Antwort trägt den Halter.
   const c1 = await s.j('/asteroid/claim', { method: 'POST', headers: kopf(tokenA),
@@ -333,10 +340,121 @@ async function starteServer() {
   check('8l: ein erschöpftes Vorkommen lässt sich nicht reservieren', cWeg.status === 409 && cWeg.body.weg === true,
     { status: cWeg.status, body: cWeg.body });
 
+  // ---- 9) Anfechtung (Phase 5) --------------------------------------------------------------
+  // anna haelt Z2 (aus 8e) mit einer Eskorte; bert fliegt sie an. Die Angriffsflotte steht NICHT in
+  // save.fleet - sie ist unterwegs -, sondern in der Mission. Genau von dort liest der Server sie.
+  const eskorteSetzen = async (schiffe) => {
+    await s.j('/storage/kepler7-save-v3', { method: 'PUT', headers: kopf(tokenA),
+      body: JSON.stringify({ value: spielstand(ANNA, 'anna', { schuerfschiff: 5 },
+        { research: { rschuerfrecht: 1 },
+          asteroidEskorten: { [Z5.sys + ':' + Z5.platz]: { schiffe, heimat: 'home' } } }) }) });
+    await s.j('/asteroid/claim', { method: 'POST', headers: kopf(tokenA),
+      body: JSON.stringify({ system: Z5.sys, platz: Z5.platz }) });
+  };
+  // bert bekommt eine Anfechtungs-Mission in den gespeicherten Spielstand.
+  const berthilfe = async (mid, composition, ziel) => {
+    await s.j('/storage/kepler7-save-v3', { method: 'PUT', headers: kopf(tokenB),
+      body: JSON.stringify({ value: spielstand(BERT, 'bert', { schuerfschiff: 2000 },
+        { fleet: { missions: [{ id: mid, type: 'asteroid-contest', targetId: ziel, composition }] } }) }) });
+  };
+  const anfechten = (token, sys, platz, mid) => s.j('/asteroid/contest', { method: 'POST', headers: kopf(token),
+    body: JSON.stringify({ system: sys, platz, missionId: mid }) });
+
+  await eskorteSetzen({ jaeger: 20 });
+  const zielKampf = Z5.sys + ':' + Z5.platz;
+
+  // 9a: ohne Mission im Spielstand geht gar nichts - das ist die Stelle, an der ein erfundener
+  // Angriff scheitert.
+  await berthilfe('mX', { jaeger: 500 }, 'ganz:anderes');
+  const ohneMission = await anfechten(tokenB, Z5.sys, Z5.platz, 'mX');
+  check('9a: ohne passende Mission im gespeicherten Spielstand wird abgelehnt',
+    ohneMission.status === 403 && /keine Flotte/.test(String(ohneMission.body && ohneMission.body.error)),
+    { status: ohneMission.status, body: ohneMission.body });
+
+  // 9b: eigenes Recht kann man nicht anfechten.
+  await s.j('/storage/kepler7-save-v3', { method: 'PUT', headers: kopf(tokenA),
+    body: JSON.stringify({ value: spielstand(ANNA, 'anna', { schuerfschiff: 5 },
+      { research: { rschuerfrecht: 1 },
+        asteroidEskorten: { [zielKampf]: { schiffe: { jaeger: 20 }, heimat: 'home' } },
+        fleet: { missions: [{ id: 'mA', type: 'asteroid-contest', targetId: zielKampf, composition: { jaeger: 99 } }] } }) }) });
+  const eigenes = await anfechten(tokenA, Z5.sys, Z5.platz, 'mA');
+  check('9b: das eigene Schürfrecht lässt sich nicht anfechten',
+    eigenes.status === 400 && /eigenes/.test(String(eigenes.body && eigenes.body.error)), { status: eigenes.status, body: eigenes.body });
+
+  // 9c: Der Kampf selbst. Uebermacht gegen 20 Jaeger - die Chance ist bei 90% gedeckelt, also
+  // mehrere Anlaeufe auf VERSCHIEDENE Vorkommen (die Abklingzeit gilt je Vorkommen). Geprueft wird
+  // die REGEL, nicht das Wuerfelglueck: Bei Sieg wechselt der Halter UND es gibt eine Schutzfrist,
+  // bei Niederlage bleibt der Halter und die Eskorte ist kleiner. Der Vorrat bleibt immer gleich.
+  const vorratVorher = (await s.j('/asteroid/field', { headers: kopf(tokenA) })).body.felder[Z5.sys].plaetze[Z5.platz].vorrat;
+  await berthilfe('m1', { schlachtschiff: 300, jaeger: 2000 }, zielKampf);
+  const kampf = await anfechten(tokenB, Z5.sys, Z5.platz, 'm1');
+  check('9c: die Anfechtung wird aufgelöst und meldet Chance und beide Verlustseiten',
+    kampf.status === 200 && typeof kampf.body.gewonnen === 'boolean' && kampf.body.chance > 0 &&
+    !!kampf.body.eigeneVerluste && !!kampf.body.gegnerVerluste,
+    { status: kampf.status, gewonnen: kampf.body && kampf.body.gewonnen, chance: kampf.body && kampf.body.chance });
+  const feldNach = (await s.j('/asteroid/field', { headers: kopf(tokenA) })).body.felder[Z5.sys].plaetze[Z5.platz];
+  check('9d: der Vorrat bleibt unangetastet - man erobert eine Quelle, keine Beute',
+    feldNach.vorrat === vorratVorher, { vorher: vorratVorher, nachher: feldNach.vorrat });
+  if (kampf.body.gewonnen){
+    check('9e: nach dem Sieg hält bert das Recht, mit Schutzfrist und ohne fremde Eskorte',
+      feldNach.halter === BERT && feldNach.schutzBis > Date.now() && !Object.keys(feldNach.eskorte || {}).length,
+      { halter: feldNach.halter === BERT, schutz: feldNach.schutzBis > Date.now(), eskorte: feldNach.eskorte });
+  } else {
+    check('9e: nach der Niederlage hält anna weiter, ihre Eskorte ist aber kleiner',
+      feldNach.halter === ANNA && (feldNach.eskorte.jaeger || 0) < 20,
+      { halter: feldNach.halter === ANNA, jaeger: feldNach.eskorte && feldNach.eskorte.jaeger });
+  }
+
+  // 9f: derselbe Anflug lässt sich nicht zweimal einlösen (sonst reibt ein wiederholter Aufruf die
+  // Eskorte in Sekunden auf). Geprueft wird der GRUND, nicht nur der Status.
+  // Hat bert gewonnen, haelt er das Recht selbst - dann wuerde "eigenes Schuerfrecht" greifen und
+  // die Pruefung waere aus dem falschen Grund gruen (Arbeitsregel 28). Also erst zurueckgeben.
+  if (kampf.body.gewonnen){
+    await s.j('/asteroid/release', { method: 'POST', headers: kopf(tokenB), body: JSON.stringify({ system: Z5.sys, platz: Z5.platz }) });
+    await s.j('/asteroid/claim', { method: 'POST', headers: kopf(tokenA), body: JSON.stringify({ system: Z5.sys, platz: Z5.platz }) });
+  }
+  const nochmal = await anfechten(tokenB, Z5.sys, Z5.platz, 'm1');
+  check('9f: derselbe Anflug lässt sich kein zweites Mal einlösen',
+    nochmal.status === 409 && /bereits abgerechnet/.test(String(nochmal.body && nochmal.body.error)),
+    { status: nochmal.status, body: nochmal.body });
+
+  // 9g: Abklingzeit bzw. Schutzfrist - je nachdem, wie 9c ausging, greift die eine oder die andere.
+  // Beide sind eine Sperre mit Grund, und genau das wird geprueft.
+  await berthilfe('m2', { schlachtschiff: 300 }, zielKampf);
+  const zweiter = await anfechten(tokenB, Z5.sys, Z5.platz, 'm2');
+  check('9g: ein sofortiger zweiter Angriff wird gesperrt - mit Schutzfrist oder Abklingzeit als Grund',
+    zweiter.status === 403 && (zweiter.body.abklingzeit === true || zweiter.body.schutz === true) &&
+    /Minuten/.test(String(zweiter.body.error)),
+    { status: zweiter.status, body: zweiter.body });
+
+  // 9h: Allianz - carl teilt annas Tag und darf ihr Recht nicht abnehmen. Dafuer haelt anna wieder
+  // eines (Z3 aus 8f), und beide bekommen denselben Tag.
+  // rschuerfrecht 3 (Limit 5): anna haelt zu diesem Zeitpunkt schon mehrere Rechte, mit dem
+  // Grundstock waere der Claim still am Limit gescheitert - und 9h haette dann gemessen, dass ein
+  // UNRESERVIERTES Vorkommen nicht anfechtbar ist. Genau so wird eine Pruefung aus dem falschen
+  // Grund gruen oder rot; deshalb steht die Vorbedingung als eigene Pruefung darunter.
+  await s.j('/storage/kepler7-save-v3', { method: 'PUT', headers: kopf(tokenA),
+    body: JSON.stringify({ value: JSON.stringify(Object.assign(JSON.parse(spielstand(ANNA, 'anna', { schuerfschiff: 5 }, { research: { rschuerfrecht: 3 } })), { player: { id: ANNA, name: 'anna', allianceTag: 'KEP' } })) }) });
+  const claimZ4 = await s.j('/asteroid/claim', { method: 'POST', headers: kopf(tokenA), body: JSON.stringify({ system: Z4.sys, platz: Z4.platz }) });
+  check('9h-vorab: anna hält Z4 mit dem Tag KEP', claimZ4.status === 200 && claimZ4.body.tag === 'KEP',
+    { status: claimZ4.status, tag: claimZ4.body && claimZ4.body.tag });
+  await s.j('/storage/kepler7-save-v3', { method: 'PUT', headers: kopf(tokenC),
+    body: JSON.stringify({ value: JSON.stringify(Object.assign(JSON.parse(spielstand(CARL, 'carl', { jaeger: 500 })), {
+      player: { id: CARL, name: 'carl', allianceTag: 'KEP' },
+      fleet: { missions: [{ id: 'mC', type: 'asteroid-contest', targetId: Z4.sys + ':' + Z4.platz, composition: { jaeger: 400 } }] } })) }) });
+  const allianz = await anfechten(tokenC, Z4.sys, Z4.platz, 'mC');
+  check('9h: Allianzmitglieder können sich ihre Schürfrechte nicht abnehmen - mit Begründung',
+    allianz.status === 403 && allianz.body.allianz === true && /Allianz/.test(String(allianz.body.error)),
+    { status: allianz.status, body: allianz.body });
+
   // Und die Rechte stehen wirklich in der Datenbank (nicht nur in der Antwort).
   await warte(900);
   const db8 = s.dbLesen();
   const z2Db = db8.shared['asteroids:' + Z2.sys].plaetze[Z2.platz];
+  const standB = JSON.parse(db8.private[BERT]['kepler7-save-v3'].value || db8.private[BERT]['kepler7-save-v3']);
+  check('9i: der Server hat auch im Kampf KEINEN Spielstand geschrieben (Verluste bucht der Client)',
+    standB.resources.erz === 5e5 && (standB.fleet.missions || []).length >= 1,
+    { erz: standB.resources.erz, missionen: (standB.fleet.missions || []).length });
   check('8m: das Recht an Z2 steht mit Halter und Zeitstempel in der DB',
     !!z2Db && z2Db.halter === ANNA && z2Db.halterName === 'anna' && z2Db.seit > 0,
     z2Db && { halter: z2Db.halter === ANNA, halterName: z2Db.halterName, seit: z2Db.seit > 0 });

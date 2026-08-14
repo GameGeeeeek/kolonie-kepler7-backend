@@ -7819,6 +7819,139 @@ app.post('/api/asteroid/release', authMiddleware, async (req, res) => {
   res.json({ ok: true });
 });
 
+const AST_SCHUTZ_MS = 2 * 3600 * 1000;      // Schutzfrist nach jedem Besitzwechsel (Konzept 6.3)
+const AST_ABKLING_MS = 4 * 3600 * 1000;     // Abklingzeit je Angreifer und Vorkommen
+const AST_CHANCE_MIN = 0.10, AST_CHANCE_MAX = 0.90;   // Deckel wie im PvP - nichts ist sicher, nichts sinnlos
+
+// Die Angriffsflotte steht NICHT in save.fleet - sie ist ja unterwegs. Sie steht in der Mission,
+// die der Client vor dem Abflug gespeichert hat. Deshalb liest der Server sie von dort: Der
+// Angreifer schickt weiterhin KEINE Stärke mit (Konzept 6.3), sondern nur, welche seiner Missionen
+// gemeint ist. Gesucht wird in der Heimatflotte UND in allen Kolonieflotten.
+function astFindeAngriffsmission(save, missionId, sysId, platz) {
+  const ziel = sysId + ':' + platz;
+  const flotten = [];
+  if (save && save.fleet) flotten.push(save.fleet);
+  if (save && save.colonies) for (const c of Object.values(save.colonies)) if (c && c.fleet) flotten.push(c.fleet);
+  for (const f of flotten) {
+    for (const m of (f.missions || [])) {
+      if (String(m.id) === String(missionId) && m.type === 'asteroid-contest' && m.targetId === ziel) return m;
+    }
+  }
+  return null;
+}
+
+// Anfechten: eine Kampfflotte gegen die stationierte Eskorte des Halters.
+//
+// WARUM DAS OHNE SPERREN SICHER IST: derselbe Grund wie bei claim/release/mine darüber - der
+// gesamte Zustandswechsel läuft synchron in einem Tick, das erste await steht erst hinter der
+// Mutation (saveDb). Zwei gleichzeitige Anfechtungen desselben Vorkommens können sich nicht
+// überlappen; die zweite findet den bereits gewechselten Halter und die geschrumpfte Eskorte vor.
+//
+// UND WARUM DER SERVER HIER KEINEN SPIELSTAND SCHREIBT (anders als /api/moonsiege/resolve, das
+// setSaveValue ruft): Die Verluste des Angreifers stehen in der Antwort, sein eigener Client bucht
+// sie - dasselbe Muster wie bei /api/asteroid/mine. Der Halter erfährt seine Verluste über das
+// Felddokument, das ihm der nächste Feld-Abruf liefert. Damit entsteht das Wettrennen zwischen
+// Server-Schreibung und Client-Save gar nicht erst.
+app.post('/api/asteroid/contest', authMiddleware, async (req, res) => {
+  const sysId = String((req.body && req.body.system) || '');
+  const platz = String((req.body && req.body.platz) !== undefined ? req.body.platz : '');
+  const missionId = (req.body && req.body.missionId) !== undefined ? String(req.body.missionId) : '';
+  if (!sysId || !platz || !missionId) return res.status(400).json({ error: 'System, Platz und Mission fehlen.' });
+  if (astGuertelSysteme().indexOf(sysId) < 0) return res.status(400).json({ error: 'Dieses System trägt keinen Asteroidengürtel.' });
+
+  const { felder } = astAlleFelder();
+  const feld = felder[sysId];
+  const vork = feld && feld.plaetze && feld.plaetze[platz];
+  if (!vork || vork.frei) return res.status(409).json({ error: 'Dieses Vorkommen ist nicht mehr da.', weg: true });
+  if (!vork.halter) return res.status(409).json({ error: 'Dieses Vorkommen ist gar nicht reserviert - es lässt sich einfach abbauen.' });
+  if (vork.halter === req.userId) return res.status(400).json({ error: 'Das ist dein eigenes Schürfrecht.' });
+  // Derselbe Anflug darf nicht zweimal eingelöst werden. Was das WIRKLICH abdeckt (gemessen an den
+  // Gegenproben, nicht angenommen): Das unmittelbare Wiederholen fangen Schutzfrist und Abklingzeit
+  // schon ab. Diese Prüfung schließt den Fall DANACH - eine alte Missions-ID lässt sich sonst vier
+  // Stunden später erneut einlösen, mit einer Flotte, die längst heimgeflogen ist oder die es nie
+  // gab. Sie steht bewusst VOR Schutzfrist und Abklingzeit: Ein doppelt eingelöster Anflug ist ein
+  // Fehler des Clients, kein Timing-Problem, und "bereits abgerechnet" ist die Auskunft, die weiterhilft.
+  if (vork.abgerechnet && vork.abgerechnet[missionId]) {
+    return res.status(409).json({ error: 'Dieser Anflug wurde bereits abgerechnet.' });
+  }
+
+  const save = astLeseSave(req.userId);
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern, dann angreifen.' });
+
+  const jetzt = Date.now();
+  // Jede Sperre nennt ihren eigenen Grund: ein blosser Statuscode sagt dem Spieler nicht, ob er
+  // warten muss, den falschen Gegner hat oder etwas anderes falsch läuft.
+  if (vork.schutzBis && vork.schutzBis > jetzt) {
+    return res.status(403).json({ error: 'Dieses Vorkommen steht nach dem letzten Besitzwechsel noch ' + Math.ceil((vork.schutzBis - jetzt) / 60000) + ' Minuten unter Schutz.', schutz: true });
+  }
+  const letzterAngriff = (vork.angriffe || {})[req.userId] || 0;
+  if (letzterAngriff + AST_ABKLING_MS > jetzt) {
+    return res.status(403).json({ error: 'Du hast dieses Vorkommen erst vor Kurzem angegriffen - nächster Versuch in ' + Math.ceil((letzterAngriff + AST_ABKLING_MS - jetzt) / 60000) + ' Minuten.', abklingzeit: true });
+  }
+  const meinTag = ((save.player && save.player.allianceTag) || '').trim().toUpperCase();
+  if (meinTag && vork.tag && meinTag === vork.tag) {
+    return res.status(403).json({ error: 'Mitglieder derselben Allianz können sich ihre Schürfrechte nicht abnehmen.', allianz: true });
+  }
+  const mission = astFindeAngriffsmission(save, missionId, sysId, platz);
+  if (!mission || !mission.composition) {
+    return res.status(403).json({ error: 'Zu dieser Anfechtung ist keine Flotte im gespeicherten Spielstand unterwegs.' });
+  }
+
+  const angriff = rawFleetPower(mission.composition, 1, 1, save.shipMarks);
+  const verteidigung = weightedFleetDefensePower(vork.eskorte || {}, null) + fleetShieldSum(vork.eskorte || {}, null);
+  if (!(angriff > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
+
+  // Zufallsband wie bei der Mondbelagerung, Deckel wie im PvP: Überzahl gewinnt meist, aber nie
+  // sicher - und ein unterlegener Angriff ist nicht von vornherein sinnlos.
+  const wurf = 0.85 + Math.random() * 0.3;
+  const chance = Math.max(AST_CHANCE_MIN, Math.min(AST_CHANCE_MAX, (angriff * wurf) / (angriff * wurf + Math.max(1, verteidigung))));
+  const gewonnen = Math.random() < chance;
+
+  // Verluste: der Verlierer trägt schwerer. Anteilig auf beide Seiten, damit auch ein gewonnener
+  // Angriff etwas kostet - sonst wäre eine Übermacht ein Freifahrtschein.
+  const eigenerVerlustAnteil = gewonnen ? Math.min(0.5, verteidigung / Math.max(1, angriff) * 0.35) : Math.min(0.85, 0.45 + verteidigung / Math.max(1, angriff) * 0.2);
+  const gegnerVerlustAnteil = gewonnen ? 1 : Math.min(0.6, angriff / Math.max(1, verteidigung) * 0.35);
+
+  const gegnerVerluste = {};
+  const neueEskorte = {};
+  for (const [typ, n] of Object.entries(vork.eskorte || {})) {
+    const weg = Math.min(n, Math.round(n * gegnerVerlustAnteil));
+    if (weg > 0) gegnerVerluste[typ] = weg;
+    const rest = n - weg;
+    if (rest > 0) neueEskorte[typ] = rest;
+  }
+  const eigeneVerluste = {};
+  for (const [typ, n] of Object.entries(mission.composition)) {
+    if (typeof n !== 'number' || n <= 0) continue;
+    const weg = Math.min(n, Math.round(n * eigenerVerlustAnteil));
+    if (weg > 0) eigeneVerluste[typ] = weg;
+  }
+
+  const halterVorher = vork.halterName || 'Unbekannt';
+  vork.angriffe = vork.angriffe || {};
+  vork.angriffe[req.userId] = jetzt;
+  vork.abgerechnet = vork.abgerechnet || {};
+  vork.abgerechnet[missionId] = jetzt;
+  if (gewonnen) {
+    // Der Vorrat bleibt, wo er ist: man erobert eine Quelle, keine Beute (Konzept 6.3). Die
+    // überlebende Eskorte des Verlierers fliegt heim - sein Client erzeugt daraus den Rückflug,
+    // sobald er das Felddokument liest.
+    vork.halter = req.userId;
+    vork.halterName = req.username || 'Unbekannt';
+    vork.tag = meinTag;
+    vork.seit = jetzt;
+    vork.schutzBis = jetzt + AST_SCHUTZ_MS;
+    vork.eskorte = {};
+  } else {
+    vork.eskorte = neueEskorte;
+  }
+  db.shared[astFeldKey(sysId)] = feld;
+  console.log('[asteroid-contest] userId=' + req.userId + ' sys=' + sysId + ' platz=' + platz + ' chance=' + chance.toFixed(2) + ' gewonnen=' + gewonnen);
+  await saveDb();
+  res.json({ ok: true, gewonnen, chance, eigeneVerluste, gegnerVerluste, halterVorher,
+    halter: vork.halter, halterName: vork.halterName, schutzBis: vork.schutzBis || 0 });
+});
+
 app.post('/api/deploy-webhook', (req, res) => {
   if (!verifyGithubSignature(req)) {
     console.warn('Deploy-Webhook: ungültige oder fehlende Signatur, Anfrage abgelehnt.');

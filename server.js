@@ -2399,7 +2399,7 @@ const SHIP_SCORE_WEIGHTS = {
   // (Score-Untervalidierung ihrer Besitzer, exakt der CLAUDE.md-Fallstrick). Gewichte identisch zur
   // Frontend-Kopie SHIP_SCORE_WEIGHTS (weltraum_kolonie.html).
   metamaterialtitan:135, singularitaetsvernichter:200,
-  forscher:20, frachter:10, frachtergross:40, spaeher:15, spionageschiff:22, colonyShips:5, recycler:12,
+  forscher:20, frachter:10, frachtergross:40, bergungsfrachter:80, spaeher:15, spionageschiff:22, colonyShips:5, recycler:12,
   // Bugfix (20.07.2026, Bug-Sweep): mondzerstoerer fehlte komplett - maxOwned:1, 10 Tage Bauzeit,
   // Top-Tier-Forschung nötig, atk 300 (höchster Wert im Spiel), Gewicht identisch zur Frontend-Kopie
   // (weltraum_kolonie.html SHIP_SCORE_WEIGHTS) synchron gehalten.
@@ -5791,7 +5791,7 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
     // Der 50%-Deckel bleibt außen, damit auch die Bastion die Flotte nicht über die alte Obergrenze
     // hinaus abräumen kann.
     const lossPct = Math.min(0.5, ((0.08 + bLevel * 0.01) + Math.random() * 0.07) * worldBossArchetypeOf(bLevel).verlustMult);
-    for (const k of ['jaeger','cruisers','destroyers','bomber','schlachtschiff','carrier','superschlachtschiff','frachter','frachtergross','waechter']) {
+    for (const k of ['jaeger','cruisers','destroyers','bomber','schlachtschiff','carrier','superschlachtschiff','frachter','frachtergross','bergungsfrachter','waechter']) {
       const sentCount = composition[k] || 0;
       if (sentCount <= 0) continue;
       const loseNow = Math.min(fleetObj[k] || 0, Math.round(sentCount * lossPct));

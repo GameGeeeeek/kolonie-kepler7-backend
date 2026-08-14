@@ -56,4 +56,16 @@ Container-Setup (per `docker inspect` verifiziert, 19.07.2026): Startbefehl ist 
 
 Das ältere Auto-Pull-Skript unter `deploy/autodeploy.sh` ist damit **hinfällig** – es löste dasselbe Problem vor dem Webhook und braucht keine Einrichtung mehr.
 
+**Von außen messen, welchen Stand der Pi wirklich fährt** (Vorfall 14.08.2026: der Backend-Deploy
+hing zum zweiten Mal, diesmal seit dem 10.08. – mindestens sechs Merges nie angekommen, während der
+Frontend-Deploy desselben Webhooks einwandfrei lief): Eine Route, die es im laufenden Prozess gibt,
+antwortet ohne Token mit **401** (authMiddleware), eine, die der laufende Code nicht kennt, mit
+**404** („Cannot GET/POST …" von Express). Wer je Merge eine neue Route kennt, kann den Stand damit
+ohne SSH eingrenzen – z.B. `curl -X POST https://gamegeeeeek.de/api/randkriege/lager` (existiert
+seit #95): 401 = Stand mindestens 10.08., 404 = älter. Die Gegenprobe gehört dazu: eine ALTE Route
+(z.B. `/api/musterattack/create`) muss im selben Lauf 401 liefern, sonst misst man die eigene
+Messmethode. WICHTIG: `/api/health` mit 200 beweist nur, dass IRGENDEIN Backend läuft – nicht,
+welches. Und der Frontend-Deploy kann funktionieren, während der Backend-Pull kaputt ist: Beide
+laufen über denselben Webhook-Endpunkt, aber als getrennte fest verdrahtete Befehle.
+
 **Folge für PRs:** Der Merge ist nicht der Zwischenschritt zu einem späteren Deploy, sondern die Auslieferung selbst – was gemerged wird, läuft Sekunden später auf dem Pi. Offene PRs trotzdem sofort mergen statt sie liegen zu lassen, aber erst nach grünem Prüflauf.

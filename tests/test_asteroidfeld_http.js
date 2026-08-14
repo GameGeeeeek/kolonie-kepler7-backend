@@ -447,6 +447,21 @@ async function starteServer() {
     allianz.status === 403 && allianz.body.allianz === true && /Allianz/.test(String(allianz.body.error)),
     { status: allianz.status, body: allianz.body });
 
+  // 9j: Der Halter erfaehrt den Angriff, auch wenn sein Spiel zu ist. Geprueft wird der EMPFAENGER -
+  // bei einem Sieg wird vork.halter mit dem Angreifer ueberschrieben, eine Benachrichtigung an
+  // "den Halter" ginge dann an den, der gerade gewonnen hat.
+  await warte(300);
+  const dbPush = s.dbLesen();
+  const annaEreignisse = (dbPush.private[ANNA] || {}).__notificationEvents || [];
+  const bertEreignisse = (dbPush.private[BERT] || {}).__notificationEvents || [];
+  const meldung = annaEreignisse.find(e => e && e.type === 'asteroid-contested');
+  check('9j: die Verteidigerin bekommt eine Benachrichtigung über die Anfechtung',
+    !!meldung && !!meldung.payload && typeof meldung.payload.verloren === 'boolean' && meldung.payload.angreiferName === 'bert',
+    meldung ? meldung.payload : { annaEreignisse: annaEreignisse.map(e => e.type) });
+  check('9j2: und der ANGREIFER bekommt keine - die Meldung ging nicht an den Falschen',
+    !bertEreignisse.some(e => e && e.type === 'asteroid-contested'),
+    bertEreignisse.map(e => e.type));
+
   // Und die Rechte stehen wirklich in der Datenbank (nicht nur in der Antwort).
   await warte(900);
   const db8 = s.dbLesen();

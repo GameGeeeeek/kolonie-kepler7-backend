@@ -27,10 +27,19 @@
 //   5. Ein leergefördertes Vorkommen verschwindet und bekommt einen Nachschub-Termin in der Zukunft.
 //   6. Unsinnige Anfragen werden abgelehnt.
 //   7. Das Feld liegt wirklich im geteilten Speicher der Datenbank.
+//   8. Schürfrechte (Phase 4, Schritt 2): claim reserviert für genau einen Spieler; ein fremdes
+//      mine/claim/release wird abgelehnt UND der Fehlertext nennt den Grund (Halter bzw. Limit -
+//      Arbeitsregel 28: nicht nur den Statuscode prüfen); das Anspruchslimit kommt aus der
+//      GESPEICHERTEN Forschung rschuerfrecht (2 Basis, +1 je Stufe, Deckel 5); die Eskorte wird
+//      aus save.asteroidEskorten übernommen, nie aus dem Request; release macht den Platz wieder
+//      für alle abbaubar.
 //
 // GEGENPROBE (in beide Richtungen ausgeführt): Gegen den alten server.js antworten beide Endpunkte
 // mit 404 - 1a fällt sofort. Ersetzt man die Klemmung `Math.min(wunsch, vork.vorrat, obergrenze)`
-// durch `wunsch`, fallen 3c/3d (Summe > Ausgangsvorrat) und 4b.
+// durch `wunsch`, fallen 3c/3d (Summe > Ausgangsvorrat) und 4b. Für Abschnitt 8: Gegen den Stand
+// vor den Schürfrechten fällt 8a mit 404; nimmt man die Halter-Prüfung aus mine heraus, fällt 8c
+// (der Fremde baut ab, obwohl reserviert); prüft man das Limit gegen den Request statt gegen den
+// gespeicherten Spielstand, fällt 8f (die Forschung im Save hebt das Limit nicht).
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -48,13 +57,13 @@ const crypto = require('crypto');
 const hash = bcrypt.hashSync('test1234', 10);
 const ANNA = crypto.randomUUID(), BERT = crypto.randomUUID(), CARL = crypto.randomUUID();
 
-function spielstand(id, name, fleet) {
-  return JSON.stringify({
+function spielstand(id, name, fleet, extras) {
+  return JSON.stringify(Object.assign({
     resources: { energie: 5e5, erz: 5e5, kristalle: 5e5, deuterium: 5e5, antimaterie: 100, forschungspunkte: 100 },
     buildings: {}, research: {}, colonies: {},
     fleet: Object.assign({ missions: [] }, fleet),
     player: { id, name }, credits: 1000, xp: 1000, prestige: 0, battlePoints: 0, lastTick: Date.now()
-  });
+  }, extras || {}));
 }
 function grunddb() {
   return {
@@ -232,6 +241,105 @@ async function starteServer() {
   const standA = JSON.parse(db.private[ANNA]['kepler7-save-v3'].value || db.private[ANNA]['kepler7-save-v3']);
   check('7b: der Server hat den Spielstand des Abbauenden nicht angefasst',
     !standA.asteroidFeld && (standA.resources.erz === 5e5), { erz: standA.resources.erz });
+
+  // ---- 8) Schürfrechte: reservieren, abgewiesen werden, Limit, Eskorte, aufgeben --------------
+  // Drei noch volle Vorkommen suchen (nach den Abschnitten 3-5 sind zwei erschöpft; von ~90 ist
+  // reichlich übrig). Z1 wird Annas Hauptziel, Z2/Z3 füllen ihr Limit.
+  const f4 = await s.j('/asteroid/field', { headers: kopf(tokenA) });
+  const volle = [];
+  for (const x of f4.body.systeme) for (const [platz, p] of Object.entries(f4.body.felder[x].plaetze)) {
+    if (p && !p.frei && !p.halter && p.vorrat > 3000) volle.push({ sys: x, platz, vorrat: p.vorrat });
+  }
+  check('8-0: mindestens vier volle, freie Vorkommen gefunden', volle.length >= 4, volle.length);
+  const [Z1, Z2, Z3, Z4] = volle;
+
+  // anna reserviert Z1 - und die Antwort trägt den Halter.
+  const c1 = await s.j('/asteroid/claim', { method: 'POST', headers: kopf(tokenA),
+    body: JSON.stringify({ system: Z1.sys, platz: Z1.platz }) });
+  check('8a: anna reserviert ein freies Vorkommen', c1.status === 200 && c1.body.halterName === 'anna',
+    { status: c1.status, body: c1.body });
+
+  // bert scheitert am selben Platz - und der Fehlertext nennt anna (Regel 28: der GRUND, nicht nur der Status).
+  const c2 = await s.j('/asteroid/claim', { method: 'POST', headers: kopf(tokenB),
+    body: JSON.stringify({ system: Z1.sys, platz: Z1.platz }) });
+  check('8b: berts Anspruch auf denselben Platz wird abgelehnt und nennt die Halterin',
+    c2.status === 409 && /anna/.test(String(c2.body && c2.body.error)), { status: c2.status, body: c2.body });
+
+  // bert darf dort auch nicht abbauen - Fehlertext nennt die Halterin, Flag reserviert.
+  const mFremd = await s.j('/asteroid/mine', { method: 'POST', headers: kopf(tokenB),
+    body: JSON.stringify({ system: Z1.sys, platz: Z1.platz, wunsch: 1000 }) });
+  check('8c: ein Fremder darf ein reserviertes Vorkommen nicht abbauen, und erfährt von wem',
+    mFremd.status === 403 && mFremd.body.reserviert === true && /anna/.test(String(mFremd.body.error)),
+    { status: mFremd.status, body: mFremd.body });
+
+  // anna selbst darf weiterhin abbauen (kleiner Wunsch, damit das Vorkommen NICHT erschöpft).
+  const mEigen = await s.j('/asteroid/mine', { method: 'POST', headers: kopf(tokenA),
+    body: JSON.stringify({ system: Z1.sys, platz: Z1.platz, wunsch: 500 }) });
+  check('8d: die Halterin selbst baut weiter ab', mEigen.status === 200 && mEigen.body.menge === 500,
+    { status: mEigen.status, menge: mEigen.body && mEigen.body.menge });
+
+  // Limit: anna hat KEINE Forschung -> Grundstock 2. Z2 geht noch, Z3 scheitert - und der
+  // Fehlertext nennt das Limit.
+  const c3 = await s.j('/asteroid/claim', { method: 'POST', headers: kopf(tokenA),
+    body: JSON.stringify({ system: Z2.sys, platz: Z2.platz }) });
+  check('8e: das zweite Recht geht noch durch (Grundstock 2)', c3.status === 200, c3.status);
+  const c4 = await s.j('/asteroid/claim', { method: 'POST', headers: kopf(tokenA),
+    body: JSON.stringify({ system: Z3.sys, platz: Z3.platz }) });
+  check('8e2: das dritte scheitert am Anspruchslimit, und der Fehlertext nennt es',
+    c4.status === 403 && /Anspruchslimit/.test(String(c4.body && c4.body.error)) && /2/.test(String(c4.body && c4.body.error)),
+    { status: c4.status, body: c4.body });
+
+  // Forschung im GESPEICHERTEN Spielstand hebt das Limit: rschuerfrecht 1 -> Limit 3, Z3 geht jetzt.
+  await s.j('/storage/kepler7-save-v3', { method: 'PUT', headers: kopf(tokenA),
+    body: JSON.stringify({ value: spielstand(ANNA, 'anna', { schuerfschiff: 5 }, { research: { rschuerfrecht: 1 } }) }) });
+  const c5 = await s.j('/asteroid/claim', { method: 'POST', headers: kopf(tokenA),
+    body: JSON.stringify({ system: Z3.sys, platz: Z3.platz }) });
+  check('8f: die gespeicherte Forschung Bergbaurecht hebt das Limit (3. Recht geht jetzt)',
+    c5.status === 200, { status: c5.status, body: c5.status !== 200 ? c5.body : undefined });
+
+  // Eskorte: kommt aus save.asteroidEskorten, NIE aus dem Request. Erst speichern, dann abgleichen.
+  await s.j('/storage/kepler7-save-v3', { method: 'PUT', headers: kopf(tokenA),
+    body: JSON.stringify({ value: spielstand(ANNA, 'anna', { schuerfschiff: 5 },
+      { research: { rschuerfrecht: 1 },
+        asteroidEskorten: { [Z1.sys + ':' + Z1.platz]: { schiffe: { jaeger: 25, kreuzer: 3 }, heimat: 'home' } } }) }) });
+  const c6 = await s.j('/asteroid/claim', { method: 'POST', headers: kopf(tokenA),
+    body: JSON.stringify({ system: Z1.sys, platz: Z1.platz, eskorte: { jaeger: 999999 } }) });
+  check('8g: die Eskorte kommt aus dem Spielstand - was der Request behauptet, ist egal',
+    c6.status === 200 && c6.body.eskorte && c6.body.eskorte.jaeger === 25 && c6.body.eskorte.kreuzer === 3,
+    { status: c6.status, eskorte: c6.body && c6.body.eskorte });
+
+  // Und alle anderen SEHEN Halterin und Eskorte im Feld.
+  const f5 = await s.j('/asteroid/field', { headers: kopf(tokenB) });
+  const z1Sicht = f5.body.felder[Z1.sys].plaetze[Z1.platz];
+  check('8h: bert sieht Halterin und Eskorte im Feld', !!z1Sicht && z1Sicht.halterName === 'anna' &&
+    z1Sicht.eskorte && z1Sicht.eskorte.jaeger === 25, z1Sicht && { halterName: z1Sicht.halterName, eskorte: z1Sicht.eskorte });
+
+  // Aufgeben: bert darf nicht, anna darf - und danach baut bert dort ganz normal ab.
+  const r1 = await s.j('/asteroid/release', { method: 'POST', headers: kopf(tokenB),
+    body: JSON.stringify({ system: Z1.sys, platz: Z1.platz }) });
+  check('8i: ein Fremder kann das Recht nicht aufgeben', r1.status === 403 && /Halter/.test(String(r1.body && r1.body.error)),
+    { status: r1.status, body: r1.body });
+  const r2 = await s.j('/asteroid/release', { method: 'POST', headers: kopf(tokenA),
+    body: JSON.stringify({ system: Z1.sys, platz: Z1.platz }) });
+  check('8j: die Halterin gibt das Recht auf', r2.status === 200, r2.status);
+  const mNachher = await s.j('/asteroid/mine', { method: 'POST', headers: kopf(tokenB),
+    body: JSON.stringify({ system: Z1.sys, platz: Z1.platz, wunsch: 700 }) });
+  check('8k: danach baut bert dort ganz normal ab', mNachher.status === 200 && mNachher.body.menge === 700,
+    { status: mNachher.status, menge: mNachher.body && mNachher.body.menge });
+
+  // Ein erschöpfter Platz lässt sich nicht reservieren (zielSys/zielPlatz aus Abschnitt 3/5 ist leer).
+  const cWeg = await s.j('/asteroid/claim', { method: 'POST', headers: kopf(tokenA),
+    body: JSON.stringify({ system: zielSys, platz: zielPlatz }) });
+  check('8l: ein erschöpftes Vorkommen lässt sich nicht reservieren', cWeg.status === 409 && cWeg.body.weg === true,
+    { status: cWeg.status, body: cWeg.body });
+
+  // Und die Rechte stehen wirklich in der Datenbank (nicht nur in der Antwort).
+  await warte(900);
+  const db8 = s.dbLesen();
+  const z2Db = db8.shared['asteroids:' + Z2.sys].plaetze[Z2.platz];
+  check('8m: das Recht an Z2 steht mit Halter und Zeitstempel in der DB',
+    !!z2Db && z2Db.halter === ANNA && z2Db.halterName === 'anna' && z2Db.seit > 0,
+    z2Db && { halter: z2Db.halter === ANNA, halterName: z2Db.halterName, seit: z2Db.seit > 0 });
 
   s.ende();
   console.log(fail ? '\nFAIL' : '\nPASS');

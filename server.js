@@ -7680,6 +7680,12 @@ app.post('/api/asteroid/mine', authMiddleware, async (req, res) => {
     return res.status(409).json({ error: 'Dieses Vorkommen ist nicht mehr da.', weg: true });
   }
 
+  // Schürfrecht (Konzept 6.1): Ein reserviertes Vorkommen darf nur sein Halter abbauen. Der
+  // Fehlertext nennt den Halter, damit der Client dem Spieler sagen kann, WER es reserviert hat.
+  if (vork.halter && vork.halter !== req.userId) {
+    return res.status(403).json({ error: 'Reserviert von ' + (vork.halterName || 'einem anderen Kommandanten') + (vork.tag ? ' [' + vork.tag + ']' : '') + '.', reserviert: true });
+  }
+
   // Obergrenze aus der gespeicherten Flotte. Ehrliche Grenze (wie bei der Modulbörse): Der Client
   // schreibt seinen Spielstand selbst, wer ihn manipuliert, kann Schiffe behaupten. Der Server prüft
   // BESITZ im gespeicherten Stand - mehr nicht, und mehr behauptet das Konzept auch nicht.
@@ -7714,6 +7720,103 @@ app.post('/api/asteroid/mine', authMiddleware, async (req, res) => {
   console.log('[asteroid-mine] userId=' + req.userId + ' sys=' + sysId + ' platz=' + platz + ' menge=' + menge + ' rest=' + Math.max(0, vork.vorrat));
   await saveDb();
   res.json({ ok: true, menge, sorte: vork.sorte, groesse: vork.groesse, rest: Math.max(0, vork.vorrat) });
+});
+
+// ===== Schürfrechte (Konzept 6.1/6.2/6.4): ein Vorkommen für genau einen Spieler reservieren =====
+//
+// WARUM DAS OHNE SPERREN SICHER IST (dasselbe Muster wie die Modulbörse, Z. 5202 ff., und
+// /api/asteroid/mine direkt darüber): Der gesamte Zustandswechsel eines Aufrufs läuft synchron in
+// einem Tick - das erste await steht erst hinter der Mutation (saveDb). Zwei gleichzeitige
+// Ansprüche auf denselben Platz können sich nicht überlappen; der zweite findet ihn belegt.
+// Dieses Muster nicht "aufräumen".
+const AST_RECHTE_BASIS = 2;          // Grundstock je Spieler (Konzept 6.1)
+const AST_RECHTE_MAX = 5;            // Deckel inkl. Forschung (Konzept 3.6: ~90 Vorkommen, gemessen)
+const AST_RECHTE_FORSCHUNG_MAX = 3;  // Forschung rschuerfrecht: 3 Stufen à +1 Recht
+
+function astLeseSave(userId) {
+  try { const roh = getSaveValue(userId); return roh ? JSON.parse(roh) : null; } catch (e) { return null; }
+}
+function astRechteLimit(save) {
+  const stufe = Math.max(0, Math.floor(Number(save && save.research && save.research.rschuerfrecht) || 0));
+  return Math.min(AST_RECHTE_MAX, AST_RECHTE_BASIS + Math.min(AST_RECHTE_FORSCHUNG_MAX, stufe));
+}
+function astGehalteneRechte(felder, userId) {
+  let n = 0;
+  for (const feld of Object.values(felder)) {
+    for (const p of Object.values((feld && feld.plaetze) || {})) if (p && p.halter === userId) n++;
+  }
+  return n;
+}
+// Die Eskorte kommt NICHT aus dem Request, sondern aus dem gespeicherten Spielstand
+// (save.asteroidEskorten['<sys>:<platz>'].schiffe). Der Client schickt bewusst keine Schiffszahlen:
+// Beim Stationieren haben die Schiffe seine Heimflotte längst verlassen - eine Prüfung gegen
+// save.fleet würde genau den ehrlichen Fall ablehnen. So ist "Eskorte wirklich im Spielstand?"
+// (Konzept 6.4) wörtlich implementiert, und es steht nichts im Request, dem man glauben müsste.
+function astEskorteAusSave(save, sysId, platz) {
+  const e = save && save.asteroidEskorten && save.asteroidEskorten[sysId + ':' + platz];
+  const schiffe = (e && e.schiffe) || {};
+  const sauber = {};
+  for (const typ of Object.keys(schiffe)) {
+    const n = Math.floor(Number(schiffe[typ]) || 0);
+    if (n > 0 && n <= 1e9) sauber[typ] = n;
+  }
+  return sauber;
+}
+
+// Anmelden ODER Eskorte abgleichen: Der erste Aufruf eines freien Vorkommens reserviert es (mit
+// Limit-Prüfung), jeder weitere Aufruf des Halters übernimmt nur die aktuelle Eskorte aus seinem
+// gespeicherten Spielstand ins Felddokument. Die Limit-Prüfung läuft bewusst NUR bei der Anmeldung -
+// ein Eskorten-Abgleich am Limit darf nie scheitern.
+app.post('/api/asteroid/claim', authMiddleware, async (req, res) => {
+  const sysId = String((req.body && req.body.system) || '');
+  const platz = String((req.body && req.body.platz) !== undefined ? req.body.platz : '');
+  if (!sysId || !platz) return res.status(400).json({ error: 'System und Platz fehlen.' });
+  if (astGuertelSysteme().indexOf(sysId) < 0) return res.status(400).json({ error: 'Dieses System trägt keinen Asteroidengürtel.' });
+  const { felder } = astAlleFelder();
+  const feld = felder[sysId];
+  const vork = feld && feld.plaetze && feld.plaetze[platz];
+  if (!vork || vork.frei || !(vork.vorrat > 0)) return res.status(409).json({ error: 'Dieses Vorkommen ist nicht mehr da.', weg: true });
+  if (vork.halter && vork.halter !== req.userId) {
+    return res.status(409).json({ error: 'Bereits reserviert von ' + (vork.halterName || 'einem anderen Kommandanten') + '.' });
+  }
+  const save = astLeseSave(req.userId);
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern, dann reservieren.' });
+  if (!vork.halter) {
+    const limit = astRechteLimit(save);
+    const gehalten = astGehalteneRechte(felder, req.userId);
+    if (gehalten >= limit) {
+      return res.status(403).json({ error: 'Anspruchslimit erreicht: ' + gehalten + ' von ' + limit + ' Schürfrechten belegt. Die Forschung Bergbaurecht hebt das Limit auf höchstens ' + AST_RECHTE_MAX + '.' });
+    }
+    vork.halter = req.userId;
+    vork.halterName = req.username || 'Unbekannt';
+    vork.tag = ((save.player && save.player.allianceTag) || '').trim().toUpperCase();
+    vork.seit = Date.now();
+  }
+  vork.eskorte = astEskorteAusSave(save, sysId, platz);
+  db.shared[astFeldKey(sysId)] = feld;
+  console.log('[asteroid-claim] userId=' + req.userId + ' sys=' + sysId + ' platz=' + platz + ' eskorte=' + JSON.stringify(vork.eskorte));
+  await saveDb();
+  res.json({ ok: true, halter: vork.halter, halterName: vork.halterName, tag: vork.tag, seit: vork.seit, eskorte: vork.eskorte });
+});
+
+// Aufgeben: nur der Halter. Der Heimflug einer stationierten Eskorte ist Sache des Clients - die
+// Schiffe stehen in SEINEM Spielstand (asteroidEskorten), das Felddokument vergisst sie hier nur.
+app.post('/api/asteroid/release', authMiddleware, async (req, res) => {
+  const sysId = String((req.body && req.body.system) || '');
+  const platz = String((req.body && req.body.platz) !== undefined ? req.body.platz : '');
+  if (!sysId || !platz) return res.status(400).json({ error: 'System und Platz fehlen.' });
+  if (astGuertelSysteme().indexOf(sysId) < 0) return res.status(400).json({ error: 'Dieses System trägt keinen Asteroidengürtel.' });
+  const { felder } = astAlleFelder();
+  const feld = felder[sysId];
+  const vork = feld && feld.plaetze && feld.plaetze[platz];
+  if (!vork || vork.frei) return res.status(409).json({ error: 'Dieses Vorkommen ist nicht mehr da.', weg: true });
+  if (!vork.halter) return res.status(409).json({ error: 'Dieses Vorkommen ist gar nicht reserviert.' });
+  if (vork.halter !== req.userId) return res.status(403).json({ error: 'Nur der Halter kann ein Schürfrecht aufgeben.' });
+  delete vork.halter; delete vork.halterName; delete vork.tag; delete vork.seit; delete vork.eskorte;
+  db.shared[astFeldKey(sysId)] = feld;
+  console.log('[asteroid-release] userId=' + req.userId + ' sys=' + sysId + ' platz=' + platz);
+  await saveDb();
+  res.json({ ok: true });
 });
 
 app.post('/api/deploy-webhook', (req, res) => {

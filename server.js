@@ -7441,6 +7441,281 @@ function verifyGithubSignature(req) {
     return a.length === b.length && crypto.timingSafeEqual(a, b);
   } catch (e) { return false; }
 }
+/* =============================================================================================
+   Asteroidenfeld - der geteilte, umkämpfte Vorrat (Konzept docs/asteroiden-konzept.md 3.3.2/6.4)
+
+   WARUM DER SERVER DAS FELD ERZEUGT UND NICHT NACHRECHNET. Die erste Idee war, dass Client und
+   Server dasselbe Feld unabhängig aus einem Seed ausrechnen und nur die Abweichung gespeichert
+   wird. Seit der Nachschub WANDERT (Konzept 3.3.1) geht das nicht mehr: Ein Feld, das sich bei
+   jeder Erschöpfung an einer zufälligen anderen Stelle neu bildet, ist Geschichte, keine Formel.
+   Zwei Implementierungen derselben Geschichte müssten dauerhaft synchron bleiben - genau die
+   Fehlerklasse, an der dieses Projekt schon mehrfach hing (CLAUDE.md: "Backend hat teils eigene
+   Kopien von Frontend-Formeln").
+   Deshalb: **Der Server erzeugt und führt das Feld, der Client zeigt nur an, was er bekommt.**
+   Die einzige verbleibende Parität sind die SCHLÜSSEL der Sorten und Größen - der Client muss
+   wissen, wie ein 'magnetit' aussieht. Genau das prüft tests/test_asteroid_paritaet_http.js.
+
+   FAUL STATT TIMER. Ein erschöpfter Platz bekommt einen Termin (`nachschubAb`); beim nächsten
+   LESEN des Feldes prüft der Server, welche Termine fällig sind, und würfelt dort neu aus. Auf dem
+   Pi läuft kein Hintergrundjob, und es gibt nichts, was bei einem Neustart hängenbleiben kann.
+   Liest wochenlang niemand ein System, holt der erste Blick alles auf einmal nach.
+
+   OHNE SPERREN SICHER, aus demselben Grund wie die Modulbörse weiter oben: Der gesamte
+   Zustandswechsel eines Endpunkts läuft synchron in EINEM Tick, das erste await steht erst hinter
+   saveDb(). Zwei gleichzeitige Abbaumissionen auf denselben Brocken können sich nicht überlappen -
+   der zweite bekommt, was der erste übrig gelassen hat. Dieser Grund gehört hierher als Kommentar,
+   sonst "repariert" ihn irgendwann jemand kaputt.
+============================================================================================= */
+const AST_SEED = 'kepler7-asteroiden-v1';
+const AST_GUERTEL_ZAHL = 20;            // von 69 Systemen - bei wachsender Spielerschaft erhöhen
+const AST_PLAETZE_JE_GUERTEL = 10;      // feste Positionen auf der Gürtelbahn
+const AST_VORKOMMEN_MIN = 4, AST_VORKOMMEN_MAX = 6;   // Startbelegung je Gürtelsystem
+const AST_GRENZE_MIN = 3, AST_GRENZE_MAX = 8;         // Schranken beim Wandern des Nachschubs
+const AST_SYSTEMWECHSEL = 0.30;         // Anteil des Nachschubs, der in ein anderes System wandert
+// Sorten und Größen: NUR die Felder, die der Server für Erzeugung und Buchführung braucht. Namen,
+// Icons, Farben und die Rohstoff-Aufteilung bleiben im Frontend - der Server verteilt keine
+// Ressourcen, er führt nur Vorrat. Die Schlüssel müssen mit ASTEROID_SORTEN/ASTEROID_GROESSEN
+// im Frontend übereinstimmen; test_asteroid_paritaet_http.js prüft genau das.
+const AST_SORTEN = [
+  { key: 'eisen', gewicht: 22 }, { key: 'prisma', gewicht: 18 }, { key: 'eiskern', gewicht: 15 },
+  { key: 'magnetit', gewicht: 12 }, { key: 'hydrat', gewicht: 11 }, { key: 'klathrat', gewicht: 9 },
+  { key: 'pechblende', gewicht: 5 }, { key: 'resonanz', gewicht: 5 }, { key: 'kometenkern', gewicht: 3 }
+];
+const AST_GROESSEN = [
+  { key: 'splitter', vorrat: 50000, plaetze: 4, gewicht: 46, nachschubStd: 3 },
+  { key: 'brocken', vorrat: 150000, plaetze: 8, gewicht: 34, nachschubStd: 8 },
+  { key: 'kern', vorrat: 500000, plaetze: 16, gewicht: 16, nachschubStd: 20 },
+  { key: 'koloss', vorrat: 1500000, plaetze: 30, gewicht: 4, nachschubStd: 48 }
+];
+// Obergrenze für eine einzelne Ladung, hergeleitet aus der WIRKLICH gespeicherten Flotte. Das ist
+// bewusst KEIN Nachbau der Client-Formel (die hängt an Cargo-Modulen, Werftmarken und Forschung -
+// sie hier zu spiegeln hieße, zwei Formeln dauerhaft synchron zu halten). Es ist eine großzügige
+// Schranke, die kein ehrlicher Spieler je erreicht, und sie schließt trotzdem genau das Loch, auf
+// das es ankommt: dass ein manipulierter Client mit einem einzigen Minenschiff einen Kern leersaugt.
+const AST_MAX_JE_SCHUERFSCHIFF = 2000;   // Bunker 400 * Fördertechnik 1,4 -> 560; Faktor 3,5 Luft
+const AST_MAX_JE_FRACHTER = 1500;        // Frachter 300 * Modul-/Markenspielraum
+const AST_MAX_JE_GROSSFRACHTER = 7500;   // grosser Frachter 1500, derselbe Spielraum
+function astFeldKey(sysId) { return 'asteroids:' + sysId; }
+// Deterministische Auswahl der Gürtelsysteme: dieselbe 5x4-Rasterstreuung wie im Frontend, damit
+// die Gürtel über die ganze Karte verteilt liegen statt in einer Ecke zu klumpen. Sie ist hier NICHT
+// paritätspflichtig (der Client bekommt die Liste vom Server), sondern nur stabil - dieselbe
+// Galaxie soll bei jedem Serverstart dieselben Gürtel haben.
+let _astGuertelCache = null;
+function astGuertelSysteme() {
+  if (_astGuertelCache) return _astGuertelCache;
+  const sys = SYSTEM_COORDS;
+  const xs = sys.map(s => s.gx), ys = sys.map(s => s.gy);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const SPALTEN = 5, ZEILEN = 4;
+  const zellen = new Map();
+  const hash = s => astHash(AST_SEED + ':' + s.id);
+  for (const s of sys) {
+    const cx = Math.min(SPALTEN - 1, Math.floor((s.gx - x0) / ((x1 - x0) || 1) * SPALTEN));
+    const cy = Math.min(ZEILEN - 1, Math.floor((s.gy - y0) / ((y1 - y0) || 1) * ZEILEN));
+    const k = cx + ':' + cy;
+    const h = hash(s);
+    const bisher = zellen.get(k);
+    if (!bisher || h < bisher.h) zellen.set(k, { id: s.id, h });
+  }
+  let gewaehlt = [...zellen.values()];
+  if (gewaehlt.length > AST_GUERTEL_ZAHL) {
+    gewaehlt = gewaehlt.sort((a, b) => a.h - b.h).slice(0, AST_GUERTEL_ZAHL);
+  } else if (gewaehlt.length < AST_GUERTEL_ZAHL) {
+    const drin = new Set(gewaehlt.map(g => g.id));
+    const rest = sys.filter(s => !drin.has(s.id)).map(s => ({ id: s.id, h: hash(s) })).sort((a, b) => a.h - b.h);
+    gewaehlt = gewaehlt.concat(rest.slice(0, AST_GUERTEL_ZAHL - gewaehlt.length));
+  }
+  _astGuertelCache = gewaehlt.map(g => g.id).sort();
+  return _astGuertelCache;
+}
+// Stabiler Hash 0..1 für die Systemauswahl. Nur dafür - der Feldinhalt selbst wird echt gewürfelt
+// (er ist Geschichte, siehe Kopfkommentar) und darf gerade NICHT reproduzierbar sein.
+function astHash(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return ((h >>> 0) % 100000) / 100000;
+}
+function astZieheGewichtet(liste) {
+  const summe = liste.reduce((a, x) => a + x.gewicht, 0);
+  let r = Math.random() * summe;
+  for (const x of liste) { r -= x.gewicht; if (r <= 0) return x; }
+  return liste[liste.length - 1];
+}
+// Wie weit liegt das System von der Heimat? 0 = Zentrum, 1 = äußerster Rand. Draußen liegen die
+// dickeren Brocken - das ist der Grund, überhaupt weit zu fliegen.
+function astFerne(sysId) {
+  const heimat = SYSTEM_COORDS.find(s => s.id === 'kepler') || SYSTEM_COORDS[0];
+  const s = SYSTEM_COORDS.find(x => x.id === sysId);
+  if (!s || !heimat) return 0.5;
+  const d = Math.hypot(s.gx - heimat.gx, s.gy - heimat.gy);
+  const max = Math.max(...SYSTEM_COORDS.map(x => Math.hypot(x.gx - heimat.gx, x.gy - heimat.gy))) || 1;
+  return Math.min(1, d / max);
+}
+function astZieheGroesse(sysId) {
+  const f = astFerne(sysId);
+  // fernBonus wie im Frontend: draußen verschiebt sich die Verteilung zu den großen Brocken.
+  const bonus = { splitter: -0.5, brocken: 0, kern: 0.8, koloss: 2.0 };
+  const gewichtet = AST_GROESSEN.map(g => ({
+    key: g.key, gewicht: Math.max(0.2, g.gewicht * (1 + (bonus[g.key] || 0) * f))
+  }));
+  // EINMAL ziehen, dann suchen. Stünde der Zug im find()-Rückruf, würde er für JEDES Element neu
+  // gewürfelt - dann trifft die Suche nur zufällig, liefert oft undefined und verzerrt nebenbei die
+  // Verteilung. Genau so war die erste Fassung, und der Server stürzte beim ersten Feldaufbau ab.
+  const gezogen = astZieheGewichtet(gewichtet);
+  return AST_GROESSEN.find(g => g.key === gezogen.key) || AST_GROESSEN[0];
+}
+function astNeuesVorkommen(sysId) {
+  const g = astZieheGroesse(sysId);
+  const s = astZieheGewichtet(AST_SORTEN);
+  // Vorrat streut um +-20%, damit zwei Kerne nicht identisch aussehen.
+  const vorrat = Math.round(g.vorrat * (0.8 + Math.random() * 0.4));
+  return { sorte: s.key, groesse: g.key, vorrat };
+}
+function astLeeresFeld() { return { plaetze: {} }; }
+// Erstbelegung eines Gürtelsystems.
+function astErzeugeFeld(sysId) {
+  const feld = astLeeresFeld();
+  const anzahl = AST_VORKOMMEN_MIN + Math.floor(Math.random() * (AST_VORKOMMEN_MAX - AST_VORKOMMEN_MIN + 1));
+  const plaetze = [];
+  for (let i = 0; i < AST_PLAETZE_JE_GUERTEL; i++) plaetze.push(String(i));
+  for (let i = plaetze.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [plaetze[i], plaetze[j]] = [plaetze[j], plaetze[i]]; }
+  for (const p of plaetze.slice(0, anzahl)) feld.plaetze[p] = astNeuesVorkommen(sysId);
+  return feld;
+}
+function astBelegtZahl(feld) {
+  return Object.values(feld.plaetze || {}).filter(p => p && !p.frei && (p.vorrat || 0) > 0).length;
+}
+// Fällige Nachschub-Termine auflösen. Gibt zurück, ob sich etwas geändert hat.
+function astNachschub(sysId, feld, alleFelder) {
+  const now = Date.now();
+  let geaendert = false;
+  for (const [platz, p] of Object.entries(feld.plaetze || {})) {
+    if (!p || !p.frei || !p.nachschubAb || p.nachschubAb > now) continue;
+    delete feld.plaetze[platz];
+    geaendert = true;
+    // Wandernder Nachschub: Der Brocken kommt NICHT an derselben Stelle wieder. Zu 30% sogar in
+    // einem anderen Gürtelsystem - der Gürtel ist ein Revier, das man absuchen muss, kein Fahrplan.
+    let zielSys = sysId, zielFeld = feld;
+    if (Math.random() < AST_SYSTEMWECHSEL) {
+      const andere = astGuertelSysteme().filter(x => x !== sysId);
+      const kandidat = andere[Math.floor(Math.random() * andere.length)];
+      if (kandidat && alleFelder[kandidat]) { zielSys = kandidat; zielFeld = alleFelder[kandidat]; }
+    }
+    if (astBelegtZahl(zielFeld) >= AST_GRENZE_MAX) continue;   // dort ist kein Platz mehr
+    const frei = [];
+    for (let i = 0; i < AST_PLAETZE_JE_GUERTEL; i++) {
+      const k = String(i);
+      const q = zielFeld.plaetze[k];
+      if (!q || q.frei) frei.push(k);
+    }
+    if (!frei.length) continue;
+    const ziel = frei[Math.floor(Math.random() * frei.length)];
+    zielFeld.plaetze[ziel] = astNeuesVorkommen(zielSys);
+  }
+  // Untergrenze halten: Ein Gürtelsystem, das unter das Minimum gefallen ist, bekommt sofort auf.
+  while (astBelegtZahl(feld) < AST_GRENZE_MIN) {
+    const frei = [];
+    for (let i = 0; i < AST_PLAETZE_JE_GUERTEL; i++) {
+      const k = String(i);
+      const q = feld.plaetze[k];
+      if (!q || q.frei) frei.push(k);
+    }
+    if (!frei.length) break;
+    feld.plaetze[frei[Math.floor(Math.random() * frei.length)]] = astNeuesVorkommen(sysId);
+    geaendert = true;
+  }
+  return geaendert;
+}
+// Alle Gürtelfelder lesen, dabei fällige Termine auflösen und fehlende Systeme erstbelegen.
+function astAlleFelder() {
+  if (!db.shared) db.shared = {};
+  const felder = {};
+  let geaendert = false;
+  for (const sysId of astGuertelSysteme()) {
+    const key = astFeldKey(sysId);
+    let feld = db.shared[key];
+    if (!feld || typeof feld !== 'object' || !feld.plaetze) { feld = astErzeugeFeld(sysId); geaendert = true; }
+    felder[sysId] = feld;
+  }
+  // Nachschub NACH dem Einsammeln aller Felder: Ein wandernder Brocken braucht das Zielsystem.
+  for (const sysId of Object.keys(felder)) if (astNachschub(sysId, felder[sysId], felder)) geaendert = true;
+  if (geaendert) { for (const sysId of Object.keys(felder)) db.shared[astFeldKey(sysId)] = felder[sysId]; }
+  return { felder, geaendert };
+}
+
+// Das ganze Feld lesen. Bewusst alle Gürtelsysteme auf einmal statt eines je Anfrage: Es sind rund
+// 16 KB, die Sektorkarte zeigt ohnehin alle, und zwanzig Einzelanfragen je Kartenaufruf wären auf
+// einem Raspberry Pi die teurere Lösung.
+app.get('/api/asteroid/field', authMiddleware, async (req, res) => {
+  const { felder, geaendert } = astAlleFelder();
+  if (geaendert) await saveDb();
+  res.json({ systeme: astGuertelSysteme(), felder });
+});
+
+// Beim START einer Abbaumission: Ladung aus dem Vorkommen entnehmen. DER SERVER ENTSCHEIDET DIE
+// MENGE - der Client nennt nur seinen Wunsch, und der wird gegen zwei Schranken geklemmt: den
+// tatsächlichen Restvorrat und eine großzügige Obergrenze aus der wirklich gespeicherten Flotte.
+//
+// Die Entnahme passiert beim START, nicht bei der Rückkehr. Damit kann derselbe Brocken nicht
+// zweimal vergeben werden, und wer als Zweiter losfliegt, erfährt es SOFORT statt nach einer halben
+// Stunde Flug. Der Preis ist ehrlich zu benennen: Bricht die Verbindung zwischen diesem Aufruf und
+// dem tatsächlichen Missionsstart ab, ist die Ladung entnommen, ohne dass eine Flotte fliegt.
+// Deshalb ruft der Client ihn erst, wenn Treibstoff und Slots bereits geprüft sind.
+//
+// Der Server schreibt NIE den Spielstand. Er führt Buch über den geteilten Vorrat und nichts sonst;
+// die Gutschrift beim Spieler macht der Client bei Heimkehr über gainResources(), wie bei jeder
+// anderen Mission. Das Wettrennen zwischen Server-Gutschrift und Client-Save entsteht hier gar nicht.
+app.post('/api/asteroid/mine', authMiddleware, async (req, res) => {
+  const sysId = String((req.body && req.body.system) || '');
+  const platz = String((req.body && req.body.platz) !== undefined ? req.body.platz : '');
+  const wunsch = Math.floor(Number((req.body && req.body.wunsch) || 0));
+  if (!sysId || !platz) return res.status(400).json({ error: 'System und Platz fehlen.' });
+  if (!(wunsch > 0)) return res.status(400).json({ error: 'Ungültige Wunschmenge.' });
+  if (astGuertelSysteme().indexOf(sysId) < 0) return res.status(400).json({ error: 'Dieses System trägt keinen Asteroidengürtel.' });
+
+  const { felder } = astAlleFelder();
+  const feld = felder[sysId];
+  const vork = feld && feld.plaetze && feld.plaetze[platz];
+  if (!vork || vork.frei || !(vork.vorrat > 0)) {
+    return res.status(409).json({ error: 'Dieses Vorkommen ist nicht mehr da.', weg: true });
+  }
+
+  // Obergrenze aus der gespeicherten Flotte. Ehrliche Grenze (wie bei der Modulbörse): Der Client
+  // schreibt seinen Spielstand selbst, wer ihn manipuliert, kann Schiffe behaupten. Der Server prüft
+  // BESITZ im gespeicherten Stand - mehr nicht, und mehr behauptet das Konzept auch nicht.
+  let obergrenze = 0;
+  try {
+    const roh = getSaveValue(req.userId);
+    const save = roh ? JSON.parse(roh) : null;
+    const flotten = [];
+    if (save && save.fleet) flotten.push(save.fleet);
+    if (save && save.colonies) for (const c of Object.values(save.colonies)) if (c && c.fleet) flotten.push(c.fleet);
+    for (const f of flotten) {
+      obergrenze += (Number(f.schuerfschiff) || 0) * AST_MAX_JE_SCHUERFSCHIFF;
+      obergrenze += (Number(f.frachter) || 0) * AST_MAX_JE_FRACHTER;
+      obergrenze += (Number(f.grossfrachter) || 0) * AST_MAX_JE_GROSSFRACHTER;
+    }
+  } catch (e) { obergrenze = 0; }
+  if (!(obergrenze > 0)) {
+    return res.status(403).json({ error: 'Kein Minenschiff im gespeicherten Spielstand - erst speichern, dann losfliegen.' });
+  }
+
+  const menge = Math.max(0, Math.min(wunsch, vork.vorrat, Math.floor(obergrenze)));
+  if (menge <= 0) return res.status(409).json({ error: 'Dieses Vorkommen ist erschöpft.', weg: true });
+
+  vork.vorrat -= menge;
+  const groesse = AST_GROESSEN.find(g => g.key === vork.groesse) || AST_GROESSEN[0];
+  if (vork.vorrat <= 0) {
+    // Erschöpft: Der Platz wird frei und bekommt einen Nachschub-Termin. Der Brocken kommt woanders
+    // wieder (siehe astNachschub) - nie am selben Fleck.
+    feld.plaetze[platz] = { frei: true, nachschubAb: Date.now() + groesse.nachschubStd * 3600 * 1000 };
+  }
+  db.shared[astFeldKey(sysId)] = feld;
+  console.log('[asteroid-mine] userId=' + req.userId + ' sys=' + sysId + ' platz=' + platz + ' menge=' + menge + ' rest=' + Math.max(0, vork.vorrat));
+  await saveDb();
+  res.json({ ok: true, menge, sorte: vork.sorte, groesse: vork.groesse, rest: Math.max(0, vork.vorrat) });
+});
+
 app.post('/api/deploy-webhook', (req, res) => {
   if (!verifyGithubSignature(req)) {
     console.warn('Deploy-Webhook: ungültige oder fehlende Signatur, Anfrage abgelehnt.');

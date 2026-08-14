@@ -1004,6 +1004,9 @@ function pushNotificationText(type, payload) {
   if (type === 'attack-received') return payload.defended
     ? { title: 'Angriff abgewehrt!', body: (payload.attackerName || 'Ein Spieler') + ' hat dich angegriffen - deine Verteidigung hat gehalten. Sieh dir den Bericht an.' }
     : { title: 'Du wurdest angegriffen!', body: (payload.attackerName || 'Ein Spieler') + ' hat deine Kolonie überfallen' + (payload.looted ? ' und Ressourcen erbeutet' : '') + '. Rüste auf oder schlage zurück!' };
+  if (type === 'asteroid-contested') return payload.verloren
+    ? { title: 'Schürfrecht verloren!', body: (payload.angreiferName || 'Ein Kommandant') + ' hat dir das Schürfrecht abgenommen. Deine überlebende Eskorte kehrt zurück - das Vorkommen gehört jetzt ihm.' }
+    : { title: 'Angriff auf dein Schürfrecht abgewehrt', body: 'Deine Eskorte hat ' + (payload.angreiferName || 'einen Angreifer') + ' zurückgeschlagen. Das Vorkommen bleibt deins - sieh nach, was von der Wache übrig ist.' };
   if (type === 'spy-detected') return payload.sabotage
     ? { title: 'Störmanöver!', body: (payload.fromName || 'Ein Spieler') + ' hat ein Sabotage-Störmanöver gegen dich geflogen - prüfe deine Ressourcen und Spionageabwehr.' }
     : { title: 'Spionage entdeckt', body: (payload.fromName || 'Ein Spieler') + ' hat deine Kolonie ausgespäht' + (payload.deep ? ' (Tiefen-Aufklärung inkl. Beute-Schätzung).' : '.') };
@@ -1082,6 +1085,7 @@ function notificationTarget(type, payload) {
     case 'raid-incoming': return 'verteidigung';
     case 'spy-detected': return 'verteidigung';
     case 'attack-received': return 'berichte';
+    case 'asteroid-contested': return 'karte';
     case 'sabotaged': return 'berichte';
     case 'message': return 'berichte';
     // Der Chat ist kein Reiter, sondern ein Einschub-Fenster - 'chat:global' oeffnet es und stellt
@@ -7928,6 +7932,10 @@ app.post('/api/asteroid/contest', authMiddleware, async (req, res) => {
   }
 
   const halterVorher = vork.halterName || 'Unbekannt';
+  // Die Empfaenger-ID VOR der Aufloesung sichern: Bei einem Sieg wird vork.halter mit dem
+  // Angreifer ueberschrieben, und die Benachrichtigung ginge dann an den Falschen - naemlich an
+  // den, der gerade gewonnen hat.
+  const halterIdVorher = vork.halter;
   vork.angriffe = vork.angriffe || {};
   vork.angriffe[req.userId] = jetzt;
   vork.abgerechnet = vork.abgerechnet || {};
@@ -7946,6 +7954,33 @@ app.post('/api/asteroid/contest', authMiddleware, async (req, res) => {
     vork.eskorte = neueEskorte;
   }
   db.shared[astFeldKey(sysId)] = feld;
+
+  /* Der Halter erfaehrt den Angriff, auch wenn sein Spiel geschlossen ist (Konzept 6.3). Ohne das
+     merkt er ihn erst, wenn sein Client das Feld das naechste Mal liest - bei einem verlorenen
+     Recht kann das Stunden dauern.
+     KATEGORIE 'attack' statt einer eigenen Einstellung: Es IST ein Angriff auf ihn, und wer
+     Angriffs-Pushes abgestellt hat, will auch diesen nicht. Eine eigene Einstellung fuer eine
+     einzelne Angriffsart waere eine, die niemand findet - im Konzept steht sie, hier ist bewusst
+     abgewichen. Dieselbe Anti-Flut-Drosselung wie bei /api/attack: Der Postfach-Eintrag kommt
+     immer, die Handy-Push hoechstens alle 30 Minuten.
+     VOR saveDb(), genau wie in /api/attack: pushNotificationEvent schreibt den Postfach-Eintrag
+     nach db.private, allowAttackPush den Drossel-Zeitstempel. Nach dem Schreibvorgang gesetzt
+     haengen beide bis zum naechsten saveDb irgendeines anderen Aufrufers in der Luft - die
+     Hausregel "db immer VOR saveDb synchron mutieren" meint genau diesen Fall. Der eigentliche
+     Handy-Versand darin ist Feuer-und-Vergessen und blockiert nichts. */
+  try {
+    const halterUser = halterIdVorher ? findUserById(halterIdVorher) : null;
+    if (halterUser) {
+      const hPrefs = getNotifPrefs(halterUser);
+      if (hPrefs.enabled && hPrefs.attack) {
+        pushNotificationEvent(halterIdVorher, 'asteroid-contested', {
+          angreiferName: req.username || 'Ein Kommandant', verloren: gewonnen,
+          sorte: vork.sorte || '', system: sysId
+        }, { skipWebPush: !allowAttackPush(halterIdVorher) });
+      }
+    }
+  } catch (e) { console.warn('[asteroid-contest] Push fehlgeschlagen:', e.message); }
+
   console.log('[asteroid-contest] userId=' + req.userId + ' sys=' + sysId + ' platz=' + platz + ' chance=' + chance.toFixed(2) + ' gewonnen=' + gewonnen);
   await saveDb();
   res.json({ ok: true, gewonnen, chance, eigeneVerluste, gegnerVerluste, halterVorher,

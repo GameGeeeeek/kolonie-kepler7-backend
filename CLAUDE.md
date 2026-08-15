@@ -68,4 +68,26 @@ Messmethode. WICHTIG: `/api/health` mit 200 beweist nur, dass IRGENDEIN Backend 
 welches. Und der Frontend-Deploy kann funktionieren, während der Backend-Pull kaputt ist: Beide
 laufen über denselben Webhook-Endpunkt, aber als getrennte fest verdrahtete Befehle.
 
+**Nachtrag 15.08.2026 – DRITTES Mal, und diesmal mit ausgeliefertem Frontend davor.** Nach drei
+Backend-Merges an einem Tag (#105 Testphase, #106 Kosmetik, #107 Sternenstaub) stand der Pi
+weiterhin auf Code von VOR dem 15.08. Gemessen von außen nach der Methode oben, mit Kontrollroute
+im selben Lauf:
+
+```
+cosmetics/buy          404   (#107, heute)
+cosmetics              404   (#106, heute)
+supporter/trial        404   (#105, heute)
+randkriege/lager       401   (#95, 10.08.)
+musterattack/create    401   (alte Kontrollroute)
+```
+
+Das Neue an diesem Mal ist die Wirkung: Der FRONTEND-Deploy lief durch. Die Spieldatei war also auf
+v8.519.0 und fragte Routen ab, die es auf dem Server nicht gab – der neue Abschnitt „Aussehen" stand
+für Spieler dauerhaft auf „Lädt…". **Zwei Lehren:** (a) Nach jedem Merge, der BEIDE Repos betrifft,
+den Backend-Stand mit dieser 401/404-Messung prüfen, nicht nur die Frontend-Version – der
+Frontend-Deploy beweist nichts über den Backend-Deploy, beide sind getrennte fest verdrahtete
+Befehle desselben Webhooks; (b) das Frontend muss einen nicht erreichbaren Server BENENNEN können,
+statt stumm im Ladezustand zu bleiben (Frontend-CLAUDE.md, Regel 35, behoben in v8.520.0). Ein
+hängender Deploy ist dann eine sichtbare Störung statt einer toten Fläche.
+
 **Folge für PRs:** Der Merge ist nicht der Zwischenschritt zu einem späteren Deploy, sondern die Auslieferung selbst – was gemerged wird, läuft Sekunden später auf dem Pi. Offene PRs trotzdem sofort mergen statt sie liegen zu lassen, aber erst nach grünem Prüflauf.

@@ -1770,6 +1770,15 @@ function maskEmail(email) {
 }
 app.get('/api/me', authMiddleware, (req, res) => {
   const user = findUserById(req.userId);
+  // Sternenstaub für die tägliche Anmeldung (15.08.2026). Bewusst HIER und nicht in /api/login:
+  // Das Token überlebt Tage, ein Spieler mit gespeicherter Anmeldung durchläuft /api/login unter
+  // Umständen wochenlang nicht - er bekäme seine Tagesgutschrift nie. /api/me läuft bei jedem
+  // Spielstart. Die Gutschrift ist über den Tagesschlüssel idempotent, mehrfache Aufrufe am selben
+  // Tag ändern also nichts.
+  // Geschrieben wird nur, wenn wirklich etwas gutgeschrieben wurde - eine GET-Route soll nicht bei
+  // jedem Aufruf einen Schreibvorgang auslösen.
+  const staubNeu = staubAnmeldungGutschreiben(user);
+  if (staubNeu > 0) saveDb();
   res.json({
     userId: req.userId, username: req.username,
     hasEmail: !!(user && user.email),
@@ -1788,7 +1797,10 @@ app.get('/api/me', authMiddleware, (req, res) => {
     // frei. Seit dem 15.08.2026 steckt darin auch die einmalige Testphase (`trial`), die dieselben
     // Funktionen ohne Spende freischaltet - der Server ist für beides die Autorität, siehe
     // supporterFeaturesFor().
-    supporter: supporterFeaturesFor(req.userId)
+    supporter: supporterFeaturesFor(req.userId),
+    // `neu` sagt dem Spiel, ob es die Gutschrift ansagen soll - ohne das müsste es den Stand mit
+    // dem letzten Start vergleichen, den es nach einem Neuladen gar nicht mehr kennt.
+    staub: Object.assign({ neu: staubNeu }, staubStand(user || {}))
   });
 });
 
@@ -3266,13 +3278,20 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // im Berichte-Reiter zeigt ihn an) - ein Zähler ohne Anzeige wäre nur Ballast im Spielstand.
     target.pvpDefended = (target.pvpDefended || 0) + 1;
     setSaveValue(targetUserId, JSON.stringify(target));
+    // Sternenstaub für die erfolgreiche Abwehr (15.08.2026). Der Kampf ist hier gerade
+    // SERVERSEITIG ausgewürfelt worden - der Verteidiger konnte ihn weder auslösen noch sein
+    // Ergebnis beeinflussen. Genau deshalb taugt er als Quelle, anders als alles, was aus dem
+    // Spielstand gemeldet wird. Gegen Absprache zählt je Angreifer nur ein Angriff pro Tag.
+    const staubAbwehr = staubAbwehrGutschreiben(targetUser, req.userId);
 
     addReport(req.userId, {
       type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt',
       attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
     });
     addReport(targetUserId, {
-      type: 'attack-received', result: 'win', attackerName: req.username, defendReward: abwehrCp,
+      // staubReward steht im Bericht, damit die Gutschrift nicht unsichtbar bleibt: Der Verteidiger
+      // war beim Kampf per Definition nicht dabei, der Bericht ist seine einzige Quelle.
+      type: 'attack-received', result: 'win', attackerName: req.username, defendReward: abwehrCp, staubReward: staubAbwehr,
       attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
     });
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: true, looted: false }, { skipWebPush: !allowAttackPush(targetUserId) }); }
@@ -8292,6 +8311,79 @@ app.post('/api/supporter/trial', authMiddleware, async (req, res) => {
   res.json({ ok: true, tage: SUPPORTER_TRIAL_DAYS, bis: user.supporterTrialUntil, supporter: supporterFeaturesFor(req.userId) });
 });
 
+// ===== Sternenstaub (15.08.2026): die Währung für Kosmetik =====
+//
+// WARUM SIE NUR AUS ZWEI QUELLEN KOMMT - und warum die naheliegenden fehlen
+// ------------------------------------------------------------------------
+// Der erste Entwurf sah Tagesaufgaben und Wochenliga als Quellen vor. Das wäre eine Währung
+// gewesen, die nur so AUSSIEHT, als läge sie sicher auf dem Server: Beide Größen stehen im
+// Spielstand, und der ist bauartbedingt klientenautoritativ. "Ich habe meine Tagesaufgabe erledigt"
+// kann der Server so wenig nachprüfen wie "ich habe 10^9 Erz" - er würde eine gemeldete Zahl
+// entgegennehmen und feierlich in sein eigenes Konto schreiben. Damit wäre die ganze serverseitige
+// Verankerung der Kosmetik über den Umweg der Währung wieder offen.
+//
+// Es zählt deshalb nur, was der Server SELBST beobachtet:
+//   1. Die tägliche Anmeldung. Der Zeitstempel entsteht hier, nicht im Spielstand.
+//   2. Ein ABGEWEHRTER Spielerangriff. /api/attack löst den Kampf serverseitig auf; der
+//      Verteidiger kann ihn weder auslösen noch sein Ergebnis beeinflussen.
+//
+// Gegen die offensichtliche Absprache (zwei Konten, eines greift immer wieder an und verliert)
+// stehen zwei Grenzen: je Angreifer zählt höchstens EIN abgewehrter Angriff pro Tag, und insgesamt
+// höchstens STAUB_ABWEHR_MAX_PRO_TAG. Das macht Absprache nicht unmöglich, aber unlohnend - mehr
+// als der ehrliche Tagesertrag springt dabei nicht heraus.
+const STAUB_ANMELDUNG = 5;
+const STAUB_SERIE_BONUS = 1;          // je Tag Serie zusätzlich
+const STAUB_SERIE_MAX = 5;            // Deckel des Serienbonus -> 5..10 je Tag
+const STAUB_ABWEHR = 3;
+const STAUB_ABWEHR_MAX_PRO_TAG = 3;   // verschiedene Angreifer je Tag
+function staubTagesschluessel(zeit) { return new Date(zeit || Date.now()).toISOString().slice(0, 10); }
+function staubKonto(user) {
+  if (!user.staub) user.staub = { menge: 0, serie: 0, letzterTag: null, abwehrTag: null, abwehrVon: [] };
+  return user.staub;
+}
+// Tagesgutschrift für die Anmeldung. Idempotent über den Tagesschlüssel: Ein zweiter Aufruf am
+// selben Tag tut nichts, egal wie oft das Spiel /api/me aufruft.
+// Rückgabe: die gutgeschriebene Menge (0 = heute schon geschehen).
+function staubAnmeldungGutschreiben(user) {
+  if (!user) return 0;
+  const k = staubKonto(user);
+  const heute = staubTagesschluessel();
+  if (k.letzterTag === heute) return 0;
+  // Serie: nur ein LÜCKENLOS folgender Tag verlängert sie. Ein ausgelassener Tag setzt auf 1
+  // zurück, nicht auf 0 - der heutige Tag zählt ja bereits.
+  const gestern = staubTagesschluessel(Date.now() - 86400000);
+  k.serie = (k.letzterTag === gestern) ? Math.min(k.serie + 1, STAUB_SERIE_MAX) : 1;
+  const menge = STAUB_ANMELDUNG + (k.serie - 1) * STAUB_SERIE_BONUS;
+  k.menge += menge;
+  k.letzterTag = heute;
+  return menge;
+}
+// Gutschrift für einen abgewehrten Angriff. `angreiferId` wird mitgeführt, damit derselbe Gegner
+// nicht mehrfach am Tag zählt.
+function staubAbwehrGutschreiben(user, angreiferId) {
+  if (!user) return 0;
+  const k = staubKonto(user);
+  const heute = staubTagesschluessel();
+  if (k.abwehrTag !== heute) { k.abwehrTag = heute; k.abwehrVon = []; }
+  if (k.abwehrVon.length >= STAUB_ABWEHR_MAX_PRO_TAG) return 0;
+  if (k.abwehrVon.indexOf(angreiferId) !== -1) return 0;
+  k.abwehrVon.push(angreiferId);
+  k.menge += STAUB_ABWEHR;
+  return STAUB_ABWEHR;
+}
+function staubStand(user) {
+  const k = staubKonto(user);
+  return {
+    menge: k.menge || 0, serie: k.serie || 0,
+    heuteAngemeldet: k.letzterTag === staubTagesschluessel(),
+    abwehrHeute: (k.abwehrTag === staubTagesschluessel()) ? k.abwehrVon.length : 0,
+    saetze: {
+      anmeldung: STAUB_ANMELDUNG, serieBonus: STAUB_SERIE_BONUS, serieMax: STAUB_SERIE_MAX,
+      abwehr: STAUB_ABWEHR, abwehrMaxProTag: STAUB_ABWEHR_MAX_PRO_TAG
+    }
+  };
+}
+
 // ===== Kosmetik: Namensfarbe und Emblem (15.08.2026) =====
 //
 // WARUM DAS HIER LIEGT UND NICHT IM SPIELSTAND
@@ -8340,7 +8432,17 @@ const KOSMETIK_DEFS = [
   { key: 'em_zirkel',     art: 'emblem',      bedingung: { typ: 'prestige', wert: 3 } },
   { key: 'em_aufstieg',   art: 'emblem',      bedingung: { typ: 'aufstieg', wert: 1 } },
   { key: 'em_klinge',     art: 'emblem',      bedingung: { typ: 'kampfpunkte', wert: 5000 } },
-  { key: 'em_lot',        art: 'emblem',      bedingung: { typ: 'abgrund', wert: 60 } }
+  { key: 'em_lot',        art: 'emblem',      bedingung: { typ: 'abgrund', wert: 60 } },
+  // --- Für Sternenstaub zu kaufen (15.08.2026) ---
+  // Der dritte Weg neben Fortschritt und Unterstützung, und der einzige, der jedem offensteht:
+  // Sternenstaub kommt aus der täglichen Anmeldung und aus abgewehrten Angriffen. Die Preise sind
+  // an den Tagesertrag gerechnet (5-10 aus der Anmeldung, bis 9 aus Abwehr): Das billigste Stück
+  // ist nach wenigen Tagen erreichbar, das teuerste bleibt ein Ziel für ein paar Wochen.
+  { key: 'nf_koralle',    art: 'namensfarbe', bedingung: { typ: 'kauf', preis: 40 } },
+  { key: 'nf_nebel',      art: 'namensfarbe', bedingung: { typ: 'kauf', preis: 90 } },
+  { key: 'nf_signal',     art: 'namensfarbe', bedingung: { typ: 'kauf', preis: 200 } },
+  { key: 'em_ring',       art: 'emblem',      bedingung: { typ: 'kauf', preis: 60 } },
+  { key: 'em_saat',       art: 'emblem',      bedingung: { typ: 'kauf', preis: 150 } }
 ];
 const KOSMETIK_ARTEN = ['namensfarbe', 'emblem'];
 const KOSMETIK_VORGABE = { namensfarbe: 'nf_standard', emblem: 'em_keins' };
@@ -8362,6 +8464,13 @@ function kosmetikBedingungErfuellt(userId, def, save) {
   const b = def.bedingung;
   if (b.typ === 'immer') return true;
   if (b.typ === 'spender') return kosmetikSpenderErfuellt(userId, b.stufe);
+  // Gekauft wird einmal und bleibt. Damit ist die Bedingung MONOTON wie die Fortschritts-Werte und
+  // muss im Lesepfad nicht erneut geprüft werden (siehe kosmetikBefristet). Der Kauf selbst wird
+  // gegen ein serverseitiges Konto abgerechnet - kein Feld aus dem Spielstand ist daran beteiligt.
+  if (b.typ === 'kauf') {
+    const u = findUserById(userId);
+    return !!(u && (u.cosmeticsGekauft || []).indexOf(def.key) !== -1);
+  }
   const s = save || {};
   if (b.typ === 'prestige') return (Number(s.prestige) || 0) >= b.wert;
   if (b.typ === 'aufstieg') return (Number((s.ascension || {}).count) || 0) >= b.wert;
@@ -8402,8 +8511,30 @@ app.get('/api/cosmetics', authMiddleware, (req, res) => {
     katalog: KOSMETIK_DEFS.map(d => ({ key: d.key, art: d.art, bedingung: d.bedingung })),
     besitz: kosmetikBesitz(req.userId),
     getragen: kosmetikGetragen(req.userId),
-    vorgabe: KOSMETIK_VORGABE
+    vorgabe: KOSMETIK_VORGABE,
+    staub: staubStand(findUserById(req.userId) || {})
   });
+});
+// Kaufen. Die einzige Stelle, an der Sternenstaub abgeht.
+app.post('/api/cosmetics/buy', authMiddleware, async (req, res) => {
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Account nicht gefunden.' });
+  const key = String((req.body && req.body.key) || '');
+  const def = kosmetikDef(key);
+  if (!def) return res.status(400).json({ error: 'Unbekanntes Kosmetik-Stück: ' + key });
+  if (def.bedingung.typ !== 'kauf') return res.status(400).json({ error: 'Dieses Stück ist nicht käuflich – es wird über Fortschritt oder Unterstützung freigeschaltet.' });
+  const gekauft = user.cosmeticsGekauft || [];
+  if (gekauft.indexOf(key) !== -1) return res.status(409).json({ error: 'Dieses Stück besitzt du bereits.' });
+  const k = staubKonto(user);
+  if ((k.menge || 0) < def.bedingung.preis) {
+    return res.status(402).json({ error: 'Nicht genug Sternenstaub.', fehlt: def.bedingung.preis - (k.menge || 0) });
+  }
+  // Erst abbuchen, dann eintragen, dann EINMAL speichern - beide Mutationen laufen synchron vor
+  // saveDb(), sonst könnte eine davon einen Schreibvorgang verpassen (CLAUDE.md-Fallstrick).
+  k.menge -= def.bedingung.preis;
+  user.cosmeticsGekauft = gekauft.concat([key]);
+  await saveDb();
+  res.json({ ok: true, key, staub: staubStand(user), besitz: kosmetikBesitz(req.userId) });
 });
 app.post('/api/cosmetics/equip', authMiddleware, async (req, res) => {
   const user = findUserById(req.userId);

@@ -1953,9 +1953,15 @@ app.get('/api/storage/:key', authMiddleware, (req, res) => {
       // supporterStatusCombined (05.08.2026): Spende ODER manuell vergebener Rang - beides ist ein
       // Rang und traegt deshalb dasselbe Abzeichen. Die gamegeeeeek-Ausnahme steckt bewusst NICHT
       // darin, die schaltet nur Funktionen frei.
-      const status = supporterStatusCombined(key.slice('leaderboard:'.length));
+      const besitzerId = key.slice('leaderboard:'.length);
+      const status = supporterStatusCombined(besitzerId);
       parsed.isSupporter = status.active;
       parsed.supporterTier = status.active ? status.tier : null;
+      // Kosmetik (15.08.2026) aus derselben Erwägung wie isSupporter darüber: Namensfarbe und
+      // Emblem stehen in einer Liste, die alle sehen - der Client darf sie nicht selbst setzen.
+      // Was hier hineingeschrieben wird, ist die serverseitig geprüfte Auswahl; ein abgelaufenes
+      // Spender-Stück fällt dabei von selbst auf die Vorgabe zurück (siehe kosmetikGetragen).
+      parsed.cosmetics = kosmetikGetragen(besitzerId);
       return res.json({ key, value: JSON.stringify(parsed), shared, version: 0 });
     } catch (e) { /* kaputter Eintrag - unverändert durchreichen, kein Absturz */ }
   }
@@ -2038,6 +2044,9 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
           const submittedStatus = supporterStatusCombined(targetId);
           submitted.isSupporter = submittedStatus.active;
           submitted.supporterTier = submittedStatus.active ? submittedStatus.tier : null;
+          // Wie isSupporter: GET überschreibt das ohnehin bei jedem Lesen erneut, das hier ist
+          // Verteidigung in der Tiefe, damit auch der gespeicherte Wert für sich stimmt.
+          submitted.cosmetics = kosmetikGetragen(targetId);
           finalValue = JSON.stringify(submitted);
         } catch (e) { /* Spielstand/Wert kaputt - unverändert durchreichen, kein Absturz */ }
       }
@@ -8281,6 +8290,143 @@ app.post('/api/supporter/trial', authMiddleware, async (req, res) => {
   user.supporterTrialUntil = jetzt + SUPPORTER_TRIAL_DAYS * 86400000;
   await saveDb();
   res.json({ ok: true, tage: SUPPORTER_TRIAL_DAYS, bis: user.supporterTrialUntil, supporter: supporterFeaturesFor(req.userId) });
+});
+
+// ===== Kosmetik: Namensfarbe und Emblem (15.08.2026) =====
+//
+// WARUM DAS HIER LIEGT UND NICHT IM SPIELSTAND
+// -------------------------------------------
+// Der Spielstand ist bauartbedingt klientenautoritativ - wer sich Kredite geben will, braucht dafür
+// keine Lücke. Bei Kosmetik ist die Lage aber eine andere, und zwar genau die, an der in diesem
+// Projekt die Sicherheitsgrenze verläuft: Eine Namensfarbe steht in der BESTENLISTE, also auf einer
+// Fläche, die allen gemeinsam gehört. "Ich habe mir selbst Erz gegeben" trifft niemanden außer den
+// Spieler selbst; "ich trage die Goldspender-Farbe, ohne je gespendet zu haben" entwertet sie für
+// alle, die dafür bezahlt haben. Besitz und Auswahl liegen deshalb hier.
+//
+// ZWEI STUFEN DER PRÜFUNG, UND WARUM ES ZWEI SIND
+// ----------------------------------------------
+// (a) Beim AUSRÜSTEN wird vollständig geprüft, inklusive der Fortschritts-Bedingungen. Das kostet
+//     einmal das Einlesen des Spielstands - selten genug, um es sich zu leisten.
+// (b) Beim LESEN (Bestenliste, jede Sekunde, von jedem) werden nur die BEFRISTETEN Bedingungen
+//     erneut geprüft, also die Spender-Stufen. Der Spielstand wird dabei NICHT eingelesen; das wäre
+//     ein mehrere hundert Kilobyte großer JSON.parse pro Bestenlisten-Zeile.
+//     Das ist tragfähig, weil die Fortschritts-Bedingungen MONOTON sind: Prestige, Aufstiege,
+//     Kampfpunkte und Rekordtiefe wachsen, sie schrumpfen nicht. Was beim Ausrüsten galt, gilt
+//     später weiter. Eine Spende läuft dagegen ab - und genau dann muss die Farbe von selbst
+//     verschwinden, ohne dass jemand aufräumt.
+// Die gespeicherte Auswahl bleibt beim Ablauf bewusst STEHEN. Spendet derselbe Spieler später
+// erneut, trägt er sofort wieder seine alte Farbe, ohne sie neu suchen zu müssen.
+//
+// Die Definitionen sind eine bewusste Kopie: Das Frontend kennt dieselben Schlüssel mit Aussehen
+// und Beschreibungstext, hier stehen die Freischalt-Bedingungen. Das ist derselbe Fall wie
+// SHIP_SCORE_WEIGHTS/computeScoreServer (siehe CLAUDE.md, "Backend hat teils eigene Kopien von
+// Frontend-Formeln") - und wie dort wacht ein Test im Frontend-Repo darüber, dass die
+// Schlüsselmengen nicht auseinanderlaufen (tests/test_kosmetik_paritaet.js).
+const KOSMETIK_DEFS = [
+  // --- Namensfarben ---
+  { key: 'nf_standard',   art: 'namensfarbe', bedingung: { typ: 'immer' } },
+  { key: 'nf_kupfer',     art: 'namensfarbe', bedingung: { typ: 'spender', stufe: 'bronze' } },
+  { key: 'nf_silber',     art: 'namensfarbe', bedingung: { typ: 'spender', stufe: 'silver' } },
+  { key: 'nf_gold',       art: 'namensfarbe', bedingung: { typ: 'spender', stufe: 'gold' } },
+  { key: 'nf_asche',      art: 'namensfarbe', bedingung: { typ: 'prestige', wert: 1 } },
+  { key: 'nf_glut',       art: 'namensfarbe', bedingung: { typ: 'prestige', wert: 5 } },
+  { key: 'nf_leere',      art: 'namensfarbe', bedingung: { typ: 'aufstieg', wert: 1 } },
+  { key: 'nf_stahl',      art: 'namensfarbe', bedingung: { typ: 'kampfpunkte', wert: 2000 } },
+  { key: 'nf_tiefe',      art: 'namensfarbe', bedingung: { typ: 'abgrund', wert: 40 } },
+  // --- Embleme ---
+  { key: 'em_keins',      art: 'emblem',      bedingung: { typ: 'immer' } },
+  { key: 'em_tasse',      art: 'emblem',      bedingung: { typ: 'spender', stufe: 'bronze' } },
+  { key: 'em_komet',      art: 'emblem',      bedingung: { typ: 'spender', stufe: 'gold' } },
+  { key: 'em_zirkel',     art: 'emblem',      bedingung: { typ: 'prestige', wert: 3 } },
+  { key: 'em_aufstieg',   art: 'emblem',      bedingung: { typ: 'aufstieg', wert: 1 } },
+  { key: 'em_klinge',     art: 'emblem',      bedingung: { typ: 'kampfpunkte', wert: 5000 } },
+  { key: 'em_lot',        art: 'emblem',      bedingung: { typ: 'abgrund', wert: 60 } }
+];
+const KOSMETIK_ARTEN = ['namensfarbe', 'emblem'];
+const KOSMETIK_VORGABE = { namensfarbe: 'nf_standard', emblem: 'em_keins' };
+// Spender-Stufen sind aufsteigend: Wer Gold hat, besitzt auch die Bronze- und Silber-Farbe. Ohne
+// diese Ordnung verlöre ein großzügiger Spender ausgerechnet die einfacheren Stücke.
+const KOSMETIK_STUFEN_RANG = { bronze: 1, silver: 2, gold: 3 };
+function kosmetikDef(key) { return KOSMETIK_DEFS.find(d => d.key === key) || null; }
+// Ist die Bedingung BEFRISTET? Nur solche werden beim Lesen erneut geprüft (siehe Kopfkommentar).
+function kosmetikBefristet(def) { return !!def && def.bedingung.typ === 'spender'; }
+function kosmetikSpenderErfuellt(userId, stufe) {
+  // Bewusst supporterStatusCombined (der RANG) und nicht supporterFeaturesFor: Die Testphase gibt
+  // kein Abzeichen, also auch keine Spender-Kosmetik - sonst trüge jeder nach fünf Gratistagen die
+  // Farbe, die für eine Spende steht. Aus demselben Grund ist die gamegeeeeek-Ausnahme nicht drin.
+  const st = supporterStatusCombined(userId);
+  if (!st.active) return false;
+  return (KOSMETIK_STUFEN_RANG[st.tier] || 0) >= (KOSMETIK_STUFEN_RANG[stufe] || 99);
+}
+function kosmetikBedingungErfuellt(userId, def, save) {
+  const b = def.bedingung;
+  if (b.typ === 'immer') return true;
+  if (b.typ === 'spender') return kosmetikSpenderErfuellt(userId, b.stufe);
+  const s = save || {};
+  if (b.typ === 'prestige') return (Number(s.prestige) || 0) >= b.wert;
+  if (b.typ === 'aufstieg') return (Number((s.ascension || {}).count) || 0) >= b.wert;
+  if (b.typ === 'kampfpunkte') return (Number(s.battlePoints) || 0) >= b.wert;
+  if (b.typ === 'abgrund') return (Number((s.abgrund || {}).best) || 0) >= b.wert;
+  return false;   // unbekannte Bedingung sperrt, statt versehentlich freizugeben
+}
+// Die vollständige Prüfung - liest den Spielstand ein und ist deshalb nur für /api/cosmetics und
+// das Ausrüsten gedacht, nicht für den Lesepfad der Bestenliste.
+function kosmetikBesitz(userId) {
+  let save = {};
+  try { save = JSON.parse(getSaveValue(userId) || '{}') || {}; } catch (e) { save = {}; }
+  const besitz = [];
+  for (const def of KOSMETIK_DEFS) if (kosmetikBedingungErfuellt(userId, def, save)) besitz.push(def.key);
+  return besitz;
+}
+// Was ein Spieler gerade TRÄGT, aus fremder Sicht. Der Lesepfad: billig, ohne Spielstand, und er
+// lässt abgelaufene Spender-Stücke von selbst wegfallen (siehe Kopfkommentar, Stufe b).
+function kosmetikGetragen(userId) {
+  const user = findUserById(userId);
+  const gewaehlt = (user && user.cosmetics) || {};
+  const raus = {};
+  for (const art of KOSMETIK_ARTEN) {
+    const key = gewaehlt[art];
+    const def = key ? kosmetikDef(key) : null;
+    if (!def || def.art !== art) { raus[art] = KOSMETIK_VORGABE[art]; continue; }
+    // Nur die befristeten Bedingungen erneut prüfen; die monotonen galten beim Ausrüsten und gelten
+    // weiter. Fällt eine weg, greift still die Vorgabe - kein Aufräumen, kein Datenverlust.
+    if (kosmetikBefristet(def) && !kosmetikBedingungErfuellt(userId, def, null)) { raus[art] = KOSMETIK_VORGABE[art]; continue; }
+    raus[art] = key;
+  }
+  return raus;
+}
+// Katalog + eigener Besitz + eigene Auswahl. Ein Aufruf, damit das Frontend die Auswahlfläche in
+// einem Zug zeichnen kann, statt drei Anfragen zu stellen.
+app.get('/api/cosmetics', authMiddleware, (req, res) => {
+  res.json({
+    katalog: KOSMETIK_DEFS.map(d => ({ key: d.key, art: d.art, bedingung: d.bedingung })),
+    besitz: kosmetikBesitz(req.userId),
+    getragen: kosmetikGetragen(req.userId),
+    vorgabe: KOSMETIK_VORGABE
+  });
+});
+app.post('/api/cosmetics/equip', authMiddleware, async (req, res) => {
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Account nicht gefunden.' });
+  const wunsch = (req.body && req.body.auswahl) || {};
+  const besitz = kosmetikBesitz(req.userId);
+  const neu = Object.assign({}, user.cosmetics || {});
+  for (const art of KOSMETIK_ARTEN) {
+    if (!Object.prototype.hasOwnProperty.call(wunsch, art)) continue;   // nicht genannt = unverändert
+    const key = String(wunsch[art] || '');
+    const def = kosmetikDef(key);
+    if (!def || def.art !== art) return res.status(400).json({ error: 'Unbekanntes Kosmetik-Stück: ' + key });
+    if (besitz.indexOf(key) === -1) {
+      // Der eigentliche Zweck dieser Route. Ohne diese Zeile wäre die ganze Kosmetik so
+      // fälschungssicher wie ein Feld im Spielstand - also gar nicht.
+      console.warn('[kosmetik-reject] userId=' + req.userId + ' username=' + req.username + ' wollte ' + key + ' tragen, ohne es zu besitzen.');
+      return res.status(403).json({ error: 'Dieses Stück hast du noch nicht freigeschaltet.' });
+    }
+    neu[art] = key;
+  }
+  user.cosmetics = neu;
+  await saveDb();
+  res.json({ ok: true, getragen: kosmetikGetragen(req.userId), besitz });
 });
 // --- Admin: Rang vergeben / entziehen / auflisten ---
 app.post('/api/admin/grant-supporter', authMiddleware, async (req, res) => {

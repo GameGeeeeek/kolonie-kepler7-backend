@@ -7496,9 +7496,19 @@ const AST_GROESSEN = [
 // sie hier zu spiegeln hieße, zwei Formeln dauerhaft synchron zu halten). Es ist eine großzügige
 // Schranke, die kein ehrlicher Spieler je erreicht, und sie schließt trotzdem genau das Loch, auf
 // das es ankommt: dass ein manipulierter Client mit einem einzigen Minenschiff einen Kern leersaugt.
-const AST_MAX_JE_SCHUERFSCHIFF = 2000;   // Bunker 400 * Fördertechnik 1,4 -> 560; Faktor 3,5 Luft
-const AST_MAX_JE_FRACHTER = 1500;        // Frachter 300 * Modul-/Markenspielraum
-const AST_MAX_JE_GROSSFRACHTER = 7500;   // grosser Frachter 1500, derselbe Spielraum
+// WICHTIG: Die Schlüssel unten müssen die SPIELSTAND-Schlüssel des Frontends sein. Der große
+// Frachter heißt dort 'frachtergross'; bis zum 15.08.2026 stand hier 'grossfrachter', also ein
+// Feld, das es im Spielstand nie gab - der Term war damit immer 0 und die Schranke zählte den
+// größten Frachter des Spiels gar nicht mit. Zusammen mit dem seit v8.495.0 fehlenden
+// Bergungsfrachter wurde eine ehrliche Kolossflotte um über die Hälfte ihrer Ladung gekürzt,
+// ohne dass irgendwo ein Fehler erschien: menge = min(wunsch, vorrat, obergrenze) schneidet
+// stillschweigend ab, und der Client übernimmt die Server-Zahl.
+// tests/test_abbau_obergrenze.js (Frontend-Repo) vergleicht diese Liste jetzt maschinell gegen
+// die Frachttabellen der Spieldatei und schlägt an, sobald ein Ladungsträger hier fehlt.
+const AST_MAX_JE_SCHUERFSCHIFF = 2000;    // Bunker 400 * Fördertechnik 1,4 -> 560; Faktor 3,5 Luft
+const AST_MAX_JE_FRACHTER = 1500;         // Frachter 300 * Modul-/Markenspielraum
+const AST_MAX_JE_GROSSFRACHTER = 7500;    // grosser Frachter 1500, derselbe Spielraum
+const AST_MAX_JE_BERGUNGSFRACHTER = 15000; // Bergungsfrachter 3000, derselbe Spielraum
 function astFeldKey(sysId) { return 'asteroids:' + sysId; }
 // Deterministische Auswahl der Gürtelsysteme: dieselbe 5x4-Rasterstreuung wie im Frontend, damit
 // die Gürtel über die ganze Karte verteilt liegen statt in einer Ecke zu klumpen. Sie ist hier NICHT
@@ -7703,7 +7713,8 @@ app.post('/api/asteroid/mine', authMiddleware, async (req, res) => {
     for (const f of flotten) {
       obergrenze += (Number(f.schuerfschiff) || 0) * AST_MAX_JE_SCHUERFSCHIFF;
       obergrenze += (Number(f.frachter) || 0) * AST_MAX_JE_FRACHTER;
-      obergrenze += (Number(f.grossfrachter) || 0) * AST_MAX_JE_GROSSFRACHTER;
+      obergrenze += (Number(f.frachtergross) || 0) * AST_MAX_JE_GROSSFRACHTER;
+      obergrenze += (Number(f.bergungsfrachter) || 0) * AST_MAX_JE_BERGUNGSFRACHTER;
     }
   } catch (e) { obergrenze = 0; }
   if (!(obergrenze > 0)) {

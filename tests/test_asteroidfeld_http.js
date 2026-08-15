@@ -23,7 +23,10 @@
 //   3. Entnahme: Der Vorrat sinkt um genau die entnommene Menge, und wer als Zweiter kommt,
 //      bekommt nur den Rest - nicht seinen Wunsch.
 //   4. Die Obergrenze aus der GESPEICHERTEN Flotte greift: ohne Minenschiff nichts, mit einem
-//      Minenschiff höchstens dessen Schranke, egal was der Client wünscht.
+//      Minenschiff höchstens dessen Schranke, egal was der Client wünscht - und sie kennt JEDEN
+//      Ladungsträger, nicht nur die zwei, mit denen sie ursprünglich geprüft wurde (4c-4e,
+//      15.08.2026: der große Frachter wurde unter einem Schlüssel gelesen, den der Spielstand nie
+//      hatte, der Bergungsfrachter fehlte ganz - beides kürzte ehrliche Flotten stillschweigend).
 //   5. Ein leergefördertes Vorkommen verschwindet und bekommt einen Nachschub-Termin in der Zukunft.
 //   6. Unsinnige Anfragen werden abgelehnt.
 //   7. Das Feld liegt wirklich im geteilten Speicher der Datenbank.
@@ -221,6 +224,55 @@ async function starteServer() {
   check('4b: ein einzelnes Minenschiff kann kein ganzes Vorkommen leersaugen',
     gedeckelt.status === 200 && gedeckelt.body.menge <= 2000 && gedeckelt.body.menge < vorrat2,
     { menge: gedeckelt.body && gedeckelt.body.menge, vorrat: vorrat2 });
+
+  /* 4c-4e (15.08.2026): Die Schranke muss ALLE Ladungsträger kennen - nicht nur die beiden, mit
+     denen sie 4a/4b damals geprüft haben. Genau daran hing sie ein knappes Vierteljahr:
+       - Der große Frachter wurde als `f.grossfrachter` gelesen; im Spielstand heißt er
+         `frachtergross`. Der Term war also IMMER 0.
+       - Der Bergungsfrachter (v8.495.0) fehlte in der Summe komplett.
+     Beides fiel nicht auf, weil `menge = min(wunsch, vorrat, obergrenze)` still abschneidet: Es
+     gibt keinen Fehler, keine Meldung, die Mission startet - sie trägt nur weniger, als die
+     Startvorschau desselben Spielers eine Sekunde vorher versprochen hat. Gemessen an einer
+     Kolossflotte (30 Minenschiffe + 40 große + 20 Bergungsfrachter) fehlten 56% der Ladung.
+     Dass 4b grün war, ist dabei kein Zufall, sondern der Kern der Sache: Der Test benutzte
+     ausschließlich den einen Schiffstyp, bei dem der Code stimmte.
+
+     WARUM GEMESSEN UND NICHT EINGETIPPT (Arbeitsregel 2): Bezugsgröße ist die Menge, die dieselbe
+     Flotte OHNE Frachter bekommt. Damit bleibt der Test gültig, wenn jemand an
+     AST_MAX_JE_SCHUERFSCHIFF dreht - er prüft die Regel „ein Ladungsträger erhöht die Schranke",
+     nicht die Momentaufnahme „genau 2000".
+     GEGENPROBE (beidseitig gefahren): Gegen den Stand vor dieser Behebung liefern alle drei Flotten
+     dieselbe Menge - 4c und 4d fallen zusammen. */
+  const fLad = await s.j('/asteroid/field', { headers: kopf(tokenA) });
+  let sysLad = null, platzLad = null, vorratLad = 0;
+  for (const x of systeme) for (const [platz, p] of Object.entries(fLad.body.felder[x].plaetze)) {
+    if (p && !p.frei && p.vorrat > vorratLad) { sysLad = x; platzLad = platz; vorratLad = p.vorrat; }
+  }
+  // Ohne diese Vorabprüfung könnte 4c/4d den BROCKEN messen statt die Flotte (Arbeitsregel 7):
+  // Ist der Vorrat kleiner als die Schranke, liefern alle Flotten denselben Wert - und der Test
+  // wäre aus dem falschen Grund grün bzw. rot.
+  check('4c-vorab: das Zielvorkommen ist groß genug, dass die FLOTTE die Grenze setzt',
+    vorratLad >= 200000, { system: sysLad, platz: platzLad, vorrat: vorratLad });
+
+  async function holeMit(fleet) {
+    const setzen = await s.j('/storage/kepler7-save-v3', { method: 'PUT', headers: kopf(tokenC),
+      body: JSON.stringify({ value: spielstand(CARL, 'carl', fleet) }) });
+    if (setzen.status !== 200) return { menge: -1, fehler: 'Spielstand abgelehnt: ' + setzen.status };
+    const r = await s.j('/asteroid/mine', { method: 'POST', headers: kopf(tokenC),
+      body: JSON.stringify({ system: sysLad, platz: platzLad, wunsch: 10000000 }) });
+    return { status: r.status, menge: (r.body && r.body.menge) || 0, rest: r.body && r.body.rest };
+  }
+  const nurMine    = await holeMit({ schuerfschiff: 1 });
+  const mitGross   = await holeMit({ schuerfschiff: 1, frachtergross: 4 });
+  const mitBergung = await holeMit({ schuerfschiff: 1, bergungsfrachter: 4 });
+  check('4c: große Frachter heben die Schranke - der Server liest ihren echten Spielstand-Schlüssel',
+    mitGross.menge > nurMine.menge, { ohneFrachter: nurMine.menge, mitGrossfrachtern: mitGross.menge });
+  check('4d: Bergungsfrachter heben sie stärker - sie sind der größte Ladungsträger des Spiels',
+    mitBergung.menge > mitGross.menge,
+    { ohneFrachter: nurMine.menge, mitGrossfrachtern: mitGross.menge, mitBergungsfrachtern: mitBergung.menge });
+  check('4e: der Vorrat war dabei nie die bindende Grenze (sonst hätte 4c/4d den Brocken gemessen)',
+    mitBergung.rest > 0 && mitBergung.menge < vorratLad,
+    { rest: mitBergung.rest, menge: mitBergung.menge, ausgangsvorrat: vorratLad });
 
   // ---- 6) Unsinn wird abgelehnt --------------------------------------------------------------
   const fremd = await s.j('/asteroid/mine', { method: 'POST', headers: kopf(tokenA),

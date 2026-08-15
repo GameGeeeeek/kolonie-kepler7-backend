@@ -1784,8 +1784,10 @@ app.get('/api/me', authMiddleware, (req, res) => {
     homeSystem: user && user.homeSystem, homeSlot: user && user.homeSlot,
     attackShieldMs: attackShieldRemaining(req.userId),
     season: seasonInfoForUser(req.userId),
-    // Unterstützer-Rang (05.08.2026): schaltet die drei Automatiken im Verteidigung-Tab frei.
-    // Der Server ist hier die Autorität - siehe supporterFeaturesFor().
+    // Unterstützer-Rang (05.08.2026): schaltet die Unterstützer-Automatiken im Verteidigung-Tab
+    // frei. Seit dem 15.08.2026 steckt darin auch die einmalige Testphase (`trial`), die dieselben
+    // Funktionen ohne Spende freischaltet - der Server ist für beides die Autorität, siehe
+    // supporterFeaturesFor().
     supporter: supporterFeaturesFor(req.userId)
   });
 });
@@ -8218,16 +8220,68 @@ function supporterStatusCombined(userId) {
   }
   return { active: false };
 }
-// Die FUNKTIONSFREIGABE (die drei Automatiken): Rang oder Ausnahme.
+// ===== Testphase (15.08.2026) =====
+// Dritter Weg zur FUNKTIONSFREIGABE - und der einzige, der nichts kostet. Wer die
+// Unterstützer-Funktionen noch nie hatte, schaltet sie einmalig für SUPPORTER_TRIAL_DAYS Tage frei
+// und sieht, was sie ihm bringen. Ein Beschreibungstext leistet das nachweislich nicht: Die drei
+// Automatiken erklären sich erst, wenn sie einmal von selbst zur richtigen Sekunde eingegriffen
+// haben - genau dann, wenn man gerade nicht im Spiel war.
+//
+// Drei Eigenschaften sind bewusst so und nicht anders:
+//  - EINMALIG je Konto. `supporterTrialAt` bleibt nach Ablauf für immer stehen und ist das
+//    Verbrauchszeichen; abgefragt wird NIE `supporterTrialUntil` (das liegt nach Ablauf in der
+//    Vergangenheit und würde die Testphase wieder freigeben - aus einer Testphase wäre damit ein
+//    Dauerabo mit Klickzwang geworden).
+//  - KEIN Abzeichen. Die Testphase steht deshalb hier in supporterFeaturesFor und NICHT in
+//    supporterStatusCombined - dieselbe Trennung wie bei der gamegeeeeek-Ausnahme und aus demselben
+//    Grund: ein Abzeichen für eine Unterstützung, die es nie gab, wäre schlicht unwahr. Aus dem
+//    gleichen Grund bleibt `tier` null; die Stufe gehört zur Spendensumme.
+//  - Sie VERLÄNGERT nichts. Wer bereits Rang hat, kann sie starten, ohne etwas zu verlieren, aber
+//    sie schiebt kein aktives Fenster nach hinten - beide Fenster laufen unabhängig, und
+//    supporterFeaturesFor meldet immer das SPÄTER endende (siehe `until` unten).
+const SUPPORTER_TRIAL_DAYS = 5;
+function supporterTrialActive(user) { return !!(user && (user.supporterTrialUntil || 0) > Date.now()); }
+// Die FUNKTIONSFREIGABE (die Unterstützer-Automatiken): Rang, Ausnahme oder laufende Testphase.
 function supporterFeaturesFor(userId) {
   const user = findUserById(userId);
   const name = String((user && user.username) || '').trim().toLowerCase();
-  if (SUPPORTER_EXEMPT_USERNAMES.indexOf(name) !== -1) return { active: true, tier: 'gold', exempt: true, until: 0 };
+  // Ob die Testphase noch zu HABEN ist, gehört in JEDE Antwort - auch in die eines aktiven
+  // Unterstützers. Sonst müsste das Frontend aus "aktiv" schließen, sie sei verbraucht, und würde
+  // sie einem Spender nach Ablauf seiner Spende fälschlich als schon genutzt anzeigen.
+  const trialUsedAt = (user && user.supporterTrialAt) || 0;
+  const trialUntil = (user && user.supporterTrialUntil) || 0;
+  const trialAktiv = supporterTrialActive(user);
+  const trial = { verfuegbar: !trialUsedAt, genutztAm: trialUsedAt, aktiv: trialAktiv, bis: trialUntil, tage: SUPPORTER_TRIAL_DAYS };
+  if (SUPPORTER_EXEMPT_USERNAMES.indexOf(name) !== -1) return { active: true, tier: 'gold', exempt: true, until: 0, quelle: 'betreiber', trial };
   const st = supporterStatusCombined(userId);
-  if (!st.active) return { active: false, tier: null, exempt: false, until: 0 };
-  const until = st.granted ? st.until : ((st.lastDonationAt || 0) + SUPPORTER_BADGE_DAYS * 86400000);
-  return { active: true, tier: st.tier || 'bronze', exempt: false, granted: !!st.granted, until };
+  if (!st.active) {
+    if (trialAktiv) return { active: true, tier: null, exempt: false, until: trialUntil, quelle: 'testphase', trial };
+    return { active: false, tier: null, exempt: false, until: 0, quelle: null, trial };
+  }
+  const rangUntil = st.granted ? st.until : ((st.lastDonationAt || 0) + SUPPORTER_BADGE_DAYS * 86400000);
+  return {
+    active: true, tier: st.tier || 'bronze', exempt: false, granted: !!st.granted,
+    // Das SPÄTER endende der beiden Fenster - eine laufende Testphase darf einen Rang nicht
+    // verkürzen und umgekehrt (siehe Kommentar oben, dritte Eigenschaft).
+    until: Math.max(rangUntil, trialAktiv ? trialUntil : 0),
+    quelle: st.granted ? 'vergeben' : 'kofi', trial
+  };
 }
+// Testphase starten. Einmalig je Konto, ohne Admin, ohne Zahlung - der einzige Selbstbedienungsweg
+// zu den Unterstützer-Funktionen. Bewusst als eigene Route und nicht als Nebenwirkung von /api/me:
+// Sie soll ein bewusster Klick des Spielers sein, kein stiller Verbrauch beim Vorbeischauen.
+app.post('/api/supporter/trial', authMiddleware, async (req, res) => {
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Account nicht gefunden.' });
+  if (user.supporterTrialAt) {
+    return res.status(409).json({ error: 'Die Testphase wurde für dieses Konto bereits genutzt.', genutztAm: user.supporterTrialAt, bis: user.supporterTrialUntil || 0 });
+  }
+  const jetzt = Date.now();
+  user.supporterTrialAt = jetzt;
+  user.supporterTrialUntil = jetzt + SUPPORTER_TRIAL_DAYS * 86400000;
+  await saveDb();
+  res.json({ ok: true, tage: SUPPORTER_TRIAL_DAYS, bis: user.supporterTrialUntil, supporter: supporterFeaturesFor(req.userId) });
+});
 // --- Admin: Rang vergeben / entziehen / auflisten ---
 app.post('/api/admin/grant-supporter', authMiddleware, async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });

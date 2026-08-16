@@ -8364,9 +8364,41 @@ const STAUB_SERIE_MAX = 5;            // Deckel des Serienbonus -> 5..10 je Tag
 const STAUB_ABWEHR = 3;
 const STAUB_ABWEHR_MAX_PRO_TAG = 3;   // verschiedene Angreifer je Tag
 function staubTagesschluessel(zeit) { return new Date(zeit || Date.now()).toISOString().slice(0, 10); }
+// Wochenschlüssel nach ISO-8601 in UTC (Montag als Wochenanfang).
+//
+// ER IST NICHT DERSELBE WIE DER DES SPIELS, und das ist Absicht: `weekKeyOf()` im Frontend bildet
+// den lokalen Montag als Datum ab ("2026-08-10"), rechnet also in der Zeitzone des Spielers. Der
+// Server kennt die nicht - er kann diese Grenze grundsätzlich nicht nachbilden, und ein aus der
+// Client-Uhr gemeldeter Wochenschlüssel wäre wieder eine Angabe, die sich frei setzen lässt.
+// Bei UTC+2 laufen die beiden Grenzen also rund zwei Stunden auseinander.
+//
+// Tragbar ist das, weil diese Woche NUR eine Anzeige speist ("diese Woche verdient: 42") und an
+// ihr keine Belohnung hängt: Der Sternenstaub selbst wird pro Tag und pro Angreifer gedeckelt, nicht
+// pro Woche. Sollte hier je eine Wochenbelohnung drankommen, muss diese Entscheidung neu getroffen
+// werden - dann wäre die Abweichung ein echter Unterschied und keine Fußnote mehr.
+function staubWochenschluessel(zeit) {
+  const d = new Date(zeit || Date.now());
+  const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  // Donnerstag derselben Woche bestimmt das Jahr (ISO-Regel), sonst zählt die Jahreswechsel-Woche
+  // je nach Wochentag zum falschen Jahr.
+  t.setUTCDate(t.getUTCDate() + 4 - (t.getUTCDay() || 7));
+  const jahresanfang = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+  const woche = Math.ceil(((t - jahresanfang) / 86400000 + 1) / 7);
+  return t.getUTCFullYear() + '-W' + String(woche).padStart(2, '0');
+}
 function staubKonto(user) {
   if (!user.staub) user.staub = { menge: 0, serie: 0, letzterTag: null, abwehrTag: null, abwehrVon: [] };
   return user.staub;
+}
+// Jede Gutschrift läuft hier durch. EINE Stelle, damit die Wochensumme nicht an einer der beiden
+// Quellen vorbeigezählt werden kann - genau der Fehler, den eine zweite Additionsstelle macht.
+function staubGutschreiben(k, menge) {
+  if (!(menge > 0)) return 0;
+  k.menge += menge;
+  const w = staubWochenschluessel();
+  if (!k.woche || k.woche.key !== w) k.woche = { key: w, menge: 0 };
+  k.woche.menge += menge;
+  return menge;
 }
 // Tagesgutschrift für die Anmeldung. Idempotent über den Tagesschlüssel: Ein zweiter Aufruf am
 // selben Tag tut nichts, egal wie oft das Spiel /api/me aufruft.
@@ -8381,7 +8413,7 @@ function staubAnmeldungGutschreiben(user) {
   const gestern = staubTagesschluessel(Date.now() - 86400000);
   k.serie = (k.letzterTag === gestern) ? Math.min(k.serie + 1, STAUB_SERIE_MAX) : 1;
   const menge = STAUB_ANMELDUNG + (k.serie - 1) * STAUB_SERIE_BONUS;
-  k.menge += menge;
+  staubGutschreiben(k, menge);
   k.letzterTag = heute;
   return menge;
 }
@@ -8395,13 +8427,18 @@ function staubAbwehrGutschreiben(user, angreiferId) {
   if (k.abwehrVon.length >= STAUB_ABWEHR_MAX_PRO_TAG) return 0;
   if (k.abwehrVon.indexOf(angreiferId) !== -1) return 0;
   k.abwehrVon.push(angreiferId);
-  k.menge += STAUB_ABWEHR;
+  staubGutschreiben(k, STAUB_ABWEHR);
   return STAUB_ABWEHR;
 }
 function staubStand(user) {
   const k = staubKonto(user);
+  const w = staubWochenschluessel();
   return {
     menge: k.menge || 0, serie: k.serie || 0,
+    // Diese Woche verdient. Gehört zu einer ANDEREN Woche als der aktuellen, ist die Antwort 0 -
+    // nicht der alte Stand: Der Zähler wird erst bei der nächsten Gutschrift zurückgesetzt, und bis
+    // dahin würde er sonst die Vorwoche als "diese Woche" ausgeben.
+    dieseWoche: (k.woche && k.woche.key === w) ? k.woche.menge : 0,
     heuteAngemeldet: k.letzterTag === staubTagesschluessel(),
     abwehrHeute: (k.abwehrTag === staubTagesschluessel()) ? k.abwehrVon.length : 0,
     saetze: {
@@ -8469,7 +8506,17 @@ const KOSMETIK_DEFS = [
   { key: 'nf_nebel',      art: 'namensfarbe', bedingung: { typ: 'kauf', preis: 90 } },
   { key: 'nf_signal',     art: 'namensfarbe', bedingung: { typ: 'kauf', preis: 200 } },
   { key: 'em_ring',       art: 'emblem',      bedingung: { typ: 'kauf', preis: 60 } },
-  { key: 'em_saat',       art: 'emblem',      bedingung: { typ: 'kauf', preis: 150 } }
+  { key: 'em_saat',       art: 'emblem',      bedingung: { typ: 'kauf', preis: 150 } },
+  // --- Zwei weitere Fortschritts-Wege (16.08.2026) ---
+  // Bis hierher hing der Fortschritts-Zweig allein an Prestige, Aufstieg, Kampfpunkten und
+  // Rekordtiefe - also an den Größen der SPÄTEN Laufbahn. Wer sammelt oder Bosse jagt, statt zu
+  // prestigen, hatte gar keinen Weg zu einem eigenen Stück. Erfolge (102 im Spiel) und besiegte
+  // Sektor-Bosse schließen genau diese Lücke; beide wachsen monoton wie die übrigen und werden
+  // deshalb ebenfalls nur beim Ausrüsten geprüft.
+  { key: 'nf_chronik',    art: 'namensfarbe', bedingung: { typ: 'erfolge', wert: 25 } },
+  { key: 'em_kranz',      art: 'emblem',      bedingung: { typ: 'erfolge', wert: 60 } },
+  { key: 'nf_trophae',    art: 'namensfarbe', bedingung: { typ: 'bosse', wert: 10 } },
+  { key: 'em_schaedel',   art: 'emblem',      bedingung: { typ: 'bosse', wert: 30 } }
 ];
 const KOSMETIK_ARTEN = ['namensfarbe', 'emblem'];
 const KOSMETIK_VORGABE = { namensfarbe: 'nf_standard', emblem: 'em_keins' };
@@ -8503,6 +8550,10 @@ function kosmetikBedingungErfuellt(userId, def, save) {
   if (b.typ === 'aufstieg') return (Number((s.ascension || {}).count) || 0) >= b.wert;
   if (b.typ === 'kampfpunkte') return (Number(s.battlePoints) || 0) >= b.wert;
   if (b.typ === 'abgrund') return (Number((s.abgrund || {}).best) || 0) >= b.wert;
+  // Erfolge liegen als Objekt vor (Schlüssel -> true), gezählt wird die Zahl der Schlüssel - genau
+  // so, wie es auch das Frontend für seine Kompendium-Anzeige tut.
+  if (b.typ === 'erfolge') return Object.keys(s.achievements || {}).length >= b.wert;
+  if (b.typ === 'bosse') return (Number(s.bossKills) || 0) >= b.wert;
   return false;   // unbekannte Bedingung sperrt, statt versehentlich freizugeben
 }
 // Die vollständige Prüfung - liest den Spielstand ein und ist deshalb nur für /api/cosmetics und

@@ -90,4 +90,50 @@ Befehle desselben Webhooks; (b) das Frontend muss einen nicht erreichbaren Serve
 statt stumm im Ladezustand zu bleiben (Frontend-CLAUDE.md, Regel 35, behoben in v8.520.0). Ein
 hängender Deploy ist dann eine sichtbare Störung statt einer toten Fläche.
 
+**URSACHE GEFUNDEN UND BEHOBEN, 16.08.2026 – es waren nie die Lock-Dateien.** Die drei Vorfälle
+(14.08. und zweimal 15.08.) hatten dieselbe Wurzel, und sie stand in der **root-crontab** des Pi:
+
+```
+*/10 * * * * cd /DATA/kepler7/kolonie-kepler7 && git pull -q && cp weltraum_kolonie.html /DATA/kepler7/web/
+*/10 * * * * cd /DATA/kepler7/backend && git pull -q
+*/5  * * * * /DATA/kepler7/backend/deploy/autodeploy.sh >> …/autodeploy.log 2>&1
+```
+
+Drei Cron-Jobs taten als **root** dasselbe wie der Webhook – nur zusätzlich und alle paar Minuten.
+Damit erklären sich beide Fehlerbilder auf einen Schlag:
+
+- **`Unable to create '/app/.git/index.lock': File exists`** – der Cron-Pull und der Webhook-Pull
+  liefen gleichzeitig im selben Repo. Es war nie ein „abgestürzter git-Prozess", sondern schlicht
+  ein zweiter, ganz normaler.
+- **root-eigene `.git`-Objekte** – genau das, was der `chown 1000:1000` im Webhook seit dem
+  05.08.2026 hinterherräumt. Die Cron-Jobs erzeugten es alle fünf bis zehn Minuten neu.
+
+Und es erklärt, warum es **immer das Backend** traf und nie das Frontend: Im Backend liefen ZWEI
+Konkurrenten (`*/10`-Pull und `*/5`-`autodeploy.sh`), im Frontend nur einer. `deploy/autodeploy.sh`
+ist seit dem Webhook ohnehin hinfällig – es löste dasselbe Problem vorher.
+
+**Behoben:** Die drei Zeilen sind aus der root-crontab entfernt, nur die certbot-Erneuerung bleibt.
+Gegengeprüft, dass dabei nichts verlorengeht: `docker exec kepler7-nginx ls -la
+/usr/share/nginx/html/` zeigt **alle** Seiten, Icons, `robots.txt`, `sitemap.xml`, `manifest.json`
+und `service-worker.js` mit demselben frischen Zeitstempel – der Webhook kopiert seit dem 05.08.
+das komplette Set, die Cron-Zeile kopierte nur `weltraum_kolonie.html` und war damit die ärmere
+Variante derselben Arbeit.
+
+**Der zweite Blocker, unabhängig davon: eine Handänderung an `server.js` auf dem Pi.** Sie fügte
+`bergungsfrachter` in `SHIP_SCORE_WEIGHTS` und in die Schiffsliste von `/api/worldboss/resolve` ein
+und blockierte JEDEN Pull mit „Ihre lokalen Änderungen würden überschrieben" – tagelang, ohne dass
+es jemandem auffiel, weil der Webhook seinen Fehler nur ins Container-Log schreibt. Beide Zeilen
+kamen später über git ordentlich herein, der verworfene Stand war also inhaltsgleich; verloren ging
+nichts. **Lehre:** Eine Änderung von Hand am ausgecheckten Stand auf dem Pi legt den automatischen
+Deploy still lahm. Wer dort etwas ausprobiert, macht es rückgängig (`git checkout -- <datei>`),
+sobald er fertig ist – und prüft vor dem Verwerfen mit `git --no-pager diff --numstat -- <datei>`,
+ob überhaupt Inhalt drinsteckt (`0 0` heißt: nur ein Dateimodus).
+
+**Nachtrag zur Messmethode oben:** Die 401/404-Messung muss die **HTTP-Methode der Route treffen**.
+`curl -X POST` auf `/api/cosmetics` (eine GET-Route) liefert 404 von Express – das sieht aus wie
+„Route fehlt", obwohl der Server sie kennt. Genau dieser falsche Alarm ist am 16.08. entstanden.
+Deshalb gehört zur Messung eine **Negativkontrolle**: eine frei erfundene Route (`/api/gibtesnicht`)
+muss im selben Lauf 404 liefern, und eine bekannte alte Route 401. Erst dann misst man den Server
+und nicht die eigene Anfrage.
+
 **Folge für PRs:** Der Merge ist nicht der Zwischenschritt zu einem späteren Deploy, sondern die Auslieferung selbst – was gemerged wird, läuft Sekunden später auf dem Pi. Offene PRs trotzdem sofort mergen statt sie liegen zu lassen, aber erst nach grünem Prüflauf.

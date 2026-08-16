@@ -116,6 +116,11 @@ async function teil1() {
   check('1b: ein zweiter Aufruf am selben Tag schreibt NICHTS gut',
     s2.menge === s1.menge && s3.menge === s1.menge, { erst: s1.menge, dann: s2.menge, danach: s3.menge });
   check('1b: und meldet auch nichts als neu', s2.neu === 0 && s3.neu === 0, { neu2: s2.neu, neu3: s3.neu });
+  // Die Wochensumme (16.08.2026) läuft über dieselbe eine Gutschriftstelle wie der Gesamtstand -
+  // beim ersten Verdienst der Woche müssen deshalb beide gleich sein. Wäre die Wochensumme an einer
+  // zweiten Stelle addiert worden, liefe sie hier schon auseinander.
+  check('1c: die Wochensumme zählt mit', s1.dieseWoche === s1.menge, { woche: s1.dieseWoche, gesamt: s1.menge });
+  check('1c: und wächst beim Neuladen ebenfalls nicht', s3.dieseWoche === s1.dieseWoche, { erst: s1.dieseWoche, dann: s3.dieseWoche });
 
   // ---- 2. Laden ---------------------------------------------------------------------------------
   const k = await j('/cosmetics', { headers: alsNutzer(tokenO) });

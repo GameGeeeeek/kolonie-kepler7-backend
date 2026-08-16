@@ -148,6 +148,43 @@ async function teil1() {
     !!lb && lb.cosmetics && lb.cosmetics.namensfarbe === getragenJetzt, { gelesen: lb && lb.cosmetics, erwartet: getragenJetzt });
   check('1e: auch das gefälschte Emblem ist weg',
     !!lb && lb.cosmetics && lb.cosmetics.emblem === 'em_keins', lb && lb.cosmetics);
+  // ---- 1f. Die beiden jüngeren Fortschritts-Wege (16.08.2026) ---------------------------------
+  // Erfolge und besiegte Sektor-Bosse. Sie kamen dazu, weil der Fortschritts-Zweig vorher allein an
+  // den Größen der SPÄTEN Laufbahn hing. Geprüft wird für JEDE Bedingungsart, die der Katalog
+  // führt - so muss dieser Abschnitt beim nächsten neuen Weg nicht nachgezogen werden, er deckt ihn
+  // automatisch mit ab (und schlägt an, wenn der Server ihn nicht erfüllt bekommt).
+  const ausSpielstand = { prestige: 'prestige', aufstieg: 'ascension.count', kampfpunkte: 'battlePoints',
+                          abgrund: 'abgrund.best', erfolge: 'achievements', bosse: 'bossKills' };
+  const arten = Array.from(new Set(katalog.map(d => d.bedingung.typ))).filter(t => ausSpielstand[t]);
+  check('1f-vorab: der Katalog führt mehrere Fortschritts-Arten', arten.length >= 4, arten);
+  for (const art of arten) {
+    const def = katalog.filter(d => d.bedingung.typ === art).sort((x, y) => x.bedingung.wert - y.bedingung.wert)[0];
+    // Ein Spielstand, der GENAU diese eine Bedingung erfüllt und sonst nichts.
+    const stand = { prestige: 0, ascension: { count: 0 }, battlePoints: 0, abgrund: { best: 0 },
+                    achievements: {}, bossKills: 0, resources: {}, buildings: {}, research: {}, fleet: {}, colonies: {} };
+    const w = def.bedingung.wert;
+    if (art === 'prestige') stand.prestige = w;
+    else if (art === 'aufstieg') stand.ascension.count = w;
+    else if (art === 'kampfpunkte') stand.battlePoints = w;
+    else if (art === 'abgrund') stand.abgrund.best = w;
+    else if (art === 'erfolge') { for (let i = 0; i < w; i++) stand.achievements['e' + i] = true; }
+    else if (art === 'bosse') stand.bossKills = w;
+    await j('/storage/kepler7-save-v3', { method: 'PUT', headers: alsNutzer(token, { 'Content-Type': 'application/json' }), body: JSON.stringify({ value: JSON.stringify(stand) }) });
+    const kk = await j('/cosmetics', { headers: alsNutzer(token) });
+    check('1f: Bedingungsart "' + art + '" schaltet ' + def.key + ' frei',
+      ((kk.body || {}).besitz || []).indexOf(def.key) !== -1, { schwelle: w, besitz: (kk.body || {}).besitz });
+  }
+  // Und die Gegenrichtung an EINEM Fall: knapp darunter darf es NICHT reichen. Ohne diese Prüfung
+  // wäre "schaltet frei" auch mit einer Bedingung grün, die immer true liefert.
+  const bossDef = katalog.filter(d => d.bedingung.typ === 'bosse').sort((x, y) => x.bedingung.wert - y.bedingung.wert)[0];
+  if (bossDef) {
+    const knapp = { prestige: 0, ascension: { count: 0 }, battlePoints: 0, abgrund: { best: 0 },
+                    achievements: {}, bossKills: bossDef.bedingung.wert - 1, resources: {}, buildings: {}, research: {}, fleet: {}, colonies: {} };
+    await j('/storage/kepler7-save-v3', { method: 'PUT', headers: alsNutzer(token, { 'Content-Type': 'application/json' }), body: JSON.stringify({ value: JSON.stringify(knapp) }) });
+    const kk = await j('/cosmetics', { headers: alsNutzer(token) });
+    check('1f: einer unter der Schwelle reicht NICHT', ((kk.body || {}).besitz || []).indexOf(bossDef.key) === -1,
+      { schwelle: bossDef.bedingung.wert, hatte: bossDef.bedingung.wert - 1, besitz: (kk.body || {}).besitz });
+  }
   await new Promise(r => setTimeout(r, 900));
 }
 

@@ -2160,7 +2160,16 @@ app.get('/api/storage-list', authMiddleware, (req, res) => {
 // --- Berichte (Angriffs-/Überfall-Protokolle) ---
 app.get('/api/reports', authMiddleware, (req, res) => {
   const list = (db.private[req.userId] && db.private[req.userId].__reports) || [];
-  res.json({ reports: list });
+  // `archiv` wandert mit, damit das Spiel "37 von 150" zeigen kann, ohne die Zahl selbst zu kennen -
+  // sonst stünde die Grenze an einer zweiten Stelle und veraltete beim nächsten Umbau.
+  // `platz` ist der tatsächlich gültige Deckel, nicht der nominelle: Bei einem ehemaligen
+  // Unterstützer ist das Archiv auf seiner erreichten Größe eingefroren und damit größer als
+  // REPORTS_MAX_STANDARD (siehe addReport).
+  res.json({
+    reports: list,
+    archiv: { belegt: list.length, platz: Math.max(reportLimitFor(req.userId), list.length),
+              standard: REPORTS_MAX_STANDARD, unterstuetzer: REPORTS_MAX_SUPPORTER }
+  });
 });
 
 app.post('/api/reports', authMiddleware, async (req, res) => {
@@ -2171,11 +2180,29 @@ app.post('/api/reports', authMiddleware, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ===== Berichts-Archiv (16.08.2026) =====
+// Unterstützer bekommen ein größeres Archiv. Die interessante Frage war nicht die Zahl, sondern was
+// beim ABLAUF eines Rangs passiert: Ein schlichtes `slice(0, deckel)` hätte einem ehemaligen
+// Unterstützer beim nächsten Kampf über hundert Kampfberichte GELÖSCHT. Ein Deckel, der Historie
+// vernichtet, sobald jemand aufhört zu spenden, ist der falsche Anreiz - er bestraft das Aufhören,
+// statt das Unterstützen zu belohnen, und der Betroffene merkt es erst, wenn er nachsehen will.
+//
+// Der Deckel begrenzt deshalb nur das WACHSTUM und räumt nie ab: behalten wird immer mindestens so
+// viel, wie vor diesem Bericht schon dalag. Ein abgelaufener Rang friert das Archiv damit auf
+// seiner erreichten Größe ein, statt es zu kürzen. Nach oben ist alles trotzdem begrenzt - mehr als
+// REPORTS_MAX_SUPPORTER kann so nie entstehen.
+const REPORTS_MAX_STANDARD = 40;
+const REPORTS_MAX_SUPPORTER = 150;
+function reportLimitFor(userId) {
+  try { return supporterFeaturesFor(userId).active ? REPORTS_MAX_SUPPORTER : REPORTS_MAX_STANDARD; }
+  catch (e) { return REPORTS_MAX_STANDARD; }
+}
 function addReport(userId, report) {
   db.private[userId] = db.private[userId] || {};
   const list = db.private[userId].__reports || [];
+  const vorher = list.length;
   list.unshift(Object.assign({ id: crypto.randomUUID(), time: Date.now() }, report));
-  db.private[userId].__reports = list.slice(0, 40);
+  db.private[userId].__reports = list.slice(0, Math.max(reportLimitFor(userId), vorher));
 }
 
 app.delete('/api/reports/:id', authMiddleware, async (req, res) => {

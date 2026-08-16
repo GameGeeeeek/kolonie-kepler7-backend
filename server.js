@@ -2449,6 +2449,11 @@ const SHIP_SCORE_WEIGHTS = {
   // (Score-Untervalidierung ihrer Besitzer, exakt der CLAUDE.md-Fallstrick). Gewichte identisch zur
   // Frontend-Kopie SHIP_SCORE_WEIGHTS (weltraum_kolonie.html).
   metamaterialtitan:135, singularitaetsvernichter:200,
+  // Kausalitätsbrecher (16.08.2026): das Tier-3-Apex-Schiff. Ohne diese Zeile bewertet der
+  // Server den Score seiner Besitzer zu niedrig - derselbe Fallstrick wie bei den beiden
+  // Apex-Schiffen darüber, und in CLAUDE.md ausdrücklich als wiederkehrend vermerkt.
+  // Gewicht identisch zur Frontend-Kopie (weltraum_kolonie.html).
+  kausalitaetsbrecher:260,
   forscher:20, frachter:10, frachtergross:40, bergungsfrachter:80, spaeher:15, spionageschiff:22, colonyShips:5, recycler:12,
   // Bugfix (20.07.2026, Bug-Sweep): mondzerstoerer fehlte komplett - maxOwned:1, 10 Tage Bauzeit,
   // Top-Tier-Forschung nötig, atk 300 (höchster Wert im Spiel), Gewicht identisch zur Frontend-Kopie

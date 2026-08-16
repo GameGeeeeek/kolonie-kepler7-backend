@@ -2984,7 +2984,10 @@ function farmingPenaltyFor(attackerUserId, targetUserId) {
 // Diese Kopie MUSS mit MODULE_RARITY im Frontend uebereinstimmen - der ||1-Fallback wuerde
 // eine fehlende Stufe sonst still mit Faktor 1 auszahlen (tests/test_seltenheiten.js im
 // Frontend-Repo prueft beide Seiten gegeneinander).
-const MODULE_RARITY_MULT = { gewoehnlich: 1.0, ungewoehnlich: 1.3, selten: 1.6, episch: 2.4, legendaer: 3.5, mythisch: 5.0, exotisch: 7.0 };
+// primordial (16.08.2026): achte Stufe, nur aus Tier-3-Material schmiedbar. Muss hier stehen -
+// ohne Eintrag zahlt der Ueberfall-Schutz sie mit Faktor 1 aus, also wie ein gewoehnliches Modul.
+// Genau davor warnt der Kommentar an der Frontend-Kopie (MODULE_RARITY in weltraum_kolonie.html).
+const MODULE_RARITY_MULT = { gewoehnlich: 1.0, ungewoehnlich: 1.3, selten: 1.6, episch: 2.4, legendaer: 3.5, mythisch: 5.0, exotisch: 7.0, primordial: 9.5 };
 const RAIDLOSS_MODULE_BASE = 0.05;
 // Schiffsklassen-Kampfmodule (SHIP_MODULE_DEFS im Frontend, nur die kampfrelevanten Einträge).
 // Bugfix (24.07.2026, Modul-Text-Audit): Zielcomputer wirkte nur in der Client-Vorschau, Reaktorkern-

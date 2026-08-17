@@ -183,9 +183,12 @@ Seine Gegenprobe hat ein Lehrstück dokumentiert: Am alten Stand blieb die Decke
 FALSCHEN Grund grün (die Verkaufsschleife leerte den Bestand, der 400 kam vom „Nicht genug"-Zweig) –
 deshalb verlangt Prüfung 4 den GRUND im Fehlertext, nicht nur den Statuscode.
 
-**Bewusst offen (Sascha zur Entscheidung vorgelegt):** Handelsrouten vom Typ `sell` verkaufen
-klientenseitig am Endpunkt vorbei – ~63k Credits je gebundenem Frachter und Tag, ohne Slippage.
-Ab ~80 Frachtern überholt dieser Tropf den Deckel.
+**Entschieden am 17.08.2026 (Sascha): Verkaufsrouten zählen auf DASSELBE Kontingent.** Der Client
+meldet Routen-Erlöse gebündelt an `POST /api/market/routen-erloes`; sie zählen in denselben
+`user.marktTag`-Zähler. Das ist eine klientengemeldete Zahl – aber sie kann das Kontingent nur
+VERKLEINERN: Wer die Meldung unterschlägt, hat exakt den Stand von vor der Änderung (Routen
+verbucht ohnehin der Client), wer zu viel meldet, sperrt sich selbst den Direktverkauf. Dieselbe
+Prüffrage wie beim Sternenstaub, mit umgekehrtem Ergebnis – hier gibt es nichts zu holen.
 
 ## Bekannte Fallstricke
 

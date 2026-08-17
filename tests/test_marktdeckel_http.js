@@ -125,11 +125,33 @@ const stand = async (token) => {
       v2.status === 200 && v2.body.ok && v2.body.tagesRest === MAX - v1.body.credits - v2.body.credits,
       { rest1: v1.body && v1.body.tagesRest, credits2: v2.body && v2.body.credits, rest2: v2.body && v2.body.tagesRest });
 
+    // ---- 8) Routen-Erloese zaehlen in DENSELBEN Zaehler ---------------------------------------
+    // (17.08.2026, Entscheidung Sascha). Steht bewusst VOR der Erschoepfungs-Schleife: Nur hier
+    // laesst sich die exakte Arithmetik gegen den GEMESSENEN Stand pruefen (Regel 2) - nach der
+    // Schleife ist der Zaehler am Anschlag und jede Addition verschwaende im Clamp.
+    const RM = 250000;
+    const r1 = await anfrage('POST', '/api/market/routen-erloes', token, { credits: RM });
+    check('8a: eine Routen-Meldung senkt das Restkontingent um exakt den gemeldeten Betrag',
+      r1.status === 200 && r1.body.ok && r1.body.tagesRest === v2.body.tagesRest - RM,
+      { vorher: v2.body.tagesRest, gemeldet: RM, nachher: r1.body && r1.body.tagesRest });
+    const rNull = await anfrage('POST', '/api/market/routen-erloes', token, { credits: 0 });
+    const rNeg = await anfrage('POST', '/api/market/routen-erloes', token, { credits: -50 });
+    const rRiesig = await anfrage('POST', '/api/market/routen-erloes', token, { credits: 99999999 });
+    check('8b: 0, negativ und ueber dem Tagesmaximum prallen als 400 ab',
+      rNull.status === 400 && rNeg.status === 400 && rRiesig.status === 400,
+      { null: rNull.status, neg: rNeg.status, riesig: rRiesig.status });
+    // Der Beleg fuer den GETEILTEN Zaehler: Ein direkter Verkauf direkt nach der Meldung muss
+    // vom gemeldeten Stand aus weiterrechnen - nicht von dem, den v2 zuletzt sah.
+    const v3 = await anfrage('POST', '/api/market/trade', token, { action: 'sell', resource: 'antimaterie', amount: 100000 });
+    check('8c: ein direkter Verkauf rechnet vom gemeldeten Stand aus weiter (ein Zaehler, zwei Quellen)',
+      v3.status === 200 && v3.body.ok && v3.body.tagesRest === r1.body.tagesRest - v3.body.credits,
+      { nachMeldung: r1.body && r1.body.tagesRest, verkaufsErloes: v3.body && v3.body.credits, danach: v3.body && v3.body.tagesRest });
+
     // ---- 3+4) Der Deckel greift, und die Ablehnung mutiert NICHTS -----------------------------
     // Weiterverkaufen, bis eine Tranche abprallt (Sicherheitsgrenze 40 Anfragen, weit ueber dem
     // rechnerischen Bedarf - laeuft sie leer, meldet 3-vorab das ausdruecklich statt still gruen
     // zu sein, Regel 37).
-    let abgelehnt = null, letzterRest = v2.body.tagesRest;
+    let abgelehnt = null, letzterRest = (v3.body && v3.body.tagesRest) || (r1.body && r1.body.tagesRest) || v2.body.tagesRest;
     for (let i = 0; i < 40 && !abgelehnt; i++) {
       const v = await anfrage('POST', '/api/market/trade', token, { action: 'sell', resource: 'antimaterie', amount: 1000000 });
       if (v.status === 400) abgelehnt = v; else letzterRest = v.body && v.body.tagesRest;

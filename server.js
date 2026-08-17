@@ -5516,6 +5516,32 @@ function marketDiscountPctFor(save) {
   return Math.min(MARKET_DISCOUNT_CAP, pct);
 }
 
+/* Routen-Erloese auf das Tageskontingent anrechnen (17.08.2026, Entscheidung Sascha: "Auf
+   dasselbe Tageskontingent anrechnen"). VERKAUFSROUTEN verbuchen ihre Credits klientenseitig
+   (processTradeRoutes im Frontend, ohne jeden Server-Aufruf) und liefen damit am Deckel vorbei -
+   gemessen ~63k Credits je gebundenem Frachter und Tag, ohne Slippage; ab ~80 Frachtern
+   ueberholte der Tropf den Deckel. Damit es EIN Kontingent ist, meldet der Client seine
+   Routen-Erloese gebuendelt hierher, und sie zaehlen in denselben user.marktTag-Zaehler wie die
+   direkten Verkaeufe.
+   ZUR EINORDNUNG DER MISSBRAUCHSRICHTUNG (dieselbe Frage wie beim Sternenstaub, andere Antwort):
+   Das ist eine KLIENTENGEMELDETE Zahl - aber sie kann das Kontingent nur VERKLEINERN, nie
+   vergroessern. Wer die Meldung unterschlaegt, hat exakt den Stand von vor dieser Aenderung
+   (Routen klientenautoritativ am Deckel vorbei - die Routen selbst verbucht ohnehin der Client);
+   wer zu viel meldet, sperrt sich selbst den Direktverkauf. Es gibt hier nichts zu holen.
+   Validierung trotzdem: ganzzahlig, positiv, je Meldung hoechstens ein Tages-Maximum. */
+app.post('/api/market/routen-erloes', authMiddleware, (req, res) => {
+  const credits = Math.floor(Number((req.body || {}).credits));
+  if (!Number.isFinite(credits) || credits <= 0) return res.status(400).json({ error: 'ungültige Menge' });
+  if (credits > MARKT_TAGES_ERLOES_MAX) return res.status(400).json({ error: 'Menge zu groß' });
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+  const heute = staubTagesschluessel();
+  if (!user.marktTag || user.marktTag.stempel !== heute) user.marktTag = { stempel: heute, erloes: 0 };
+  user.marktTag.erloes += credits;
+  saveDb();
+  res.json({ ok: true, tagesRest: Math.max(0, MARKT_TAGES_ERLOES_MAX - user.marktTag.erloes), tagesMax: MARKT_TAGES_ERLOES_MAX });
+});
+
 // Handeln auf dem geteilten Markt. Body: { action:'buy'|'sell', resource, amount }.
 // Server ist jetzt vollständig autoritativ: liest den echten Spielstand, prüft Kredite/Ressourcen
 // dort, berechnet Preis UND Rabatt selbst, schreibt das Ergebnis direkt in den Spielstand zurück und

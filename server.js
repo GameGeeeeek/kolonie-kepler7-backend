@@ -7555,7 +7555,13 @@ const AST_SYSTEMWECHSEL = 0.30;         // Anteil des Nachschubs, der in ein and
 const AST_SORTEN = [
   { key: 'eisen', gewicht: 22 }, { key: 'prisma', gewicht: 18 }, { key: 'eiskern', gewicht: 15 },
   { key: 'magnetit', gewicht: 12 }, { key: 'hydrat', gewicht: 11 }, { key: 'klathrat', gewicht: 9 },
-  { key: 'pechblende', gewicht: 5 }, { key: 'resonanz', gewicht: 5 }, { key: 'kometenkern', gewicht: 3 }
+  { key: 'pechblende', gewicht: 5 }, { key: 'resonanz', gewicht: 5 }, { key: 'kometenkern', gewicht: 3 },
+  // Urmateriekern (17.08.2026): die einzige Sorte, die Protomaterie fuehrt. Fuer den Server ist sie
+  // eine Sorte wie jede andere - er verteilt keine Ressourcen, er zieht nur Sorte und Groesse und
+  // fuehrt den Vorrat. Wieviel Protomaterie sie hergibt, steht allein im Frontend
+  // (PROTOMATERIE_JE_FUHRE); hier zaehlt nur, dass der Schluessel und das Gewicht uebereinstimmen -
+  // test_asteroid_paritaet.js im Frontend-Repo prueft genau das.
+  { key: 'urmaterie', gewicht: 3 }
 ];
 const AST_GROESSEN = [
   { key: 'splitter', vorrat: 50000, plaetze: 4, gewicht: 46, nachschubStd: 3 },

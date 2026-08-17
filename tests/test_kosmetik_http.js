@@ -5,7 +5,7 @@
 // Fläche, die allen gehört. "Ich trage die Goldspender-Farbe, ohne je gespendet zu haben" entwertet
 // sie für alle, die dafür bezahlt haben. Genau diese Grenze prüft dieser Test.
 //
-// GEPRÜFT WERDEN DIE VIER EIGENSCHAFTEN, DIE STILL KAPUTTGEHEN KÖNNEN:
+// GEPRÜFT WERDEN DIE EIGENSCHAFTEN, DIE STILL KAPUTTGEHEN KÖNNEN:
 //   1. Ohne Freischaltung lässt sich ein Stück nicht ausrüsten (403) - der eigentliche Zweck.
 //   2. Der Client kann die Bestenliste nicht selbst bemalen: Ein eingereichter Eintrag mit
 //      gefälschter Kosmetik wird beim Lesen durch die geprüfte Auswahl ERSETZT.
@@ -15,6 +15,17 @@
 //      alte Farbe. Beides zusammen geht nur mit mehreren Serverstarts, weil die Bedingung an der
 //      Uhr hängt. Genau hier trennt sich der billige Lesepfad (prüft nur die BEFRISTETEN
 //      Bedingungen, ohne den Spielstand einzulesen) von der vollständigen Prüfung beim Ausrüsten.
+//   5. DER GEGENFALL DAZU (17.08.2026): Ein MEILENSTEIN-Emblem (`spender_je`) muss denselben
+//      Ablauf ÜBERLEBEN. Abschnitt 3c misst beides im selben Atemzug, an demselben Nutzer und in
+//      derselben Antwort: die Spender-Farbe ist weg, das Meilenstein-Emblem steht noch. Erst das
+//      Paar belegt die Regel - "Emblem noch da" allein wäre auch dann grün, wenn der Server
+//      überhaupt nichts mehr ablaufen ließe.
+//      Von den beiden 3c-Prüfungen ist die BESITZ-Prüfung die trennscharfe; die zweite ("wird
+//      weiter getragen") bleibt auch in der sabotierten Fassung grün, weil der Lesepfad
+//      unbefristete Bedingungen nicht erneut prüft - sie belegt, dass das Stück überhaupt
+//      gezeichnet wird, nicht die Ablauf-Regel. Genau diese Diskrepanz (getragen, aber nicht
+//      besessen) war der erste Messbefund und der Grund, warum die Höchstmarke jetzt
+//      PERSISTIERT statt abgeleitet wird.
 //
 // AUSFÜHREN (Serverstart und Test im selben Bash-Aufruf - CLAUDE.md, Punkt 2 der Commit-Pflichten).
 // Vier Abschnitte, gesteuert über das Argument; dazwischen wird die DB von außen verändert:
@@ -39,6 +50,11 @@
 //   Gegen eine Kopie, die im Lesepfad die Befristung NICHT erneut prüft: Teil 1-2 grün,
 //     "4b: abgelaufenes Spender-Stück fällt aus der Bestenliste" rot - der Fall, den nur die
 //     Uhr sichtbar macht.
+//   Für 3c (17.08.2026) gegen eine Kopie, die die Höchstmarke ABLEITET statt sie fortzuschreiben
+//     (also nur den LAUFENDEN Rang zählt): Teil 1-2 grün, "3c: das Meilenstein-Emblem bleibt im
+//     Besitz" rot, gleiche Prüfungszahl in beiden Läufen. Genau dieser Lauf hat den Fehler
+//     überhaupt erst gefunden - der erste Entwurf leitete ab, und ein von Hand vergebener Rang
+//     aus der Zeit davor hatte keine Historie.
 
 const BASIS = 'http://127.0.0.1:3214/api';
 const TEIL = process.argv[2] || 'teil1';
@@ -209,6 +225,16 @@ async function teil2() {
   check('2b: und steht in der Bestenliste', !!lb && lb.cosmetics && lb.cosmetics.namensfarbe === 'nf_gold', lb && lb.cosmetics);
   check('2b: das nie freigeschaltete Emblem kommt nicht durch',
     !!lb && lb.cosmetics && lb.cosmetics.emblem !== 'em_lot', lb && lb.cosmetics);
+  // ---- 2c. Meilenstein-Embleme (17.08.2026) --------------------------------------------------
+  // Sie hängen an der HÖCHSTEN JE ERREICHTEN Stufe. Hier, bei aktivem Goldrang, müssen alle drei
+  // im Besitz sein; das Gold-Stück wird ausgerüstet, damit Teil 3 messen kann, ob es den Ablauf
+  // überlebt - das ist die eine Eigenschaft, für die es diesen Typ überhaupt gibt.
+  check('2c: der Goldrang schaltet alle drei Meilenstein-Embleme frei',
+    ['em_funke', 'em_leitstern', 'em_leuchtfeuer'].every(x => besitz.indexOf(x) !== -1), { besitz });
+  const em = await j('/cosmetics/equip', { method: 'POST', headers: alsNutzer(token, { 'Content-Type': 'application/json' }), body: JSON.stringify({ auswahl: { emblem: 'em_leuchtfeuer' } }) });
+  check('2c: das Meilenstein-Emblem lässt sich ausrüsten', em.status === 200, { status: em.status, body: em.body && em.body.error });
+  const lb2 = await bestenlisteSchreibenUndLesen(token, uid, null);
+  check('2c: und steht in der Bestenliste', !!lb2 && lb2.cosmetics && lb2.cosmetics.emblem === 'em_leuchtfeuer', lb2 && lb2.cosmetics);
   await new Promise(r => setTimeout(r, 900));
 }
 
@@ -224,6 +250,15 @@ async function teil3() {
     !!lb && lb.cosmetics && lb.cosmetics.namensfarbe === 'nf_standard', lb && lb.cosmetics);
   const k = await j('/cosmetics', { headers: alsNutzer(token) });
   check('3a: und gilt auch nicht mehr als Besitz', ((k.body || {}).besitz || []).indexOf('nf_gold') === -1, (k.body || {}).besitz);
+  // ---- 3c. Das Meilenstein-Emblem ÜBERLEBT den Ablauf ----------------------------------------
+  // Das ist die entscheidende Messung des ganzen Typs, und sie ist DISKRIMINIEREND: derselbe
+  // Nutzer, derselbe Moment, dieselbe Antwort - die Spender-Farbe ist eben weggefallen (3a), das
+  // Meilenstein-Emblem muss stehen bleiben. Eine Prüfung nur auf "Emblem noch da" wäre auch dann
+  // grün, wenn der Server gar nichts mehr ablaufen ließe; erst das Paar belegt die Regel.
+  check('3c: das Meilenstein-Emblem bleibt im Besitz, obwohl der Rang abgelaufen ist',
+    ((k.body || {}).besitz || []).indexOf('em_leuchtfeuer') !== -1, (k.body || {}).besitz);
+  check('3c: und wird in der Bestenliste weiter getragen',
+    !!lb && lb.cosmetics && lb.cosmetics.emblem === 'em_leuchtfeuer', lb && lb.cosmetics);
   // ABER: die getroffene Wahl darf nicht gelöscht worden sein - sonst müsste ein wiederkehrender
   // Spender seine Farbe neu suchen. Gemessen an der Datenbank, nicht an der Antwort: die Antwort
   // zeigt ja bewusst die Vorgabe.

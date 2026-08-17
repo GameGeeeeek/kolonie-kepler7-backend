@@ -1778,7 +1778,14 @@ app.get('/api/me', authMiddleware, (req, res) => {
   // Geschrieben wird nur, wenn wirklich etwas gutgeschrieben wurde - eine GET-Route soll nicht bei
   // jedem Aufruf einen Schreibvorgang auslösen.
   const staubNeu = staubAnmeldungGutschreiben(user);
-  if (staubNeu > 0) saveDb();
+  // Höchstmarke für die Meilenstein-Embleme fortschreiben, solange ein Rang LÄUFT (17.08.2026).
+  // Dieselbe Stelle und derselbe Gedanke wie beim Sternenstaub darüber: /api/me ist der Moment, in
+  // dem der Server den Spieler tatsächlich sieht. Damit erwischt es auch die Ränge, die vor der
+  // Einführung dieser Marke vergeben wurden - sie werden beim nächsten Spielstart nachgetragen,
+  // solange sie noch aktiv sind. Geschrieben wird wie beim Staub nur bei echter Änderung.
+  const rangJetzt = supporterStatusCombined(req.userId);
+  const stufeNeu = rangJetzt.active && spenderStufeJeFortschreiben(user, rangJetzt.tier);
+  if (staubNeu > 0 || stufeNeu) saveDb();
   res.json({
     userId: req.userId, username: req.username,
     hasEmail: !!(user && user.email),
@@ -8176,6 +8183,12 @@ app.post('/api/kofi-webhook', express.urlencoded({ extended: true, limit: '256kb
       rec.total += amount;
       rec.lastDonationAt = Date.now();
       db.kofiDonationsByEmail[email] = rec;
+      // Höchstmarke für die Meilenstein-Embleme gleich hier festhalten (17.08.2026). Sie ließe sich
+      // zwar aus rec.total ableiten - aber nur solange die E-Mail mit diesem Konto verknüpft
+      // BLEIBT. Wird sie später gelöst oder geändert, wäre die Historie weg und ein Emblem, das
+      // "hat unterstützt" sagt, verschwände wieder. Deshalb zusätzlich am Konto selbst.
+      const spenderKonto = Object.values(db.users).find(u => u.kofiEmail === email);
+      if (spenderKonto) spenderStufeJeFortschreiben(spenderKonto, supporterTierFor(rec.total));
     } else {
       // ===== Spende ohne E-Mail (05.08.2026, Spieler-Report über Sascha) =====
       //
@@ -8282,6 +8295,48 @@ function supporterStatusCombined(userId) {
     return { active: true, lastDonationAt: 0, tier: user.supporterGrantTier || 'bronze', granted: true, until: user.supporterGrantUntil };
   }
   return { active: false };
+}
+// ===== Die HÖCHSTE JE ERREICHTE Spender-Stufe (17.08.2026) =====
+// Grundlage der Meilenstein-Embleme, und die einzige Größe im Unterstützer-Bereich, die bewusst
+// NIE abläuft. Der Gedanke ist derselbe wie beim wachstumsbegrenzten `addReport`: Wer aufhört zu
+// spenden, verliert die laufenden Vorteile - aber nicht die Auszeichnung dafür, dass er es getan
+// hat. Ein Ehrenzeichen, das beim Ablauf verschwindet, bestraft das Aufhören statt das
+// Unterstützen, und der Betroffene merkt es erst, wenn er nachsehen will.
+//
+// Die Datenbasis lag längst da und musste nur richtig gelesen werden: `rec.total` im
+// Spendenverzeichnis wird beim Webhook ADDIERT (`rec.total += amount`), wächst also monoton und
+// schrumpft nie. `supporterTierFor(rec.total)` OHNE die 30-Tage-Prüfung ist damit exakt die
+// höchste je erreichte Stufe. Was abläuft, ist ausschließlich das `active`-Flag.
+//
+// ES REICHT ABER NICHT, das nur ABZULEITEN - und das hat der Test bewiesen, nicht die Überlegung.
+// Der erste Entwurf las die Stufe bei jedem Aufruf frisch aus Spendensumme und laufendem Rang
+// zusammen. Damit war sie NICHT monoton, sondern nur meistens:
+//   - Ein von Hand vergebener Rang aus der Zeit vor dieser Änderung hat keine Historie. Läuft er
+//     ab, war die Stufe "nie erreicht" - gemessen im HTTP-Test: das Emblem fiel aus dem Besitz,
+//     wurde aber weiter GETRAGEN (der Lesepfad prüft unbefristete Bedingungen ja nicht erneut).
+//     Genau der Zustand, vor dem der Kopfkommentar zu kosmetikBefristet warnt.
+//   - Dieselbe Lücke bei einer gelösten oder geänderten Ko-fi-Adresse: Die Spendensumme hängt an
+//     `user.kofiEmail`; ist die weg, ist die Historie weg.
+// Deshalb wird die Höchstmarke PERSISTIERT statt abgeleitet: `supporterStufeJeMax` steigt nur und
+// wird überall dort fortgeschrieben, wo der Server einen Rang tatsächlich BEOBACHTET (Spende,
+// Vergabe, und bei jedem /api/me für den Altbestand). Abgeleitet wird nur noch zusätzlich aus der
+// Spendensumme - die ist von sich aus monoton und deckt den Fall ab, dass jemand seit der
+// Umstellung gespendet, sich aber nie wieder angemeldet hat.
+function spenderStufeJeFortschreiben(user, stufe) {
+  if (!user || !stufe) return false;
+  if ((KOSMETIK_STUFEN_RANG[stufe] || 0) <= (KOSMETIK_STUFEN_RANG[user.supporterStufeJeMax] || 0)) return false;
+  user.supporterStufeJeMax = stufe;
+  return true;
+}
+function spenderStufeJeErreicht(userId) {
+  const user = findUserById(userId);
+  if (!user) return null;
+  let rang = 0;
+  const nimm = (stufe) => { const r = KOSMETIK_STUFEN_RANG[stufe] || 0; if (r > rang) rang = r; };
+  const rec = user.kofiEmail ? (db.kofiDonationsByEmail || {})[user.kofiEmail] : null;
+  if (rec && rec.total > 0) nimm(supporterTierFor(rec.total));
+  if (user.supporterStufeJeMax) nimm(user.supporterStufeJeMax);
+  return rang ? (Object.keys(KOSMETIK_STUFEN_RANG).find(k => KOSMETIK_STUFEN_RANG[k] === rang) || null) : null;
 }
 // ===== Testphase (15.08.2026) =====
 // Dritter Weg zur FUNKTIONSFREIGABE - und der einzige, der nichts kostet. Wer die
@@ -8524,7 +8579,19 @@ const KOSMETIK_DEFS = [
   { key: 'nf_chronik',    art: 'namensfarbe', bedingung: { typ: 'erfolge', wert: 25 } },
   { key: 'em_kranz',      art: 'emblem',      bedingung: { typ: 'erfolge', wert: 60 } },
   { key: 'nf_trophae',    art: 'namensfarbe', bedingung: { typ: 'bosse', wert: 10 } },
-  { key: 'em_schaedel',   art: 'emblem',      bedingung: { typ: 'bosse', wert: 30 } }
+  { key: 'em_schaedel',   art: 'emblem',      bedingung: { typ: 'bosse', wert: 30 } },
+  // --- Meilenstein-Embleme (17.08.2026) ---
+  // Die Gegenstücke zu em_tasse/em_komet, und der Unterschied ist der ganze Punkt: Jene tragen den
+  // AKTUELLEN Rang und verschwinden, wenn er ausläuft. Diese hier bleiben. Sie sagen nicht
+  // "unterstützt gerade", sondern "hat unterstützt" - eine Aussage, die nicht falsch werden kann
+  // und die niemandem weggenommen werden sollte, weil er irgendwann aufhört.
+  //
+  // Drei Stufen, damit auch die kleine Spende ihr Zeichen bekommt; die Schwellen sind dieselben
+  // wie bei supporterTierFor (Bronze ab der ersten Spende, Silber ab 15, Gold ab 50) - also KEINE
+  // zweite Zahlenliste, die veralten kann.
+  { key: 'em_funke',      art: 'emblem',      bedingung: { typ: 'spender_je', stufe: 'bronze' } },
+  { key: 'em_leitstern',      art: 'emblem',      bedingung: { typ: 'spender_je', stufe: 'silver' } },
+  { key: 'em_leuchtfeuer',art: 'emblem',      bedingung: { typ: 'spender_je', stufe: 'gold' } }
 ];
 const KOSMETIK_ARTEN = ['namensfarbe', 'emblem'];
 const KOSMETIK_VORGABE = { namensfarbe: 'nf_standard', emblem: 'em_keins' };
@@ -8533,6 +8600,10 @@ const KOSMETIK_VORGABE = { namensfarbe: 'nf_standard', emblem: 'em_keins' };
 const KOSMETIK_STUFEN_RANG = { bronze: 1, silver: 2, gold: 3 };
 function kosmetikDef(key) { return KOSMETIK_DEFS.find(d => d.key === key) || null; }
 // Ist die Bedingung BEFRISTET? Nur solche werden beim Lesen erneut geprüft (siehe Kopfkommentar).
+// `spender_je` gehört ausdrücklich NICHT dazu, und das ist keine Nachlässigkeit, sondern der
+// ganze Zweck: Die höchste je erreichte Stufe kann nicht sinken (siehe spenderStufeJeErreicht),
+// ist damit monoton wie Prestige oder Kampfpunkte - und ein Meilenstein-Emblem, das nach 30 Tagen
+// von selbst verschwände, wäre kein Meilenstein.
 function kosmetikBefristet(def) { return !!def && def.bedingung.typ === 'spender'; }
 function kosmetikSpenderErfuellt(userId, stufe) {
   // Bewusst supporterStatusCombined (der RANG) und nicht supporterFeaturesFor: Die Testphase gibt
@@ -8546,6 +8617,12 @@ function kosmetikBedingungErfuellt(userId, def, save) {
   const b = def.bedingung;
   if (b.typ === 'immer') return true;
   if (b.typ === 'spender') return kosmetikSpenderErfuellt(userId, b.stufe);
+  // Meilenstein: einmal erreicht, für immer besessen. Bewusst OHNE Ablaufprüfung - der Unterschied
+  // zu 'spender' ist genau der, und er ist der Grund für den eigenen Typ statt eines Zusatzfeldes.
+  if (b.typ === 'spender_je') {
+    const je = spenderStufeJeErreicht(userId);
+    return (KOSMETIK_STUFEN_RANG[je] || 0) >= (KOSMETIK_STUFEN_RANG[b.stufe] || 99);
+  }
   // Gekauft wird einmal und bleibt. Damit ist die Bedingung MONOTON wie die Fortschritts-Werte und
   // muss im Lesepfad nicht erneut geprüft werden (siehe kosmetikBefristet). Der Kauf selbst wird
   // gegen ein serverseitiges Konto abgerechnet - kein Feld aus dem Spielstand ist daran beteiligt.
@@ -8660,6 +8737,10 @@ app.post('/api/admin/grant-supporter', authMiddleware, async (req, res) => {
   const stufe = ['bronze', 'silver', 'gold'].indexOf(String(tier || '')) !== -1 ? String(tier) : 'bronze';
   target.supporterGrantUntil = Date.now() + tage * 86400000;
   target.supporterGrantTier = stufe;
+  // Historie für die Meilenstein-Embleme (17.08.2026): steigt nur, sinkt nie. `supporterGrantTier`
+  // taugt dafür nicht - es wird beim Widerruf gelöscht und beim Korrigieren eines Vertippers nach
+  // UNTEN überschrieben (ein zweiter Aufruf setzt neu statt zu verlängern, siehe Kommentar oben).
+  spenderStufeJeFortschreiben(target, stufe);
   target.supporterGrantBy = req.username;
   target.supporterGrantAt = Date.now();
   await saveDb();
@@ -8673,6 +8754,10 @@ app.post('/api/admin/revoke-supporter', authMiddleware, async (req, res) => {
   delete target.supporterGrantTier;
   delete target.supporterGrantBy;
   delete target.supporterGrantAt;
+  // `supporterStufeJeMax` bleibt bewusst STEHEN. Der Widerruf nimmt den laufenden Rang zurück,
+  // nicht die Tatsache, dass er einmal vergeben war - dieselbe Haltung wie beim Berichts-Archiv:
+  // ein Deckel (oder hier ein Widerruf) darf Historie nicht vernichten. Wer eine Fehlvergabe
+  // restlos tilgen will, muss das Feld bewusst von Hand entfernen.
   await saveDb();
   // Eine per Ko-fi verdiente Unterstützung bleibt davon unberührt - deshalb wird der verbleibende
   // Stand zurückgemeldet und nicht einfach "weg" behauptet.

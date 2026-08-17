@@ -157,6 +157,36 @@ ab, Tag wechselt) und sich anders nicht prüfen lassen. Zwei Fallen daraus:
 `test_kosmetik_http.js` Abschnitt 1f prüft **jede** Fortschritts-Bedingungsart, die der Katalog
 führt, statt einer festen Liste – eine neue Art ist damit automatisch abgedeckt.
 
+### Markt: Tagesumsatz-Deckel für Verkaufserlöse (17.08.2026)
+
+`MARKT_TAGES_ERLOES_MAX` (5 Mio Credits je Konto und UTC-Tag) deckelt am `/api/market/trade`-Endpunkt
+ausschließlich VERKAUFS-Erlöse – Käufe vernichten Credits und bleiben frei. Anlass und Rechnung
+stehen als Kommentar an der Konstante. Vier Entscheidungen, die man beim Anfassen kennen muss:
+
+- **Der Zähler lebt am user-Objekt** (`user.marktTag = { stempel, erloes }`), nach exakt dem
+  `user.staub`-Muster: Stempel gegen `staubTagesschluessel()` prüfen, bei Abweichung zurücksetzen,
+  dann zählen – kein Cron. Der Spielstand scheidet als Ablageort aus: Er ist klientenautoritativ
+  und beim nächsten regulären Speichern überschrieben.
+- **Prüfung VOR der ersten Mutation, Fortschreibung im selben synchronen Block** vor `saveDb()` –
+  dieselbe Race-Begründung wie bei der Modulbörse. Zwei parallele Verkäufe können den Deckel so
+  nicht gemeinsam durchbrechen.
+- **Abgelehnt wird mit 400, bewusst NICHT mit 429**: Den 429 deutet der Sammelauftrag des Frontends
+  als vorübergehend und wiederholt dieselbe Tranche bis zu dreimal mit je 20 s Wartezeit. Ein
+  erschöpftes Tageskontingent ist nicht vorübergehend. Der Fehlertext nennt die Zahlen, die
+  Antwort trägt `tagesRest`/`tagesMax` als Felder.
+- **`tagesRest` reist in JEDER Antwort mit** (GET /api/market und beide Trade-Ausgänge) – das
+  Frontend zeigt den Stand an, statt dass der Spieler ihn erst aus einer Ablehnung erfährt.
+
+`tests/test_marktdeckel_http.js` ist der erste Markt-HTTP-Test dieses Repos (Port 3217,
+Sternenstaub-Muster: zwei Serverstarts auf derselben DB, Tageswechsel per rückdatiertem Stempel).
+Seine Gegenprobe hat ein Lehrstück dokumentiert: Am alten Stand blieb die Deckel-Prüfung aus dem
+FALSCHEN Grund grün (die Verkaufsschleife leerte den Bestand, der 400 kam vom „Nicht genug"-Zweig) –
+deshalb verlangt Prüfung 4 den GRUND im Fehlertext, nicht nur den Statuscode.
+
+**Bewusst offen (Sascha zur Entscheidung vorgelegt):** Handelsrouten vom Typ `sell` verkaufen
+klientenseitig am Endpunkt vorbei – ~63k Credits je gebundenem Frachter und Tag, ohne Slippage.
+Ab ~80 Frachtern überholt dieser Tropf den Deckel.
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

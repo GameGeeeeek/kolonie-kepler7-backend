@@ -4076,6 +4076,19 @@ const MARKET_RESOURCES = {
 // Wie stark eine gehandelte Menge den Preis bewegt (pro 1000 Einheiten, zusätzlich mit dem
 // Basispreis der Ressource multipliziert - siehe Formel im Handels-Endpunkt). Käufe +, Verkäufe −.
 const MARKET_IMPACT_PER_1000 = 0.04;
+// Tagesumsatz-Deckel fuer VERKAUFSERLOESE (17.08.2026, Auftrag Sascha). Der Anlass, komplett
+// durchgemessen: 400 Mio Erz liessen sich in ~6 Minuten fuer 66 Mio Credits verkaufen - die
+// Slippage schuetzt nur die ERSTE Tranche (eine einzige 1-Mio-Tranche drueckt den Preis um 80
+// Punkte auf den Boden 0,30, wo er fuer alle 399 weiteren bleibt), und 66 Mio Credits sind im
+// Credit-Shop 16.500 Modulfragmente = 206 legendaere Module auf einen Schlag. Das strukturelle
+// Problem ist dasselbe wie bei der Protomaterie-Entscheidung (Frontend-CLAUDE.md, Regel 41):
+// Rohstoffe skalieren mit dem Imperium, die Modulwirtschaft nicht - jeder ungedeckelte Kanal
+// dazwischen bricht, egal wie der Preis modelliert ist. Der Deckel sitzt deshalb an der QUELLE
+// der Credits, nicht an einem der Abnehmer. Er zaehlt nur VERKAUFS-Erloese; Kaeufe bleiben frei
+// (die vernichten Credits, sie erzeugen keine). Gefuehrt wird er serverautoritativ am
+// user-Objekt (user.marktTag, Muster user.staub) - der Spielstand scheidet aus, der ist
+// klientenautoritativ und beim naechsten regulaeren Speichern ueberschrieben.
+const MARKT_TAGES_ERLOES_MAX = 5000000;
 // Markt-Vertiefung (20.07.2026): Preisverlauf + Angebots-/Nachfrageschock-Ereignisse. Labels/Namen hier
 // zentral, damit die galaktische News dieselbe Bezeichnung nutzt wie der Client.
 const MARKET_RES_LABELS = { erz:'Erz', kristalle:'Kristalle', deuterium:'Deuterium', energie:'Energie', antimaterie:'Antimaterie' };
@@ -5468,7 +5481,13 @@ app.get('/api/market', authMiddleware, (req, res) => {
   for (const key of Object.keys(MARKET_RESOURCES)) {
     out[key] = { price: market[key], basePrice: MARKET_RESOURCES[key].basePrice, min: MARKET_RESOURCES[key].min, max: MARKET_RESOURCES[key].max, impactScale: MARKET_RESOURCES[key].impactScale || 1, history: (g.marketHistory && g.marketHistory[key]) || [] };
   }
-  res.json({ market: out, event: g.marketEvent || null });
+  // Tagesrest des Verkaufserloes-Deckels mitliefern (17.08.2026): Die Markt-Box zeigt damit von
+  // Anfang an "heute noch X frei", statt dass der Spieler es erst an einer Ablehnung erfaehrt.
+  const marktUser = findUserById(req.userId);
+  const marktHeute = staubTagesschluessel();
+  const marktRest = (marktUser && marktUser.marktTag && marktUser.marktTag.stempel === marktHeute)
+    ? Math.max(0, MARKT_TAGES_ERLOES_MAX - marktUser.marktTag.erloes) : MARKT_TAGES_ERLOES_MAX;
+  res.json({ market: out, event: g.marketEvent || null, tagesRest: marktRest, tagesMax: MARKT_TAGES_ERLOES_MAX });
 });
 
 // Ermittelt den Markt-Rabatt (Kartell-Ruf + Allianz-Handelsabkommen) SERVERSEITIG aus dem echten
@@ -5549,6 +5568,33 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
   if (action === 'sell') {
     if ((save.resources[resource] || 0) < amt) return res.status(400).json({ error: 'Nicht genug ' + resource + ' zum Verkaufen.' });
     credits = Math.round(avgPrice * amt * MARKET_SELL_SPREAD * (1 + discount));
+    /* Tagesumsatz-Deckel (17.08.2026, Begruendung bei MARKT_TAGES_ERLOES_MAX). Der Zaehler lebt
+       am user-Objekt nach dem staub-Muster: Stempel pruefen, bei Tageswechsel zuruecksetzen, dann
+       zaehlen - kein Cron, der Reset passiert beim ersten Zugriff des neuen UTC-Tages
+       (staubTagesschluessel; fuer deutsche Spieler ist das 1 bzw. 2 Uhr nachts, das Frontend
+       zeigt deshalb eine Restzeit statt "Mitternacht" zu behaupten).
+       Die Pruefung steht VOR der ersten Mutation und die Fortschreibung im selben synchronen
+       Block vor saveDb() - zwei parallele Verkaeufe koennen den Deckel so nicht gemeinsam
+       durchbrechen (dieselbe Race-Begruendung wie bei der Modulboerse weiter unten).
+       Abgelehnt wird mit 400, NICHT mit 429: Den 429 deutet der Sammelauftrag des Frontends
+       als voruebergehend und wiederholte dieselbe Tranche bis zu dreimal mit je 20 s Wartezeit -
+       ein erschoepftes Tageskontingent ist aber nicht voruebergehend, die Schleife soll sofort
+       sauber stoppen. Die Ablehnung nennt Zahlen und traegt tagesRest als Feld, damit das
+       Frontend den Rest anzeigen kann statt nur "fehlgeschlagen" zu sagen. */
+    const traderUser = findUserById(req.userId);
+    if (!traderUser) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+    const heute = staubTagesschluessel();
+    if (!traderUser.marktTag || traderUser.marktTag.stempel !== heute) traderUser.marktTag = { stempel: heute, erloes: 0 };
+    const tagesRest = Math.max(0, MARKT_TAGES_ERLOES_MAX - traderUser.marktTag.erloes);
+    if (credits > tagesRest) {
+      return res.status(400).json({
+        error: tagesRest > 0
+          ? 'Tageskontingent fast erreicht: Dieser Verkauf brächte ' + credits.toLocaleString('de-DE') + ' Credits, heute sind aber nur noch ' + tagesRest.toLocaleString('de-DE') + ' von ' + MARKT_TAGES_ERLOES_MAX.toLocaleString('de-DE') + ' frei. Verkaufe entsprechend weniger - morgen geht es weiter.'
+          : 'Tageskontingent erreicht: ' + MARKT_TAGES_ERLOES_MAX.toLocaleString('de-DE') + ' Credits Verkaufserlös je Tag. Morgen geht es weiter.',
+        tagesRest, tagesMax: MARKT_TAGES_ERLOES_MAX
+      });
+    }
+    traderUser.marktTag.erloes += credits;
     save.resources[resource] -= amt;
     save.credits = (save.credits || 0) + credits;
   } else {
@@ -5562,6 +5608,12 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
   saveDb();
 
+  // Das Restkontingent reist in JEDER Antwort mit (auch beim Kauf, dort nur informativ) - das
+  // Frontend zeigt es an, statt dass der Spieler erst an einer Ablehnung erfaehrt, wo er steht.
+  const antwortUser = findUserById(req.userId);
+  const antwortHeute = staubTagesschluessel();
+  const antwortRest = (antwortUser && antwortUser.marktTag && antwortUser.marktTag.stempel === antwortHeute)
+    ? Math.max(0, MARKT_TAGES_ERLOES_MAX - antwortUser.marktTag.erloes) : MARKT_TAGES_ERLOES_MAX;
   res.json({
     ok: true,
     action, resource, amount: amt,
@@ -5571,7 +5623,8 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
     priceBefore, priceAfter,
     saveVersion: mySaveVersion,
     newCredits: save.credits,
-    newResourceAmount: save.resources[resource]
+    newResourceAmount: save.resources[resource],
+    tagesRest: antwortRest, tagesMax: MARKT_TAGES_ERLOES_MAX
   });
 });
 

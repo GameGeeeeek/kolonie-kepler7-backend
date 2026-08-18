@@ -190,6 +190,44 @@ VERKLEINERN: Wer die Meldung unterschlägt, hat exakt den Stand von vor der Änd
 verbucht ohnehin der Client), wer zu viel meldet, sperrt sich selbst den Direktverkauf. Dieselbe
 Prüffrage wie beim Sternenstaub, mit umgekehrtem Ergebnis – hier gibt es nichts zu holen.
 
+### Gefechtsvorräte: warum der Server sie rechnet UND abbucht (18.08.2026)
+
+`GEFECHTSVORRAETE` ist eine Kopie der Frontend-Tabelle, dieselbe Familie wie `SHIP_SCORE_WEIGHTS`
+und `DEFENSE_VALUES`. Ein Vorrat erhöht Angriff bzw. Verteidigung um einen festen Prozentsatz und
+kostet dafür Tier-2-Material je Kampf.
+
+**Die Entscheidung, die man kennen muss:** Ein Vorrat verändert den Ausgang eines Kampfes gegen
+einen **echten Spieler**. Er fällt damit auf die Seite der Grenze, die dieses Projekt verteidigt
+(„kann ich etwas anfassen, das anderen gehört?"), und darf deshalb weder vom Client gemeldet noch
+vom Client abgebucht werden. `/api/attack` nimmt weiterhin **keinen einzigen Kampfparameter** aus
+dem Request entgegen — das ist eine Eigenschaft dieses Endpunkts, die erhalten bleiben soll. Statt
+dessen steht die **Wahl** im Spielstand (`save.gefechtsvorrat`), genau wie Doktrin, Aufstellung und
+Prestige-Perks; der Server liest sie, prüft den Bestand und bucht in `gefechtsvorratEinsetzenServer`
+im selben synchronen Block ab, bevor beide Spielstände ohnehin geschrieben werden.
+
+Dass der Spielstand klientenautoritativ ist, ändert daran nichts: Wer sich Nanolegierungen
+hinschreibt, konnte sich schon immer alles hinschreiben. Neu wäre nur gewesen, dem Client zu
+erlauben, dem Server eine **Wirkung** zu diktieren — und genau das passiert hier nicht.
+
+**Zwei Fallen beim Anfassen:**
+
+- **`attackPower` ist EINE Definition, die den Vorrat trägt.** Sie wird an sechs Stellen ausgegeben
+  (zwei Berichte je Ausgang plus beide Antworten). Vor dem Umbau hätte jede davon eine Kraft
+  genannt, mit der gar nicht gekämpft wurde. Das Konterverhältnis wird bewusst **davor** aus dem
+  unveränderten Wert gebildet — es ist das Verhältnis zweier Kraftwerte und darf sich durch einen
+  flachen Aufschlag nicht verschieben (dieselbe Überlegung wie beim `spyEdgeMult`).
+- **Reicht der Bestand nicht, wird NICHTS abgebucht** und der Kampf findet ohne Vorrat statt. Ein
+  Teilabzug wäre schlimmer als keiner: Material weg, Wirkung keine.
+
+`tests/test_gefechtsvorrat_http.js` (Port 3218) misst das an echten Kämpfen. Zwei Dinge daraus, die
+jeder neue Angriffs-Test braucht: **Jede Messung bekommt ein eigenes, frisches Opfer** — der
+PvP-Kampf hat einen Boden von 19,6 % je Phase, rund jeder zehnte Angriff geht also auch gegen eine
+hundertfach überlegene Verteidigung durch, verschiebt per Beute die gemessenen Bestände und setzt
+beim Opfer einen Schutzschild, nach dem alle weiteren Angriffe mit 403 abprallen. Und der
+**Anfängerschutz muss zwischen zwei Serverstarts in der DB-Datei geleert werden**; beim ersten
+Anlauf sah sein 403 aus wie „der Vorrat wirkt nicht", und zwei Prüfungen wurden dadurch aus dem
+falschen Grund grün (beide Seiten `undefined`).
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

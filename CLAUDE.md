@@ -689,6 +689,36 @@ reine Pipeline-Störung ohne jede Spielerwirkung – anders als am 15.08., als d
 abfragte, die es serverseitig nicht gab. **Genau dafür ist der Schalter da** (Frontend-Arbeitsregel
 60): Er macht die Reihenfolge der beiden Deploys gleichgültig, statt auf sie zu hoffen.
 
+**NACHTRAG 18.08.2026, 22:03 UTC – der Ausfall läuft noch, und die Behebung dafür steckt HINTER
+ihm fest.** Unmittelbar nach dem Merge von Phase 2 (Frontend v8.575.0, Backend #135) gemessen, mit
+beiden Kontrollen im selben Lauf:
+
+```
+POST /api/festung/angriff        404   (neu mit #126)
+POST /api/musterattack/create    401   (alte Kontrollroute)
+POST /api/gibtesnicht            404   (Negativkontrolle)
+```
+
+Das Frontend stand binnen Sekunden auf `8.575.0`. Der Pi fährt also weiterhin einen Stand von VOR
+#126 – inzwischen fehlen ihm zehn Commits.
+
+**Der wahrscheinliche Grund steht in #134, und das ist die Pointe:** Der Webhook rief `exec()` mit
+einem Timeout von **30 Sekunden** auf. Nachgemessen in einem Node-Nachbau schickt `exec()` beim
+Ablauf SIGTERM an die **Shell**, nicht an das `git` darunter – der Enkelprozess läuft weiter und
+schreibt seine Datei zu Ende (`killed:true`, `signal:SIGTERM`, Marke trotzdem angelegt). Auf dem Pi
+ist das genau der Zustand, der den Deploy am 16.08. für 49 Stunden lahmgelegt hat: ein
+unbeobachtetes `git`, ein halb geschriebener Arbeitsbaum, eine liegengebliebene `.git/index.lock`.
+Ein `git pull` samt `cp` des 6-MB-Spielstands und `chown -R` über `.git` kann auf einem Raspberry Pi
+30 Sekunden überschreiten, ohne dass irgendetwas kaputt ist – **der Webhook konnte den Schaden also
+selbst erzeugen**, ganz ohne Cron-Konkurrenten. Das erklärt, warum es nach dem Leeren beider
+crontabs wieder passiert ist.
+
+#134 hebt den Timeout auf 10 Minuten und gibt der Zeitüberschreitung eine eigene Logmeldung. **Nur
+kommt die Behebung nicht an, solange der Pull hängt** – sie steckt hinter genau dem Problem fest,
+das sie behebt. Der erste Schritt bleibt deshalb ein Blick ins Container-Log und danach der
+Wiederherstellungsweg von Hand; ab dem nächsten erfolgreichen Pull greift der neue Timeout von
+selbst.
+
 **Der Wiederherstellungsweg, falls es wieder passiert** (am 18.08. so gefahren, jede Stufe gemessen,
 vorher von vier Prüfläufen adversarisch zerlegt):
 

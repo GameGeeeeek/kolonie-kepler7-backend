@@ -320,6 +320,78 @@ und `service-worker.js` mit demselben frischen Zeitstempel – der Webhook kopie
 das komplette Set, die Cron-Zeile kopierte nur `weltraum_kolonie.html` und war damit die ärmere
 Variante derselben Arbeit.
 
+**KORREKTUR 18.08.2026 – die Behebung oben war unvollständig, und der Deploy hing danach 49 Stunden.**
+Entfernt wurden die drei Zeilen aus der **root**-crontab. Sie standen aber ZUSÄTZLICH in Saschas
+**Nutzer-crontab** (`/var/spool/cron/crontabs/sascha`) und liefen dort unverändert weiter – gemessen
+am 18.08. um 10:40, also zwei Tage nach der angeblichen Behebung, alle drei Zeilen wortgleich.
+
+Am 16.08. um 09:13:16 kollidierte einer dieser Läufe mit dem Webhook-Pull. Der unterlegene Prozess
+hinterließ `.git/index.lock`; ab da scheiterte **jeder** weitere Pull – der Pi blieb auf #109 stehen,
+während elf Commits (#110–#120) aufliefen, und das Frontend fragte live Routen ab, die es
+serverseitig nicht gab. Der FRONTEND-Deploy lief die ganze Zeit sauber, weil dort nur EIN
+Cron-Konkurrent lief statt zweier – dieselbe Asymmetrie wie schon am 15.08.
+
+**Die Lehre ist nicht „Cron ist böse", sondern: Eine Prüfung, die nur `sudo crontab -l` ansieht,
+beantwortet eine andere Frage als die gestellte** (dieselbe Familie wie die Fernreferenz-Falle im
+Frontend-Prüflauf). Cron-Zeilen können in fünf Ablagen stehen, und Datei-Eigentümer verraten nichts:
+root darf in eine sascha-eigene Logdatei anhängen, ohne dass sich der Eigentümer ändert. Wer fragt
+„läuft noch ein zweiter Deploy?", misst deshalb alle fünf:
+
+```
+crontab -l                       # der eigene Nutzer  <-- HIER standen sie
+sudo crontab -l                  # root
+grep -vE '^#|^$' /etc/crontab
+ls -la /etc/cron.d/
+systemctl list-timers --all
+```
+
+**Zwei Befunde, die dabei nebenbei herausfielen:**
+
+- **Was auf dem Pi wie eine „Handänderung an `server.js`" aussah, war der halb geschriebene
+  Arbeitsbaum des abgestürzten Pulls.** Belegt über den Blob-Hash: `git hash-object server.js`
+  lieferte exakt `a1d7b40…`, also `server.js` bei #110 – und die daneben unversioniert liegende
+  `tests/test_berichtsarchiv_http.js` ist genau die Datei, die #110 anlegt, mit Zeitstempel
+  16.08. 09:13. **Vorgehen bei einer „lokalen Änderung", die einen Pull blockiert: erst den
+  Blob-Hash gegen die eingehenden Commits halten, bevor man sie stasht.** Hier gab es nichts zu
+  retten – der Inhalt stand längst im Ursprung, und ein Stash wäre eine Zeitbombe gewesen (ein
+  späteres `git stash pop` schreibt bei 278 geänderten Zeilen Konfliktmarker in die
+  Produktivdatei, nodemon lädt sie, und das Backend ist komplett aus).
+- **Der Container sammelt Zombies.** PID 1 im Container ist `npm exec nodemon`, und das erntet
+  verwaiste Kinder nicht ab. Gemessen am 18.08.: mehrere hundert `[git] <defunct>` (dazu ein
+  `[chown]`), alle mit PPID 3307, der älteste zweieinhalb Tage alt. Sie halten nichts und sind
+  harmlos – aber sie **verfälschen jede Prozessprüfung**: `pgrep -x git` findet einen Zombie über
+  den Prozessnamen, `ps … | awk '$4 ~ /git$/'` findet ihn nicht, weil die Kommandozeile fehlt.
+  Genau dieser Widerspruch hat bei der Wiederherstellung eine Runde gekostet. Wer prüft, ob ein
+  git-Prozess LEBT, liest den Zustand mit:
+  `ps -eo pid=,stat=,etimes=,comm=,args= | awk '$4=="git" && $2 !~ /Z/'`. Ein `docker restart`
+  räumt sie ab – mit Vorsicht, der Startbefehl beginnt mit `npm install`, und ein Fehlschlag dort
+  lässt den Container gar nicht erst hochkommen.
+
+**Der Wiederherstellungsweg, falls es wieder passiert** (am 18.08. so gefahren, jede Stufe gemessen,
+vorher von vier Prüfläufen adversarisch zerlegt):
+
+1. **Auslöser stilllegen**, bevor irgendetwas angefasst wird – sonst startet der Konkurrent mitten
+   in die Reparatur hinein.
+2. **Sichern, was kein git wiederherstellt.** Achtung auf die Ablage: `db.json` und
+   `jwt-secret.txt` liegen im Docker-**Volume** (`DB_FILE=/data/db.json`), die
+   **VAPID-Schlüssel dagegen im Repo-Verzeichnis** (die Env-Variablen sind nicht gesetzt, also
+   greift der `__dirname`-Rückfall). In diesem Verzeichnis niemals `git clean -x`, `git stash -a`
+   oder `git reset --hard` – sie träfen genau diese Dateien.
+3. **Wachen prüfen**: kein LEBENDER git-Prozess (siehe Zombies oben), Sperre älter als eine Stunde,
+   kein `MERGE_HEAD`, keine eigenen Commits, HEAD ist Vorfahr des Ziels.
+4. **`chown` inklusive Wurzelverzeichnis.** git ersetzt eine Datei per unlink+create; dafür zählt
+   das Schreibrecht am **Verzeichnis**, nicht an der Datei. Fehlt das `.`, scheitert der Checkout
+   mit „unable to unlink old" – und darüber steht trotzdem verführerisch `Updating …`.
+5. Sperren entfernen (`find .git -name '*.lock' -delete`, nicht nur `.git/*.lock` – Ref-Locks
+   liegen tiefer), Arbeitsbaum-Rest mit `git checkout HEAD -- <datei>` verwerfen, kollidierende
+   unversionierte Dateien **wegbewegen, nie löschen**.
+6. **`git merge --ff-only <fester Hash>`** – nie `git pull` (darf einen Merge-Commit bauen, und der
+   Pi liefe danach dauerhaft neben `origin/master`) und nie `origin/master` als Ziel (kann zwischen
+   Prüfung und Merge weiterlaufen). Danach `echo "merge EXIT=$?"` ohne Pipe dazwischen.
+7. **Der Beleg ist nie `git log`**, sondern eine Route, die es erst im neuen Stand gibt: 404 vorher,
+   401 nachher, mit `/api/gibtesnicht` als Negativkontrolle und einer alten Route als
+   Gegenkontrolle. `git log` beweist nur den Dateistand, nicht den laufenden Prozess.
+
 **Der zweite Blocker, unabhängig davon: eine Handänderung an `server.js` auf dem Pi.** Sie fügte
 `bergungsfrachter` in `SHIP_SCORE_WEIGHTS` und in die Schiffsliste von `/api/worldboss/resolve` ein
 und blockierte JEDEN Pull mit „Ihre lokalen Änderungen würden überschrieben" – tagelang, ohne dass

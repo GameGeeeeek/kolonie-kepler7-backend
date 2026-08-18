@@ -2771,7 +2771,12 @@ const SAVE_SANITY_LIMITS = {
   // zu enges Limit sperrt im Zweifel einen echten Spieler komplett vom Speichern aus, ein
   // grosszuegiges faengt offensichtliche Faelschungen trotzdem ab. Sollte der Deckel im Spiel
   // jemals ueber 1000 steigen, muss dieser Wert VORHER mitwachsen.
-  maxShipMark: 1000
+  maxShipMark: 1000,
+  // Bastionsmarken (18.08.2026): dieselbe Groessenordnung und dieselbe Begruendung wie die
+  // Werftmarke darueber. Das Frontend deckelt bei 10 (BASTION_MARK_MAX) und schreibt nie mehr;
+  // 1000 faengt offensichtliche Faelschungen ab, ohne einen echten Spieler vom Speichern
+  // auszusperren. Steigt BASTION_MARK_MAX je ueber 1000, muss dieser Wert VORHER mitwachsen.
+  maxBastionMark: 1000
 };
 function numberOutOfRange(v, max) {
   return typeof v === 'number' && (!Number.isFinite(v) || v < 0 || v > max);
@@ -2799,6 +2804,15 @@ function saveSanityViolation(save) {
   if (numberOutOfRange(save.xp, SAVE_SANITY_LIMITS.maxXp)) return 'XP unplausibel: ' + save.xp;
   for (const [k, v] of Object.entries(save.shipMarks || {})) {
     if (numberOutOfRange(v, SAVE_SANITY_LIMITS.maxShipMark)) return 'Werftmarke "' + k + '" unplausibel: ' + v;
+  }
+  /* Bastionsmarken - Verteidigung in der Tiefe, genau wie eine Zeile darueber. Sie ist NICHT
+     der Schutz der Kampfrechnung (den macht bastionMarkMultServer mit seinem eigenen Deckel),
+     sondern verhindert, dass ein absurder Wert ueberhaupt im Spielstand liegen bleibt. Ohne
+     diese Schleife waere bastionMarks das einzige Markenfeld ohne Pruefung - und eine
+     Ungleichbehandlung, die niemand begruendet hat, ist die Sorte Luecke, die spaeter jemand
+     fuer Absicht haelt. */
+  for (const [k, v] of Object.entries(save.bastionMarks || {})) {
+    if (numberOutOfRange(v, SAVE_SANITY_LIMITS.maxBastionMark)) return 'Bastionsmarke "' + k + '" unplausibel: ' + v;
   }
   return null;
 }

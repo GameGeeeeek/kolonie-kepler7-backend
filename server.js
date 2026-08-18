@@ -5358,6 +5358,15 @@ function galaxyTick() {
   // mit dem Kontrollwert seines Vorbesitzers da.
   rkTick(g);
 
+  // Asteroidenfestungen: Entstehen und Verfallen. Bewusst HIER und nicht beim Lesen des Feldes -
+  // eine Festung ist ein Ereignis der Galaxie, kein Nebeneffekt eines Kartenaufrufs. Der Hort
+  // dagegen wächst beim Lesen (festungReifen), weil er zwischen zwei Takten sonst stillstünde.
+  if (Math.random() < FESTUNG_SPAWN_CHANCE) {
+    const { felder } = astAlleFelder();
+    const neu = festungSpawn(felder);
+    if (neu) { for (const sysId of Object.keys(felder)) db.shared[astFeldKey(sysId)] = felder[sysId]; }
+  }
+
   checkLeaderboardOvertakes();
 
   saveDb();
@@ -5514,7 +5523,19 @@ setInterval(checkDormantWinback, 60 * 60 * 1000);   // stündlich prüfen
 setTimeout(checkDormantWinback, 2 * 60 * 1000);     // erster Lauf ~2 Min nach Start (blockiert den Boot nicht)
 
 setInterval(galaxyTick, GALAXY_TICK_MS);
-galaxyTick(); // einmal sofort beim Serverstart, damit nicht 15 Min. auf den ersten Zustand gewartet wird
+/* Der Startlauf liegt in setImmediate und NICHT direkt hier - gemessen, nicht vermutet (18.08.2026).
+   Diese Zeile steht bei 5526, der Rest der Datei geht bis 9100+. Ein direkter Aufruf führt den
+   Rumpf von galaxyTick MITTEN in der Modulauswertung aus; jede `const`, die weiter unten steht,
+   liegt zu diesem Zeitpunkt in ihrer temporalen Todeszone. Konkret passiert beim Einbau der
+   Asteroidenfestungen: `FESTUNG_SPAWN_CHANCE` steht bei 7908, und der Server startete gar nicht
+   mehr ("Cannot access 'FESTUNG_SPAWN_CHANCE' before initialization") - bei JEDEM Start, nicht
+   nur in 8 % der Fälle, denn der rechte Operand eines `<` wird immer ausgewertet.
+   `node --check` findet das NICHT: es parst nur und führt nie aus.
+   setImmediate löst das für alle künftigen Fälle mit: Es feuert, sobald die Modulauswertung fertig
+   ist, also Millisekunden später - die Absicht "nicht 15 Minuten auf den ersten Zustand warten"
+   bleibt vollständig erhalten. Nach der Zeile stehen ohnehin nur noch Funktions-, Konstanten- und
+   Routendefinitionen, nichts, was den Takt vorher gelaufen sehen müsste (nachgesehen). */
+setImmediate(galaxyTick);
 
 // Die Front fuehrt zwei Dinge, die ausserhalb des Servers niemanden etwas angehen: die Pufferstaende
 // beider Seiten (wer sie sieht, kennt das Ergebnis des naechsten Takts, bevor er faellt) und je Konto
@@ -7871,6 +7892,176 @@ function astErzeugeFeld(sysId) {
 function astBelegtZahl(feld) {
   return Object.values(feld.plaetze || {}).filter(p => p && !p.frei && (p.vorrat || 0) > 0).length;
 }
+
+/* ===== Asteroidenfestungen (18.08.2026, docs/aliens-asteroidenfestungen-konzept.md Abschnitt 4)
+   ============================================================================================
+   Eine Festung besetzt EINEN freien Platz auf der Gürtelbahn eines Gürtelsystems - dieselben zehn
+   Positionen, auf denen die Vorkommen liegen. Sie lebt IM SELBEN Felddokument (asteroids:<sys>);
+   das ist keine Bequemlichkeit, sondern hat zwei Gründe: /api/asteroid/field liefert sie ohne
+   neuen Endpunkt mit, und der Sekunden-Auffangcache der Karte im Frontend führt das Feld bereits
+   in seiner Signatur - eine Festung, die woanders läge, erschiene bis zu fünf Sekunden zu spät.
+
+   Höchstens EINE je System (sie wirkt auf das ganze System - zwei würden ihre Blockaden stapeln,
+   und der Spieler stünde vor einer Rechnung statt vor einer Entscheidung) und höchstens sechs
+   galaxieweit: Bei zwanzig gäbe es kein unblockiertes Gürtelsystem mehr, und die Blockade wäre
+   keine Bedrohung, sondern eine Steuer. Bei sechs bleibt immer die Wahl "woanders schürfen oder
+   die Festung schleifen" - und genau diese Wahl ist der Inhalt.
+
+   Die Stufe hängt an astFerne() - dem vorhandenen Maß, das schon die Größenverteilung der
+   Vorkommen steuert. Anfänger finden in Reichweite eine Festung, die sie knacken können; die
+   harten stehen dort, wo Flugzeit und Treibstoff ohnehin wehtun. Keine zweite Schwierigkeitszahl.
+
+   LEBENSPUNKTE, nachgerechnet gegen computeAttackPowerFromComposition (nicht geschätzt):
+   ein Mittelfeld-Konto bringt rund 7.000 Angriffskraft, ein Endspiel-Konto 90.000-120.000. Bei
+   Schaden = Kraft * 0,8-1,2 und sechs Stunden Abklingzeit JE FESTUNG heisst das: Schanze = ein
+   Solo-Ziel (1-2 Schläge im Endspiel, ~4 Tage im Mittelfeld), Kastell = zwei bis drei Tage oder
+   zwei Mitspieler, Sternenfeste = ohne Allianz eine Zumutung. Absicht: Eine Festung soll NICHT an
+   einem Nachmittag verschwinden - sie soll lange genug stehen, dass die Blockade spürbar ist.
+
+   DER HORT ist der eigentliche Anreiz, und er hängt an der PROTOMATERIE, nicht an der Tonnage.
+   Der Grund steht im Frontend bei PROTOMATERIE_SORTE und ist gemessen: Ein entwickeltes Konto
+   produziert 8,81 Mio. Erz je STUNDE, die beste Abbaufuhre des Spiels entspricht davon 73
+   SEKUNDEN. Ein T1-Hort von 900.000 wäre im Endspiel sechs Minuten Produktion - unsichtbar.
+   Protomaterie dagegen kann keine Fabrik herstellen; gemessen sind es 11 je Stunde mit einer
+   Schürfflotte, 32 mit dreien. Ein Sternenfesten-Hort von 480 ist damit 44 Stunden Förderung,
+   aufgeteilt unter allen Angreifern. Die T1-Beute bleibt als Belohnung für das junge Konto, das
+   die Schanze in Heimatnähe schleift - dort sind 120.000 Einheiten tatsächlich Geld. */
+/* DER SCHALTER, DER DIESE PHASE ALLEIN AUSLIEFERBAR MACHT (18.08.2026).
+   Steht er auf false, entsteht keine Festung - und ohne Festung tut der ganze Rest dieses
+   Abschnitts nichts: Die Blockade in /api/asteroid/mine findet keine, /api/festung/angriff
+   antwortet "steht keine Festung mehr", astFreiePlaetze verhält sich wie zuvor.
+
+   WARUM ES IHN BRAUCHT: Backend und Frontend gehen über zwei GETRENNTE fest verdrahtete Befehle
+   desselben Webhooks live (siehe "Deploy"), und historisch sind sie dreimal auseinandergelaufen.
+   Ginge dieses Backend allein live, entstünde binnen Stunden eine Festung, und die Blockade
+   kürzte die Abbauladung um bis zu 55 % - während das Frontend die UNGEKÜRZTE Vorschau zeigt,
+   das Feld `festung` gar nicht kennt und nichts davon erklären kann. Gemessen am Frontend-Code
+   (`echt = daten.menge`, Z. 55880): Der Spieler bekommt still weniger, als die Vorschau ihm
+   versprochen hat, ohne einen einzigen Hinweis worauf. Das ist genau die Sorte stiller
+   Verschlechterung, für die ein Spieler zu Recht einen Fehlerbericht schreibt.
+   Dazu käme eine ausdrückliche Falschaussage: Die Galaxie-Nachricht beim Entstehen KÜNDIGT die
+   Protomaterie-Drosselung an, und die kann ohne das Frontend gar nicht wirken (siehe
+   `protoBlockade` in /api/asteroid/mine).
+
+   UMLEGEN auf true gehört in den Frontend-PR der Phase 1 - also erst, wenn Karte, Kartenmenü,
+   Angriffsmission und die gekürzte Vorschau wirklich da sind. Vorher ist er eine Lüge gegenüber
+   dem Spieler, nachher eine überflüssige Zeile. */
+const FESTUNG_SPAWN_AKTIV = false;
+const FESTUNG_MAX_AKTIV = 6;              // von 20 Gürtelsystemen
+const FESTUNG_SPAWN_CHANCE = 0.08;        // je galaxyTick (15 Min) -> im Mittel eine je 3,1 Stunden
+const FESTUNG_ABKLING_MS = 6 * 3600 * 1000;   // je Festung UND Spieler, nicht global
+const FESTUNG_GERAEUMT_MS = 24 * 3600 * 1000; // Bonusfenster nach dem Fall
+const FESTUNG_GERAEUMT_BONUS = 0.15;      // +15 % Abbau-Ladung im geräumten System
+// Die Stufen. `fernBis` ist die Obergrenze von astFerne(), bei der diese Stufe entsteht.
+/* DIE KERN-LEBENSPUNKTE sind gegen echte Flottenkraefte gerechnet, nicht geschaetzt (18.08.2026).
+   Gemessen an rawFleetPower + diminishingShipCount (Schwelle 300, danach halber Wert) fuer drei
+   Ausbaustufen, danach die ueblichen Multiplikatoren aus computeAttackPowerFromComposition
+   (Vielfalt, rkampf/rkampf2, Haltung) - je Schlag rund:
+     junges Konto      6.200 roh  ->  ~7.500
+     mittleres Konto  29.400 roh  -> ~44.000
+     entwickeltes    85.650 roh  -> ~240.000
+   Daraus die Kerne, so dass ein Konto der PASSENDEN Stufe allein etwa vier bis sieben Schlaege
+   braucht - bei 6 h Abklingzeit also ein bis zwei Tage, mit Mitstreitern entsprechend weniger.
+   Der erste Entwurf stand bei 120.000 fuer die Schanze; das waeren fuer ihr eigentliches Publikum
+   NEUNZEHN Schlaege gewesen, also fast fuenf Tage allein - ausgerechnet an dem Ziel, das das
+   heimatnahe, junge Konto einladen soll. Zur Einordnung der Groessenordnung: Der Weltboss startet
+   bei 50.000 LP und waechst um Faktor 1,6 je Stufe; die Schanze liegt darunter, das Kastell etwa
+   bei Weltboss-Stufe 5, die Sternenfeste bei Stufe 8. */
+const FESTUNG_STUFEN = {
+  schanze:      { name: 'Schanze',      fernBis: 0.40, kern: 30000,   blockade: 0.25, proto: 0.50, hortStd: 2000,  hortDeckel: 120000, protoStd: 1.5, protoDeckel: 90,  verlust: 0.06, kampfpunkte: 15 },
+  kastell:      { name: 'Kastell',      fernBis: 0.75, kern: 250000,  blockade: 0.40, proto: 0.75, hortStd: 6000,  hortDeckel: 400000, protoStd: 4,   protoDeckel: 240, verlust: 0.09, kampfpunkte: 40 },
+  sternenfeste: { name: 'Sternenfeste', fernBis: 1.01, kern: 1200000, blockade: 0.55, proto: 1.00, hortStd: 15000, hortDeckel: 900000, protoStd: 8,   protoDeckel: 480, verlust: 0.12, kampfpunkte: 90 }
+};
+/* `verlust` ist der GRUNDANTEIL der eigenen Verluste je Schlag, dazu bis zu 6 % Streuung. Er liegt
+   bewusst in derselben Familie wie der Weltboss (dort 8 % + Stufe + Streuung, gedeckelt bei 50 %)
+   und bewusst NIEDRIG: In Phase 2 kommen die Geschuetztuerme dazu, und die heben die Quote laut
+   Konzept auf das Drei- bis Vierfache, solange sie stehen. Waere der Grundwert schon jetzt hoch,
+   haetten die Tuerme keinen Spielraum mehr - der Wert, den man sich mit dem Turmbeschuss erkauft,
+   ist der ganze Zweck der Bauteile. */
+const FESTUNG_STUFEN_ORDNUNG = ['schanze', 'kastell', 'sternenfeste'];
+function festungStufeFuer(sysId) {
+  const f = astFerne(sysId);
+  for (const k of FESTUNG_STUFEN_ORDNUNG) if (f < FESTUNG_STUFEN[k].fernBis) return k;
+  return 'sternenfeste';
+}
+/* DIE EINE Stelle, die "welche Plätze sind frei" beantwortet - und die einzige, die von der
+   Festung weiss. astNachschub() suchte das an ZWEI Stellen selbst und hätte ein neues Vorkommen
+   auf die Festung gesetzt, die damit still verschwunden wäre. Eine Funktion statt zweier Kopien,
+   damit ein dritter Aufrufer das Verhalten automatisch erbt (dieselbe Behandlung wie
+   kbMarkerFrei im Frontend). */
+function astFreiePlaetze(feld) {
+  const belegtDurchFestung = feld && feld.festung ? String(feld.festung.platz) : null;
+  const frei = [];
+  for (let i = 0; i < AST_PLAETZE_JE_GUERTEL; i++) {
+    const k = String(i);
+    if (k === belegtDurchFestung) continue;
+    const q = (feld.plaetze || {})[k];
+    if (!q || q.frei) frei.push(k);
+  }
+  return frei;
+}
+// Der Hort wächst LAZY beim Lesen, nicht in einem eigenen Takt: Der galaxyTick läuft alle 15
+// Minuten, das Feld wird viel häufiger gelesen, und ein Zähler, der nur beim Tick wächst, wäre
+// zwischen zwei Ticks eingefroren. Gerechnet wird aus `letzteReifung` - vergangene Stunden mal
+// Rate, gedeckelt. Dasselbe Muster wie die Tageszähler an user.marktTag.
+function festungReifen(feld, now) {
+  const f = feld && feld.festung;
+  if (!f) return false;
+  const st = FESTUNG_STUFEN[f.stufe] || FESTUNG_STUFEN.schanze;
+  const seit = Math.max(0, now - (f.letzteReifung || f.seit || now));
+  if (seit < 60000) return false;                 // unter einer Minute lohnt das Schreiben nicht
+  const stunden = seit / 3600000;
+  const vorherT = f.hort || 0, vorherP = f.hortProto || 0;
+  f.hort = Math.min(st.hortDeckel, vorherT + st.hortStd * stunden);
+  f.hortProto = Math.min(st.protoDeckel, vorherP + st.protoStd * stunden);
+  f.letzteReifung = now;
+  // Immer true: Auch wenn beide Horte am Deckel stehen und sich die ZAHLEN nicht ändern, ist
+  // `letzteReifung` fortgeschrieben - das Feld muss geschrieben werden, sonst rechnet der nächste
+  // Aufruf dieselbe Spanne erneut und der Deckel wäre die einzige Bremse.
+  return true;
+}
+// Entstehen: im galaxyTick, in ein Gürtelsystem OHNE Festung und MIT einem freien Platz.
+function festungSpawn(felder) {
+  if (!FESTUNG_SPAWN_AKTIV) return null;   // siehe die Begründung bei der Konstante
+  const aktive = Object.values(felder).filter(x => x && x.festung).length;
+  if (aktive >= FESTUNG_MAX_AKTIV) return null;
+  const now = Date.now();
+  const kandidaten = Object.keys(felder).filter(sysId => {
+    const feld = felder[sysId];
+    if (!feld || feld.festung) return false;
+    if ((feld.geraeumtBis || 0) > now) return false;       // 24 h Ruhe nach einem Fall
+    return astFreiePlaetze(feld).length > 0;
+  });
+  if (!kandidaten.length) return null;
+  const sysId = kandidaten[Math.floor(Math.random() * kandidaten.length)];
+  const feld = felder[sysId];
+  const frei = astFreiePlaetze(feld);
+  const stufe = festungStufeFuer(sysId);
+  const st = FESTUNG_STUFEN[stufe];
+  /* Der Hort traegt eine SORTE aus derselben Tabelle wie die Vorkommen (AST_SORTEN). Das ist keine
+     Verzierung, sondern die Vermeidung eines zweiten Begriffs: Der Server verteilt in diesem ganzen
+     Modul keine Ressourcen, er fuehrt nur Sorte und Menge - das Frontend bildet daraus seine
+     T1-Ressourcen ab (Kommentar bei AST_SORTEN). Eine Festung mit Sorte laeuft damit durch dieselbe
+     Abbildung wie jede Abbaufuhre, und es entsteht kein zweiter Weg, der auseinanderlaufen kann.
+     Die PROTOMATERIE dagegen fuehrt der Hort IMMER und unabhaengig von der Sorte - bei den Vorkommen
+     traegt sie nur 'urmaterie'. Das ist Absicht und der Kern der ganzen Belohnung: Sie ist die
+     einzige Groesse, die im Endspiel nicht in der Eigenproduktion untergeht (Rechnung im Kommentar
+     oben bei FESTUNG_MAX_AKTIV). Haenge sie an die Sorte, waere die Belohnung in neun von zehn
+     Faellen wertlos, und die Festung waere fuer entwickelte Konten kein Ziel. */
+  feld.festung = {
+    id: crypto.randomUUID(),
+    stufe, platz: frei[Math.floor(Math.random() * frei.length)],
+    sorte: astZieheGewichtet(AST_SORTEN).key,
+    kernMax: st.kern, kern: st.kern,
+    hort: 0, hortProto: 0,
+    seit: now, letzteReifung: now,
+    beitraege: {}
+  };
+  pushGalaxyNews('ti-building-fortress', 'Bei ' + sysId + ' hat sich eine Asteroidenfestung (' + st.name +
+    ') auf der Gürtelbahn eingenistet. Sie drosselt den Abbau im ganzen System um ' +
+    Math.round(st.blockade * 100) + ' % und die Protomaterie um ' + Math.round(st.proto * 100) + ' %.');
+  return sysId;
+}
 // Fällige Nachschub-Termine auflösen. Gibt zurück, ob sich etwas geändert hat.
 function astNachschub(sysId, feld, alleFelder) {
   const now = Date.now();
@@ -7888,24 +8079,14 @@ function astNachschub(sysId, feld, alleFelder) {
       if (kandidat && alleFelder[kandidat]) { zielSys = kandidat; zielFeld = alleFelder[kandidat]; }
     }
     if (astBelegtZahl(zielFeld) >= AST_GRENZE_MAX) continue;   // dort ist kein Platz mehr
-    const frei = [];
-    for (let i = 0; i < AST_PLAETZE_JE_GUERTEL; i++) {
-      const k = String(i);
-      const q = zielFeld.plaetze[k];
-      if (!q || q.frei) frei.push(k);
-    }
+    const frei = astFreiePlaetze(zielFeld);   // kennt die Festung und setzt nichts auf sie
     if (!frei.length) continue;
     const ziel = frei[Math.floor(Math.random() * frei.length)];
     zielFeld.plaetze[ziel] = astNeuesVorkommen(zielSys);
   }
   // Untergrenze halten: Ein Gürtelsystem, das unter das Minimum gefallen ist, bekommt sofort auf.
   while (astBelegtZahl(feld) < AST_GRENZE_MIN) {
-    const frei = [];
-    for (let i = 0; i < AST_PLAETZE_JE_GUERTEL; i++) {
-      const k = String(i);
-      const q = feld.plaetze[k];
-      if (!q || q.frei) frei.push(k);
-    }
+    const frei = astFreiePlaetze(feld);
     if (!frei.length) break;
     feld.plaetze[frei[Math.floor(Math.random() * frei.length)]] = astNeuesVorkommen(sysId);
     geaendert = true;
@@ -7925,6 +8106,9 @@ function astAlleFelder() {
   }
   // Nachschub NACH dem Einsammeln aller Felder: Ein wandernder Brocken braucht das Zielsystem.
   for (const sysId of Object.keys(felder)) if (astNachschub(sysId, felder[sysId], felder)) geaendert = true;
+  // Der Hort der Festungen wächst beim Lesen mit (siehe festungReifen).
+  const jetztR = Date.now();
+  for (const sysId of Object.keys(felder)) if (festungReifen(felder[sysId], jetztR)) geaendert = true;
   if (geaendert) { for (const sysId of Object.keys(felder)) db.shared[astFeldKey(sysId)] = felder[sysId]; }
   return { felder, geaendert };
 }
@@ -7993,7 +8177,28 @@ app.post('/api/asteroid/mine', authMiddleware, async (req, res) => {
     return res.status(403).json({ error: 'Kein Minenschiff im gespeicherten Spielstand - erst speichern, dann losfliegen.' });
   }
 
-  const menge = Math.max(0, Math.min(wunsch, vork.vorrat, Math.floor(obergrenze)));
+  /* BLOCKADE und GERAEUMT-BONUS (18.08.2026): Solange eine Festung in diesem Guertelsystem steht,
+     faellt die Ladung jeder Abbaumission um 25/40/55 %. Angewandt wird das HIER, an der Obergrenze,
+     die der Server ohnehin aus dem gespeicherten Spielstand rechnet - eine Blockade, die nur im
+     Client rechnet, waere eine Anzeige und keine Regel. Nach dem Fall einer Festung laeuft 24
+     Stunden lang der Gegenbonus (+15 %), damit sich das Schleifen auch fuer den lohnt, der beim
+     Hort nur einen kleinen Anteil hatte.
+     Bewusst auf die LADUNG und nicht auf die Rate: Eine gedrosselte Rate verlaengert nur die
+     Abbauzeit, und der Spieler bekaeme am Ende dieselbe Fuhre nach laengerem Warten - eine
+     Blockade, die man aussitzen kann, ist keine. Das Frontend rechnet in abbauPlan() mit demselben
+     Faktor, damit die Vorschau nicht eine andere Zahl nennt als die Abbuchung (test_festung_
+     paritaet.js im Frontend-Repo vergleicht beide Tabellen). */
+  const festungHier = feld.festung;
+  const blockade = festungHier ? (FESTUNG_STUFEN[festungHier.stufe] || FESTUNG_STUFEN.schanze).blockade : 0;
+  const geraeumt = !festungHier && (feld.geraeumtBis || 0) > Date.now() ? FESTUNG_GERAEUMT_BONUS : 0;
+  /* Math.round und NICHT Math.floor: `1 - 0.55` ist in Gleitkomma 0.44999999999999996, und
+     abgerundet werden aus 100.000 Grundkapazitaet 44.999 statt 45.000 - eine Einheit, die dem
+     Spieler als krumme Zahl auffaellt, ohne dass es dafuer einen Grund gaebe. Wichtiger noch: Das
+     Frontend rechnet dieselbe Formel fuer die Vorschau, und eine Paritaetspruefung muesste sonst
+     das Gleitkomma-Rauschen zeichengenau nachbauen statt die Regel. Aufgerundet wird hoechstens
+     eine halbe Einheit - gegen eine Obergrenze im Zehntausenderbereich bedeutungslos. */
+  const grenzeMitFestung = Math.round(obergrenze * (1 - blockade) * (1 + geraeumt));
+  const menge = Math.max(0, Math.min(wunsch, vork.vorrat, grenzeMitFestung));
   if (menge <= 0) return res.status(409).json({ error: 'Dieses Vorkommen ist erschöpft.', weg: true });
 
   vork.vorrat -= menge;
@@ -8006,7 +8211,21 @@ app.post('/api/asteroid/mine', authMiddleware, async (req, res) => {
   db.shared[astFeldKey(sysId)] = feld;
   console.log('[asteroid-mine] userId=' + req.userId + ' sys=' + sysId + ' platz=' + platz + ' menge=' + menge + ' rest=' + Math.max(0, vork.vorrat));
   await saveDb();
-  res.json({ ok: true, menge, sorte: vork.sorte, groesse: vork.groesse, rest: Math.max(0, vork.vorrat) });
+  /* `protoBlockade` reist MIT, obwohl der Server die Protomaterie gar nicht bucht - und genau
+     deshalb muss sie mit. Die Menge je Fuhre hängt im Frontend allein an der GRÖSSE des
+     Vorkommens (`proto: protoJeFuhre(a)`, weltraum_kolonie.html Z. 55912), nicht an der Ladung;
+     die Ladungskürzung oben erreicht sie also nie. Ohne dieses Feld wäre die
+     Protomaterie-Drosselung, die das Konzept als eigentlichen Zahn der Blockade beschreibt und
+     die die Galaxie-Nachricht beim Entstehen ausdrücklich ANKÜNDIGT, schlicht nicht vorhanden -
+     eine Zahl in einer Tabelle, die niemand liest (nachgemessen: `st.proto` wurde vor dieser
+     Zeile ausschliesslich im Ankündigungstext verwendet).
+     Der Server bleibt damit die Autorität über den Faktor, das Frontend multipliziert ihn nur -
+     dieselbe Arbeitsteilung wie bei `menge`. Ein Client, der das Feld nicht kennt, verhält sich
+     wie bisher; deshalb ist die Blockade ohne das Frontend wirkungslos und der Spawn-Schalter
+     FESTUNG_SPAWN_AKTIV steht bis dahin auf false. */
+  const protoBlockade = festungHier ? 1 - (FESTUNG_STUFEN[festungHier.stufe] || FESTUNG_STUFEN.schanze).proto : 1;
+  res.json({ ok: true, menge, sorte: vork.sorte, groesse: vork.groesse, rest: Math.max(0, vork.vorrat),
+    blockade, geraeumtBonus: geraeumt, protoBlockade });
 });
 
 // ===== Schürfrechte (Konzept 6.1/6.2/6.4): ein Vorkommen für genau einen Spieler reservieren =====
@@ -8268,6 +8487,170 @@ app.post('/api/asteroid/contest', authMiddleware, async (req, res) => {
   await saveDb();
   res.json({ ok: true, gewonnen, chance, eigeneVerluste, gegnerVerluste, halterVorher,
     halter: vork.halter, halterName: vork.halterName, schutzBis: vork.schutzBis || 0 });
+});
+
+/* ===== Die Festung angreifen ==================================================================
+   Gebaut als Kreuzung der beiden vorhandenen Muster, und die Wahl je Punkt ist begruendet:
+
+   VOM WELTBOSS (/api/worldboss/resolve) kommt die Schadensrechnung - ein gemeinsames Ziel mit
+   Lebenspunkten, an dem viele Spieler nacheinander arbeiten, und ein `beitraege`-Verzeichnis, aus
+   dem beim Fall die Anteile folgen.
+
+   VON DER ANFECHTUNG (/api/asteroid/contest) kommt, dass der Server den SPIELSTAND DES ANGREIFERS
+   NICHT SCHREIBT. Die Verluste stehen in der Antwort, sein eigener Client bucht sie - damit
+   entsteht das Wettrennen zwischen Server-Schreibung und Autosave gar nicht erst. Der Weltboss
+   macht es andersherum (setSaveValue); hier liegt das benachbarte Asteroiden-Modul naeher, und
+   zwei Muster im selben Modul waeren die Dopplung, die spaeter auseinanderlaeuft.
+
+   DREI ENTSCHEIDUNGEN, DIE MAN BEIM ANFASSEN KENNEN MUSS:
+
+   1. DIE ABKLINGZEIT LEBT AN DER FESTUNG, NICHT IM SPIELSTAND. Der Entwurf im Konzept sah
+      `save.festungLetzterSchlag[sysId]` vor - das waere wertlos gewesen: Der Spielstand ist in
+      diesem Spiel bauartbedingt klientenautoritativ, ein geloeschtes Feld gibt den naechsten
+      Schlag sofort frei, und die einzige Bremse der ganzen Mechanik waere per Entwicklerkonsole
+      abschaltbar. `festung.schlaege[userId]` liegt dagegen im geteilten Speicher, den nur dieser
+      Endpunkt schreibt (die Schreibsperre dafuer steht in checkAsteroidKeyPermission). Genau so
+      macht es die Anfechtung nebenan mit `vork.angriffe[userId]`.
+      Der Weltboss legt seine 24-Stunden-Sperre bewusst in den Spielstand, weil sie einen
+      Boss-Respawn ueberleben soll - dort ist das die richtige Wahl, hier nicht: Faellt die
+      Festung, ist ihre Abklingzeit gegenstandslos.
+
+   2. `mission.endTime` WIRD GEPRUEFT, IST ABER KEINE SICHERHEITSPRUEFUNG. Sie steht im
+      klientenautoritativen Spielstand und ist in fuenf Sekunden auf 0 gesetzt. Sie fangt einen
+      ehrlichen Client-Fehler ab (Aufloesung vor der Heimkehr), mehr nicht. Was die Haeufigkeit
+      wirklich begrenzt, ist Punkt 1.
+
+   3. GEZAEHLT WIRD, WAS ANGEKOMMEN IST - nicht, was gewuerfelt wurde. Ein Schlag von 900.000 gegen
+      einen Kernrest von 40.000 traegt 40.000 zum Anteil bei, nicht 900.000. Sonst risse der letzte
+      Angreifer mit einem einzigen Schlag den halben Hort an sich, obwohl der Rest der Arbeit von
+      anderen kam. Dieselbe Ueberlegung fehlt beim Weltboss (dort zaehlt der volle Wurf) - hier ist
+      bewusst abgewichen, weil der Hort anders als die Weltboss-Belohnung REIN anteilig ausgezahlt
+      wird. */
+function festungFindeMission(save, missionId, sysId) {
+  const flotten = [];
+  if (save && save.fleet) flotten.push(save.fleet);
+  if (save && save.colonies) for (const c of Object.values(save.colonies)) if (c && c.fleet) flotten.push(c.fleet);
+  for (const f of flotten) {
+    for (const m of (f.missions || [])) {
+      if (String(m.id) === String(missionId) && m.type === 'festung-angriff' && m.targetId === sysId) return m;
+    }
+  }
+  return null;
+}
+app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
+  const sysId = String((req.body && req.body.system) || '');
+  const missionId = (req.body && req.body.missionId) !== undefined ? String(req.body.missionId) : '';
+  const festungId = String((req.body && req.body.festungId) || '');
+  if (!sysId || !missionId) return res.status(400).json({ error: 'System und Mission fehlen.' });
+  if (astGuertelSysteme().indexOf(sysId) < 0) return res.status(400).json({ error: 'Dieses System trägt keinen Asteroidengürtel.' });
+
+  const { felder } = astAlleFelder();          // reift den Hort auf den Stand dieser Sekunde
+  const feld = felder[sysId];
+  const fest = feld && feld.festung;
+  if (!fest) return res.status(409).json({ error: 'In diesem System steht keine Festung mehr - sie ist bereits gefallen.', weg: true });
+  // Die Kennung ist der Schutz gegen den seltenen, aber echten Fall: Die Festung faellt, waehrend
+  // die eigene Flotte unterwegs ist, und der galaxyTick setzt spaeter eine NEUE ins selbe System.
+  // Ohne diese Zeile schlueg der Anflug gegen ein Ziel ein, das es beim Start nicht gab.
+  if (festungId && fest.id !== festungId) {
+    return res.status(409).json({ error: 'Die Festung, gegen die du geflogen bist, ist gefallen - an ihrer Stelle steht bereits eine neue.', weg: true });
+  }
+
+  fest.abgerechnet = fest.abgerechnet || {};
+  if (fest.abgerechnet[missionId]) return res.status(409).json({ error: 'Dieser Anflug wurde bereits abgerechnet.' });
+
+  const jetzt = Date.now();
+  fest.schlaege = fest.schlaege || {};
+  const letzter = fest.schlaege[req.userId] || 0;
+  if (letzter + FESTUNG_ABKLING_MS > jetzt) {
+    return res.status(403).json({ error: 'Deine Verbände haben diese Festung erst vor Kurzem beschossen - der nächste Schlag ist in ' + Math.ceil((letzter + FESTUNG_ABKLING_MS - jetzt) / 60000) + ' Minuten möglich.', abklingzeit: true });
+  }
+
+  const save = astLeseSave(req.userId);
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern, dann angreifen.' });
+  const mission = festungFindeMission(save, missionId, sysId);
+  if (!mission || !mission.composition) {
+    return res.status(403).json({ error: 'Zu diesem Angriff ist keine Flotte im gespeicherten Spielstand unterwegs.' });
+  }
+  if (mission.endTime && mission.endTime > jetzt) {
+    return res.status(400).json({ error: 'Deine Flotte ist noch unterwegs.', unterwegs: true });
+  }
+
+  const st = FESTUNG_STUFEN[fest.stufe] || FESTUNG_STUFEN.schanze;
+  // Dritter Parameter 0: Der Weltboss-Schwaechenbonus gilt hier nicht - eine Festung hat keinen
+  // Archetyp. Die Rollenfaktoren der drei Bauteile kommen erst in Phase 2 dazu.
+  const kraft = computeAttackPowerFromComposition(save, mission.composition, 0);
+  if (!(kraft > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
+  const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4));
+
+  const kernVorher = fest.kern;
+  fest.kern = Math.max(0, kernVorher - wurf);
+  const schaden = kernVorher - fest.kern;      // siehe Entscheidung 3 oben
+  fest.beitraege = fest.beitraege || {};
+  const mein = fest.beitraege[req.userId] || { name: req.username || 'Kommandant', schaden: 0 };
+  mein.schaden = (mein.schaden || 0) + schaden;
+  mein.name = req.username || mein.name;
+  fest.beitraege[req.userId] = mein;
+  fest.schlaege[req.userId] = jetzt;
+  fest.abgerechnet[missionId] = jetzt;
+
+  // Die Festung schiesst zurueck. Anteilig auf die LOSGESCHICKTE Zusammensetzung; abgebucht wird
+  // im Client, deshalb steht hier nur die Liste.
+  const quote = Math.min(0.5, st.verlust + Math.random() * 0.06);
+  const eigeneVerluste = {};
+  for (const [typ, n] of Object.entries(mission.composition)) {
+    if (typeof n !== 'number' || n <= 0) continue;
+    const weg = Math.min(n, Math.round(n * quote));
+    if (weg > 0) eigeneVerluste[typ] = weg;
+  }
+
+  const gefallen = fest.kern <= 0;
+  let meinAnteil = 0, teilnehmer = 0;
+  if (gefallen) {
+    /* Ausschuettung an ALLE Beitragenden - auch an den, der gerade anfragt. Bewusst EIN Weg fuer
+       alle statt "die anderen ueber die Warteschlange, ich ueber die Antwort": Zwei Wege waeren
+       zwei Rechnungen, die auseinanderlaufen koennen, und die Belohnung des Anfragenden ginge
+       verloren, wenn sein Client zwischen Antwort und Verbuchung abstuerzt.
+       pushPendingReward schreibt nach db.private[uid].__pendingRewards - also NICHT in fremde
+       Spielstaende. Das ist der ganze Grund, warum es diese Warteschlange gibt: Ein Schreibzugriff
+       auf den Spielstand eines gerade online spielenden Mitstreiters kollidiert mit dessen
+       Autosave. Doppelt einreihen kann sich das nicht, weil die Festung im selben synchronen Block
+       geloescht wird - ein zweiter Aufruf findet sie nicht mehr vor. */
+    const summe = Object.values(fest.beitraege).reduce((a, b) => a + (b.schaden || 0), 0) || 1;
+    for (const [uid, b] of Object.entries(fest.beitraege)) {
+      const anteil = (b.schaden || 0) / summe;
+      if (!(anteil > 0)) continue;
+      teilnehmer++;
+      if (uid === req.userId) meinAnteil = anteil;
+      pushPendingReward(uid, {
+        type: 'festung',
+        system: sysId, stufe: fest.stufe, stufeName: st.name,
+        sorte: fest.sorte, anteil: Math.round(anteil * 1000) / 1000,
+        menge: Math.round((fest.hort || 0) * anteil),
+        protomaterie: Math.round((fest.hortProto || 0) * anteil * 10) / 10,
+        kampfpunkte: Math.max(1, Math.round(st.kampfpunkte * anteil)),
+        zeit: jetzt
+      });
+    }
+    delete feld.festung;
+    feld.geraeumtBis = jetzt + FESTUNG_GERAEUMT_MS;
+    pushGalaxyNews('ti-building-fortress', 'Die ' + st.name + ' bei ' + sysId + ' ist gefallen - ' +
+      teilnehmer + ' Kommandant' + (teilnehmer === 1 ? '' : 'en') + ' teilen sich den Hort. Der Gürtel ist ' +
+      Math.round(FESTUNG_GERAEUMT_MS / 3600000) + ' Stunden lang frei, der Abbau dort um ' +
+      Math.round(FESTUNG_GERAEUMT_BONUS * 100) + ' % ergiebiger.');
+  }
+  db.shared[astFeldKey(sysId)] = feld;
+
+  console.log('[festung-angriff] userId=' + req.userId + ' sys=' + sysId + ' stufe=' + st.name +
+    ' schaden=' + schaden + ' kern=' + (gefallen ? 'gefallen' : fest.kern) + '/' + st.kern);
+  await saveDb();
+  res.json({
+    ok: true, schaden, gefallen, eigeneVerluste,
+    kern: gefallen ? 0 : fest.kern, kernMax: st.kern,
+    stufe: gefallen ? null : fest.stufe, stufeName: st.name,
+    anteil: gefallen ? Math.round(meinAnteil * 1000) / 1000 : 0,
+    teilnehmer: gefallen ? teilnehmer : Object.keys(fest.beitraege).length,
+    naechsterSchlagAb: jetzt + FESTUNG_ABKLING_MS
+  });
 });
 
 app.post('/api/deploy-webhook', (req, res) => {

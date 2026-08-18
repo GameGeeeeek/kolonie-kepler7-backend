@@ -12,8 +12,40 @@ Gilt für **jedes** Skript, auch neue Standalone-Skripte (wie `thank_bugreporter
 ## Vor jedem Commit (Pflicht)
 
 1. `node --check server.js`
-2. Bei sicherheitsrelevanten Änderungen an geteiltem Speicher (`alliance:*`-Schlüssel, Markt, o.ä.): **echte HTTP-Tests**, nicht nur Syntax-Check. Test-DB in `/tmp` aufsetzen (bcrypt-Hash für Testnutzer, `crypto.randomUUID()` für IDs), Server mit `DB_FILE=/tmp/...` lokal starten, curl-Requests gegen echte Endpunkte. **Serverstart und Test müssen im selben Bash-Aufruf laufen** – über mehrere Tool-Aufrufe hinweg verliert die Sandbox den Hintergrundprozess.
-3. Testartefakte (`/tmp/...`, `node_modules`, `package.json`/`package-lock.json` falls nur für den Test installiert) vor dem Commit wieder entfernen.
+2. **`node tests/test_serverstart.js`** – drei Sekunden, und sie schließen die Lücke, die Punkt 1
+   offenlässt: `node --check` **parst nur und führt nie aus**. Am 18.08.2026 hat genau das einen
+   Absturz durchgelassen, der den Server bei JEDEM Start getötet hätte (Einzelheiten unten unter
+   „Die temporale Todeszone…"). Ein Backend, das nicht startet, ist der teuerste denkbare Fehler
+   dieses Projekts – der Merge ist die Auslieferung, und nodemon startet Sekunden später neu.
+3. Bei sicherheitsrelevanten Änderungen an geteiltem Speicher (`alliance:*`-Schlüssel, Markt, o.ä.): **echte HTTP-Tests**, nicht nur Syntax-Check. Test-DB in `/tmp` aufsetzen (bcrypt-Hash für Testnutzer, `crypto.randomUUID()` für IDs), Server mit `DB_FILE=/tmp/...` lokal starten, curl-Requests gegen echte Endpunkte. **Serverstart und Test müssen im selben Bash-Aufruf laufen** – über mehrere Tool-Aufrufe hinweg verliert die Sandbox den Hintergrundprozess.
+4. Testartefakte (`/tmp/...`, `package.json`/`package-lock.json` falls nur für den Test installiert) vor dem Commit wieder entfernen. `node_modules` steht in `.gitignore` und darf liegen bleiben.
+
+### Die temporale Todeszone: `node --check` sieht sie NICHT (18.08.2026)
+
+`galaxyTick()` wurde bei Zeile 5526 einmal **mitten in der Modulauswertung** aufgerufen, damit nach
+einem Neustart nicht 15 Minuten auf den ersten Galaxie-Zustand gewartet werden muss. Der Rumpf
+dieser Funktion sieht damit jede `const`, die weiter unten in der Datei steht, in ihrer temporalen
+Todeszone. Beim Einbau von `FESTUNG_SPAWN_CHANCE` (Zeile 7908) war die Folge:
+
+```
+ReferenceError: Cannot access 'FESTUNG_SPAWN_CHANCE' before initialization
+    at galaxyTick (server.js:5364:23)
+    at Object.<anonymous> (server.js:5526:1)
+```
+
+Bei **jedem** Start, nicht nur in 8 % der Fälle – der rechte Operand eines `<` wird immer
+ausgewertet. `node --check` war grün.
+
+**Behoben strukturell, nicht punktuell:** Der Startlauf liegt jetzt in `setImmediate(galaxyTick)`.
+Er feuert, sobald die Modulauswertung fertig ist – also Millisekunden später, die Absicht bleibt
+vollständig erhalten, und die ganze Fehlerklasse ist für **jede künftige Konstante** miterledigt.
+Vorher nachgesehen: Nach dieser Zeile stehen nur noch Funktions-, Konstanten- und
+Routendefinitionen, nichts, was den Takt vorher gelaufen sehen müsste.
+
+Das ist dieselbe Familie wie Arbeitsregel 38 der Frontend-CLAUDE.md (dort für Array-Literale wie
+`CREDIT_SHOP`/`HELP_SECTIONS`, die beim Laden ausgewertet werden). **Die übertragbare Regel: Ein
+Syntax-Check ist kein Startversuch.** Wer eine Konstante einführt und irgendwo oben in der Datei
+benutzt, muss den Server einmal wirklich hochfahren – `tests/test_serverstart.js` tut genau das.
 
 **Vorhandene Tests liegen unter `tests/`** und werden von Hand gestartet (`npm install` vorher, danach `node_modules` wieder löschen): `bash tests/chatpush.sh` prüft die Chat-Push-Kette Ende zu Ende gegen einen echten, lokal gestarteten Server. Sie sind bewusst **im Repo** und nicht im Sitzungs-Scratchpad – dort wären sie mit dem Container weg, und genau so stand das Frontend bis zum 25.07.2026 ohne einen einzigen Test da. Ein neuer Backend-Test gehört ebenfalls hierher.
 
@@ -227,6 +259,131 @@ beim Opfer einen Schutzschild, nach dem alle weiteren Angriffe mit 403 abprallen
 **Anfängerschutz muss zwischen zwei Serverstarts in der DB-Datei geleert werden**; beim ersten
 Anlauf sah sein 403 aus wie „der Vorrat wirkt nicht", und zwei Prüfungen wurden dadurch aus dem
 falschen Grund grün (beide Seiten `undefined`).
+
+## Asteroidenfestungen (Phase 1, 18.08.2026)
+
+Konzept: `docs/aliens-asteroidenfestungen-konzept.md` im FRONTEND-Repo. Hier stehen nur die
+Entscheidungen, die man kennen muss, bevor man etwas daran ändert.
+
+**`FESTUNG_SPAWN_AKTIV` steht auf `false`, und das ist kein Übersehen.** Solange der Schalter aus
+ist, entsteht keine Festung – und ohne Festung tut der ganze Abschnitt nichts. Der Grund ist die
+Auslieferung: Backend und Frontend gehen über **zwei getrennte** fest verdrahtete Befehle desselben
+Webhooks live, und sie sind historisch dreimal auseinandergelaufen. Ginge dieses Backend allein
+live, entstünde binnen Stunden eine Festung, und die Blockade kürzte die Abbauladung um bis zu
+55 % – während das Frontend die UNGEKÜRZTE Vorschau zeigt und das Feld `festung` nicht einmal
+kennt. Gemessen am Frontend-Code (`echt = daten.menge`, `weltraum_kolonie.html` Z. 55883): Der
+Spieler bekommt still weniger, als die Vorschau ihm versprach, ohne einen einzigen Hinweis worauf.
+Umgelegt wird der Schalter im **Frontend-PR der Phase 1**, nicht vorher. `test_festung_http.js`
+Abschnitt 10 hält ihn fest, damit er nicht versehentlich früher kippt.
+
+**Der Fund, der den Schalter erst nötig machte – `st.proto` war eine Zahl, die nur die ANKÜNDIGUNG
+las.** Die Stufentabelle führt neben `blockade` (Ladung) ein Feld `proto` (0,50/0,75/1,00) für die
+Protomaterie-Drosselung, die das Konzept als den eigentlichen Zahn der Blockade beschreibt. Ein
+`grep` nach `st.proto` fand einen Treffer und sah damit benutzt aus – der einzige Treffer war
+jedoch der **Galaxie-Nachrichtentext, der die Drosselung ankündigt**. Die Mechanik selbst gab es
+nicht. Der Grund liegt im Frontend: Die Protomaterie je Fuhre hängt allein an der **GRÖSSE** des
+Vorkommens (`proto: protoJeFuhre(a)`, Z. 55912 im Missionsstart und Z. 55722 in der Vorschau), nicht an der Ladung – die Ladungskürzung erreicht
+sie also nie. Behoben, indem `/api/asteroid/mine` den Faktor als **`protoBlockade`** mitschickt und
+das Frontend ihn multipliziert; der Server bleibt Autorität über den Faktor, dieselbe Arbeitsteilung
+wie bei `menge`.
+**Die übertragbare Lehre: Ein Konstantenfeld, das nur der Ankündigungstext liest, ist keine
+umgesetzte Mechanik – und ein `grep` nach dem Namen sagt das Gegenteil.** Wer prüfen will, ob eine
+Tabellenspalte wirklich wirkt, muss die Fundstellen einzeln ansehen und fragen, ob eine davon
+etwas BERECHNET. Das ist die Gegenrichtung zu Frontend-Arbeitsregel 32: Dort existiert eine Zahl
+nur zur Laufzeit und wird beim Suchen übersehen, hier existiert sie nur im Versprechen und wird
+beim Suchen fälschlich für vorhanden gehalten.
+
+**Wo die Festung wohnt:** in `db.shared['asteroids:<sys>'].festung`, also im selben Dokument wie die
+Vorkommen. Geschrieben wird es ausschließlich von den Asteroiden-Endpunkten – die generische
+Storage-Route ist seit dem 18.08.2026 durch `checkAsteroidKeyPermission()` gesperrt. Das war die
+Voraussetzung für alles Weitere: Ohne die Sperre wäre der Kern-Lebenspunktestand einer Festung von
+jedem Konto mit einer Anfrage auf null zu setzen.
+
+**`astFreiePlaetze()` ist DIE EINE Stelle, die „welcher Platz ist frei" beantwortet.** `astNachschub`
+suchte das vorher an zwei Stellen selbst und hätte ein nachwachsendes Vorkommen auf den Platz der
+Festung gesetzt – die wäre damit still verschwunden. Gemessen in der Gegenprobe: **6 von 6**
+Nachschub-Runden trafen den Festungsplatz. Ein dritter Aufrufer erbt das Verhalten jetzt automatisch
+(dieselbe Behandlung wie `kbMarkerFrei` im Frontend).
+
+**Die Kern-Lebenspunkte sind GERECHNET, nicht geschätzt.** Gemessen über `rawFleetPower` +
+`diminishingShipCount` (Schwelle 300, danach halber Wert) für drei Ausbaustufen, dazu die üblichen
+Multiplikatoren aus `computeAttackPowerFromComposition`: je Schlag rund **7.500 / 44.000 / 240.000**.
+Daraus die Kerne 30.000 / 250.000 / 1.200.000, also vier bis sieben Schläge für ein Konto der
+passenden Stufe – bei 6 h Abklingzeit ein bis zwei Tage allein. Der erste Entwurf stand bei 120.000
+für die Schanze; das wären für ihr eigentliches Publikum **neunzehn** Schläge gewesen, fast fünf
+Tage, ausgerechnet am Einsteigerziel. Zur Einordnung: Der Weltboss startet bei 50.000 LP und wächst
+um Faktor 1,6 je Stufe – die Schanze liegt darunter, das Kastell etwa bei Stufe 5, die Sternenfeste
+bei Stufe 8. **Wer diese Zahlen anfasst, rechnet sie gegen echte Flottenkräfte nach**, nicht gegen
+das Gefühl (Frontend-Arbeitsregel 41: ein Konzept ist kein Messergebnis).
+
+**Der Hort trägt eine `sorte` aus `AST_SORTEN`** – kein Schmuck, sondern die Vermeidung eines
+zweiten Begriffs: Der Server verteilt in diesem ganzen Modul keine Ressourcen, er führt nur Sorte
+und Menge, das Frontend bildet daraus seine T1-Ressourcen ab. Eine Festung mit Sorte läuft damit
+durch dieselbe Abbildung wie jede Abbaufuhre. Die **Protomaterie dagegen führt der Hort IMMER**,
+unabhängig von der Sorte (bei den Vorkommen trägt sie nur `urmaterie`). Das ist Absicht und der
+Kern der Belohnung: Sie ist die einzige Größe, die im Endspiel nicht in der Eigenproduktion
+untergeht – 8,81 Mio. Erz je Stunde gegen 11 bis 32 Protomaterie. Hinge sie an der Sorte, wäre die
+Belohnung in neun von zehn Fällen wertlos und die Festung für entwickelte Konten kein Ziel.
+
+**Der Hort wächst LAZY beim Lesen** (`festungReifen`, aus `letzteReifung`), nicht im galaxyTick: Der
+Takt läuft alle 15 Minuten, das Feld wird viel häufiger gelesen, und ein Zähler, der nur beim Tick
+wächst, wäre dazwischen eingefroren. Dasselbe Muster wie `user.marktTag`. Das ENTSTEHEN dagegen
+liegt im galaxyTick – eine Festung ist ein Ereignis der Galaxie, kein Nebeneffekt eines
+Kartenaufrufs.
+
+### Drei Entscheidungen an `/api/festung/angriff`, die man kennen muss
+
+1. **Die Abklingzeit liegt AN DER FESTUNG (`festung.schlaege[userId]`), nicht im Spielstand.** Der
+   Konzept-Entwurf sah `save.festungLetzterSchlag[sysId]` vor – das wäre wertlos gewesen: Der
+   Spielstand ist bauartbedingt klientenautoritativ, ein gelöschtes Feld gibt den nächsten Schlag
+   sofort frei, und die einzige Bremse der ganzen Mechanik wäre per Entwicklerkonsole abschaltbar.
+   Genau so macht es die Anfechtung nebenan mit `vork.angriffe[userId]`.
+   Der Weltboss legt seine 24-Stunden-Sperre bewusst in den Spielstand, weil sie einen Respawn
+   überleben soll – dort ist das richtig, hier nicht: Fällt die Festung, ist ihre Abklingzeit
+   gegenstandslos. **Zwei berechtigte Ablageorte, und welcher stimmt, hängt an der Frage, was die
+   Sperre überleben soll.**
+2. **Gezählt wird, was ANGEKOMMEN ist**, nicht was gewürfelt wurde: `schaden = kernVorher - kernNachher`.
+   Gemessen in der Gegenprobe – mit dem vollen Wurf stünde der letzte Angreifer bei **84,2 %** des
+   Hortes statt bei den 40 %, die seiner Arbeit entsprechen. Der Weltboss zählt den vollen Wurf; hier
+   ist bewusst abgewichen, weil der Hort rein anteilig ausgezahlt wird.
+3. **Der Server schreibt den Spielstand des Angreifers NICHT.** Die Verluste stehen in der Antwort,
+   sein Client bucht sie – das Muster der Anfechtung, nicht das des Weltbosses. Damit entsteht das
+   Wettrennen zwischen Server-Schreibung und Autosave gar nicht erst. Die Belohnung beim Fall geht an
+   **alle** Beitragenden über `pushPendingReward` (also `db.private[uid].__pendingRewards`, nie ein
+   fremder Spielstand) – **auch an den Anfragenden selbst**: Ein Weg für alle statt zweier, die
+   auseinanderlaufen können.
+
+**`Math.round` statt `Math.floor`** bei der Blockade-Obergrenze: `1 - 0.55` ist in Gleitkomma
+`0.44999999999999996`, abgerundet werden aus 100.000 Kapazität 44.999 statt 45.000. Für den Spieler
+eine grundlos krumme Zahl – und schlimmer, das Frontend rechnet dieselbe Formel für die Vorschau, eine
+Paritätsprüfung müsste sonst das Rauschen zeichengenau nachbauen statt die Regel.
+
+### Die Lehre aus dem Test dieses Bereichs
+
+`tests/test_festung_http.js` (Port 3221, **33 Prüfungen, sieben Gegenproben** – Abklingzeit,
+Schadenszählung, Blockade, Geräumt-Bonus, Platzkollision, `protoBlockade`, Spawn-Schalter; alle in
+beide Richtungen gefahren, überall dieselbe Anzahl gelaufener Prüfungen). **Belegte Testports sind
+jetzt 3195–3200, 3210–3219, 3220 (`test_serverstart.js`) und 3221** – ein neuer Test nimmt 3222
+(Arbeitsregel 29).
+
+Zwei Zahlen aus den Gegenproben, die den Wert der jeweiligen Entscheidung belegen: Mit dem vollen
+Wurf statt dem angekommenen Schaden stünde der letzte Angreifer bei **84,2 %** des Hortes statt bei
+40 %. Und ohne `astFreiePlaetze` trafen **6 von 6** Nachschub-Runden den Platz der Festung – sie
+wäre still verschwunden.
+
+Eine Falle daraus, die jeder Test mit mehreren Serverstarts auf derselben DB vermeiden muss:
+
+**Eine Änderung an der DB-DATEI, während der Server noch läuft, ist beim nächsten `stoppeServer()`
+wieder weg.** SIGTERM löst den Graceful Shutdown aus, und der flusht die im Speicher gehaltene `db`
+auf Platte – über die gerade geschriebene Änderung hinweg. Im grünen Lauf fiel das nicht auf, weil
+die betroffenen Prüfungen durch die Abklingzeit ohnehin erfüllt waren und die Abklingzeit VOR der
+Missionssuche geprüft wird. Erst die Gegenprobe mit ausgebauter Abklingzeit brachte heraus, dass die
+vorbereitete Mission nie in der Datei stand – die Ablehnung lautete dann „keine Flotte unterwegs"
+statt der erwarteten. **Eine Prüfung, die aus dem falschen Grund grün ist** (Frontend-Arbeitsregel 28),
+und sie wäre ohne die Gegenprobe nie aufgefallen.
+Behoben nicht durch vier von Hand richtig sortierte Stellen, sondern durch **einen Helfer**
+(`aendereDb(fn)`: stoppen → lesen → ändern → schreiben → starten), der die falsche Reihenfolge
+strukturell unmöglich macht.
 
 ## Bekannte Fallstricke
 

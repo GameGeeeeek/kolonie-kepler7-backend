@@ -2563,6 +2563,38 @@ const BATTLE_PHASES = [
 // Das Frontend nutzt für NPC-Kämpfe andere Grenzen ([0,05 … 0,95] -> [0,14 … 0,86]), deshalb sind
 // die Deckel Parameter und keine Konstanten. Wer daran dreht, muss neu zurückrechnen.
 const PVP_PHASE_MIN = 0.196, PVP_PHASE_MAX = 0.804;
+/* ===== Gefechtsvorraete (18.08.2026, Etappe B1) - KOPIE aus dem Frontend =====
+   Dieselbe Kopie-Familie wie SHIP_SCORE_WEIGHTS/computeScoreServer und DEFENSE_VALUES: Wer die
+   Frontend-Tabelle GEFECHTSVORRAETE aendert, aendert diese mit. tests/test_gefechtsvorrat_http.js
+   im Backend und tests/test_gefechtsvorrat.js im Frontend vergleichen beide Seiten Wert fuer Wert.
+
+   WARUM DER SERVER DAS UEBERHAUPT RECHNET: Ein Vorrat veraendert den Ausgang eines Kampfes gegen
+   einen ECHTEN Spieler - er faellt damit auf die Seite der Grenze, die dieses Projekt verteidigt
+   ("kann ich etwas anfassen, das anderen gehoert?"). Der Client darf ihn deshalb weder melden noch
+   selbst abbuchen; /api/attack nimmt bewusst keinen einzigen Kampfparameter entgegen. Der Server
+   liest die WAHL aus dem Spielstand, prueft den Bestand, wendet den Bonus an und bucht im selben
+   synchronen Block ab, bevor er speichert. */
+const GEFECHTSVORRAETE = [
+  { key: 'gefechtskoepfe', name: 'Nano-Gefechtsköpfe', seite: 'angriff', res: 'nanolegierungen', menge: 40, bonus: 0.08 },
+  { key: 'schildkondensatoren', name: 'Schildkondensatoren', seite: 'verteidigung', res: 'hochenergiekristalle', menge: 25, bonus: 0.08 }
+];
+/* Setzt die eingeschalteten Vorraete einer Seite ein und MUTIERT dabei save.resources. Der Aufrufer
+   muss den Spielstand danach speichern - beide /api/attack-Ausgaenge tun das ohnehin fuer Beute und
+   Verluste. Rueckgabe: der Multiplikator und die Liste fuer den Kampfbericht. */
+function gefechtsvorratEinsetzenServer(save, seite) {
+  const gewaehlt = (save && save.gefechtsvorrat) || {};
+  const res = (save && save.resources) || {};
+  const eingesetzt = [];
+  let summe = 0;
+  for (const v of GEFECHTSVORRAETE) {
+    if (v.seite !== seite || !gewaehlt[v.key]) continue;
+    if (!(Number(res[v.res]) >= v.menge)) continue;   // deckt auch undefined/NaN ab
+    res[v.res] = Number(res[v.res]) - v.menge;
+    summe += v.bonus;
+    eingesetzt.push({ key: v.key, name: v.name, res: v.res, menge: v.menge, bonus: v.bonus });
+  }
+  return { mult: 1 + summe, eingesetzt };
+}
 function resolveBattlePhases(basePower, defense, counterMult, minC, maxC, rng) {
   const wurf = rng || Math.random;
   const mult = (typeof counterMult === 'number' && counterMult > 0) ? counterMult : 1;
@@ -3133,21 +3165,36 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   // Angriffskraft-Werte angewandt (mit und ohne Konter), damit der abgeleitete Konterfaktor
   // unverändert bleibt - er ist das Verhältnis der beiden und darf sich davon nicht verschieben.
   const spyEdgeMult = 1 + spyIntelEdge(attacker, targetUserId);
-  const attackPower = Math.round(computeAttackPower(attacker, targetFleetSummary) * spyEdgeMult);
+  const attackPowerMitKonter = Math.round(computeAttackPower(attacker, targetFleetSummary) * spyEdgeMult);
   // Für die Phasen wird die Kontergewichtung je Phase eigen gesetzt - dafür braucht es die
   // Angriffskraft OHNE Konter und den effektiven Konterfaktor getrennt. computeAttackPower wendet
   // den Konter pro Teilflotte an; das Verhältnis der beiden Aufrufe ist genau der aggregierte
   // Faktor, ohne dass die Funktion selbst umgebaut werden muss.
   const attackPowerRoh = Math.round(computeAttackPower(attacker, null) * spyEdgeMult);
-  const effektiverKonter = attackPowerRoh > 0 ? attackPower / attackPowerRoh : 1;
+  const effektiverKonter = attackPowerRoh > 0 ? attackPowerMitKonter / attackPowerRoh : 1;
   // Verteidigungs-Aufstellung des ZIELS: die Wahl des Verteidigers wirkt genau hier, im einzigen
   // Kampf, in dem ein echter Gegner die Angriffszusammensetzung bestimmt.
   const attackerFleetForFormation = fleetSummary(attacker);
   const formationKey = target.defenseFormation || 'ausgewogen';
   const formationMult = formationDefenseMult(attackerFleetForFormation, formationKey);
-  const defensePower = Math.round(computeDefensePower(target) * formationMult);
-  const phasenErgebnis = resolveBattlePhases(attackPowerRoh, defensePower, effektiverKonter, PVP_PHASE_MIN, PVP_PHASE_MAX);
-  const chance = battleWinChance(attackPowerRoh, defensePower, effektiverKonter, PVP_PHASE_MIN, PVP_PHASE_MAX);
+  /* Gefechtsvorraete beider Seiten (Etappe B1). Sie werden GENAU HIER eingesetzt - nach allen
+     Kraftberechnungen und vor dem Wurf -, und zwar je Kampf genau einmal je Seite. Die Funktion
+     bucht ab; beide Spielstaende werden am Ende dieses Handlers ohnehin geschrieben.
+     Der Angriffs-Vorrat wirkt auf attackPowerRoh, nicht auf attackPower: resolveBattlePhases
+     gewichtet den Konter je Phase selbst, und attackPower ist nur der abgeleitete Anzeigewert.
+     effektiverKonter bleibt unveraendert - er ist das VERHAELTNIS der beiden Werte und darf sich
+     durch einen flachen Aufschlag nicht verschieben (dieselbe Ueberlegung wie beim spyEdgeMult). */
+  const vorratAngriff = gefechtsvorratEinsetzenServer(attacker, 'angriff');
+  const vorratVerteidigung = gefechtsvorratEinsetzenServer(target, 'verteidigung');
+  const attackPowerMitVorrat = Math.round(attackPowerRoh * vorratAngriff.mult);
+  /* Der ANGEZEIGTE Wert traegt den Vorrat ebenfalls. Er wird an sechs Stellen ausgegeben (zwei
+     Berichte je Ausgang plus die Antwort an den Angreifer); haenge ich ihn hier an EINE Definition,
+     kann keine davon veralten - genau der Fehlertyp, an dem dieses Projekt wiederholt haengengeblieben
+     ist (Hausregel 6). Das Konterverhaeltnis darueber ist schon berechnet und bleibt unberuehrt. */
+  const attackPower = Math.round(attackPowerMitKonter * vorratAngriff.mult);
+  const defensePower = Math.round(computeDefensePower(target) * formationMult * vorratVerteidigung.mult);
+  const phasenErgebnis = resolveBattlePhases(attackPowerMitVorrat, defensePower, effektiverKonter, PVP_PHASE_MIN, PVP_PHASE_MAX);
+  const chance = battleWinChance(attackPowerMitVorrat, defensePower, effektiverKonter, PVP_PHASE_MIN, PVP_PHASE_MAX);
   const success = phasenErgebnis.success;
 
   const defenseBefore = defenseBreakdown(target);
@@ -3280,17 +3327,19 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
 
     addReport(req.userId, {
       type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt',
-      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct
+      attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct
     });
     addReport(targetUserId, {
       type: 'attack-received', result: 'loss', attackerName: req.username,
-      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct
+      attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct
     });
     // Verteidiger benachrichtigen (Retention-Trigger 21.07.2026): angegriffen zu werden ist einer der
     // stärksten Rückkehr-Anlässe. Server hat den Kampf ohnehin aufgelöst - hier nur der Push obendrauf.
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: false, looted: Object.keys(stolen).length > 0 }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     await saveDb();
-    return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, saveVersion: mySaveVersion, ...kampfDetails() });
+    return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
   } else {
     attacker.battlePoints = (attacker.battlePoints || 0) + 3;
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
@@ -3328,17 +3377,19 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
 
     addReport(req.userId, {
       type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt',
-      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
+      attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
     });
     addReport(targetUserId, {
       // staubReward steht im Bericht, damit die Gutschrift nicht unsichtbar bleibt: Der Verteidiger
       // war beim Kampf per Definition nicht dabei, der Bericht ist seine einzige Quelle.
       type: 'attack-received', result: 'win', attackerName: req.username, defendReward: abwehrCp, staubReward: staubAbwehr,
-      attackPower, defensePower, phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
+      attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
     });
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: true, looted: false }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     await saveDb();
-    return res.json({ success: false, attackPower, defensePower, saveVersion: mySaveVersion, ...kampfDetails() });
+    return res.json({ success: false, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
   }
 });
 

@@ -2311,7 +2311,13 @@ function shipShield(k) { return SHIP_SHIELD_EXPLICIT[k] !== undefined ? SHIP_SHI
 // marks (31.07.2026): +3% Schild je Werftmarke, identisch zum Frontend (defensePower/shieldSum).
 function fleetShieldSum(f, marks) { if (!f) return 0; let s = 0; for (const k of Object.keys(SHIP_ATK_VALUES)) s += (f[k] || 0) * shipShield(k) * shipMarkShieldMult(marks, k); return s; }
 // Doktrin-Multiplikatoren (DOCTRINE_DEFS im Frontend). Neutral, wenn keine Doktrin aktiv.
-const DOCTRINE_MULTS = { doc_offensive: { atk: 1.20, def: 0.85 }, doc_defensive: { atk: 0.85, def: 1.20 }, doc_logistics: { atk: 1, def: 1 } };
+const DOCTRINE_MULTS = { doc_offensive: { atk: 1.20, def: 0.85 }, doc_defensive: { atk: 0.85, def: 1.20 }, doc_logistics: { atk: 1, def: 1 },
+  // Die drei wirtschaftlichen Doktrinen (18.08.2026) sind im Kampf NEUTRAL. Sie stehen hier
+  // trotzdem, und zwar aus genau dem Grund, der schon bei doc_logistics steht: damit die Tabelle
+  // vollstaendig neben der Frontend-Kopie liegt und beim naechsten Balance-Pass niemand denkt,
+  // sie seien vergessen worden. Ihre Wirkung (Produktion, Expeditions-Ausbeute, Abgrundsplitter)
+  // rechnet der Server ohnehin nicht nach - keine davon beruehrt einen PvP-Kampf.
+  doc_erschliessung: { atk: 1, def: 1 }, doc_aufklaerung: { atk: 1, def: 1 }, doc_bergung: { atk: 1, def: 1 } };
 // Doktrin-Synergie (01.08.2026, Frontend: DOCTRINE_DEFS[].syn + doctrineMultOf/doctrineSynActive).
 // Greift nur, wenn IRGENDEINE Welt des Spielers die passende Rolle hat - im Frontend hasRoleAnywhere(),
 // hier dieselbe Prüfung über save.planetSpecialization. Der Logistik-Zweig hat serverseitig keine
@@ -2321,7 +2327,13 @@ const DOCTRINE_MULTS = { doc_offensive: { atk: 1.20, def: 0.85 }, doc_defensive:
 const DOCTRINE_SYN = {
   doc_offensive: { rolle: 'shipyard', atk: 1.08, def: 1 },
   doc_defensive: { rolle: 'fortress', atk: 1, def: 1.08 },
-  doc_logistics: { rolle: 'trade', atk: 1, def: 1 }
+  doc_logistics: { rolle: 'trade', atk: 1, def: 1 },
+  // Dieselbe Begruendung wie bei DOCTRINE_MULTS: kampfneutral, aber vollstaendig gefuehrt. Die
+  // Rollen sind die im Frontend hinterlegten - ein Auseinanderlaufen faellt dem Paritaetstest auf,
+  // der seit dem 18.08.2026 JEDE Doktrin aus DOCTRINE_DEFS prueft statt einer festen Dreierliste.
+  doc_erschliessung: { rolle: 'mining', atk: 1, def: 1 },
+  doc_aufklaerung: { rolle: 'science', atk: 1, def: 1 },
+  doc_bergung: { rolle: 'deepport', atk: 1, def: 1 }
 };
 function hasRoleAnywhereServer(save, roleKey) {
   const spec = (save && save.planetSpecialization) || {};

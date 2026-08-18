@@ -354,6 +354,35 @@ Kartenaufrufs.
    fremder Spielstand) – **auch an den Anfragenden selbst**: Ein Weg für alle statt zweier, die
    auseinanderlaufen können.
 
+**Die Blockade greift an der GEWÄHRTEN MENGE, nicht an der Obergrenze – und der erste Entwurf tat
+das Gegenteil, ohne dass sein Test es sah (18.08.2026).** `obergrenze` ist die Anti-Betrugs-Schranke
+aus dem gespeicherten Spielstand und hat bewusst reichlich Luft (`AST_MAX_JE_SCHUERFSCHIFF` nennt
+„Faktor 3,5"). Sie bindet im echten Spiel praktisch nie. Ein Faktor auf sie ist deshalb wirkungslos –
+gemessen für vier typische Flotten, Frontend-Laderaum gegen `obergrenze × 0,45`:
+
+| Flotte | Laderaum | gekürzte Obergrenze | Wirkung |
+|---|---|---|---|
+| 50 Schürfschiffe, keine Forschung | 20.000 | 45.000 | keine |
+| 50 Schürfschiffe, Förderung max | 28.000 | 45.000 | keine |
+| 16 Schürf + 20 Frachter | 14.960 | 27.900 | keine |
+| 50 Schürf + 100 Großfrachter | 178.000 | 382.500 | keine |
+
+**In keinem Fall hätte ein Spieler etwas von der Blockade gemerkt.** Die ganze Mechanik war inert.
+Aufgefallen ist es erst beim Bau der Frontend-Vorschau, beim Nachrechnen der beiden Kapazitäten
+gegeneinander.
+
+**Und der eigene Test hat es gedeckt** – er schickte `wunsch: 999999999` und maß damit exakt den
+Deckel statt der Wirkung. Das ist Frontend-Arbeitsregel 7 („Messen, was gemessen werden soll, nicht
+den Deckel") in Reinform, und es ist die zweite Prüfung dieses Bereichs, die aus dem falschen Grund
+grün war. Seither schickt `test_festung_http.js` einen realistischen Wunsch (30.000, klar unter der
+Obergrenze); die Gegenprobe am alten Stand liefert für alle drei Messungen unverändert 30.000.
+Dazu `7e`, das ausdrücklich prüft, dass die Obergrenze WEITERHIN bindet – sonst wäre beim Verschieben
+des Faktors der Betrugsschutz still verlorengegangen.
+
+**Die übertragbare Lehre: Wer einen Faktor an eine Schranke hängt, muss zuerst messen, ob diese
+Schranke überhaupt bindet.** Eine Schranke mit Sicherheitsabstand ist gerade dadurch definiert, dass
+sie normalerweise nicht greift – ein Rabatt darauf ist ein Rabatt auf nichts.
+
 **`Math.round` statt `Math.floor`** bei der Blockade-Obergrenze: `1 - 0.55` ist in Gleitkomma
 `0.44999999999999996`, abgerundet werden aus 100.000 Kapazität 44.999 statt 45.000. Für den Spieler
 eine grundlos krumme Zahl – und schlimmer, das Frontend rechnet dieselbe Formel für die Vorschau, eine

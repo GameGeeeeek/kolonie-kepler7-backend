@@ -2255,6 +2255,31 @@ const DEFENSE_VALUES = {
 // Gebäude-Schildanteil: im Frontend trägt jedes Verteidigungsgebäude defVal + round(defVal*0.4) bei
 // (der Schild-Zuschlag). Serverseitig als Faktor 1.4 auf die Gebäude-Summe abgebildet.
 const BUILDING_SHIELD_FACTOR = 1.4;
+// Bastionsmarken (18.08.2026, V2a des Verteidigungs-Konzepts) - die Server-Kopie der
+// Frontend-Formel, dieselbe Kopie-Familie wie SHIP_SCORE_WEIGHTS/computeScoreServer und
+// DEFENSE_VALUES selbst.
+//
+// SIE MUSS HIER SEIN. Das Konzept hat behauptet, V2 brauche "weder Backend-Paritaet noch
+// Bestandsschutz" - das ist beim Nachrechnen falsch: computeDefensePower() summiert
+// server-autoritativ ueber DEFENSE_VALUES und entscheidet damit jeden PvP-Angriff. Ohne die
+// Marke hier zeigte das Spiel dem Verteidiger eine hoehere Verteidigung an, als im Kampf
+// tatsaechlich gerechnet wird - genau der Fehler, den die PvP-Vorschau schon zweimal hatte
+// (und derselbe, an dem 'resonanzschild' bis zum 01.08.2026 mit NULL zaehlte).
+//
+// Die Zahlen stehen bewusst als Zahlen da und nicht abgeleitet: Es gibt keinen gemeinsamen
+// Quelltext zwischen den Repos. tests/test_bastionsmarken.js im FRONTEND-Repo vergleicht beide
+// Seiten und schlaegt an, sobald eine wandert.
+const BASTION_MARK_MAX = 10;
+const BASTION_MARK_PER_STEP = 0.03;
+// Der Deckel steht hier aus demselben Grund wie in bastionMarkOf(): Ein manipulierter Spielstand
+// mit bastionMarks.flak = 900 liefe sonst durch die Kampfrechnung. Der Spielstand ist
+// klientenautoritativ - was der Server aus ihm liest, prueft er selbst.
+function bastionMarkMultServer(save, buildingKey) {
+  const v = ((save && save.bastionMarks) || {})[buildingKey];
+  if (typeof v !== 'number' || !isFinite(v)) return 1;
+  const mk = Math.max(1, Math.min(BASTION_MARK_MAX, Math.floor(v)));
+  return 1 + (mk - 1) * BASTION_MARK_PER_STEP;
+}
 // Schiffs-Schildpunkte – wie im Frontend (SHIP_DEFS): explizite Werte, sonst round(atk*0.5).
 const SHIP_SHIELD_EXPLICIT = { enterschiff: 32, phantomschiff: 5, waechter: 14, quantenkreuzer: 20, metamaterialtitan: 80, superschlachtschiff: 110, paktkorvette: 14, bundeskreuzer: 60, sternenbanner: 100 };
 function shipShield(k) { return SHIP_SHIELD_EXPLICIT[k] !== undefined ? SHIP_SHIELD_EXPLICIT[k] : Math.round((SHIP_ATK_VALUES[k] || 0) * 0.5); }
@@ -2746,7 +2771,12 @@ const SAVE_SANITY_LIMITS = {
   // zu enges Limit sperrt im Zweifel einen echten Spieler komplett vom Speichern aus, ein
   // grosszuegiges faengt offensichtliche Faelschungen trotzdem ab. Sollte der Deckel im Spiel
   // jemals ueber 1000 steigen, muss dieser Wert VORHER mitwachsen.
-  maxShipMark: 1000
+  maxShipMark: 1000,
+  // Bastionsmarken (18.08.2026): dieselbe Groessenordnung und dieselbe Begruendung wie die
+  // Werftmarke darueber. Das Frontend deckelt bei 10 (BASTION_MARK_MAX) und schreibt nie mehr;
+  // 1000 faengt offensichtliche Faelschungen ab, ohne einen echten Spieler vom Speichern
+  // auszusperren. Steigt BASTION_MARK_MAX je ueber 1000, muss dieser Wert VORHER mitwachsen.
+  maxBastionMark: 1000
 };
 function numberOutOfRange(v, max) {
   return typeof v === 'number' && (!Number.isFinite(v) || v < 0 || v > max);
@@ -2774,6 +2804,15 @@ function saveSanityViolation(save) {
   if (numberOutOfRange(save.xp, SAVE_SANITY_LIMITS.maxXp)) return 'XP unplausibel: ' + save.xp;
   for (const [k, v] of Object.entries(save.shipMarks || {})) {
     if (numberOutOfRange(v, SAVE_SANITY_LIMITS.maxShipMark)) return 'Werftmarke "' + k + '" unplausibel: ' + v;
+  }
+  /* Bastionsmarken - Verteidigung in der Tiefe, genau wie eine Zeile darueber. Sie ist NICHT
+     der Schutz der Kampfrechnung (den macht bastionMarkMultServer mit seinem eigenen Deckel),
+     sondern verhindert, dass ein absurder Wert ueberhaupt im Spielstand liegen bleibt. Ohne
+     diese Schleife waere bastionMarks das einzige Markenfeld ohne Pruefung - und eine
+     Ungleichbehandlung, die niemand begruendet hat, ist die Sorte Luecke, die spaeter jemand
+     fuer Absicht haelt. */
+  for (const [k, v] of Object.entries(save.bastionMarks || {})) {
+    if (numberOutOfRange(v, SAVE_SANITY_LIMITS.maxBastionMark)) return 'Bastionsmarke "' + k + '" unplausibel: ' + v;
   }
   return null;
 }
@@ -2962,12 +3001,16 @@ function computeDefensePower(save) {
   // Heimatbasis (save.buildings/save.fleet) bekommt +20% ggü. Kolonien - getrennt behandeln.
   const homeBuildings = save.buildings || {};
   let homeBuildingSub = 0;
-  for (const [k, v] of Object.entries(DEFENSE_VALUES)) homeBuildingSub += (homeBuildings[k] || 0) * v;
+  // Bastionsmarke je Anlagenklasse - identisch zum Frontend (defensePower), wo derselbe Faktor an
+  // der Summierstelle steht. Sie gilt fuer ALLE Standorte, deshalb dieselbe Zeile in beiden
+  // Schleifen; der Schildanteil (BUILDING_SHIELD_FACTOR) laeuft mit, weil er ein Faktor auf
+  // dieselbe Summe ist.
+  for (const [k, v] of Object.entries(DEFENSE_VALUES)) homeBuildingSub += (homeBuildings[k] || 0) * v * bastionMarkMultServer(save, k);
   power += homeBuildingSub * BUILDING_SHIELD_FACTOR * HOME_DEFENSE_BONUS; // Gebäude + Schildanteil
   for (const c of Object.values(save.colonies || {})) {
     if (!c || !c.buildings) continue;
     let sub = 0;
-    for (const [k, v] of Object.entries(DEFENSE_VALUES)) sub += (c.buildings[k] || 0) * v;
+    for (const [k, v] of Object.entries(DEFENSE_VALUES)) sub += (c.buildings[k] || 0) * v * bastionMarkMultServer(save, k);
     power += sub * BUILDING_SHIELD_FACTOR;
   }
   // Flotten-Verteidigung = Angriffs-abgeleiteter Anteil (×0,4) + Schildsumme, wie im Frontend.

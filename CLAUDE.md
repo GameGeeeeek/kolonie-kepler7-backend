@@ -282,8 +282,9 @@ Protomaterie-Drosselung, die das Konzept als den eigentlichen Zahn der Blockade 
 `grep` nach `st.proto` fand einen Treffer und sah damit benutzt aus – der einzige Treffer war
 jedoch der **Galaxie-Nachrichtentext, der die Drosselung ankündigt**. Die Mechanik selbst gab es
 nicht. Der Grund liegt im Frontend: Die Protomaterie je Fuhre hängt allein an der **GRÖSSE** des
-Vorkommens (`proto: protoJeFuhre(a)`, Z. 55912 im Missionsstart und Z. 55722 in der Vorschau), nicht an der Ladung – die Ladungskürzung erreicht
-sie also nie. Behoben, indem `/api/asteroid/mine` den Faktor als **`protoBlockade`** mitschickt und
+Vorkommens (`proto: protoJeFuhre(a)` – Z. 55912 im Missionsstart, Z. 55722 in der Vorschau, und
+beide müssen im Gleichschritt bleiben), nicht an der Ladung – die Ladungskürzung erreicht sie also
+nie. Behoben, indem `/api/asteroid/mine` den Faktor als **`protoBlockade`** mitschickt und
 das Frontend ihn multipliziert; der Server bleibt Autorität über den Faktor, dieselbe Arbeitsteilung
 wie bei `menge`.
 **Die übertragbare Lehre: Ein Konstantenfeld, das nur der Ankündigungstext liest, ist keine

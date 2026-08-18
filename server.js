@@ -4259,7 +4259,7 @@ function loadOrInitGalaxy() {
   if (!db.galaxy.news) db.galaxy.news = [];
   if (!db.galaxy.lastTick) db.galaxy.lastTick = Date.now();
   if (!db.galaxy.controlledSystems) db.galaxy.controlledSystems = {}; // systemId -> userId (vom Spieler eroberte Systeme)
-  if (db.galaxy.worldBoss === undefined) db.galaxy.worldBoss = null;
+  delete db.galaxy.worldBoss;   // vestigial, siehe Kommentar bei galaxyTick (18.08.2026)
   if (!db.galaxy.marketHistory) db.galaxy.marketHistory = {}; // key -> rollender Preisverlauf (Sparkline)
   if (db.galaxy.marketEvent === undefined) db.galaxy.marketEvent = null; // aktiver Angebots-/Nachfrageschock
   loadOrInitMarket(db.galaxy);
@@ -4267,40 +4267,24 @@ function loadOrInitGalaxy() {
   return db.galaxy;
 }
 
-// ============ Galaktischer Weltboss ============
-// Ein gemeinsamer Server-Gegner für ALLE Spieler: er hat einen geteilten HP-Pool, jeder kann ihn (mit
-// Abklingzeit) angreifen, jeder Angriff zieht echte HP ab. Wer den Todesstoß setzt, bekommt die große
-// Belohnung; jeder Angriff gibt eine kleine. Belohnungen werden nur für den ANFRAGENDEN Spieler in
-// dessen Spielstand geschrieben (keine Schreibzugriffe auf fremde Spielstände - die würden mit dem
-// Autosave online spielender Nutzer kollidieren).
-const WORLD_BOSS_NAMES = ['Leviathan der Leere', 'Chronos-Verschlinger', 'Die Singularität', 'Wächter des Abgrunds', 'Nova-Titan'];
-// Boss-Archetypen (#8): jeder Spawn wählt eine Variante, die HP-Menge und Auftauchdauer verändert und
-// einen thematischen Kampf-Trait mitbringt. Bewusst BELOHNUNGS-NEUTRAL gehalten (keine Änderung an der
-// schadensanteil-basierten Belohnungsmathematik) - die Variety kommt aus Zähigkeit/Zeitdruck/Flavour,
-// nicht aus abweichenden Ausschüttungen. hpMult/durH modifizieren nur Spawn-Parameter.
-const WORLD_BOSS_ARCHETYPES = [
-  { key: 'normal',   label: 'Wandelnder Koloss', hpMult: 1.0,  durH: 72, trait: 'Ein ausgewogener Gegner – gemeinsames Dauerfeuer bringt ihn zu Fall.' },
-  { key: 'bastion',  label: 'Panzer-Bastion',    hpMult: 1.8,  durH: 96, trait: 'Extrem zäh (deutlich mehr HP), bleibt dafür länger – nur koordinierte Allianzen knacken ihn.' },
-  { key: 'schwarm',  label: 'Schwarm-Titan',     hpMult: 0.55, durH: 36, trait: 'Wenig HP, aber kurzes Zeitfenster – schnell zuschlagen, sonst zieht er sich zurück!' },
-  { key: 'phantom',  label: 'Phasen-Phantom',    hpMult: 1.2,  durH: 60, trait: 'Wechselt ständig seine Deckung – seine Schwäche gegen bestimmte Schiffstypen wiegt hier besonders schwer.' },
-  { key: 'piraten',  label: 'Piratenboss',       hpMult: 2.0,  durH: 48, trait: 'Zäh wie kein zweiter (doppelte HP), zieht sich dafür deutlich früher zurück – wer mitverdienen will, muss schnell dabei sein.' }
-];
-function spawnWorldBoss(g) {
-  const users = Math.max(1, Object.keys(db.users).length);
-  const arch = WORLD_BOSS_ARCHETYPES[Math.floor(Math.random() * WORLD_BOSS_ARCHETYPES.length)];
-  const maxHp = Math.round(40000 * (1 + users * 0.4) * arch.hpMult);
-  g.worldBoss = {
-    id: crypto.randomUUID(),
-    name: WORLD_BOSS_NAMES[Math.floor(Math.random() * WORLD_BOSS_NAMES.length)],
-    archetype: arch.key, archetypeLabel: arch.label, archetypeTrait: arch.trait,
-    maxHp, hp: maxHp,
-    system: pickRandomFreeSystem(),
-    expiresAt: Date.now() + arch.durH * 3600 * 1000,
-    participants: {},   // userId -> Gesamtschaden (für die Bestenliste)
-    lastAttack: {}      // userId -> Zeitstempel des letzten Angriffs (Abklingzeit)
-  };
-  pushGalaxyNews('ti-alien', 'WELTBOSS (' + arch.label + '): ' + g.worldBoss.name + ' ist bei ' + g.worldBoss.system + ' erschienen! ' + arch.trait + ' Gemeinsam bekämpfbar (' + maxHp.toLocaleString('de-DE') + ' HP, Rückzug in ' + arch.durH + 'h).');
-}
+// ============ Galaktischer Weltboss: ENTFERNT (18.08.2026) ============
+// Hier stand bis heute ein ZWEITER Weltboss - `db.galaxy.worldBoss`, gespawnt vom galaxyTick, mit
+// eigenem HP-Pool, eigenem Archetyp, eigener Ablauffrist und einem echten Ort aus
+// pickRandomFreeSystem(). Er wurde NIRGENDS gelesen: nur angelegt, angekündigt und wieder
+// abgeräumt. Sein gesamter Effekt waren zwei Galaxie-Nachrichten.
+//
+// Der ANGREIFBARE Weltboss ist ein anderes Objekt - db.shared['worldboss:current'] (WORLDBOSS_KEY
+// weiter unten), vom Client angelegt und über /api/worldboss/resolve gehärtet. Beide zogen ihre
+// Namen aus derselben Fünferliste, hatten aber verschiedene HP-Formeln
+// (40000*(1+users*0.4)*hpMult hier gegen 50000*1,6^(Stufe-1) dort). Im Galaxie-Tab stand deshalb
+// die Nachricht "… ist bei nyra erschienen! … Gemeinsam bekämpfbar (312.000 HP)" neben einer
+// Boss-Karte, die denselben Namen mit einer ganz anderen Zahl und ohne Ort führte. Wer die
+// Nachricht las und dann die Karte ansah, fand nichts, was zusammenpasste.
+//
+// Entfernt statt angeschlossen: Die Anschluss-Variante hätte eine zweite Wahrheit über die
+// Weltboss-HP eingeführt, und mit zwei Wahrheiten über dieselbe Größe hat dieses Projekt
+// schlechte Erfahrungen. Zwei Zeilen weniger Weltgeschichte sind besser als zwei erfundene.
+// Der Zustand wird in loadOrInitGalaxy aus Bestandsdatenbanken gelöscht.
 
 // ============ NPC-Fraktionen mit echtem Territorium ============
 // Vier Fraktionen besitzen jeweils eine Menge Systeme, haben eine Militärstärke und expandieren im
@@ -5368,13 +5352,6 @@ function galaxyTick() {
     }
   }
 
-  // ===== Weltboss: spawnen, wenn keiner aktiv; abgelaufene entfernen =====
-  if (g.worldBoss && g.worldBoss.expiresAt < Date.now()) {
-    pushGalaxyNews('ti-alien', g.worldBoss.name + ' hat sich zurückgezogen, ohne besiegt zu werden (' + Math.round((1 - g.worldBoss.hp / g.worldBoss.maxHp) * 100) + '% Schaden erlitten).');
-    g.worldBoss = null;
-  }
-  if (!g.worldBoss && Math.random() < 0.10) spawnWorldBoss(g);
-
   // Die Front zuletzt: Expansion, Rueckeroberung und Kriegsauflösung haben den Besitzstand dieses
   // Takts bereits festgelegt. Rechnete die Front davor, wuerde sie auf einem Stand arbeiten, den es
   // am Ende des Takts gar nicht mehr gibt - und ein gerade eroberter Sektor stuende einen Takt lang
@@ -5958,10 +5935,10 @@ const WORLDBOSS_KEY = 'worldboss:current';
 const WORLDBOSS_WEAKNESS = ['jaeger','cruiser','bomber','destroyer','jaeger','schlachtschiff','cruiser','bomber','destroyer','jaeger'];
 function worldBossWeakness(level) { return WORLDBOSS_WEAKNESS[(Math.max(1,level)-1) % WORLDBOSS_WEAKNESS.length]; }
 // Archetypen des ANGREIFBAREN Weltbosses (02.08.2026). Spiegel von WORLDBOSS_ARCHETYPEN im Frontend -
-// dort steht die ausführliche Begründung. Kurz: Die vier Varianten gab es bisher nur beim
-// Galaxie-Nachrichten-Boss (spawnWorldBoss weiter oben), den niemand angreifen kann; der angreifbare
-// Boss hatte genau eine Ausprägung, obwohl Patchnote v8.211.0 die Varianten als Kampf-Feature
-// angekündigt hatte.
+// dort steht die ausführliche Begründung. Kurz: Die vier Varianten gab es bis zum 02.08.2026 nur
+// beim Galaxie-Nachrichten-Boss, den niemand angreifen konnte (seit dem 18.08.2026 ganz entfernt,
+// siehe den Block bei loadOrInitGalaxy); der angreifbare Boss hatte genau eine Ausprägung, obwohl
+// Patchnote v8.211.0 die Varianten als Kampf-Feature angekündigt hatte.
 //
 // Ableitung DETERMINISTISCH aus der Stufe, nicht aus einem Feld des Boss-Dokuments: Das Dokument
 // liegt im geteilten Speicher und wird von Clients geschrieben - ein dort mitgeführter Archetyp wäre

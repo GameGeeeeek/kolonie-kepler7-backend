@@ -308,6 +308,15 @@ async function aendereDb(fn) {
   // Obergrenze). Ein Blick auf das Feld `blockade` in der Antwort allein wäre die Beschriftung,
   // nicht die Wirkung (Arbeitsregel 3: die REGEL prüfen, nicht die Momentaufnahme).
   const MESSPLATZ = String((Number(festPlatz) + 1) % 10);
+  /* DER WUNSCH IST BEWUSST KLEINER ALS DIE OBERGRENZE - und das ist die Lehre dieses Abschnitts.
+     Der erste Entwurf schickte `wunsch: 999999999`. Damit band immer die `obergrenze` (50
+     Schürfschiffe x 2000 = 100.000), und der Test mass den DECKEL statt der Wirkung
+     (Arbeitsregel 7). Er war gruen, waehrend die Blockade fuer jede echte Flotte wirkungslos war:
+     Der Laderaum des Frontends liegt bei denselben 50 Schuerfschiffen bei 20.000 bis 28.000, also
+     weit unter den 45.000, die von der gekuerzten Obergrenze uebrig blieben.
+     30.000 ist deshalb der richtige Wunsch: klar unter der Obergrenze, so dass wirklich der
+     Faktor gemessen wird und nicht die Schranke dahinter. */
+  const WUNSCH = 30000;
   async function messeFuhre(bau) {
     await stoppeServer();
     const d = liesDb();
@@ -320,12 +329,12 @@ async function aendereDb(fn) {
     schreibDb(d);
     s = await starteServer(); tokA = await s.anmelden('anna');
     return await s.j('/asteroid/mine', { method: 'POST', headers: kopf(tokA),
-      body: JSON.stringify({ system: sys, platz: MESSPLATZ, wunsch: 999999999 }) });
+      body: JSON.stringify({ system: sys, platz: MESSPLATZ, wunsch: WUNSCH }) });
   }
 
   const frei = await messeFuhre(() => {});
-  check('7a: ohne Festung trägt die Fuhre die volle Obergrenze',
-    frei.status === 200 && frei.body.menge === 100000 && frei.body.blockade === 0,
+  check('7a: ohne Festung kommt der Wunsch ungekürzt an',
+    frei.status === 200 && frei.body.menge === WUNSCH && frei.body.blockade === 0,
     { status: frei.status, error: frei.body.error, menge: frei.body.menge, blockade: frei.body.blockade });
 
   const blockiert = await messeFuhre(f => {
@@ -334,9 +343,9 @@ async function aendereDb(fn) {
       seit: Date.now(), letzteReifung: Date.now(), beitraege: {} };
   });
   check('7b: die Sternenfeste kürzt die Fuhre wirklich um 55 %',
-    blockiert.status === 200 && blockiert.body.menge === 45000 && blockiert.body.blockade === 0.55,
+    blockiert.status === 200 && blockiert.body.menge === Math.round(WUNSCH * 0.45) && blockiert.body.blockade === 0.55,
     { status: blockiert.status, error: blockiert.body.error, menge: blockiert.body.menge,
-      erwartet: 45000, blockade: blockiert.body.blockade });
+      erwartet: Math.round(WUNSCH * 0.45), blockade: blockiert.body.blockade });
   // Die Protomaterie haengt im Frontend an der GROESSE des Vorkommens, nicht an der Ladung - die
   // Kuerzung oben erreicht sie nie. Der Faktor muss deshalb eigens mitreisen, sonst ist die
   // Drosselung, die die Galaxie-Nachricht ankuendigt, gar nicht vorhanden.
@@ -347,9 +356,9 @@ async function aendereDb(fn) {
 
   const geraeumt = await messeFuhre(f => { f.geraeumtBis = Date.now() + 3600 * 1000; });
   check('7c: nach dem Fall trägt die Fuhre 15 % mehr',
-    geraeumt.status === 200 && geraeumt.body.menge === 115000 && geraeumt.body.geraeumtBonus === 0.15,
+    geraeumt.status === 200 && geraeumt.body.menge === Math.round(WUNSCH * 1.15) && geraeumt.body.geraeumtBonus === 0.15,
     { status: geraeumt.status, error: geraeumt.body.error, menge: geraeumt.body.menge,
-      erwartet: 115000, geraeumtBonus: geraeumt.body.geraeumtBonus });
+      erwartet: Math.round(WUNSCH * 1.15), geraeumtBonus: geraeumt.body.geraeumtBonus });
 
   // Die Gegenrichtung: Solange die Festung steht, gibt es KEINEN Geräumt-Bonus - auch dann nicht,
   // wenn beide Marken gesetzt sind. Ohne diese Prüfung könnte sich beides addieren, und ein
@@ -361,9 +370,9 @@ async function aendereDb(fn) {
       seit: Date.now(), letzteReifung: Date.now(), beitraege: {} };
   });
   check('7d: steht wieder eine Festung, greift der Bonus NICHT mehr',
-    beides.status === 200 && beides.body.geraeumtBonus === 0 && beides.body.menge === 75000,
+    beides.status === 200 && beides.body.geraeumtBonus === 0 && beides.body.menge === Math.round(WUNSCH * 0.75),
     { status: beides.status, error: beides.body.error, menge: beides.body.menge,
-      erwartet: 75000, geraeumtBonus: beides.body.geraeumtBonus, blockade: beides.body.blockade });
+      erwartet: Math.round(WUNSCH * 0.75), geraeumtBonus: beides.body.geraeumtBonus, blockade: beides.body.blockade });
   // Zweite Stufe: Die Schanze drosselt die Protomaterie nur zur Haelfte. Damit ist belegt, dass
   // der Faktor der TABELLE folgt und nicht bloss ein festes 0/1 ist.
   check('7d-proto: die Schanze drosselt die Protomaterie um 50 %',
@@ -383,11 +392,34 @@ async function aendereDb(fn) {
       { steht_auf: schalter && schalter[1] });
   }
 
+  // Gegenrichtung zum Umbau: Die Obergrenze aus dem Spielstand muss WEITERHIN binden, sonst waere
+  // beim Verschieben des Faktors der Betrugsschutz still verlorengegangen. 50 Schuerfschiffe x
+  // AST_MAX_JE_SCHUERFSCHIFF (2000) = 100.000, ohne Festung also genau das.
+  const gierig = await messeFuhre(() => {});
+  const gierigRes = await (async () => {
+    const d = liesDb(); const f = d.shared[feldKey];
+    f.plaetze[MESSPLATZ] = { sorte: 'eisen', groesse: 'brocken', vorrat: 5000000 };
+    schreibDb(d);
+    return await s.j('/asteroid/mine', { method: 'POST', headers: kopf(tokA),
+      body: JSON.stringify({ system: sys, platz: MESSPLATZ, wunsch: 999999999 }) });
+  })();
+  check('7e: die Obergrenze aus dem Spielstand bindet weiterhin',
+    gierigRes.status === 200 && gierigRes.body.menge === 100000,
+    { menge: gierigRes.body.menge, erwartet: 100000, hinweis: 'ohne diese Pruefung waere der Betrugsschutz beim Umbau still weg' });
+
   // ---- 8) Kein Nachschub auf den Platz der Festung -------------------------------------------
   await stoppeServer();
   {
     const db8 = liesDb();
     const f8 = db8.shared[feldKey];
+    /* Die Festung ausdruecklich wieder aufstellen. Die Messreihe in Abschnitt 7 raeumt sie ab
+       (messeFuhre loescht sie je Messung), und ohne sie ist `astFreiePlaetze` voellig zu Recht
+       der Meinung, der Platz sei frei - die Pruefung waere dann rot, ohne dass am Code etwas
+       falsch ist. Genau so ist sie beim Umbau von Abschnitt 7 einmal gefallen. */
+    f8.festung = { id: crypto.randomUUID(), stufe: 'sternenfeste', platz: festPlatz, sorte: 'eisen',
+      kernMax: 1200000, kern: 1200000, hort: 1000, hortProto: 5,
+      seit: Date.now(), letzteReifung: Date.now(), beitraege: {} };
+    delete f8.geraeumtBis;
     // Alle Plaetze ausser dem der Festung leeren und faellig stellen - der naechste Feldabruf
     // muss sie alle neu besetzen und darf dabei den Festungsplatz NIE treffen.
     for (let i = 0; i < 10; i++) {

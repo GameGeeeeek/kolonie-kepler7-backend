@@ -8191,14 +8191,35 @@ app.post('/api/asteroid/mine', authMiddleware, async (req, res) => {
   const festungHier = feld.festung;
   const blockade = festungHier ? (FESTUNG_STUFEN[festungHier.stufe] || FESTUNG_STUFEN.schanze).blockade : 0;
   const geraeumt = !festungHier && (feld.geraeumtBis || 0) > Date.now() ? FESTUNG_GERAEUMT_BONUS : 0;
-  /* Math.round und NICHT Math.floor: `1 - 0.55` ist in Gleitkomma 0.44999999999999996, und
-     abgerundet werden aus 100.000 Grundkapazitaet 44.999 statt 45.000 - eine Einheit, die dem
-     Spieler als krumme Zahl auffaellt, ohne dass es dafuer einen Grund gaebe. Wichtiger noch: Das
-     Frontend rechnet dieselbe Formel fuer die Vorschau, und eine Paritaetspruefung muesste sonst
-     das Gleitkomma-Rauschen zeichengenau nachbauen statt die Regel. Aufgerundet wird hoechstens
-     eine halbe Einheit - gegen eine Obergrenze im Zehntausenderbereich bedeutungslos. */
-  const grenzeMitFestung = Math.round(obergrenze * (1 - blockade) * (1 + geraeumt));
-  const menge = Math.max(0, Math.min(wunsch, vork.vorrat, grenzeMitFestung));
+  /* DIE BLOCKADE GREIFT AN DER GEWAEHRTEN MENGE, NICHT AN DER OBERGRENZE - und das ist die
+     Korrektur eines Fehlers, den der erste Entwurf hatte und den sein eigener Test nicht sah.
+
+     `obergrenze` ist die ANTI-BETRUGS-Schranke aus dem gespeicherten Spielstand, und sie hat
+     bewusst reichlich Luft (der Kommentar bei AST_MAX_JE_SCHUERFSCHIFF nennt "Faktor 3,5").
+     Sie bindet im echten Spiel praktisch nie - der Laderaum des Frontends ist deutlich kleiner.
+     Gemessen fuer vier typische Flotten (Frontend-Laderaum gegen `obergrenze * 0,45`):
+
+       50 Schuerfschiffe, keine Forschung     20.000  gegen  45.000   Blockade wirkungslos
+       50 Schuerfschiffe, Foerderung max      28.000  gegen  45.000   Blockade wirkungslos
+       16 Schuerf + 20 Frachter               14.960  gegen  27.900   Blockade wirkungslos
+       50 Schuerf + 100 Grossfrachter        178.000  gegen 382.500   Blockade wirkungslos
+
+     In KEINEM Fall haette der Spieler etwas von der Blockade gemerkt. Der erste HTTP-Test war nur
+     deshalb gruen, weil er `wunsch: 999999999` schickte und damit genau den Deckel mass statt der
+     Wirkung - Arbeitsregel 7 der Frontend-CLAUDE.md ("Messen, was gemessen werden soll, nicht den
+     Deckel") in Reinform.
+
+     Deshalb: erst die drei Schranken anwenden, DANN den Faktor auf das Ergebnis. Damit kuerzt die
+     Blockade das, was der Spieler wirklich bekommt, egal welche Schranke gerade bindet.
+     Zum Schluss noch einmal gegen den Vorrat gedeckelt: Der Geraeumt-Bonus (+15 %) darf einem
+     Brocken nicht mehr entnehmen, als er ueberhaupt enthaelt.
+
+     Math.round statt Math.floor, weil `1 - 0.55` in Gleitkomma 0.44999999999999996 ist - sonst
+     stuenden aus 100.000 krumme 44.999 da, und das Frontend muesste fuer seine Vorschau dasselbe
+     Rauschen zeichengenau nachbauen statt die Regel. */
+  const roh = Math.max(0, Math.min(wunsch, vork.vorrat, obergrenze));
+  const menge = Math.max(0, Math.min(vork.vorrat,
+    Math.round(roh * (1 - blockade) * (1 + geraeumt))));
   if (menge <= 0) return res.status(409).json({ error: 'Dieses Vorkommen ist erschöpft.', weg: true });
 
   vork.vorrat -= menge;

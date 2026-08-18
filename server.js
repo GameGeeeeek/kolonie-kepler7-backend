@@ -4265,6 +4265,10 @@ function loadOrInitGalaxy() {
   }
   if (!db.galaxy.unlockedAlienRaces) db.galaxy.unlockedAlienRaces = [];
   db.galaxy.unlockedAlienRaces = db.galaxy.unlockedAlienRaces.map(r => typeof r === 'string' ? { name: r, system: pickRandomFreeSystem() } : r);
+  // Die Nester (Phase 3). Ein Bestand ohne diese Felder ist der Normalfall, nicht der Sonderfall -
+  // sie entstehen erst, wenn NEST_SPAWN_AKTIV an ist.
+  if (!Array.isArray(db.galaxy.alienNester)) db.galaxy.alienNester = [];
+  if (!db.galaxy.alienPause || typeof db.galaxy.alienPause !== 'object') db.galaxy.alienPause = {};
   if (db.galaxy.activeWar === undefined) db.galaxy.activeWar = null;
   if (!db.galaxy.collapsedSystems) db.galaxy.collapsedSystems = {};
   if (db.galaxy.activeWormhole === undefined) db.galaxy.activeWormhole = null;
@@ -5147,6 +5151,12 @@ function galaxyTick() {
   resolveSeasonLeagueServer();
   resolveAllianceWarsServer();
   resolveBountyServer();
+
+  // Die Alien-Nester reifen, breiten sich aus und bringen Koeniginnen hervor (Phase 3). Steht der
+  // Schalter aus, kehrt nestTick sofort zurueck. Bewusst VOR npcEmpireStrength: Ab Phase 4 leitet
+  // sich dessen Zielwert aus der Stufensumme der Nester ab, und die soll dann die des aktuellen
+  // Takts sein, nicht die des vorigen.
+  nestTick(g);
 
   // NPC-Reiche wachsen langsam, gedeckelt bei 2.5x, damit es nicht unendlich eskaliert.
   g.npcEmpireStrength = Math.min(2.5, g.npcEmpireStrength * (1 + 0.002 + Math.random() * 0.003));
@@ -8685,6 +8695,228 @@ app.post('/api/asteroid/contest', authMiddleware, async (req, res) => {
       anderen kam. Dieselbe Ueberlegung fehlt beim Weltboss (dort zaehlt der volle Wurf) - hier ist
       bewusst abgewichen, weil der Hort anders als die Weltboss-Belohnung REIN anteilig ausgezahlt
       wird. */
+
+/* ===== ALIEN-NESTER (Phase 3, 18.08.2026) =====================================================
+   Konzept: docs/aliens-asteroidenfestungen-konzept.md im FRONTEND-Repo, Abschnitt 5.
+   Die Nester sind das Gegenstueck zu den Festungen: Die Festung STEHT und drosselt, das Nest
+   WAECHST und breitet sich aus. Wer nichts tut, hat in zwei Tagen mehr davon als gestern.
+
+   WO SIE WOHNEN: in `db.galaxy.alienNester`. Das ist keine Geschmacksfrage - db.galaxy ist fuer
+   Clients ueber `PUT /api/storage/:key` gar nicht erreichbar, anders als der Weltboss, dessen
+   Schluessel `worldboss:current` im geteilten Speicher liegt und deshalb 2026 eigens abgesichert
+   werden musste. Die Nester dorthin zu legen umgeht diese ganze Fehlerklasse von vornherein.
+   Nebeneffekt, der Arbeit spart: galaxyFuerClient() macht Object.assign({}, g, ...) - alles aus
+   db.galaxy geht damit automatisch an den Client, ohne eine Zeile Verdrahtung.
+
+   DER SCHALTER, wieder: Solange NEST_SPAWN_AKTIV aus ist, entsteht kein Nest, und der ganze
+   Abschnitt tut nichts. Dieselbe Begruendung wie bei FESTUNG_SPAWN_AKTIV/FESTUNG_BAUTEILE_AKTIV -
+   Backend und Frontend gehen ueber zwei getrennte fest verdrahtete Befehle desselben Webhooks
+   live und sind historisch mehrfach auseinandergelaufen. Umgelegt wird er im FRONTEND-PR der
+   Phase 3. */
+const NEST_SPAWN_AKTIV = false;
+
+/* Die vier Voelker. Der `name` muss WOERTLICH zu ALIEN_RACE_NAMES passen - darueber laeuft die
+   Zuordnung zwischen dem vorhandenen "Volk entdeckt"-Ereignis und seinem Nestbestand. Eine
+   Umbenennung dort ohne hier bricht die Verbindung still.
+   Die `schwaeche` folgt der Schreibweise von fleetHasShipType() (also 'destroyer', nicht
+   'destroyers') - dieselbe Kette wie beim Weltboss, damit keine zweite Bewertung danebensteht. */
+const ALIEN_VOELKER = {
+  kryll:     { name: 'Kryll-Schwarm',      schwaeche: 'jaeger',         reifeStd: 6,  lpFaktor: 0.8, ausbreitMult: 1.5, wandert: false },
+  xantheer:  { name: 'Xantheer-Kollektiv', schwaeche: 'bomber',         reifeStd: 10, lpFaktor: 1.4, ausbreitMult: 1.0, wandert: false },
+  vex:       { name: 'Nomaden von Vex',    schwaeche: 'destroyer',      reifeStd: 8,  lpFaktor: 1.0, ausbreitMult: 0,   wandert: true  },
+  verglueht: { name: 'Die Verglühten',     schwaeche: 'schlachtschiff', reifeStd: 8,  lpFaktor: 1.1, ausbreitMult: 1.0, wandert: false }
+};
+const ALIEN_SCHWAECHE_MULT = 1.25;   // wie beim Weltboss-Grundfall
+
+/* Die fuenf Stufen. DIE LP SIND GEGEN DIE BEREITS KALIBRIERTEN FESTUNGEN GERECHNET, nicht gegen
+   eine neu erfundene Referenzflotte - der erste Anlauf tat genau das und lieferte fuer die
+   Sternenfeste 18,8 Endspiel-Schlaege statt der 5, mit denen sie ausgeliefert ist. Der Massstab
+   war ein anderer (Forschung, Marken, Haltung), nicht die Zahl.
+   Gemessen an den Schlagkraeften des Festungs-Kapitels (7.500 / 44.000 / 240.000 je Schlag):
+
+     Sporenherd    40.000  ->  5,3 / 0,9 / 0,2 Schlaege   (Gegenstueck zur Schanze)
+     Brutkammer   120.000  -> 16,0 / 2,7 / 0,5
+     Schwarmstock 400.000  -> 53,3 / 9,1 / 1,7
+     Hochnest     1,2 Mio  -> 160  / 27,3 / 5,0           (exakt die Sternenfeste)
+     Koenigin       4 Mio  -> 533  / 90,9 / 16,7
+
+   Das Konzept sagt zur Koenigin "mit 40 Endspiel-Schlaegen ausgelegt" - gemessen sind es 16,7.
+   Bei 4 Stunden Abklingzeit je Spieler heisst das drei Kommandanten an einem Tag oder eine
+   Allianz an einem Abend; naeher am beschriebenen Gefuehl als vierzig Schlaege. Die ZAHLEN des
+   Konzepts bleiben, der Satz daneben war falsch (Frontend-Arbeitsregel 41).
+
+   `punkte` ist die einzige Groesse, mit der ein Nest auf die Galaxie wirkt - ihre Summe ueber
+   alle Nester steuert ab Phase 4 den Zielwert von npcEmpireStrength. Sie steht schon hier, damit
+   Phase 4 nichts an dieser Tabelle aendern muss. */
+const NEST_STUFEN = [
+  null,
+  { name: 'Sporenherd',   lp: 40000,   punkte: 1, kampfpunkte: 15,   xp: 120,  credits: 400 },
+  { name: 'Brutkammer',   lp: 120000,  punkte: 2, kampfpunkte: 45,   xp: 360,  credits: 1200 },
+  { name: 'Schwarmstock', lp: 400000,  punkte: 3, kampfpunkte: 130,  xp: 1000, credits: 3500 },
+  { name: 'Hochnest',     lp: 1200000, punkte: 4, kampfpunkte: 380,  xp: 3000, credits: 10000 },
+  { name: 'Königin',      lp: 4000000, punkte: 5, kampfpunkte: 1200, xp: 9000, credits: 30000 }
+];
+const NEST_MAX = 12;                      // galaxieweit gleichzeitig
+const NEST_ABKLING_MS = 4 * 3600 * 1000;  // je Nest und Spieler - kuerzer als bei der Festung, weil ein Nest davonlaeuft
+const NEST_WURF_MS = 8 * 3600 * 1000;
+const NEST_WURF_CHANCE = 0.35;
+const NEST_KOENIGIN_AB = 4;               // Nester eines Volkes, ab denen die Koenigin schluepft
+const NEST_PAUSE_MS = 72 * 3600 * 1000;   // Sperre des Volkes nach einem Koeniginnen-Fall
+const NEST_WANDER_MS = 12 * 3600 * 1000;  // nur die Nomaden von Vex
+const NEST_VERLUST = 0.10;                // Grundverlust des Angreifers je Schlag
+
+function nestVolkVonName(name) {
+  for (const [k, v] of Object.entries(ALIEN_VOELKER)) if (v.name === name) return k;
+  return null;
+}
+function nestStufe(n) { return NEST_STUFEN[Math.max(1, Math.min(5, n || 1))]; }
+function nestLpMax(volk, stufe) {
+  const v = ALIEN_VOELKER[volk] || { lpFaktor: 1 };
+  return Math.round(nestStufe(stufe).lp * v.lpFaktor);
+}
+function nestListe(g) {
+  if (!Array.isArray(g.alienNester)) g.alienNester = [];
+  return g.alienNester;
+}
+/* Wo darf ein Nest entstehen? Nach DERSELBEN Regel wie jedes andere ortsgebundene Ereignis -
+   occupiedSystems() haelt jedes System frei, in dem ein Spieler zu Hause ist. Dazu kein zweites
+   Nest im selben System und keines dort, wo eine Festung steht: Zwei angreifbare Ziele auf einem
+   Kartenknoten waeren fuer den Spieler nicht auseinanderzuhalten. */
+function nestSystemFrei(g, sysId) {
+  if (!sysId || !SYSTEMS.includes(sysId)) return false;
+  if (occupiedSystems().has(sysId)) return false;
+  if (g.collapsedSystems && g.collapsedSystems[sysId]) return false;
+  if (nestListe(g).some(n => n.sys === sysId)) return false;
+  const feld = db.shared[astFeldKey(sysId)];
+  if (feld && feld.festung) return false;
+  return true;
+}
+function nestNeu(g, volk, sysId, now) {
+  const nest = {
+    id: crypto.randomUUID(),
+    volk, sys: sysId, stufe: 1,
+    lp: nestLpMax(volk, 1), lpMax: nestLpMax(volk, 1),
+    seit: now, letzteReifung: now,
+    naechsterWurf: now + NEST_WURF_MS,
+    naechsteWanderung: ALIEN_VOELKER[volk] && ALIEN_VOELKER[volk].wandert ? now + NEST_WANDER_MS : 0,
+    beitraege: {}, schlaege: {}
+  };
+  nestListe(g).push(nest);
+  return nest;
+}
+/* Das `system`-Feld des vorhandenen "Volk entdeckt"-Eintrags auf das STAERKSTE Nest des Volkes
+   nachfuehren. Reine Ruecksicht auf den Deploy: Ein Frontend, das die Nester noch nicht kennt,
+   zeigt so weiterhin ein sinnvolles Alien-Abzeichen am richtigen Ort statt gar keins - und wenn
+   das Volk keine Nester mehr hat, bleibt der letzte bekannte Ort stehen statt zu verschwinden. */
+function nestOrteNachfuehren(g) {
+  for (const eintrag of (g.unlockedAlienRaces || [])) {
+    const volk = nestVolkVonName(eintrag && eintrag.name);
+    if (!volk) continue;
+    let bestes = null;
+    for (const n of nestListe(g)) {
+      if (n.volk !== volk) continue;
+      if (!bestes || n.stufe > bestes.stufe || (n.stufe === bestes.stufe && n.seit < bestes.seit)) bestes = n;
+    }
+    if (bestes) eintrag.system = bestes.sys;
+  }
+}
+/* DER TAKT. Laeuft im galaxyTick (alle 15 Minuten) - anders als der Hort der Festung, der LAZY
+   beim Lesen waechst. Der Unterschied hat einen Grund: Der Hort ist ein Zaehler, den nur der
+   Leser sieht; ein Nest VERAENDERT die Galaxie (es reift, es breitet sich aus, es bringt eine
+   Koenigin hervor), und diese Ereignisse gehoeren in den Weltentakt, nicht in einen
+   Kartenaufruf. Sonst haengt die Weltlage daran, wer wie oft die Karte oeffnet. */
+function nestTick(g) {
+  if (!NEST_SPAWN_AKTIV) return;
+  const now = Date.now();
+  const liste = nestListe(g);
+  g.alienPause = g.alienPause || {};
+
+  // 1) Reifen. Die LP wachsen MIT der Stufe, aber bereits angerichteter Schaden bleibt
+  //    angerichtet: lp steigt um dieselbe Differenz wie lpMax. Ein Nest, das beim Reifen voll
+  //    heilte, machte jeden Schlag wertlos, der vor dem Reifen fiel - und Warten waere die
+  //    beste Strategie fuer den Schwarm, nicht fuer den Spieler.
+  for (const n of liste) {
+    const v = ALIEN_VOELKER[n.volk];
+    if (!v || n.stufe >= 4) continue;                    // Stufe 5 ist die Koenigin, sie entsteht anders
+    const faellig = (n.letzteReifung || n.seit || now) + v.reifeStd * 3600 * 1000;
+    if (now < faellig) continue;
+    const alt = n.lpMax;
+    n.stufe += 1;
+    n.lpMax = nestLpMax(n.volk, n.stufe);
+    n.lp = Math.max(1, Math.round((n.lp || 0) + (n.lpMax - alt)));
+    n.letzteReifung = now;
+    pushGalaxyNews('ti-alien', 'Das Nest der ' + v.name + ' bei ' + n.sys + ' ist zum ' +
+      nestStufe(n.stufe).name + ' herangewachsen.');
+  }
+
+  // 2) Ausbreiten. Ab Stufe 3, alle 8 Stunden ein Wurf, in ein BENACHBARTES freies System.
+  //    "Benachbart" ist keine neue Rechnung: SYSTEM_NEIGHBORS fuehrt zu jedem System die vier
+  //    naechstgelegenen und wird beim Wochenwechsel mitgezogen - dieselbe Tabelle, nach der die
+  //    NPC-Fraktionen expandieren. Eine zweite Distanzregel waere eine zweite Wahrheit.
+  for (const n of liste.slice()) {
+    const v = ALIEN_VOELKER[n.volk];
+    if (!v || !(v.ausbreitMult > 0) || n.stufe < 3) continue;
+    if (now < (n.naechsterWurf || 0)) continue;
+    n.naechsterWurf = now + NEST_WURF_MS;
+    if (liste.length >= NEST_MAX) continue;              // Deckel: der Wurf verfaellt
+    if (Math.random() >= NEST_WURF_CHANCE * v.ausbreitMult) continue;
+    const frei = (SYSTEM_NEIGHBORS[n.sys] || []).filter(s => nestSystemFrei(g, s));
+    if (!frei.length) continue;
+    const ziel = frei[Math.floor(Math.random() * frei.length)];
+    nestNeu(g, n.volk, ziel, now);
+    pushGalaxyNews('ti-alien', 'Die ' + v.name + ' haben sich von ' + n.sys + ' nach ' + ziel +
+      ' ausgebreitet. Dort waechst ein neuer ' + NEST_STUFEN[1].name + '.');
+  }
+
+  // 3) Die Nomaden wandern, statt sich zu teilen. Ein Ziel, das man VERLIEREN kann, wenn man zu
+  //    lange zoegert - der Angriff fliegt dann ins Leere und die Flotte kommt ohne Kampf zurueck.
+  //    Die Beitraege reisen MIT: Wer Schaden angerichtet hat, hat ihn angerichtet.
+  for (const n of liste) {
+    const v = ALIEN_VOELKER[n.volk];
+    if (!v || !v.wandert || !n.naechsteWanderung || now < n.naechsteWanderung) continue;
+    n.naechsteWanderung = now + NEST_WANDER_MS;
+    const frei = (SYSTEM_NEIGHBORS[n.sys] || []).filter(s => nestSystemFrei(g, s));
+    if (!frei.length) continue;
+    const alt = n.sys;
+    n.sys = frei[Math.floor(Math.random() * frei.length)];
+    n.schlaege = {};                                     // die Abklingzeit haengt am ORT, nicht am Nest
+    pushGalaxyNews('ti-alien', 'Die ' + v.name + ' sind von ' + alt + ' nach ' + n.sys +
+      ' weitergezogen - ihr Nest ist dort nicht mehr zu finden.');
+  }
+
+  // 4) Die Koenigin. Ab NEST_KOENIGIN_AB Nestern eines Volkes schluepft sie am AELTESTEN; ab da
+  //    breitet sich dieses Volk nicht weiter aus - der Schwarm sammelt sich.
+  for (const volk of Object.keys(ALIEN_VOELKER)) {
+    const eigene = liste.filter(n => n.volk === volk);
+    if (eigene.length < NEST_KOENIGIN_AB) continue;
+    if (eigene.some(n => n.stufe === 5)) continue;
+    const aeltestes = eigene.reduce((a, b) => (a.seit <= b.seit ? a : b));
+    const alt = aeltestes.lpMax;
+    aeltestes.stufe = 5;
+    aeltestes.lpMax = nestLpMax(volk, 5);
+    aeltestes.lp = Math.max(1, Math.round((aeltestes.lp || 0) + (aeltestes.lpMax - alt)));
+    aeltestes.letzteReifung = now;
+    pushGalaxyNews('ti-alien', 'Bei ' + aeltestes.sys + ' ist die Königin der ' +
+      ALIEN_VOELKER[volk].name + ' geschlüpft. Faellt sie, faellt der ganze Schwarm.');
+  }
+
+  // 5) Erster Nachschub: Ein entdecktes Volk ohne Nest und ohne laufende Pause bekommt eines.
+  for (const eintrag of (g.unlockedAlienRaces || [])) {
+    const volk = nestVolkVonName(eintrag && eintrag.name);
+    if (!volk) continue;
+    if (liste.some(n => n.volk === volk)) continue;
+    if ((g.alienPause[volk] || 0) > now) continue;
+    if (liste.length >= NEST_MAX) continue;
+    const kandidat = nestSystemFrei(g, eintrag.system) ? eintrag.system : pickRandomFreeSystem();
+    if (!nestSystemFrei(g, kandidat)) continue;
+    nestNeu(g, volk, kandidat, now);
+    pushGalaxyNews('ti-alien', 'Die ' + ALIEN_VOELKER[volk].name + ' haben bei ' + kandidat +
+      ' einen ' + NEST_STUFEN[1].name + ' angelegt.');
+  }
+
+  nestOrteNachfuehren(g);
+}
+
 function festungFindeMission(save, missionId, sysId) {
   const flotten = [];
   if (save && save.fleet) flotten.push(save.fleet);
@@ -8858,6 +9090,160 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
     anteil: gefallen ? Math.round(meinAnteil * 1000) / 1000 : 0,
     teilnehmer: gefallen ? teilnehmer : Object.keys(fest.beitraege).length,
     naechsterSchlagAb: jetzt + FESTUNG_ABKLING_MS
+  });
+});
+
+
+function nestFindeMission(save, missionId, nestId) {
+  const flotten = [];
+  if (save && save.fleet) flotten.push(save.fleet);
+  if (save && save.colonies) for (const c of Object.values(save.colonies)) if (c && c.fleet) flotten.push(c.fleet);
+  for (const f of flotten) {
+    for (const m of (f.missions || [])) {
+      if (String(m.id) === String(missionId) && m.type === 'nest-angriff' && String(m.nestId) === String(nestId)) return m;
+    }
+  }
+  return null;
+}
+/* Ein Schlag gegen ein Nest. Gebaut nach dem Muster von /api/festung/angriff, NICHT nach
+   /api/worldboss/resolve - die drei Entscheidungen von dort gelten hier genauso:
+   (1) Die Abklingzeit liegt AM NEST (nest.schlaege[userId]), nicht im Spielstand. Der Spielstand
+       ist klientenautoritativ; ein geloeschtes Feld gaebe den naechsten Schlag sofort frei, und
+       die einzige Bremse der Mechanik waere per Entwicklerkonsole abschaltbar.
+   (2) Gezaehlt wird, was ANGEKOMMEN ist (lpVorher - lpNachher), nicht der volle Wurf. Sonst
+       stuende der letzte Angreifer bei einem Vielfachen des Anteils, der seiner Arbeit entspricht.
+   (3) Der Server schreibt den Spielstand des Angreifers NICHT. Die Verluste stehen in der
+       Antwort, sein Client bucht sie - damit entsteht das Wettrennen mit dem Autosave gar nicht.
+   Die Belohnung beim Fall geht ueber pushPendingReward an ALLE Beitragenden, auch an den
+   Anfragenden selbst: ein Weg fuer alle statt zweier, die auseinanderlaufen koennen. */
+app.post('/api/alien/nest-angriff', authMiddleware, async (req, res) => {
+  const nestId = String((req.body && req.body.nestId) || '');
+  const missionId = String((req.body && req.body.missionId) || '');
+  if (!nestId || !missionId) return res.status(400).json({ error: 'nestId und missionId erforderlich.' });
+
+  const g = loadOrInitGalaxy();
+  const liste = nestListe(g);
+  const nest = liste.find(n => n.id === nestId);
+  const save = astLeseSave(req.userId);
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern, dann angreifen.' });
+  const mission = nestFindeMission(save, missionId, nestId);
+  if (!mission || !mission.composition) {
+    return res.status(403).json({ error: 'Zu diesem Angriff ist keine Flotte im gespeicherten Spielstand unterwegs.' });
+  }
+  if (mission.endTime && mission.endTime > Date.now()) {
+    return res.status(400).json({ error: 'Deine Flotte ist noch unterwegs.', unterwegs: true });
+  }
+
+  /* Das Nest ist weg - gefallen oder weitergezogen. Beides ist KEIN Fehler des Spielers, also
+     kostet es ihn auch nichts: kein Schaden, keine Verluste, keine Abklingzeit. Die Flotte kommt
+     vollzaehlig zurueck, und die Antwort sagt WARUM. Ein stilles "ok" waere hier die
+     Falschaussage, vor der das ganze Projekt seine Anzeigestellen schuetzt. */
+  if (!nest) {
+    return res.status(200).json({ ok: true, verpasst: true, grund: 'gefallen',
+      text: 'Das Nest war bei der Ankunft bereits zerstört - dein Verband kehrt vollzählig zurück.' });
+  }
+  if (mission.system && nest.sys !== mission.system) {
+    return res.status(200).json({ ok: true, verpasst: true, grund: 'weitergezogen', neuesSystem: nest.sys,
+      text: 'Der Schwarm ist weitergezogen - dein Verband findet bei ' + mission.system + ' nichts mehr vor und kehrt zurück.' });
+  }
+
+  const jetzt = Date.now();
+  nest.schlaege = nest.schlaege || {};
+  const letzter = nest.schlaege[req.userId] || 0;
+  if (letzter && jetzt - letzter < NEST_ABKLING_MS) {
+    return res.status(403).json({ error: 'Deine Verbände haben dieses Nest erst vor Kurzem beschossen - der nächste Schlag ist in ' +
+      Math.ceil((letzter + NEST_ABKLING_MS - jetzt) / 60000) + ' Minuten möglich.', abklingzeit: true });
+  }
+
+  const volk = ALIEN_VOELKER[nest.volk] || { name: nest.volk, schwaeche: null };
+  const st = nestStufe(nest.stufe);
+  // Dritter Parameter 0: Der Weltboss-Schwaechenbonus gilt hier nicht - ein Nest hat keinen
+  // Archetyp. Die Volks-Schwaeche kommt gleich danach als EIGENER, flacher Faktor dazu.
+  const kraft = computeAttackPowerFromComposition(save, mission.composition, 0);
+  if (!(kraft > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
+  const trifftSchwaeche = !!(volk.schwaeche && fleetHasShipType(mission.composition, volk.schwaeche));
+  const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4) * (trifftSchwaeche ? ALIEN_SCHWAECHE_MULT : 1));
+
+  const lpVorher = nest.lp || 0;
+  nest.lp = Math.max(0, lpVorher - wurf);
+  const schaden = lpVorher - nest.lp;          // was ANGEKOMMEN ist
+
+  nest.beitraege = nest.beitraege || {};
+  const mein = nest.beitraege[req.userId] || { name: req.username || 'Kommandant', schaden: 0 };
+  mein.schaden = (mein.schaden || 0) + schaden;
+  mein.name = req.username || mein.name;
+  nest.beitraege[req.userId] = mein;
+  nest.schlaege[req.userId] = jetzt;
+
+  // Das Nest wehrt sich. Anteilig auf die losgeschickte Zusammensetzung; abgebucht wird im Client.
+  const quote = Math.min(0.5, NEST_VERLUST + Math.random() * 0.06);
+  const eigeneVerluste = {};
+  for (const [typ, n] of Object.entries(mission.composition)) {
+    if (typeof n !== 'number' || n <= 0) continue;
+    const weg = Math.min(n, Math.round(n * quote));
+    if (weg > 0) eigeneVerluste[typ] = weg;
+  }
+
+  const gefallen = nest.lp <= 0;
+  let meinAnteil = 0, teilnehmer = 0, schwarmGefallen = false, mitgerissen = 0;
+  if (gefallen) {
+    const summe = Object.values(nest.beitraege).reduce((a, b) => a + (b.schaden || 0), 0) || 1;
+    for (const [uid, b] of Object.entries(nest.beitraege)) {
+      const anteil = (b.schaden || 0) / summe;
+      if (!(anteil > 0)) continue;
+      teilnehmer++;
+      if (uid === req.userId) meinAnteil = anteil;
+      pushPendingReward(uid, {
+        type: 'alien-nest',
+        system: nest.sys, volk: nest.volk, volkName: volk.name,
+        stufe: nest.stufe, stufeName: st.name,
+        anteil: Math.round(anteil * 1000) / 1000,
+        kampfpunkte: Math.max(1, Math.round(st.kampfpunkte * anteil)),
+        xp: Math.max(1, Math.round(st.xp * anteil)),
+        credits: Math.max(1, Math.round(st.credits * anteil)),
+        koenigin: nest.stufe === 5,
+        zeit: jetzt
+      });
+    }
+    const idx = liste.indexOf(nest);
+    if (idx >= 0) liste.splice(idx, 1);
+
+    /* Faellt die KOENIGIN, stirbt der ganze Schwarm dieses Volkes. Das ist die Ausschuettung, auf
+       die eine Allianz hinarbeitet - und zugleich der Grund, warum Wachsenlassen eine ECHTE
+       Entscheidung ist: Wer frueh raeumt, zahlt wenig und bekommt wenig. */
+    if (nest.stufe === 5) {
+      schwarmGefallen = true;
+      for (let i = liste.length - 1; i >= 0; i--) {
+        if (liste[i].volk === nest.volk) { liste.splice(i, 1); mitgerissen++; }
+      }
+      g.alienPause = g.alienPause || {};
+      g.alienPause[nest.volk] = jetzt + NEST_PAUSE_MS;
+      pushGalaxyNews('ti-alien', 'Die Königin der ' + volk.name + ' bei ' + nest.sys + ' ist gefallen - ' +
+        'der ganze Schwarm zerfällt' + (mitgerissen ? ' (' + mitgerissen + ' weitere Nester)' : '') + '. ' +
+        'Das Volk sammelt sich für ' + Math.round(NEST_PAUSE_MS / 3600000) + ' Stunden.');
+    } else {
+      pushGalaxyNews('ti-alien', 'Der ' + st.name + ' der ' + volk.name + ' bei ' + nest.sys +
+        ' ist zerstört - ' + teilnehmer + ' Kommandant' + (teilnehmer === 1 ? '' : 'en') + ' teilen sich die Bergung.');
+    }
+    nestOrteNachfuehren(g);
+  }
+
+  console.log('[nest-angriff] userId=' + req.userId + ' nest=' + nestId + ' volk=' + nest.volk +
+    ' stufe=' + nest.stufe + ' schwaeche=' + trifftSchwaeche + ' schaden=' + schaden +
+    ' lp=' + (gefallen ? 'gefallen' : nest.lp) + '/' + nest.lpMax +
+    (schwarmGefallen ? ' SCHWARM ZERFALLEN (+' + mitgerissen + ')' : ''));
+  await saveDb();
+  res.json({
+    ok: true, schaden, gefallen,
+    trifftSchwaeche, schwaeche: volk.schwaeche,
+    lp: gefallen ? 0 : nest.lp, lpMax: nest.lpMax,
+    stufe: gefallen ? null : nest.stufe, stufeName: st.name,
+    volk: nest.volk, volkName: volk.name,
+    eigeneVerluste,
+    anteil: gefallen ? Math.round(meinAnteil * 1000) / 1000 : 0,
+    teilnehmer: gefallen ? teilnehmer : Object.keys(nest.beitraege).length,
+    schwarmGefallen, mitgerissen,
+    naechsterSchlagAb: jetzt + NEST_ABKLING_MS
   });
 });
 

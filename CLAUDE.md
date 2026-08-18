@@ -494,6 +494,106 @@ sind **Vergleiche zweier Schläge derselben Flotte**, nicht Blicke auf ein Feld:
 33.732 Kernschaden, Türme 30,5 % gegen 12,6 % Verluste. Ein Feld allein wäre die Beschriftung, nicht
 die Wirkung (Frontend-Arbeitsregel 61).
 
+## Alien-Nester (Phase 3, 18.08.2026)
+
+Das Gegenstück zu den Festungen: Die Festung **steht** und drosselt, das Nest **wächst** und breitet
+sich aus. Wer nichts tut, hat übermorgen mehr davon als heute.
+
+**`NEST_SPAWN_AKTIV` steht auf `false`** und wird im Frontend-PR der Phase 3 umgelegt – dieselbe
+Begründung wie bei den beiden Festungs-Schaltern. Solange er aus ist, kehrt `nestTick()` in der
+ersten Zeile zurück und der ganze Abschnitt tut nichts.
+
+**Wo sie wohnen: `db.galaxy.alienNester`.** Das ist keine Geschmacksfrage. `db.galaxy` ist für
+Clients über `PUT /api/storage/:key` **gar nicht erreichbar** – anders als der Weltboss, dessen
+Schlüssel `worldboss:current` im geteilten Speicher liegt und deshalb eigens abgesichert werden
+musste. Die Nester dorthin zu legen umgeht diese ganze Fehlerklasse von vornherein. Nebeneffekt,
+der Arbeit spart: `galaxyFuerClient()` macht `Object.assign({}, g, …)` – alles aus `db.galaxy`
+geht damit automatisch an den Client, ohne eine Zeile Verdrahtung.
+
+**Die LP sind gegen die BEREITS KALIBRIERTEN FESTUNGEN gerechnet, nicht gegen eine neue
+Referenzflotte** – und der erste Anlauf tat genau das Falsche. Frisch zusammengestellte Flotten
+lieferten 1.196 / 12.144 / 63.997 Schlagkraft; gegen die bräuchte die Sternenfeste 18,8
+Endspiel-Schläge statt der 5, mit denen sie ausgeliefert ist. **Der Maßstab war ein anderer**
+(Forschung, Marken, Haltung steckten in der Festungs-Kalibrierung drin), nicht die Zahl. Gegen den
+richtigen Maßstab (7.500 / 44.000 / 240.000 je Schlag):
+
+| Ziel | Einsteiger | Mittelfeld | Endspiel | × Sternenfeste |
+|---|---|---|---|---|
+| Sporenherd 40k | 5,3 | 0,9 | 0,2 | 0,03 |
+| Brutkammer 120k | 16,0 | 2,7 | 0,5 | 0,10 |
+| Schwarmstock 400k | 53,3 | 9,1 | 1,7 | 0,33 |
+| Hochnest 1,2 Mio | 160,0 | 27,3 | 5,0 | 1,00 |
+| Königin 4 Mio | 533,3 | 90,9 | **16,7** | 3,33 |
+
+Die Konzept-Zahlen halten damit alle stand – der Sporenherd ist das Gegenstück zur Schanze, das
+Hochnest exakt die Sternenfeste. **Falsch ist nur der Satz daneben:** Das Konzept sagt, die Königin
+sei „mit 40 Endspiel-Schlägen ausgelegt"; gemessen sind es 16,7. Bei 4 Stunden Abklingzeit je
+Spieler heißt das drei Kommandanten an einem Tag oder eine Allianz an einem Abend – näher am
+beschriebenen Gefühl als vierzig Schläge (Frontend-Arbeitsregel 41).
+
+### Vier Entscheidungen, die man kennen muss
+
+1. **Der Takt liegt im `galaxyTick`, nicht lazy beim Lesen** – anders als der Hort der Festung. Der
+   Unterschied hat einen Grund: Der Hort ist ein Zähler, den nur der Leser sieht; ein Nest
+   **verändert die Galaxie** (es reift, breitet sich aus, bringt eine Königin hervor), und diese
+   Ereignisse gehören in den Weltentakt. Sonst hinge die Weltlage daran, wer wie oft die Karte
+   öffnet.
+2. **Ein reifendes Nest HEILT NICHT.** `lp` steigt um dieselbe Differenz wie `lpMax`, angerichteter
+   Schaden bleibt angerichtet. Heilte es voll, wäre jeder Schlag davor wertlos – und Warten die
+   beste Strategie für den Schwarm statt für den Spieler. Gegenprobe gemessen: mit `lp = lpMax`
+   fällt `10c` mit `{"lp":96000,"erwartet":74000}`.
+3. **Die Abklingzeit liegt AM NEST** (`nest.schlaege[userId]`), nicht im Spielstand – dieselbe
+   Entscheidung wie bei der Festung und aus demselben Grund. Die Gegenprobe ist die Messung, die
+   die beiden Ablageorte überhaupt unterscheidet: Mit der Sperre im Spielstand gibt ein gelöschtes
+   Feld den nächsten Schlag sofort frei (gemessen: 200 statt 403, 31.113 Schaden).
+4. **„Weitergezogen" und „gefallen" kosten NICHTS** – keine Verluste, keine Abklingzeit, und die
+   Antwort nennt den **Grund**. Ein stilles `ok` wäre hier die Falschaussage, vor der dieses
+   Projekt seine Anzeigestellen schützt. Das ist zugleich die Eigenart der Nomaden von Vex: ein
+   Ziel, das man verlieren kann, wenn man zu lange zögert.
+
+**Die Königin reißt den ganzen Schwarm ihres Volkes mit** und setzt eine 72-Stunden-Pause. Das ist
+die Ausschüttung, auf die eine Allianz hinarbeitet – und der Grund, warum Wachsenlassen eine echte
+Entscheidung ist statt einer Formalität: Wer früh räumt, zahlt wenig und bekommt wenig.
+
+**Die Volksnamen sind eine KOPIE-FAMILIE.** `ALIEN_VOELKER[*].name` muss wörtlich zu
+`ALIEN_RACE_NAMES` passen – darüber läuft die Zuordnung zwischen dem vorhandenen „Volk
+entdeckt"-Ereignis und seinem Nestbestand. Eine Umbenennung auf einer Seite bricht sie still;
+`tests/test_alien_nester_http.js` 1a hält beide zusammen.
+
+### Der Test und zwei Lehren aus ihm
+
+`tests/test_alien_nester_http.js` (Port 3224, **40 Prüfungen, fünf Gegenproben** – Schwächenfaktor,
+angekommener Schaden, Heilung beim Reifen, Ablageort der Abklingzeit, Schwarm-Zerfall; alle in
+beide Richtungen gefahren, überall dieselbe Anzahl gelaufener Prüfungen). **Belegte Testports sind
+jetzt 3195–3200, 3210–3223 und 3224** – ein neuer Test nimmt 3225.
+
+**Der Test startet eine KOPIE von `server.js` mit umgelegtem Schalter.** Anders ginge es nicht:
+Solange `NEST_SPAWN_AKTIV` aus ist, tut `nestTick()` nichts, und der halbe Test hätte keinen
+Gegenstand. Die Kopie liegt im Repo-Verzeichnis (damit `require('./mailer')` auflöst) und wird im
+`process.on('exit')` weggeräumt. Damit misst er den echten Code mit genau der einen Zeile, die
+später ohnehin umgelegt wird – und er bleibt grün, egal wie der Schalter committet ist.
+
+Zwei Fallen, die je einen Anlauf gekostet haben:
+
+- **Ein `grep` nach `schwaeche:` trifft zwei Tabellen.** Die Namensprüfung suchte ungescopt und fand
+  neun Namen statt vier – die fünf zusätzlichen waren **Weltboss-Archetypen**, die dasselbe Feld
+  führen. Der Fehlschlag meldete sie als „fehlende Völker". Frontend-Arbeitsregel 39, hier im
+  Backend: Jede Suche nach einem Eintrag gehört auf den Block ihrer Tabelle gescopt, und der Anker
+  des Blocks gehört selbst geprüft.
+- **Eine Prüfung darf nicht an einer Momentaufnahme hängen.** `7c` verlangte zuerst GENAU ein
+  übriges Nest und fiel an einem Zufall: Der `galaxyTick` entdeckt mit 6 % je Takt ein neues Volk,
+  und der Nachschub-Zweig legt ihm sofort ein Nest an – völlig korrektes Verhalten, das mit dem
+  Königinnen-Fall nichts zu tun hat. Geprüft wird jetzt die REGEL („kein Nest des gefallenen
+  Volkes, das fremde steht noch"), und kein Zugriff im Test greift mehr über `[0]`.
+
+**Und eine dritte, die den Test selbst betraf** (Frontend-Arbeitsregel 34): Der Spielstand liegt in
+`db.private` in **zwei** Formen vor – als blanke Zeichenkette oder als `{ value, version }`, weil
+`setSaveValue()` die zweite schreibt. Der erste Entwurf nahm nur die erste an und **starb** an
+einem `JSON.parse('[object Object]')`, sobald eine Gegenprobe den Server dazu brachte, den
+Spielstand zu schreiben – 10 statt 40 Prüfungen, und der rote Exit-Code sah aus wie eine gelungene
+Gegenprobe. Seither lesen `liesSave()`/`schreibSave()` beide Formen, und die Gegenprobe zum
+Ablageort der Abklingzeit lässt sich überhaupt erst fahren.
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

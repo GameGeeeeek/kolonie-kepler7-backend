@@ -4214,7 +4214,8 @@ const WORLD_BOSS_ARCHETYPES = [
   { key: 'normal',   label: 'Wandelnder Koloss', hpMult: 1.0,  durH: 72, trait: 'Ein ausgewogener Gegner – gemeinsames Dauerfeuer bringt ihn zu Fall.' },
   { key: 'bastion',  label: 'Panzer-Bastion',    hpMult: 1.8,  durH: 96, trait: 'Extrem zäh (deutlich mehr HP), bleibt dafür länger – nur koordinierte Allianzen knacken ihn.' },
   { key: 'schwarm',  label: 'Schwarm-Titan',     hpMult: 0.55, durH: 36, trait: 'Wenig HP, aber kurzes Zeitfenster – schnell zuschlagen, sonst zieht er sich zurück!' },
-  { key: 'phantom',  label: 'Phasen-Phantom',    hpMult: 1.2,  durH: 60, trait: 'Wechselt ständig seine Deckung – seine Schwäche gegen bestimmte Schiffstypen wiegt hier besonders schwer.' }
+  { key: 'phantom',  label: 'Phasen-Phantom',    hpMult: 1.2,  durH: 60, trait: 'Wechselt ständig seine Deckung – seine Schwäche gegen bestimmte Schiffstypen wiegt hier besonders schwer.' },
+  { key: 'piraten',  label: 'Piratenboss',       hpMult: 2.0,  durH: 48, trait: 'Zäh wie kein zweiter (doppelte HP), zieht sich dafür deutlich früher zurück – wer mitverdienen will, muss schnell dabei sein.' }
 ];
 function spawnWorldBoss(g) {
   const users = Math.max(1, Object.keys(db.users).length);
@@ -5905,9 +5906,27 @@ const WORLDBOSS_ARCHETYPES_PLAYABLE = [
   { key: 'koloss',  schwaecheMult: 1.25, verlustMult: 1.0  },
   { key: 'bastion', schwaecheMult: 1.15, verlustMult: 1.35 },
   { key: 'schwarm', schwaecheMult: 1.25, verlustMult: 0.70 },
-  { key: 'phantom', schwaecheMult: 1.50, verlustMult: 1.0  }
+  { key: 'phantom', schwaecheMult: 1.50, verlustMult: 1.0  },
+  { key: 'piraten', schwaecheMult: 1.40, verlustMult: 1.20 }
 ];
-function worldBossArchetypeOf(level) { return WORLDBOSS_ARCHETYPES_PLAYABLE[(Math.max(1, level | 0) - 1) % WORLDBOSS_ARCHETYPES_PLAYABLE.length]; }
+// Die REIHENFOLGE steht bewusst in einer eigenen Tabelle und ist NICHT die Reihenfolge der
+// Archetypen selbst. Grund ist ein Zusammenspiel, das man leicht uebersieht: Der Bossname laeuft
+// mit `% 5` durch WORLDBOSS_NAMES, der Archetyp lief bisher mit `% 4` - die KOMBINATION aus beidem
+// wiederholte sich also erst nach kgV(5,4) = 20 Stufen. Ein fuenfter Archetyp haette daraus
+// kgV(5,5) = 5 gemacht: Wer Stufe 6 sah, saehe dieselbe Paarung wie auf Stufe 1. Die Erweiterung
+// haette die Abwechslung also VERVIERFACHT reduziert, obwohl sie eine Variante HINZUFUEGT.
+// 20 Positionen, jeder Archetyp genau viermal, nie zweimal hintereinander (auch nicht ueber den
+// Rundenwechsel 20 -> 1). Die Stufen 1-4 behalten ihre bisherige Zuordnung.
+const WORLDBOSS_ARCHETYPE_FOLGE = [
+  'koloss', 'bastion', 'schwarm', 'phantom', 'piraten',
+  'bastion', 'koloss', 'phantom', 'schwarm', 'piraten',
+  'schwarm', 'phantom', 'koloss', 'piraten', 'bastion',
+  'phantom', 'piraten', 'bastion', 'koloss', 'schwarm'
+];
+function worldBossArchetypeOf(level) {
+  const key = WORLDBOSS_ARCHETYPE_FOLGE[(Math.max(1, level | 0) - 1) % WORLDBOSS_ARCHETYPE_FOLGE.length];
+  return WORLDBOSS_ARCHETYPES_PLAYABLE.find(a => a.key === key) || WORLDBOSS_ARCHETYPES_PLAYABLE[0];
+}
 function fleetHasShipType(fleet, type) {
   if (!fleet) return false;
   const fleetKey = { jaeger:'jaeger', bomber:'bomber', cruiser:'cruisers', destroyer:'destroyers', schlachtschiff:'schlachtschiff' }[type] || type;

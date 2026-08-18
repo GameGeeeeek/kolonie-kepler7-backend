@@ -249,15 +249,19 @@ async function aendereDb(fn) {
       anteilSchild === '0.40' && anteilTuerme === '0.25', { schild: anteilSchild, tuerme: anteilTuerme });
     check('1b: festungSpawn legt beide an',
       /bauteile:[\s\S]{0,120}\{[\s\S]{0,400}schild:[\s\S]{0,300}tuerme:/.test(quelle));
-    /* Der Schalter, der diese Phase allein auslieferbar macht - dieselbe Zusicherung wie
-       FESTUNG_SPAWN_AKTIV in Phase 1. Solange er aus ist, entsteht keine Festung MIT Bauteilen,
-       und ohne Bauteile verhaelt sich alles wie vorher (Abschnitt 8 misst genau das).
-       Er wird im FRONTEND-PR der Phase 2 umgelegt; diese Pruefung haelt fest, dass er nicht
-       vorher kippt. */
+    /* Der Schalter, der diese Phase allein auslieferbar gemacht hat - dieselbe Zusicherung wie
+       FESTUNG_SPAWN_AKTIV in Phase 1, und dieselbe Umkehr nach der Auslieferung.
+       Solange er aus war, entstand keine Festung MIT Bauteilen, und ohne Bauteile verhielt sich
+       alles wie vorher (Abschnitt 8 misst genau das).
+       SEIT v8.575.0 steht das Frontend der Phase 2, also steht er auf true. Die Pruefung bleibt
+       und DREHT SICH UM: Ein Wechsel zurueck auf false ist ab jetzt eine bewusste Notabschaltung
+       und kein Versehen - aber er soll auffallen, statt still zu geschehen. */
     const schalter = (quelle.match(/const FESTUNG_BAUTEILE_AKTIV = (true|false);/) || [])[1];
     check('1c: der Bauteile-Schalter ist auffindbar', !!schalter, { steht_auf: schalter });
-    check('1d: er steht auf false, solange das Frontend der Phase 2 fehlt', schalter === 'false',
-      { steht_auf: schalter, hinweis: 'true ohne Frontend heisst: Schild kuerzt auf 35 %, niemand erklaert es' });
+    check('1d: und er steht auf true - das Frontend der Phase 2 ist ausgeliefert',
+      schalter === 'true',
+      { steht_auf: schalter,
+        hinweis: 'false heisst: Notabschaltung. Dann gehoert der Grund in die CLAUDE.md.' });
   }
 
   // ---- 2) Der Schild laesst nur 35 % durch ----------------------------------------------------

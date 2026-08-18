@@ -265,6 +265,34 @@ falschen Grund grün (beide Seiten `undefined`).
 Konzept: `docs/aliens-asteroidenfestungen-konzept.md` im FRONTEND-Repo. Hier stehen nur die
 Entscheidungen, die man kennen muss, bevor man etwas daran ändert.
 
+**`FESTUNG_SPAWN_AKTIV` steht auf `false`, und das ist kein Übersehen.** Solange der Schalter aus
+ist, entsteht keine Festung – und ohne Festung tut der ganze Abschnitt nichts. Der Grund ist die
+Auslieferung: Backend und Frontend gehen über **zwei getrennte** fest verdrahtete Befehle desselben
+Webhooks live, und sie sind historisch dreimal auseinandergelaufen. Ginge dieses Backend allein
+live, entstünde binnen Stunden eine Festung, und die Blockade kürzte die Abbauladung um bis zu
+55 % – während das Frontend die UNGEKÜRZTE Vorschau zeigt und das Feld `festung` nicht einmal
+kennt. Gemessen am Frontend-Code (`echt = daten.menge`, `weltraum_kolonie.html` Z. 55883): Der
+Spieler bekommt still weniger, als die Vorschau ihm versprach, ohne einen einzigen Hinweis worauf.
+Umgelegt wird der Schalter im **Frontend-PR der Phase 1**, nicht vorher. `test_festung_http.js`
+Abschnitt 10 hält ihn fest, damit er nicht versehentlich früher kippt.
+
+**Der Fund, der den Schalter erst nötig machte – `st.proto` war eine Zahl, die nur die ANKÜNDIGUNG
+las.** Die Stufentabelle führt neben `blockade` (Ladung) ein Feld `proto` (0,50/0,75/1,00) für die
+Protomaterie-Drosselung, die das Konzept als den eigentlichen Zahn der Blockade beschreibt. Ein
+`grep` nach `st.proto` fand einen Treffer und sah damit benutzt aus – der einzige Treffer war
+jedoch der **Galaxie-Nachrichtentext, der die Drosselung ankündigt**. Die Mechanik selbst gab es
+nicht. Der Grund liegt im Frontend: Die Protomaterie je Fuhre hängt allein an der **GRÖSSE** des
+Vorkommens (`proto: protoJeFuhre(a)`, Z. 55912 im Missionsstart und Z. 55722 in der Vorschau), nicht an der Ladung – die Ladungskürzung erreicht
+sie also nie. Behoben, indem `/api/asteroid/mine` den Faktor als **`protoBlockade`** mitschickt und
+das Frontend ihn multipliziert; der Server bleibt Autorität über den Faktor, dieselbe Arbeitsteilung
+wie bei `menge`.
+**Die übertragbare Lehre: Ein Konstantenfeld, das nur der Ankündigungstext liest, ist keine
+umgesetzte Mechanik – und ein `grep` nach dem Namen sagt das Gegenteil.** Wer prüfen will, ob eine
+Tabellenspalte wirklich wirkt, muss die Fundstellen einzeln ansehen und fragen, ob eine davon
+etwas BERECHNET. Das ist die Gegenrichtung zu Frontend-Arbeitsregel 32: Dort existiert eine Zahl
+nur zur Laufzeit und wird beim Suchen übersehen, hier existiert sie nur im Versprechen und wird
+beim Suchen fälschlich für vorhanden gehalten.
+
 **Wo die Festung wohnt:** in `db.shared['asteroids:<sys>'].festung`, also im selben Dokument wie die
 Vorkommen. Geschrieben wird es ausschließlich von den Asteroiden-Endpunkten – die generische
 Storage-Route ist seit dem 18.08.2026 durch `checkAsteroidKeyPermission()` gesperrt. Das war die
@@ -276,6 +304,26 @@ suchte das vorher an zwei Stellen selbst und hätte ein nachwachsendes Vorkommen
 Festung gesetzt – die wäre damit still verschwunden. Gemessen in der Gegenprobe: **6 von 6**
 Nachschub-Runden trafen den Festungsplatz. Ein dritter Aufrufer erbt das Verhalten jetzt automatisch
 (dieselbe Behandlung wie `kbMarkerFrei` im Frontend).
+
+**Die Kern-Lebenspunkte sind GERECHNET, nicht geschätzt.** Gemessen über `rawFleetPower` +
+`diminishingShipCount` (Schwelle 300, danach halber Wert) für drei Ausbaustufen, dazu die üblichen
+Multiplikatoren aus `computeAttackPowerFromComposition`: je Schlag rund **7.500 / 44.000 / 240.000**.
+Daraus die Kerne 30.000 / 250.000 / 1.200.000, also vier bis sieben Schläge für ein Konto der
+passenden Stufe – bei 6 h Abklingzeit ein bis zwei Tage allein. Der erste Entwurf stand bei 120.000
+für die Schanze; das wären für ihr eigentliches Publikum **neunzehn** Schläge gewesen, fast fünf
+Tage, ausgerechnet am Einsteigerziel. Zur Einordnung: Der Weltboss startet bei 50.000 LP und wächst
+um Faktor 1,6 je Stufe – die Schanze liegt darunter, das Kastell etwa bei Stufe 5, die Sternenfeste
+bei Stufe 8. **Wer diese Zahlen anfasst, rechnet sie gegen echte Flottenkräfte nach**, nicht gegen
+das Gefühl (Frontend-Arbeitsregel 41: ein Konzept ist kein Messergebnis).
+
+**Der Hort trägt eine `sorte` aus `AST_SORTEN`** – kein Schmuck, sondern die Vermeidung eines
+zweiten Begriffs: Der Server verteilt in diesem ganzen Modul keine Ressourcen, er führt nur Sorte
+und Menge, das Frontend bildet daraus seine T1-Ressourcen ab. Eine Festung mit Sorte läuft damit
+durch dieselbe Abbildung wie jede Abbaufuhre. Die **Protomaterie dagegen führt der Hort IMMER**,
+unabhängig von der Sorte (bei den Vorkommen trägt sie nur `urmaterie`). Das ist Absicht und der
+Kern der Belohnung: Sie ist die einzige Größe, die im Endspiel nicht in der Eigenproduktion
+untergeht – 8,81 Mio. Erz je Stunde gegen 11 bis 32 Protomaterie. Hinge sie an der Sorte, wäre die
+Belohnung in neun von zehn Fällen wertlos und die Festung für entwickelte Konten kein Ziel.
 
 **Der Hort wächst LAZY beim Lesen** (`festungReifen`, aus `letzteReifung`), nicht im galaxyTick: Der
 Takt läuft alle 15 Minuten, das Feld wird viel häufiger gelesen, und ein Zähler, der nur beim Tick
@@ -312,8 +360,18 @@ Paritätsprüfung müsste sonst das Rauschen zeichengenau nachbauen statt die Re
 
 ### Die Lehre aus dem Test dieses Bereichs
 
-`tests/test_festung_http.js` (Port 3221, 28 Prüfungen, fünf Gegenproben). Eine Falle daraus, die
-jeder Test mit mehreren Serverstarts auf derselben DB vermeiden muss:
+`tests/test_festung_http.js` (Port 3221, **33 Prüfungen, sieben Gegenproben** – Abklingzeit,
+Schadenszählung, Blockade, Geräumt-Bonus, Platzkollision, `protoBlockade`, Spawn-Schalter; alle in
+beide Richtungen gefahren, überall dieselbe Anzahl gelaufener Prüfungen). **Belegte Testports sind
+jetzt 3195–3200, 3210–3219, 3220 (`test_serverstart.js`) und 3221** – ein neuer Test nimmt 3222
+(Arbeitsregel 29).
+
+Zwei Zahlen aus den Gegenproben, die den Wert der jeweiligen Entscheidung belegen: Mit dem vollen
+Wurf statt dem angekommenen Schaden stünde der letzte Angreifer bei **84,2 %** des Hortes statt bei
+40 %. Und ohne `astFreiePlaetze` trafen **6 von 6** Nachschub-Runden den Platz der Festung – sie
+wäre still verschwunden.
+
+Eine Falle daraus, die jeder Test mit mehreren Serverstarts auf derselben DB vermeiden muss:
 
 **Eine Änderung an der DB-DATEI, während der Server noch läuft, ist beim nächsten `stoppeServer()`
 wieder weg.** SIGTERM löst den Graceful Shutdown aus, und der flusht die im Speicher gehaltene `db`

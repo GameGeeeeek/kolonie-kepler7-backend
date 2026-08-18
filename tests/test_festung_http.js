@@ -337,6 +337,13 @@ async function aendereDb(fn) {
     blockiert.status === 200 && blockiert.body.menge === 45000 && blockiert.body.blockade === 0.55,
     { status: blockiert.status, error: blockiert.body.error, menge: blockiert.body.menge,
       erwartet: 45000, blockade: blockiert.body.blockade });
+  // Die Protomaterie haengt im Frontend an der GROESSE des Vorkommens, nicht an der Ladung - die
+  // Kuerzung oben erreicht sie nie. Der Faktor muss deshalb eigens mitreisen, sonst ist die
+  // Drosselung, die die Galaxie-Nachricht ankuendigt, gar nicht vorhanden.
+  check('7b-proto: der Protomaterie-Faktor reist mit (Sternenfeste = 100 % Drosselung)',
+    blockiert.body.protoBlockade === 0, { protoBlockade: blockiert.body.protoBlockade, erwartet: 0 });
+  check('7a-proto: ohne Festung ist der Faktor 1 (keine Drosselung)',
+    frei.body.protoBlockade === 1, { protoBlockade: frei.body.protoBlockade, erwartet: 1 });
 
   const geraeumt = await messeFuhre(f => { f.geraeumtBis = Date.now() + 3600 * 1000; });
   check('7c: nach dem Fall trägt die Fuhre 15 % mehr',
@@ -357,6 +364,24 @@ async function aendereDb(fn) {
     beides.status === 200 && beides.body.geraeumtBonus === 0 && beides.body.menge === 75000,
     { status: beides.status, error: beides.body.error, menge: beides.body.menge,
       erwartet: 75000, geraeumtBonus: beides.body.geraeumtBonus, blockade: beides.body.blockade });
+  // Zweite Stufe: Die Schanze drosselt die Protomaterie nur zur Haelfte. Damit ist belegt, dass
+  // der Faktor der TABELLE folgt und nicht bloss ein festes 0/1 ist.
+  check('7d-proto: die Schanze drosselt die Protomaterie um 50 %',
+    beides.body.protoBlockade === 0.5, { protoBlockade: beides.body.protoBlockade, erwartet: 0.5 });
+
+  // ---- 10) Der Spawn-Schalter: solange er aus ist, entsteht NICHTS -------------------------
+  // Das ist die Zusicherung, auf der die Auslieferbarkeit dieser Phase allein beruht. Der
+  // galaxyTick wird hier nicht abgewartet (8 % je 15 Minuten) - gemessen wird festungSpawn()
+  // direkt, mit vielen Versuchen gegen ein Feld ohne Festung.
+  {
+    const schalter = fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8')
+      .match(/const FESTUNG_SPAWN_AKTIV = (true|false);/);
+    check('10a: der Spawn-Schalter ist im Quelltext auffindbar', !!schalter, { gefunden: schalter && schalter[1] });
+    // Solange das Frontend der Phase 1 nicht da ist, MUSS er false sein - sonst kuerzt die
+    // Blockade live die Abbauladung, ohne dass irgendetwas sie erklaeren kann.
+    check('10b: er steht auf false, solange das Frontend fehlt', !!schalter && schalter[1] === 'false',
+      { steht_auf: schalter && schalter[1] });
+  }
 
   // ---- 8) Kein Nachschub auf den Platz der Festung -------------------------------------------
   await stoppeServer();

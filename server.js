@@ -7926,6 +7926,27 @@ function astBelegtZahl(feld) {
    Schürfflotte, 32 mit dreien. Ein Sternenfesten-Hort von 480 ist damit 44 Stunden Förderung,
    aufgeteilt unter allen Angreifern. Die T1-Beute bleibt als Belohnung für das junge Konto, das
    die Schanze in Heimatnähe schleift - dort sind 120.000 Einheiten tatsächlich Geld. */
+/* DER SCHALTER, DER DIESE PHASE ALLEIN AUSLIEFERBAR MACHT (18.08.2026).
+   Steht er auf false, entsteht keine Festung - und ohne Festung tut der ganze Rest dieses
+   Abschnitts nichts: Die Blockade in /api/asteroid/mine findet keine, /api/festung/angriff
+   antwortet "steht keine Festung mehr", astFreiePlaetze verhält sich wie zuvor.
+
+   WARUM ES IHN BRAUCHT: Backend und Frontend gehen über zwei GETRENNTE fest verdrahtete Befehle
+   desselben Webhooks live (siehe "Deploy"), und historisch sind sie dreimal auseinandergelaufen.
+   Ginge dieses Backend allein live, entstünde binnen Stunden eine Festung, und die Blockade
+   kürzte die Abbauladung um bis zu 55 % - während das Frontend die UNGEKÜRZTE Vorschau zeigt,
+   das Feld `festung` gar nicht kennt und nichts davon erklären kann. Gemessen am Frontend-Code
+   (`echt = daten.menge`, Z. 55880): Der Spieler bekommt still weniger, als die Vorschau ihm
+   versprochen hat, ohne einen einzigen Hinweis worauf. Das ist genau die Sorte stiller
+   Verschlechterung, für die ein Spieler zu Recht einen Fehlerbericht schreibt.
+   Dazu käme eine ausdrückliche Falschaussage: Die Galaxie-Nachricht beim Entstehen KÜNDIGT die
+   Protomaterie-Drosselung an, und die kann ohne das Frontend gar nicht wirken (siehe
+   `protoBlockade` in /api/asteroid/mine).
+
+   UMLEGEN auf true gehört in den Frontend-PR der Phase 1 - also erst, wenn Karte, Kartenmenü,
+   Angriffsmission und die gekürzte Vorschau wirklich da sind. Vorher ist er eine Lüge gegenüber
+   dem Spieler, nachher eine überflüssige Zeile. */
+const FESTUNG_SPAWN_AKTIV = false;
 const FESTUNG_MAX_AKTIV = 6;              // von 20 Gürtelsystemen
 const FESTUNG_SPAWN_CHANCE = 0.08;        // je galaxyTick (15 Min) -> im Mittel eine je 3,1 Stunden
 const FESTUNG_ABKLING_MS = 6 * 3600 * 1000;   // je Festung UND Spieler, nicht global
@@ -8001,6 +8022,7 @@ function festungReifen(feld, now) {
 }
 // Entstehen: im galaxyTick, in ein Gürtelsystem OHNE Festung und MIT einem freien Platz.
 function festungSpawn(felder) {
+  if (!FESTUNG_SPAWN_AKTIV) return null;   // siehe die Begründung bei der Konstante
   const aktive = Object.values(felder).filter(x => x && x.festung).length;
   if (aktive >= FESTUNG_MAX_AKTIV) return null;
   const now = Date.now();
@@ -8189,8 +8211,21 @@ app.post('/api/asteroid/mine', authMiddleware, async (req, res) => {
   db.shared[astFeldKey(sysId)] = feld;
   console.log('[asteroid-mine] userId=' + req.userId + ' sys=' + sysId + ' platz=' + platz + ' menge=' + menge + ' rest=' + Math.max(0, vork.vorrat));
   await saveDb();
+  /* `protoBlockade` reist MIT, obwohl der Server die Protomaterie gar nicht bucht - und genau
+     deshalb muss sie mit. Die Menge je Fuhre hängt im Frontend allein an der GRÖSSE des
+     Vorkommens (`proto: protoJeFuhre(a)`, weltraum_kolonie.html Z. 55912), nicht an der Ladung;
+     die Ladungskürzung oben erreicht sie also nie. Ohne dieses Feld wäre die
+     Protomaterie-Drosselung, die das Konzept als eigentlichen Zahn der Blockade beschreibt und
+     die die Galaxie-Nachricht beim Entstehen ausdrücklich ANKÜNDIGT, schlicht nicht vorhanden -
+     eine Zahl in einer Tabelle, die niemand liest (nachgemessen: `st.proto` wurde vor dieser
+     Zeile ausschliesslich im Ankündigungstext verwendet).
+     Der Server bleibt damit die Autorität über den Faktor, das Frontend multipliziert ihn nur -
+     dieselbe Arbeitsteilung wie bei `menge`. Ein Client, der das Feld nicht kennt, verhält sich
+     wie bisher; deshalb ist die Blockade ohne das Frontend wirkungslos und der Spawn-Schalter
+     FESTUNG_SPAWN_AKTIV steht bis dahin auf false. */
+  const protoBlockade = festungHier ? 1 - (FESTUNG_STUFEN[festungHier.stufe] || FESTUNG_STUFEN.schanze).proto : 1;
   res.json({ ok: true, menge, sorte: vork.sorte, groesse: vork.groesse, rest: Math.max(0, vork.vorrat),
-    blockade, geraeumtBonus: geraeumt });
+    blockade, geraeumtBonus: geraeumt, protoBlockade });
 });
 
 // ===== Schürfrechte (Konzept 6.1/6.2/6.4): ein Vorkommen für genau einen Spieler reservieren =====

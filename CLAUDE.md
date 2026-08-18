@@ -431,6 +431,56 @@ Behoben nicht durch vier von Hand richtig sortierte Stellen, sondern durch **ein
 (`aendereDb(fn)`: stoppen → lesen → ändern → schreiben → starten), der die falsche Reihenfolge
 strukturell unmöglich macht.
 
+## Asteroidenfestungen Phase 2: die drei Bauteile (18.08.2026)
+
+Schildkuppel und Geschütztürme neben dem Kern, dazu die **Zielwahl** und die **Rollenfaktoren**.
+`FESTUNG_BAUTEILE_AKTIV` steht auf `false` und wird im Frontend-PR der Phase 2 umgelegt – dieselbe
+Begründung wie bei `FESTUNG_SPAWN_AKTIV`, nur gemessen an anderen Zahlen: Ginge dieses Backend
+allein live, richtete ein Kernschlag nur noch 35 % an und kostete 30 % statt 12 % der Flotte,
+während das Frontend `bauteile` nicht kennt und weder das eine erklären noch das andere abwenden
+kann.
+
+**Die LP der Bauteile sind ANTEILE des Kerns** (Schild 40 %, Türme 25 %), keine eigenen Zahlen –
+eine Größe zu pflegen statt drei, und sie skalieren automatisch mit der Stufe. Gerechnet gegen die
+gemessenen Schlagkräfte: mit einer PASSEND spezialisierten Flotte (Rollenfaktor 1,6) fällt der
+Schild in 1,0–1,4 Schlägen, die Türme in 0,6–0,9. Der erste Entwurf stand bei 30 % / 20 %; damit
+fielen beide in UNTER einem Schlag, und der ganze Abschnitt wäre eine Formalität statt einer
+Entscheidung gewesen.
+
+**Warum sich der Umweg über den Schild überhaupt lohnt, nachgerechnet:** Solange er steht, kosten
+Kerntreffer das 2,86-fache. Ihn zu brechen lohnt, solange seine LP unter dem 2,98-fachen des Kerns
+liegen – bei 40 % mit großem Abstand erfüllt. Die Mechanik trägt also, ohne dass die Zahl fein
+justiert werden müsste.
+
+**Der Rollenfaktor rechnet nach ANTEIL an der Angriffskraft, nicht nach Anwesenheit.** Ein einzelner
+Bomber in einer Kreuzerflotte darf den Schildbonus nicht auslösen. Der Faktor läuft linear zwischen
+`min` (0,70) und `max` (1,60); gemessen: reine Bomberflotte 1,60, gemischte 1,24, ohne Bomber 0,70.
+Die Gegenprobe mit „nach Anwesenheit" liefert für die gemischte Flotte 1,60 – ein einzelner Bomber
+würde reichen. Der Anteil kommt aus `rawFleetPower` je Teilmenge, damit dasselbe Gewicht zählt wie
+im echten Kampf statt einer zweiten Bewertung daneben.
+
+**Schaden an Bauteilen zählt zu 60 % auf den Hortanteil.** Ohne diesen Ausgleich würde niemand den
+Schild angreifen – die Arbeit nützt dem VERBAND, nicht dem eigenen Zähler, und die ganze
+Rollen-Mechanik wäre tot. Gewichtet und nicht voll: Wer den Kern zerlegt, hat die Festung gestürzt;
+wer den Schild gebrochen hat, hat es ermöglicht.
+
+**Der Schild regeneriert 2 %/Std., die Türme nie – und ein ZERSTÖRTER Schild kommt nicht wieder.**
+Sonst wäre der erkämpfte Vorteil vor der zweiten Welle wieder weg. Die Regeneration läuft im selben
+Lazy-Takt wie der Hort.
+
+**Ist das gewählte Bauteil schon zerstört, geht der Schaden OHNE Rollenfaktor auf den Kern**
+(`ziel: 'kern-ersatz'`). Die Flotte wird nicht dafür bestraft, dass ein Mitstreiter schneller war –
+bekommt aber auch keinen Bonus für ein Ziel, das sie nicht trifft.
+
+**Die Zielwahl steht in der MISSION, nicht im Request.** `/api/festung/angriff` nimmt weiterhin
+keinen einzigen Kampfparameter aus dem Body – dieselbe Eigenschaft wie bei den Gefechtsvorräten und
+`/api/attack`.
+
+`tests/test_festung_bauteile_http.js` (Port 3222, 28 Prüfungen, vier Gegenproben). Die Messungen
+sind **Vergleiche zweier Schläge derselben Flotte**, nicht Blicke auf ein Feld: Schild 8.821 gegen
+33.732 Kernschaden, Türme 30,5 % gegen 12,6 % Verluste. Ein Feld allein wäre die Beschriftung, nicht
+die Wirkung (Frontend-Arbeitsregel 61).
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

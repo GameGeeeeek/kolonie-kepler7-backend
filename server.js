@@ -8001,6 +8001,80 @@ function festungStufeFuer(sysId) {
   for (const k of FESTUNG_STUFEN_ORDNUNG) if (f < FESTUNG_STUFEN[k].fernBis) return k;
   return 'sternenfeste';
 }
+/* ===== Die drei Bauteile (Phase 2, 18.08.2026) ===============================================
+   Eine Festung hat neben dem Kern zwei angreifbare Teile, und die drei vorhandenen Konterrollen
+   entscheiden, wie gut man sie trifft. Es wird KEINE neue Rolle und keine neue Tabelle erfunden -
+   COUNTER_ROLE_OF ordnet bereits 24 Schiffsklassen einer der drei Rollen zu.
+
+   DIE LEBENSPUNKTE SIND ANTEILE DES KERNS, keine eigenen Zahlen. Damit gibt es eine Größe zu
+   pflegen statt drei, und die Bauteile skalieren automatisch mit der Stufe.
+   Gerechnet gegen die gemessenen Schlagkräfte (7.500 / 44.000 / 240.000 je Stufe, siehe Kommentar
+   bei FESTUNG_STUFEN) - mit einer PASSEND spezialisierten Flotte, also Rollenfaktor 1,6:
+
+     Schild 40 % des Kerns  ->  1,0 bis 1,4 Schläge
+     Türme  25 % des Kerns  ->  0,6 bis 0,9 Schläge
+
+   Der erste Entwurf stand bei 30 % / 20 % - damit fielen beide in UNTER einem Schlag, und der
+   ganze Abschnitt wäre eine Formalität statt einer Entscheidung gewesen. Mit einer gemischten
+   Flotte (Faktor ~1,0) sind es rund 1,6 bis 2,2 bzw. 1,0 bis 1,4 Schläge; Spezialisierung zahlt
+   sich also sichtbar aus, ohne dass der Umweg die Belagerung verdoppelt.
+
+   WARUM SICH DER UMWEG ÜBER DEN SCHILD ÜBERHAUPT LOHNT, nachgerechnet: Solange er steht, zählen
+   Kerntreffer nur zu 35 %, der Kern kostet also das 2,86-fache. Ihn zu brechen lohnt, solange
+   seine LP unter dem 2,98-fachen des Kerns liegen - bei 40 % ist das mit großem Abstand erfüllt.
+   Die Mechanik ist damit tragfähig, ohne dass die Zahl fein justiert werden müsste.
+
+   ROLLENFAKTOR NACH ANTEIL, nicht nach Anwesenheit: Ein einzelner Bomber in einer Flotte aus
+   zweihundert Kreuzern darf den Schildbonus nicht auslösen. Der Faktor läuft linear zwischen
+   `min` (keine passende Rolle) und `max` (reine passende Flotte); `anteil` ist der Anteil an der
+   ANGRIFFSKRAFT, nicht an der Schiffszahl - sonst wären hundert Jäger mehr wert als zehn
+   Superschlachtschiffe. Dieselbe "nach Anteil"-Konstruktion nutzt der reguläre Kampf bereits. */
+/* DERSELBE SCHUTZ WIE BEI FESTUNG_SPAWN_AKTIV, und aus demselben gemessenen Grund. Ginge dieses
+   Backend allein live, bekaeme jede neue Festung eine Schildkuppel - und ein Kernschlag richtete
+   dann nur noch 35 % an, waehrend die Verluste von 12 % auf 30 % springen. Das Frontend kennt
+   `bauteile` nicht, kann also weder das eine erklaeren noch das andere: keine Zielwahl, keine
+   Balken, kein Hinweis. Der Spieler saehe nur, dass sein Verband ploetzlich dreimal so teuer ist
+   und ein Drittel ausrichtet.
+   Steht der Schalter auf false, entsteht KEINE Festung mit Bauteilen - und eine Festung ohne
+   `bauteile` verhaelt sich exakt wie in Phase 1 (festungTeilSteht liefert false, jeder Zweig
+   faellt zurueck; test_festung_bauteile_http.js Abschnitt 8 haelt das fest).
+   Umgelegt wird er im FRONTEND-PR der Phase 2. */
+const FESTUNG_BAUTEILE_AKTIV = false;
+const FESTUNG_BAUTEILE = {
+  schild: { name: 'Schildkuppel',  anteilKern: 0.40, rolle: 'bomber', min: 0.70, max: 1.60,
+            regenProStd: 0.02, kernDurchlass: 0.35 },
+  tuerme: { name: 'Geschütztürme', anteilKern: 0.25, rolle: 'abfang', min: 0.70, max: 1.60,
+            verlustQuote: 0.30 }
+};
+// Der Kern selbst traegt ebenfalls einen Rollenfaktor, nur flacher - er ist das Ziel, das man
+// auch ohne Spezialisierung sinnvoll angreifen kann.
+const FESTUNG_KERN_ROLLE = { rolle: 'kapital', min: 0.85, max: 1.30 };
+// Schaden an Schild und Tuermen zaehlt zu 60 % auf den Hortanteil. Ohne diesen Ausgleich wuerde
+// niemand den Schild angreifen - die Arbeit nuetzt dem Verband, nicht dem eigenen Zaehler, und die
+// ganze Rollen-Mechanik waere tot.
+const FESTUNG_BAUTEIL_BEITRAG = 0.60;
+/* Der ANTEIL einer Rolle an der Angriffskraft einer Zusammensetzung. Gerechnet ueber
+   rawFleetPower je Teilmenge - damit zaehlt dasselbe Gewicht wie im echten Kampf, statt dass eine
+   zweite Bewertung danebensteht. */
+function festungRollenAnteil(composition, rolle, marks) {
+  const ganz = rawFleetPower(composition, 1, 1, marks);
+  if (!(ganz > 0)) return 0;
+  const nurRolle = {};
+  for (const [k, n] of Object.entries(composition || {})) {
+    if (typeof n === 'number' && n > 0 && COUNTER_ROLE_OF[k] === rolle) nurRolle[k] = n;
+  }
+  return Math.max(0, Math.min(1, rawFleetPower(nurRolle, 1, 1, marks) / ganz));
+}
+function festungRollenFaktor(composition, spec, marks) {
+  const anteil = festungRollenAnteil(composition, spec.rolle, marks);
+  return spec.min + (spec.max - spec.min) * anteil;
+}
+// Steht das Bauteil noch? `lp > 0` - der Eintrag bleibt nach der Zerstoerung mit lp 0 stehen,
+// damit die Anzeige "zerstoert" von "gab es nie" unterscheiden kann.
+function festungTeilSteht(fest, key) {
+  const t = fest && fest.bauteile && fest.bauteile[key];
+  return !!(t && (t.lp || 0) > 0);
+}
 /* DIE EINE Stelle, die "welche Plätze sind frei" beantwortet - und die einzige, die von der
    Festung weiss. astNachschub() suchte das an ZWEI Stellen selbst und hätte ein neues Vorkommen
    auf die Festung gesetzt, die damit still verschwunden wäre. Eine Funktion statt zweier Kopien,
@@ -8031,6 +8105,18 @@ function festungReifen(feld, now) {
   const vorherT = f.hort || 0, vorherP = f.hortProto || 0;
   f.hort = Math.min(st.hortDeckel, vorherT + st.hortStd * stunden);
   f.hortProto = Math.min(st.protoDeckel, vorherP + st.protoStd * stunden);
+  /* DER SCHILD REGENERIERT, die Tuerme nie. Damit ist "einmal anfangen und drei Wochen liegen
+     lassen" kein Weg, und eine Belagerung bleibt eine Belagerung. Zerstoert ist zerstoert: Ein
+     gefallener Schild kommt NICHT wieder (lp 0 bleibt 0) - sonst waere der Vorteil, den man sich
+     erkaempft hat, vor der zweiten Welle wieder weg.
+     2 % der Maximal-LP je Stunde, im selben Lazy-Takt wie der Hort. */
+  const sch = f.bauteile && f.bauteile.schild;
+  if (sch && (sch.lp || 0) > 0 && (sch.lp || 0) < (sch.lpMax || 0)) {
+    const seitS = Math.max(0, now - (sch.letzteReifung || f.seit || now));
+    sch.lp = Math.min(sch.lpMax, sch.lp + sch.lpMax * FESTUNG_BAUTEILE.schild.regenProStd * (seitS / 3600000));
+    sch.lp = Math.round(sch.lp);
+    sch.letzteReifung = now;
+  }
   f.letzteReifung = now;
   // Immer true: Auch wenn beide Horte am Deckel stehen und sich die ZAHLEN nicht ändern, ist
   // `letzteReifung` fortgeschrieben - das Feld muss geschrieben werden, sonst rechnet der nächste
@@ -8070,6 +8156,17 @@ function festungSpawn(felder) {
     stufe, platz: frei[Math.floor(Math.random() * frei.length)],
     sorte: astZieheGewichtet(AST_SORTEN).key,
     kernMax: st.kern, kern: st.kern,
+    // Die Bauteile entstehen MIT der Festung und leiten ihre LP aus dem Kern ab (siehe
+    // FESTUNG_BAUTEILE). Eine Festung OHNE `bauteile` - also jede aus Phase 1 und jede, solange
+    // FESTUNG_BAUTEILE_AKTIV aus ist - verhaelt sich weiterhin genau wie vorher: festungTeilSteht()
+    // liefert false, und jeder Zweig darunter faellt auf das Verhalten ohne Bauteile zurueck.
+    // Damit braucht es keine Wanderung des Bestands, und ein halb ausgerollter Stand tut niemandem weh.
+    bauteile: !FESTUNG_BAUTEILE_AKTIV ? undefined : {
+      schild: { lp: Math.round(st.kern * FESTUNG_BAUTEILE.schild.anteilKern),
+                lpMax: Math.round(st.kern * FESTUNG_BAUTEILE.schild.anteilKern), letzteReifung: now },
+      tuerme: { lp: Math.round(st.kern * FESTUNG_BAUTEILE.tuerme.anteilKern),
+                lpMax: Math.round(st.kern * FESTUNG_BAUTEILE.tuerme.anteilKern) }
+    },
     hort: 0, hortProto: 0,
     seit: now, letzteReifung: now,
     beitraege: {}
@@ -8615,17 +8712,49 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
 
   const st = FESTUNG_STUFEN[fest.stufe] || FESTUNG_STUFEN.schanze;
   // Dritter Parameter 0: Der Weltboss-Schwaechenbonus gilt hier nicht - eine Festung hat keinen
-  // Archetyp. Die Rollenfaktoren der drei Bauteile kommen erst in Phase 2 dazu.
+  // Archetyp.
   const kraft = computeAttackPowerFromComposition(save, mission.composition, 0);
   if (!(kraft > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
   const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4));
 
+  /* ZIELWAHL (Phase 2). Sie steht in der MISSION, nicht im Request - genau wie der
+     Gefechtsvorrat und aus demselben Grund: /api/festung/angriff nimmt keinen einzigen
+     Kampfparameter aus dem Body entgegen, das ist eine Eigenschaft dieses Endpunkts.
+     Ist das gewaehlte Bauteil schon zerstoert (ein Mitstreiter war schneller), geht der Schaden
+     OHNE Rollenfaktor auf den Kern: Die Flotte wird nicht dafuer bestraft, dass jemand anders
+     schneller war - aber sie bekommt auch nicht den Bonus fuer ein Ziel, das sie nicht trifft. */
+  let ziel = String(mission.ziel || 'kern');
+  if (ziel !== 'kern' && !festungTeilSteht(fest, ziel)) ziel = 'kern-ersatz';
+
+  let schaden = 0, teilSchaden = 0, zerstoert = null, rollenFaktor = 1;
+  const marks = save.shipMarks;
   const kernVorher = fest.kern;
-  fest.kern = Math.max(0, kernVorher - wurf);
-  const schaden = kernVorher - fest.kern;      // siehe Entscheidung 3 oben
+
+  if (ziel === 'schild' || ziel === 'tuerme') {
+    const spec = FESTUNG_BAUTEILE[ziel];
+    rollenFaktor = festungRollenFaktor(mission.composition, spec, marks);
+    const teil = fest.bauteile[ziel];
+    const vorher = teil.lp || 0;
+    teil.lp = Math.max(0, vorher - Math.round(wurf * rollenFaktor));
+    teilSchaden = vorher - teil.lp;              // wieder: was ANGEKOMMEN ist
+    if (teil.lp <= 0 && vorher > 0) zerstoert = ziel;
+  } else {
+    // Auf den Kern - mit Rollenfaktor, ausser das Ersatzziel greift.
+    rollenFaktor = ziel === 'kern' ? festungRollenFaktor(mission.composition, FESTUNG_KERN_ROLLE, marks) : 1;
+    // Solange die Schildkuppel steht, kommt nur ein Bruchteil durch. DAS ist ihr Zweck, und
+    // deshalb lohnt der Umweg ueber sie (Rechnung im Kommentar bei FESTUNG_BAUTEILE).
+    const durchlass = festungTeilSteht(fest, 'schild') ? FESTUNG_BAUTEILE.schild.kernDurchlass : 1;
+    fest.kern = Math.max(0, kernVorher - Math.round(wurf * rollenFaktor * durchlass));
+    schaden = kernVorher - fest.kern;
+  }
+
   fest.beitraege = fest.beitraege || {};
   const mein = fest.beitraege[req.userId] || { name: req.username || 'Kommandant', schaden: 0 };
-  mein.schaden = (mein.schaden || 0) + schaden;
+  /* Schaden an Schild und Tuermen zaehlt zu 60 % auf den Hortanteil. Ohne diesen Ausgleich wuerde
+     niemand den Schild angreifen - die Arbeit nuetzt dem VERBAND, nicht dem eigenen Zaehler.
+     Gewichtet, nicht voll: Wer den Kern zerlegt, hat die Festung gestuerzt; wer den Schild
+     gebrochen hat, hat es ermoeglicht. Beides zaehlt, nicht gleich viel. */
+  mein.schaden = (mein.schaden || 0) + schaden + Math.round(teilSchaden * FESTUNG_BAUTEIL_BEITRAG);
   mein.name = req.username || mein.name;
   fest.beitraege[req.userId] = mein;
   fest.schlaege[req.userId] = jetzt;
@@ -8633,7 +8762,12 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
 
   // Die Festung schiesst zurueck. Anteilig auf die LOSGESCHICKTE Zusammensetzung; abgebucht wird
   // im Client, deshalb steht hier nur die Liste.
-  const quote = Math.min(0.5, st.verlust + Math.random() * 0.06);
+  /* Stehen die Geschuetztuerme, kostet der Anflug ein Vielfaches. Das ist ihr Zweck und der
+     Grund, warum es sich lohnt, sie zuerst zu brechen: Der Wert, den man sich damit erkauft,
+     ist der ganze Sinn der Bauteile. Der 50-%-Deckel bleibt aussen. */
+  const quote = Math.min(0.5, (festungTeilSteht(fest, 'tuerme')
+    ? FESTUNG_BAUTEILE.tuerme.verlustQuote
+    : st.verlust) + Math.random() * 0.06);
   const eigeneVerluste = {};
   for (const [typ, n] of Object.entries(mission.composition)) {
     if (typeof n !== 'number' || n <= 0) continue;
@@ -8679,10 +8813,22 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
   db.shared[astFeldKey(sysId)] = feld;
 
   console.log('[festung-angriff] userId=' + req.userId + ' sys=' + sysId + ' stufe=' + st.name +
-    ' schaden=' + schaden + ' kern=' + (gefallen ? 'gefallen' : fest.kern) + '/' + st.kern);
+    ' ziel=' + ziel + ' rolle=' + rollenFaktor.toFixed(2) +
+    ' kernschaden=' + schaden + ' teilschaden=' + teilSchaden + (zerstoert ? ' ZERSTOERT:' + zerstoert : '') +
+    ' kern=' + (gefallen ? 'gefallen' : fest.kern) + '/' + st.kern);
   await saveDb();
+  // Der Zustand der Bauteile reist MIT - das Frontend zeigt daraus die Balken und weiss, welche
+  // Ziele es ueberhaupt anbieten darf. Ein Client, der das Feld nicht kennt, ignoriert es.
+  const bauteileAus = {};
+  for (const k of Object.keys(FESTUNG_BAUTEILE)) {
+    const t = fest.bauteile && fest.bauteile[k];
+    if (t) bauteileAus[k] = { lp: Math.max(0, Math.round(t.lp || 0)), lpMax: t.lpMax || 0 };
+  }
   res.json({
-    ok: true, schaden, gefallen, eigeneVerluste,
+    ok: true, schaden, teilSchaden, ziel, zerstoert,
+    rollenFaktor: Math.round(rollenFaktor * 100) / 100,
+    bauteile: gefallen ? {} : bauteileAus,
+    gefallen, eigeneVerluste,
     kern: gefallen ? 0 : fest.kern, kernMax: st.kern,
     stufe: gefallen ? null : fest.stufe, stufeName: st.name,
     anteil: gefallen ? Math.round(meinAnteil * 1000) / 1000 : 0,

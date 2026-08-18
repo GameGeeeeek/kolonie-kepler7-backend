@@ -681,6 +681,31 @@ function checkWorldBossPermission(req, key, isWrite) {
   if (neu.contributions && Object.keys(neu.contributions).length) return 'Ein frisch erschienener Weltboss hat noch keine Beitragenden.';
   return null;
 }
+// asteroids:<sys> (18.08.2026, Fund beim Entwurf der Asteroidenfestungen): das Gürtelfeld eines
+// Systems lief durch KEINE der Rechteprüfungen - es war die einzige Schlüsselfamilie im geteilten
+// Speicher ohne Regel (nachgezählt über `grep -o "db.shared\[[^]]*\]"`, entdoppelt).
+//
+// Gemessen an einem echten Server (tests/test_asteroid_schluessel_http.js), bevor diese Funktion
+// existierte: Ein beliebiges zweites Konto schreibt mit EINER Anfrage die Zeichenkette "kaputt"
+// auf `asteroids:abyss` und bekommt HTTP 200. Danach ist das Feld weg - astAlleFelder() prüft
+// `typeof feld !== 'object'`, findet eine Zeichenkette und erzeugt das Gürtelfeld komplett neu.
+// Alle Schürfrechte ALLER Spieler in diesem System sind damit gelöscht, ihre stationierten
+// Eskorten stranden. Zwanzig Anfragen räumen die Schürfrechte der ganzen Galaxie ab.
+//
+// Das ist genau die Grenze, die dieses Projekt verteidigt: "Kann ich etwas anfassen, das ANDEREN
+// gehört oder allen gemeinsam?" - hier beides. Dieselbe Klasse wie der Weltboss-Schlüssel darüber.
+//
+// SCHREIBEN ist deshalb vollständig gesperrt, nicht eingeschränkt: Es gibt keinen legitimen
+// Schreibzugriff über die generische Route. Alle echten Schreibwege laufen über eigene Endpunkte
+// (/api/asteroid/mine|claim|release|contest|escort), die den Spielstand selbst lesen und die
+// Menge selbst begrenzen. Nachgeprüft im Frontend: `storageSet('asteroids:…')` kommt dort NICHT
+// vor, die Spieldatei ruft ausschließlich die dedizierten Endpunkte.
+// LESEN bleibt offen - der Gürtel ist öffentlich, und /api/asteroid/field liefert ihn ohnehin.
+function checkAsteroidKeyPermission(req, key, isWrite) {
+  if (!key.startsWith('asteroids:')) return null;
+  if (!isWrite) return null;
+  return 'Das Asteroidenfeld wird ausschließlich über die Asteroiden-Endpunkte verändert.';
+}
 // Gibt bei erlaubtem Zugriff null zurück, sonst einen Fehlertext für die 403-Antwort.
 function checkAllianceKeyPermission(req, key, isWrite) {
   const m = key.match(/^alliance:([^:]+):(.+)$/);
@@ -1957,7 +1982,7 @@ app.get('/api/storage/:key', authMiddleware, (req, res) => {
   const shared = req.query.shared === 'true';
   const key = req.params.key;
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false) || checkChatKeyPermission(req, key, false) || checkHallOfFamePermission(req, key, false) || checkMoonDefensePermission(req, key, false) || checkWorldBossPermission(req, key, false) || checkMissionsKeyPermission(req, key, false);
+    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false) || checkChatKeyPermission(req, key, false) || checkHallOfFamePermission(req, key, false) || checkMoonDefensePermission(req, key, false) || checkWorldBossPermission(req, key, false) || checkMissionsKeyPermission(req, key, false) || checkAsteroidKeyPermission(req, key, false);
     if (denyReason) return res.status(403).json({ error: denyReason });
   }
   const store = shared ? db.shared : (db.private[req.userId] || {});
@@ -1995,7 +2020,7 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   const expectedVersion = req.body ? req.body.expectedVersion : undefined;
 
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true) || checkWorldBossPermission(req, key, true) || checkMissionsKeyPermission(req, key, true);
+    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true) || checkWorldBossPermission(req, key, true) || checkMissionsKeyPermission(req, key, true) || checkAsteroidKeyPermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
     // Mengenschutz (siehe MAX_SHARED_VALUE_BYTES oben). Bewusst NACH der Rechteprüfung und VOR jedem
     // Schreibzugriff - und bewusst nur für NEUE Schlüssel, damit die normale Spielschleife

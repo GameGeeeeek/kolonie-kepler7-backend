@@ -525,6 +525,41 @@ systemctl list-timers --all
   räumt sie ab – mit Vorsicht, der Startbefehl beginnt mit `npm install`, und ein Fehlschlag dort
   lässt den Container gar nicht erst hochkommen.
 
+**NACHTRAG 18.08.2026, 16:44 UTC – es ist am selben Tag WIEDER passiert, nach der Behebung von
+10:40.** Gemessen von aussen nach der Methode oben, mit beiden Kontrollen im selben Lauf, über
+sechs Minuten und neunzehn Abfragen hinweg:
+
+```
+POST /api/festung/angriff        404   (neu mit #126, gerade gemergt)
+POST /api/musterattack/create    401   (alte Kontrollroute)
+POST /api/gibtesnicht            404   (Negativkontrolle)
+```
+
+Der FRONTEND-Deploy desselben Webhooks lief im selben Moment einwandfrei durch – `www.gamegeeeeek.de`
+lieferte v8.568.0 innerhalb von Sekunden nach dem Merge. **Zum vierten Mal dieselbe Asymmetrie.**
+
+**Was daran neu und wichtig ist:** Die Korrektur von 10:40 (Nutzer-crontab von Sascha geleert) war
+also entweder unvollständig, oder es gibt eine weitere Ursache. Der Verdacht „Cron-Konkurrent" ist
+damit NICHT mehr die naheliegendste Erklärung – die fünf Ablagen waren am Morgen geprüft. Wer das
+nächste Mal hier landet, prüft deshalb **zuerst**, ob überhaupt ein Pull versucht wurde: Der
+Webhook schreibt seinen Fehler ausschliesslich ins Container-Log, und nichts holt ihn später nach.
+
+```
+docker logs --tail 80 kepler7-backend | grep -i "deploy-webhook"
+```
+
+Steht dort „erfolgreich", ist der Pull durch und nodemon hat nicht neu gestartet (dann `docker
+restart kepler7-backend` – Vorsicht, der Startbefehl beginnt mit `npm install`). Steht dort ein
+Fehler, nennt er die Ursache. Steht dort GAR NICHTS zum Zeitpunkt des Merges, kam der Webhook nicht
+an – dann liegt es an GitHub (Settings → Webhooks → Recent Deliveries) und nicht am Pi.
+
+**Was in diesem Fall NICHT kaputt war, und warum das kein Zufall ist:** `FESTUNG_SPAWN_AKTIV` stand
+auf `false`, und das ausgelieferte Frontend ruft keine der neuen Routen auf (nachgemessen: 0 Treffer
+für `festung/angriff` und `protoBlockade` in der Spieldatei). Der hängende Deploy war damit eine
+reine Pipeline-Störung ohne jede Spielerwirkung – anders als am 15.08., als das Frontend live Routen
+abfragte, die es serverseitig nicht gab. **Genau dafür ist der Schalter da** (Frontend-Arbeitsregel
+60): Er macht die Reihenfolge der beiden Deploys gleichgültig, statt auf sie zu hoffen.
+
 **Der Wiederherstellungsweg, falls es wieder passiert** (am 18.08. so gefahren, jede Stufe gemessen,
 vorher von vier Prüfläufen adversarisch zerlegt):
 

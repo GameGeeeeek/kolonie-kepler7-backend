@@ -386,10 +386,17 @@ async function aendereDb(fn) {
     const schalter = fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8')
       .match(/const FESTUNG_SPAWN_AKTIV = (true|false);/);
     check('10a: der Spawn-Schalter ist im Quelltext auffindbar', !!schalter, { gefunden: schalter && schalter[1] });
-    // Solange das Frontend der Phase 1 nicht da ist, MUSS er false sein - sonst kuerzt die
-    // Blockade live die Abbauladung, ohne dass irgendetwas sie erklaeren kann.
-    check('10b: er steht auf false, solange das Frontend fehlt', !!schalter && schalter[1] === 'false',
+    /* Seit dem 18.08.2026 steht er auf TRUE - das Frontend der Phase 1 ist da (v8.569.0), und
+       damit ist die Bedingung erfuellt, unter der er auf false stehen musste.
+       Die Pruefung bleibt und dreht sich um: Sie haelt fest, dass der Schalter EXISTIERT und
+       einen der beiden Werte traegt. Ein Wechsel auf false ist ab jetzt eine bewusste
+       Notabschaltung und kein Versehen - aber er soll auffallen, statt still zu geschehen. */
+    check('10b: der Schalter trägt einen der beiden Werte', !!schalter && (schalter[1] === 'true' || schalter[1] === 'false'),
       { steht_auf: schalter && schalter[1] });
+    check('10c: und er steht auf true - die Festungen sind ausgeliefert',
+      !!schalter && schalter[1] === 'true',
+      { steht_auf: schalter && schalter[1],
+        hinweis: 'false heisst: Notabschaltung. Dann gehoert der Grund in die CLAUDE.md.' });
   }
 
   // Gegenrichtung zum Umbau: Die Obergrenze aus dem Spielstand muss WEITERHIN binden, sonst waere

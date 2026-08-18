@@ -7955,10 +7955,15 @@ function astBelegtZahl(feld) {
    Protomaterie-Drosselung an, und die kann ohne das Frontend gar nicht wirken (siehe
    `protoBlockade` in /api/asteroid/mine).
 
-   UMLEGEN auf true gehört in den Frontend-PR der Phase 1 - also erst, wenn Karte, Kartenmenü,
-   Angriffsmission und die gekürzte Vorschau wirklich da sind. Vorher ist er eine Lüge gegenüber
-   dem Spieler, nachher eine überflüssige Zeile. */
-const FESTUNG_SPAWN_AKTIV = false;
+   UMGELEGT AM 18.08.2026 mit dem Frontend der Phase 1 (v8.569.0). Die Bedingung, die hier stand,
+   ist damit erfüllt und nachgemessen: Die Karte zeichnet die Festung als eigenen Knoten, das
+   Kartenmenü nennt Kern/Blockade/Hort und trägt den Angriff, die Abbau-Vorschau BENENNT die
+   Drosselung und zeigt die gekürzte Ladung (gemessen 2,4k statt 5,4k), und der Missionsstart
+   schickt weiterhin den ROHEN Wunsch, damit nicht doppelt gekürzt wird.
+   Der Schalter bleibt trotzdem stehen: Er ist der Ausschalter, falls sich an den Festungen etwas
+   als schädlich erweist - eine Zeile umzulegen ist schneller und sicherer, als einen Merge
+   zurückzunehmen, und alles andere (Endpunkte, Härtungen, Tests) bleibt dabei unangetastet. */
+const FESTUNG_SPAWN_AKTIV = true;
 const FESTUNG_MAX_AKTIV = 6;              // von 20 Gürtelsystemen
 const FESTUNG_SPAWN_CHANCE = 0.08;        // je galaxyTick (15 Min) -> im Mittel eine je 3,1 Stunden
 const FESTUNG_ABKLING_MS = 6 * 3600 * 1000;   // je Festung UND Spieler, nicht global

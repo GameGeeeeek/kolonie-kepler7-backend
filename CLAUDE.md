@@ -265,7 +265,23 @@ falschen Grund grün (beide Seiten `undefined`).
 Konzept: `docs/aliens-asteroidenfestungen-konzept.md` im FRONTEND-Repo. Hier stehen nur die
 Entscheidungen, die man kennen muss, bevor man etwas daran ändert.
 
-**`FESTUNG_SPAWN_AKTIV` steht auf `false`, und das ist kein Übersehen.** Solange der Schalter aus
+**`FESTUNG_SPAWN_AKTIV` steht seit dem 18.08.2026 auf `true`** – das Frontend der Phase 1 ist
+ausgeliefert (v8.569.0), und damit ist die Bedingung erfüllt, unter der er auf `false` stehen
+musste. Nachgemessen im Browser, bevor der Schalter kippte: Die Karte zeichnet die Festung als
+eigenen Knoten (32×32 px, sichtbar – nicht nur im DOM), das Kartenmenü nennt Kern, Blockade und
+Hort, die Abbau-Vorschau **benennt** die Drosselung und zeigt die gekürzte Ladung (2,4k statt
+5,4k), und der Missionsstart schickt weiterhin den ROHEN Wunsch, damit der Server nicht ein
+zweites Mal kürzt.
+
+**Der Schalter bleibt trotzdem stehen** – als Notausschalter. Eine Zeile umzulegen ist schneller
+und sicherer, als einen Merge zurückzunehmen, und Endpunkte, Härtungen und Tests bleiben dabei
+unangetastet. `test_festung_http.js` Abschnitt 10 prüft jetzt, dass er auf `true` steht; ein
+Wechsel auf `false` ist damit eine bewusste Notabschaltung, die auffällt, statt still zu geschehen –
+und ihr Grund gehört dann hierher.
+
+Warum er überhaupt gebaut wurde, bleibt als Begründung wichtig:
+
+**Er stand zunächst auf `false`, und das war kein Übersehen.** Solange der Schalter aus
 ist, entsteht keine Festung – und ohne Festung tut der ganze Abschnitt nichts. Der Grund ist die
 Auslieferung: Backend und Frontend gehen über **zwei getrennte** fest verdrahtete Befehle desselben
 Webhooks live, und sie sind historisch dreimal auseinandergelaufen. Ginge dieses Backend allein

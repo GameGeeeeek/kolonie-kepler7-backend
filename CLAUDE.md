@@ -434,11 +434,24 @@ strukturell unmöglich macht.
 ## Asteroidenfestungen Phase 2: die drei Bauteile (18.08.2026)
 
 Schildkuppel und Geschütztürme neben dem Kern, dazu die **Zielwahl** und die **Rollenfaktoren**.
-`FESTUNG_BAUTEILE_AKTIV` steht auf `false` und wird im Frontend-PR der Phase 2 umgelegt – dieselbe
-Begründung wie bei `FESTUNG_SPAWN_AKTIV`, nur gemessen an anderen Zahlen: Ginge dieses Backend
-allein live, richtete ein Kernschlag nur noch 35 % an und kostete 30 % statt 12 % der Flotte,
-während das Frontend `bauteile` nicht kennt und weder das eine erklären noch das andere abwenden
-kann.
+
+**`FESTUNG_BAUTEILE_AKTIV` steht seit dem 18.08.2026 auf `true`** – das Frontend der Phase 2 ist
+ausgeliefert (v8.575.0), und damit ist die Bedingung erfüllt, unter der er auf `false` stehen
+musste. Die Zielwahl steht, die Bauteil-Balken stehen, und der Hilfetext leitet Durchlass,
+Verlustquote und Rollenfaktoren aus der Frontend-Kopie dieser Tabelle ab, die
+`tests/test_festung_paritaet.js` gegen `server.js` hält – inzwischen auch `regenProStd` und
+`FESTUNG_BAUTEIL_BEITRAG`, die dort **ausschließlich** stehen, damit der Hilfetext seine Zahlen
+ableiten kann statt sie zu behaupten.
+
+**Der Schalter bleibt trotzdem stehen** – als Notausschalter, aus demselben Grund wie
+`FESTUNG_SPAWN_AKTIV`. `test_festung_bauteile_http.js` 1d prüft jetzt, dass er auf `true` steht; ein
+Wechsel auf `false` ist damit eine bewusste Notabschaltung, die auffällt statt still zu geschehen –
+und ihr Grund gehört dann hierher.
+
+Warum er überhaupt gebaut wurde, bleibt als Begründung wichtig: Ginge dieses Backend allein live,
+richtete ein Kernschlag nur noch 35 % an und kostete 30 % statt 12 % der Flotte, während das
+Frontend `bauteile` nicht kennt und weder das eine erklären noch das andere abwenden kann. Der
+Spieler sähe nur, dass sein Verband plötzlich dreimal so teuer ist und ein Drittel ausrichtet.
 
 **Die LP der Bauteile sind ANTEILE des Kerns** (Schild 40 %, Türme 25 %), keine eigenen Zahlen –
 eine Größe zu pflegen statt drei, und sie skalieren automatisch mit der Stufe. Gerechnet gegen die

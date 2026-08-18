@@ -8053,8 +8053,17 @@ function festungStufeFuer(sysId) {
    Steht der Schalter auf false, entsteht KEINE Festung mit Bauteilen - und eine Festung ohne
    `bauteile` verhaelt sich exakt wie in Phase 1 (festungTeilSteht liefert false, jeder Zweig
    faellt zurueck; test_festung_bauteile_http.js Abschnitt 8 haelt das fest).
-   Umgelegt wird er im FRONTEND-PR der Phase 2. */
-const FESTUNG_BAUTEILE_AKTIV = false;
+
+   SEIT DEM 18.08.2026 STEHT ER AUF TRUE - das Frontend der Phase 2 ist ausgeliefert (v8.575.0),
+   und damit ist die Bedingung erfuellt, unter der er auf false stehen musste: Die Zielwahl steht,
+   die Bauteil-Balken stehen, und der Hilfetext nennt Durchlass, Verlustquote und Rollenfaktoren
+   aus DIESER Tabelle (ueber die Frontend-Kopie, die tests/test_festung_paritaet.js dagegenhaelt).
+   Der Schalter bleibt trotzdem stehen - als Notausschalter. Eine Zeile umzulegen ist schneller und
+   sicherer als einen Merge zurueckzunehmen, und Endpunkte, Haertungen und Tests bleiben dabei
+   unangetastet. test_festung_bauteile_http.js 1d prueft jetzt, dass er auf true steht; ein Wechsel
+   auf false ist damit eine bewusste Notabschaltung, die auffaellt statt still zu geschehen - und
+   ihr Grund gehoert dann in die CLAUDE.md. */
+const FESTUNG_BAUTEILE_AKTIV = true;
 const FESTUNG_BAUTEILE = {
   schild: { name: 'Schildkuppel',  anteilKern: 0.40, rolle: 'bomber', min: 0.70, max: 1.60,
             regenProStd: 0.02, kernDurchlass: 0.35 },

@@ -9033,7 +9033,14 @@ function staubWochenschluessel(zeit) {
   return t.getUTCFullYear() + '-W' + String(woche).padStart(2, '0');
 }
 function staubKonto(user) {
-  if (!user.staub) user.staub = { menge: 0, serie: 0, letzterTag: null, abwehrTag: null, abwehrVon: [] };
+  // abwehrGesamt (18.08.2026): der KUMULATIVE Zähler abgewehrter Spielerangriffe. Er ist neu und
+  // beginnt für JEDES Konto bei 0 - auch für ein altes mit langer Abwehrbilanz. Das ist Absicht
+  // und keine Nachlässigkeit: Die einzige vorhandene Historie steht als `pvpDefended` im
+  // SPIELSTAND, und der ist klientenautoritativ. Wer sie als Startwert übernähme, importierte
+  // eine Zahl, die sich in fünf Sekunden fälschen lässt - und hinge damit ausgerechnet die
+  // Kosmetik daran, also die Fläche, die allen gemeinsam gehört. Dieselbe Entscheidung wie beim
+  // Sternenstaub selbst, der ebenfalls nicht rückwirkend gutgeschrieben wurde.
+  if (!user.staub) user.staub = { menge: 0, serie: 0, letzterTag: null, abwehrTag: null, abwehrVon: [], abwehrGesamt: 0 };
   return user.staub;
 }
 // Jede Gutschrift läuft hier durch. EINE Stelle, damit die Wochensumme nicht an einer der beiden
@@ -9073,6 +9080,12 @@ function staubAbwehrGutschreiben(user, angreiferId) {
   if (k.abwehrVon.length >= STAUB_ABWEHR_MAX_PRO_TAG) return 0;
   if (k.abwehrVon.indexOf(angreiferId) !== -1) return 0;
   k.abwehrVon.push(angreiferId);
+  // Der kumulative Zähler steht BEWUSST hinter denselben zwei Riegeln wie die Gutschrift, nicht
+  // davor: Er zählt also nur, was auch Sternenstaub bringt - höchstens STAUB_ABWEHR_MAX_PRO_TAG
+  // Angriffe je Tag und je Angreifer nur einen. Ein Zähler ohne diese Riegel wäre über abgesprochene
+  // Angriffe beliebig hochzutreiben, und daran hängt eine Kosmetik in der Bestenliste.
+  // Er wächst nur - `kosmetikBefristet` führt 'abgewehrt' deshalb zu Recht nicht.
+  k.abwehrGesamt = (k.abwehrGesamt || 0) + 1;
   staubGutschreiben(k, STAUB_ABWEHR);
   return STAUB_ABWEHR;
 }
@@ -9087,6 +9100,10 @@ function staubStand(user) {
     dieseWoche: (k.woche && k.woche.key === w) ? k.woche.menge : 0,
     heuteAngemeldet: k.letzterTag === staubTagesschluessel(),
     abwehrHeute: (k.abwehrTag === staubTagesschluessel()) ? k.abwehrVon.length : 0,
+    // Reist mit, damit das Spiel den Fortschritt zur Verteidigungs-Kosmetik ANZEIGEN kann. Eine
+    // Freischaltbedingung, deren Stand der Spieler nirgends sieht, ist eine Fläche, auf die er
+    // hinspielt, ohne zu wissen, wie weit er ist.
+    abwehrGesamt: k.abwehrGesamt || 0,
     saetze: {
       anmeldung: STAUB_ANMELDUNG, serieBonus: STAUB_SERIE_BONUS, serieMax: STAUB_SERIE_MAX,
       abwehr: STAUB_ABWEHR, abwehrMaxProTag: STAUB_ABWEHR_MAX_PRO_TAG
@@ -9172,6 +9189,30 @@ const KOSMETIK_DEFS = [
   // Drei Stufen, damit auch die kleine Spende ihr Zeichen bekommt; die Schwellen sind dieselben
   // wie bei supporterTierFor (Bronze ab der ersten Spende, Silber ab 15, Gold ab 50) - also KEINE
   // zweite Zahlenliste, die veralten kann.
+  // --- Verteidigung (18.08.2026) ---
+  // Der Fortschritts-Zweig deckte bis hierher Prestige, Aufstieg, Kampfpunkte, Rekordtiefe, Erfolge
+  // und Bosse ab - also ausnahmslos Größen, die beim ANGREIFEN oder Sammeln wachsen. Kampfpunkte
+  // gibt es ausschließlich fürs Angreifen; wer sein Imperium verteidigt, hatte im ganzen Katalog
+  // kein einziges Stück. Das schließt diese Bedingungsart.
+  //
+  // Sie liest `staub.abwehrGesamt` und damit das NUTZEROBJEKT, nicht den Spielstand. Der Zähler im
+  // Spielstand (`pvpDefended`) wird zwar ebenfalls vom Server geschrieben, ist danach aber
+  // klientenautoritativ und taugt für eine Fläche, die allen gemeinsam gehört, deshalb nicht.
+  // `abwehrGesamt` entsteht dort, wo der Server den Kampf SELBST auswürfelt, und trägt die
+  // Absprache-Riegel des Sternenstaubs bereits mit sich (siehe staubAbwehrGutschreiben).
+  //
+  // Die Schwellen sind bewusst niedrig gegenüber den Kampfpunkt-Stücken (2.000/5.000): Ein
+  // abgewehrter Angriff verlangt, dass jemand anderes angreift - man kann ihn nicht selbst
+  // herbeiführen, und je Tag zählen höchstens STAUB_ABWEHR_MAX_PRO_TAG davon.
+  //
+  // Der Tagesriegel gehört in den Erklärtext, damit niemand rätselt, warum der Zähler langsamer
+  // steigt als die Zahl der abgewehrten Angriffe. Er steht aber BEWUSST NICHT hier im Literal,
+  // sondern wird beim Ausliefern des Katalogs angehängt (`proTag` in GET /api/cosmetics): Dieses
+  // Array wird von zwei Tests als reines Literal ausgewertet, und eine Konstante darin macht es
+  // unauswertbar - der Paritätstest zwischen Frontend und Backend fiele mit einem
+  // ReferenceError aus, also ausgerechnet der Wächter über diese beiden Listen.
+  { key: 'nf_bastion',    art: 'namensfarbe', bedingung: { typ: 'abgewehrt', wert: 10 } },
+  { key: 'em_zinne',      art: 'emblem',      bedingung: { typ: 'abgewehrt', wert: 40 } },
   { key: 'em_funke',      art: 'emblem',      bedingung: { typ: 'spender_je', stufe: 'bronze' } },
   { key: 'em_leitstern',      art: 'emblem',      bedingung: { typ: 'spender_je', stufe: 'silver' } },
   { key: 'em_leuchtfeuer',art: 'emblem',      bedingung: { typ: 'spender_je', stufe: 'gold' } }
@@ -9212,6 +9253,13 @@ function kosmetikBedingungErfuellt(userId, def, save) {
   if (b.typ === 'kauf') {
     const u = findUserById(userId);
     return !!(u && (u.cosmeticsGekauft || []).indexOf(def.key) !== -1);
+  }
+  // Abgewehrte Spielerangriffe. Wie 'kauf' aus dem NUTZEROBJEKT, nicht aus dem Spielstand - die
+  // Begründung steht bei den Einträgen in KOSMETIK_DEFS. Der Zähler wächst nur, ist also monoton
+  // wie die Fortschritts-Werte und gehört deshalb nicht in kosmetikBefristet.
+  if (b.typ === 'abgewehrt') {
+    const u = findUserById(userId);
+    return !!u && (Number((u.staub || {}).abwehrGesamt) || 0) >= b.wert;
   }
   const s = save || {};
   if (b.typ === 'prestige') return (Number(s.prestige) || 0) >= b.wert;
@@ -9254,7 +9302,14 @@ function kosmetikGetragen(userId) {
 // einem Zug zeichnen kann, statt drei Anfragen zu stellen.
 app.get('/api/cosmetics', authMiddleware, (req, res) => {
   res.json({
-    katalog: KOSMETIK_DEFS.map(d => ({ key: d.key, art: d.art, bedingung: d.bedingung })),
+    // Der Tagesriegel der Abwehr reist am Katalog mit, statt im Frontend abgeschrieben zu werden -
+    // sonst wäre die Zahl im Erklärtext die zweite Anzeigestelle, die beim nächsten Justieren von
+    // STAUB_ABWEHR_MAX_PRO_TAG zurückbleibt. Angehängt wird hier und nicht im Literal, damit
+    // KOSMETIK_DEFS ein reines, von den Tests auswertbares Literal bleibt.
+    katalog: KOSMETIK_DEFS.map(d => ({ key: d.key, art: d.art,
+      bedingung: d.bedingung.typ === 'abgewehrt'
+        ? Object.assign({}, d.bedingung, { proTag: STAUB_ABWEHR_MAX_PRO_TAG })
+        : d.bedingung })),
     besitz: kosmetikBesitz(req.userId),
     getragen: kosmetikGetragen(req.userId),
     vorgabe: KOSMETIK_VORGABE,

@@ -22,9 +22,21 @@
 //
 //   DB=$(mktemp /tmp/kepler-staub-XXXX.json); rm -f "$DB"; export DB_FILE="$DB"
 //   PORT=3215 JWT_SECRET=test node server.js > /tmp/s1.log 2>&1 &
-//   PID=$!; sleep 3; node tests/test_sternenstaub_http.js teil1; kill $PID; sleep 1
-//   node -e "...staub.letzterTag auf GESTERN setzen, Guthaben geben,
-//            UND db.private[<opferId>].__attackShieldUntil = 0..."
+//   PID=$!; sleep 4; node tests/test_sternenstaub_http.js teil1; kill $PID; sleep 1
+//   node -e "
+//     const fs=require('fs'), p=process.env.DB_FILE, db=JSON.parse(fs.readFileSync(p,'utf8'));
+//     const g=new Date(Date.now()-86400000).toISOString().slice(0,10);
+//     const o=db.users['staubopfer']; o.staub=o.staub||{}; o.staub.letzterTag=g;
+//     o.staub.menge=(o.staub.menge||0)+500;
+//     for (const k of Object.keys(db.private||{}))
+//       if (db.private[k] && typeof db.private[k]==='object') db.private[k].__attackShieldUntil=0;
+//     fs.writeFileSync(p, JSON.stringify(db));"
+//
+//   Der Schutzschild wird hier ueber ALLE private-Eintraege genullt, nicht ueber eine geratene
+//   Nutzer-id. Genau daran ist der Lauf am 18.08.2026 einmal gescheitert: Die id-Zuordnung war
+//   falsch, /api/attack antwortete fuenfmal mit 403 - und die beiden Pruefungen HINTER der
+//   Vorab-Pruefung wurden dadurch trivial gruen (sie stehen alle unter `abgewehrt === 0 || ...`).
+//   Nur die Vorab-Pruefung war rot. Das ist der Grund, warum es sie gibt.
 //
 // DER ANFÄNGERSCHUTZ MUSS DABEI WEG, sonst misst Abschnitt 5 gar nichts: Frisch angelegte Konten
 // bekommen einen Schutzschild, und /api/attack antwortet dann mit 403, ohne dass je ein Kampf
@@ -35,6 +47,11 @@
 //
 // GEGENPROBE, in beide Richtungen gefahren (15.08.2026):
 //   Gegen den alten server.js:  FAIL - 1a: /api/me führt einen Staub-Stand (undefined)
+//   Fuer den kumulativen Zaehler (18.08.2026) gegen den Stand davor: Teil 1 komplett gruen,
+//   in Teil 2 faellt GENAU EINE Pruefung -
+//     FAIL - 5: der kumulative Abwehr-Zähler steht ebenfalls auf 1 | {"abgewehrt":5}
+//   (dort fehlt das Feld, `stand.abwehrGesamt` ist undefined). Am neuen Stand gemessen:
+//   zwei von fuenf Angriffen abgewehrt, abwehrGesamt = 1 - also genau der Absprache-Riegel.
 //   Gegen eine Kopie ohne den Tagesschlüssel-Riegel (letzterTag-Prüfung entfernt):
 //     FAIL - 1b: ein zweiter Aufruf am selben Tag schreibt NICHTS gut  (Stand steigt weiter)
 //   Gegen eine Kopie ohne die Angreifer-Sperre:
@@ -209,6 +226,15 @@ async function teil2() {
     abgewehrt === 0 || gutschrift === (saetze.abwehr || 3), { abgewehrt, gutschrift, satz: saetze.abwehr });
   const stand = await staubVon(tokenO);
   check('5: und der Zähler des Tages steht auf 1', abgewehrt === 0 || stand.abwehrHeute === 1, { abwehrHeute: stand.abwehrHeute });
+  // Der KUMULATIVE Zähler (18.08.2026). Er ist die Grundlage der Verteidigungs-Kosmetik und liegt
+  // deshalb bewusst hier im Nutzerobjekt statt im Spielstand - eine Namensfarbe steht in der
+  // Bestenliste, also auf einer Fläche, die allen gemeinsam gehört. Geprüft wird die REGEL, die
+  // ihn gegen Absprachen schützt: Er hängt hinter denselben zwei Riegeln wie die Gutschrift, also
+  // zählt auch er diesen einen Angreifer an diesem einen Tag genau einmal - egal wie viele der
+  // fünf Angriffe abgeprallt sind.
+  check('5: der kumulative Abwehr-Zähler steht ebenfalls auf 1',
+    abgewehrt === 0 || stand.abwehrGesamt === 1,
+    { abgewehrt, abwehrGesamt: stand.abwehrGesamt, antworten });
 }
 
 (async () => {

@@ -7733,6 +7733,21 @@ const DEPLOY_TARGETS = {
   // verifiziert). Numerisch und nicht per Name, weil der Container den Benutzer nicht kennt.
   'kolonie-kepler7-backend': 'cd /app && git pull -q && (chown -R 1000:1000 .git || true)'
 };
+// Der Deploy-Timeout darf NICHT knapp sein, und das ist keine Geschmacksfrage, sondern gemessen
+// (18.08.2026, Nachbau in Node): exec() schickt beim Ablauf SIGTERM an die SHELL - nicht an das
+// `git` darunter. Der Enkelprozess lief im Versuch weiter und schrieb seine Datei zu Ende
+// (killed=true, signal=SIGTERM, Marke trotzdem angelegt). Auf dem Pi bedeutet das: Ein
+// abgewuergter Deploy laesst ein `git` weiterschreiben, das niemand mehr beobachtet - also genau
+// den Zustand, der den Backend-Deploy am 16.08.2026 fuer 49 Stunden lahmgelegt hat (halb
+// geschriebener Arbeitsbaum plus liegengebliebene .git/index.lock).
+// Der saubere Hebel waere ein Kill an die PROZESSGRUPPE. Der steht hier bewusst NICHT: `detached`
+// erzeugte im selben Versuch keine eigene Gruppe (gemessen: PGID des Kindes = PID des
+// Elternprozesses, der Gruppenkill scheiterte mit ESRCH). Eine Behebung, die sich auf eine
+// Annahme stuetzt, die schon im Nachbau nicht haelt, waere schlimmer als keine.
+// Also: so grosszuegig, dass nur ein ECHTER Haenger ihn ausloest. Ein `git pull` samt `cp` des
+// 6-MB-Spielstands und `chown -R` ueber .git kann auf einem Raspberry Pi die alten 30 Sekunden
+// ueberschreiten, ohne dass irgendetwas kaputt ist.
+const DEPLOY_TIMEOUT_MS = 10 * 60 * 1000;
 function verifyGithubSignature(req) {
   if (!DEPLOY_WEBHOOK_SECRET) return false;
   const sig = req.headers['x-hub-signature-256'];
@@ -8851,8 +8866,13 @@ app.post('/api/deploy-webhook', (req, res) => {
   // Sofort antworten, git pull läuft asynchron im Hintergrund weiter - GitHub erwartet eine
   // schnelle Antwort und markiert den Webhook sonst als fehlgeschlagen.
   res.json({ ok: true, repo: repoName });
-  exec(command, { timeout: 30000 }, (err, stdout, stderr) => {
-    if (err) console.error('Deploy-Webhook Fehler für ' + repoName + ':', err.message);
+  exec(command, { timeout: DEPLOY_TIMEOUT_MS }, (err, stdout, stderr) => {
+    // Eine Zeitueberschreitung bekommt eine EIGENE Meldung: Sie bedeutet etwas anderes als ein
+    // gescheiterter Befehl - der git-Prozess darunter kann weiterlaufen und muss von Hand geprueft
+    // werden. Als generisches "Fehler" gemeldet, sieht der gefaehrlichste Ausgang aus wie der
+    // harmloseste.
+    if (err && err.killed) console.error('Deploy-Webhook ZEITUEBERSCHREITUNG für ' + repoName + ' nach ' + Math.round(DEPLOY_TIMEOUT_MS/1000) + 's (' + err.signal + '). ACHTUNG: der git-Prozess darunter laeuft moeglicherweise weiter und schreibt in .git - vor dem naechsten Deploy pruefen (ps nach lebendem git, find .git -name "*.lock").');
+    else if (err) console.error('Deploy-Webhook Fehler für ' + repoName + ':', err.message);
     else console.log('Deploy-Webhook erfolgreich für ' + repoName + ':', stdout.trim() || '(keine Änderungen)');
   });
 });

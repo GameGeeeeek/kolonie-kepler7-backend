@@ -620,6 +620,27 @@ systemctl list-timers --all
   räumt sie ab – mit Vorsicht, der Startbefehl beginnt mit `npm install`, und ein Fehlschlag dort
   lässt den Container gar nicht erst hochkommen.
 
+  **Nachtrag 18.08.2026 – woher sie kommen, und was der Code daran ändern kann (und was nicht).**
+  Nachgemessen in einem Node-Nachbau: `exec(cmd, { timeout })` schickt beim Ablauf SIGTERM an die
+  **Shell**, nicht an das `git` darunter. Der Enkelprozess lief im Versuch weiter und schrieb seine
+  Datei zu Ende (`killed=true`, `signal=SIGTERM`, Marke trotzdem angelegt). Auf dem Pi heißt das:
+  Ein abgewürgter Deploy lässt ein unbeobachtetes `git` in `.git` schreiben – **derselbe Zustand,
+  den wir gerade 49 Stunden lang repariert haben, nur auf einem zweiten, von Cron unabhängigen
+  Weg.** Der Deploy-Timeout steht deshalb seit #122 auf `DEPLOY_TIMEOUT_MS` = 10 Minuten statt 30
+  Sekunden (ein `git pull` samt `cp` des 6-MB-Spielstands und `chown -R` über `.git` kann die 30 s
+  auf einem Pi überschreiten, ohne dass irgendetwas kaputt ist), und die Zeitüberschreitung hat
+  einen **eigenen** Log-Zweig: Als generisches „Fehler" gemeldet sähe der gefährlichste Ausgang aus
+  wie der harmloseste.
+  **Was der Code NICHT kann:** Ein Kill an die Prozessgruppe wäre der saubere Hebel – er steht
+  bewusst nicht da, weil `detached: true` im selben Nachbau **keine** eigene Gruppe erzeugte
+  (gemessen: PGID des Kindes = PID des Elternprozesses, `process.kill(-pid)` scheiterte mit
+  `ESRCH`). Eine Behebung, die sich auf eine Annahme stützt, die schon im Nachbau nicht hält, wäre
+  schlimmer als keine. Und das Einsammeln der Zombies selbst ist **keine Code-Frage**: Verwaiste
+  Kinder landen bei PID 1, und PID 1 ist hier `npm exec nodemon`. Das behebt man am Container
+  (`--init` bzw. tini als PID 1), nicht in `server.js`. Wächter für den Endpunkt:
+  `tests/test_deploy_webhook_http.js` (Port 3223) – er fährt Signaturprüfung, Repo-Zuordnung und
+  die Sofort-Antwort gegen einen echt gestarteten Server.
+
 **NACHTRAG 18.08.2026, 16:44 UTC – es ist am selben Tag WIEDER passiert, nach der Behebung von
 10:40.** Gemessen von aussen nach der Methode oben, mit beiden Kontrollen im selben Lauf, über
 sechs Minuten und neunzehn Abfragen hinweg:

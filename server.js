@@ -1628,6 +1628,92 @@ function assignHomeSlot() {
   if (changed) saveDb();
 })();
 
+// --- Passwort-Regeln (Sicherheits-Audit 18.08.2026, Vorschlag P5) --------------------------
+// Bis hierher galt nur "mindestens 6 Zeichen". Das ist unter dem heutigen OWASP-/NIST-Stand, und
+// die dritte Zeile aus dem Ausloeser-Video ("Bekanntes PW") wurde ueberhaupt nicht geprueft.
+//
+// DIE WICHTIGSTE EIGENSCHAFT DIESES BLOCKS IST, WO ER *NICHT* AUFGERUFEN WIRD: niemals im Login.
+// Wer heute ein 6-Zeichen-Passwort hat, muss sich weiter anmelden koennen - eine neue Regel
+// begrenzt das HINZUFUEGEN, nie den Bestand. Das ist dieselbe Ueberlegung wie bei den Deckeln im
+// Unterstuetzer-Bereich ("Deckel duerfen niemals Daten loeschen"), nur auf eine Zugangsregel
+// angewandt: Ein Bestandskonto auszusperren waere ein weit groesserer Schaden als das schwache
+// Passwort, das man damit beheben wollte. Die vier bcrypt.compare-Stellen bleiben deshalb
+// unberuehrt; geprueft wird ausschliesslich an den zwei bcrypt.hash-Stellen (Registrierung, Reset).
+const PASSWORT_MIN = 8;
+const PASSWORT_LISTE_DATEI = process.env.PASSWORT_LISTE_DATEI || path.join(__dirname, 'passwoerter-bekannt.txt');
+
+// Begriffe, die fuer DIESES Spiel das sind, was "password" allgemein ist. Sie stehen in keiner
+// allgemeinen Haeufigkeitsliste - eine Liste allein waere hier also blind.
+const PASSWORT_SPIELBEGRIFFE = ['kepler', 'kolonie', 'gamegeeeeek'];
+
+// Fehlt die Datei, laeuft der Dienst weiter - anders als beim API_KEY in AI Core, und der
+// Unterschied ist der Grund: Dort WAR die Konfiguration die Sicherung, ihr Ausfall hob den ganzen
+// Schutz auf. Hier ist die Liste EINE von sechs Regeln; die anderen fuenf greifen weiter. Ein
+// Serverstart zu verweigern wuerde das Spiel fuer alle abschalten, um eine Teilregel zu erzwingen.
+// Damit der Ausfall trotzdem nicht wie Normalbetrieb aussieht, wird er laut protokolliert - und
+// tests/test_passwortregeln_http.js prueft die Anzahl der Eintraege, nicht nur ihre Existenz.
+const BEKANNTE_PASSWOERTER = (() => {
+  try {
+    const roh = fs.readFileSync(PASSWORT_LISTE_DATEI, 'utf8');
+    const menge = new Set();
+    for (const zeile of roh.split('\n')) {
+      const w = zeile.trim().toLowerCase();
+      if (w && !w.startsWith('#')) menge.add(w);
+    }
+    console.log('[passwort] ' + menge.size + ' bekannte Passwoerter geladen.');
+    return menge;
+  } catch (e) {
+    console.error('[passwort] WARNUNG: ' + PASSWORT_LISTE_DATEI + ' nicht lesbar (' + e.message +
+      '). Die Pruefung gegen bekannte Passwoerter ist damit AUS; alle uebrigen Regeln greifen weiter.');
+    return new Set();
+  }
+})();
+
+/**
+ * Prueft ein NEU gesetztes Passwort. Liefert null, wenn es in Ordnung ist, sonst den Fehlertext.
+ *
+ * Der Text nennt immer den konkreten Grund und sagt, was zu tun ist. Eine Meldung, die mehrere
+ * Ursachen zusammenfasst ("ungueltig"), ist im Fehlerfall keine Diagnose - genau diese Lehre hat
+ * das Nachbarprojekt am 17.08.2026 eine ganze Fehlersuche gekostet.
+ *
+ * `username` ist optional und darf fehlen; ist er da, wird er mitgeprueft.
+ */
+function passwortProblem(passwort, username) {
+  const pw = String(passwort == null ? '' : passwort);
+
+  if (pw.length < PASSWORT_MIN) {
+    return 'Passwort muss mindestens ' + PASSWORT_MIN + ' Zeichen haben.';
+  }
+  const klein = pw.toLowerCase();
+
+  if (BEKANNTE_PASSWOERTER.has(klein)) {
+    return 'Dieses Passwort steht auf den Listen der haeufigsten Passwoerter und waere in Sekunden geraten. Bitte waehle ein anderes.';
+  }
+  // Ein einziges wiederholtes Zeichen ("aaaaaaaa", acht Leerzeichen).
+  if (/^(.)\1*$/.test(pw)) {
+    return 'Ein Passwort aus lauter gleichen Zeichen ist zu leicht zu raten. Bitte mische Buchstaben und Zahlen.';
+  }
+  // Reine Ziffernfolgen sind fast immer ein Datum. Ein einziger Buchstabe genuegt als Abhilfe.
+  if (/^[0-9]+$/.test(pw)) {
+    return 'Ein Passwort nur aus Ziffern ist zu leicht zu raten (Geburtsdaten sind der erste Versuch). Bitte nimm mindestens einen Buchstaben dazu.';
+  }
+  const name = String(username || '').trim().toLowerCase();
+  if (name) {
+    // Ab vier Zeichen auf ENTHALTENSEIN pruefen, darunter nur auf Gleichheit: Bei einem
+    // Drei-Zeichen-Namen wie "Bob" wuerde sonst jedes Passwort mit "bob" darin abgelehnt.
+    const trifft = name.length >= 4 ? klein.includes(name) : klein === name;
+    if (trifft) {
+      return 'Das Passwort darf deinen Spielernamen nicht enthalten - er ist oeffentlich sichtbar und damit der erste Rateversuch.';
+    }
+  }
+  for (const begriff of PASSWORT_SPIELBEGRIFFE) {
+    if (klein.includes(begriff)) {
+      return 'Das Passwort darf den Namen des Spiels nicht enthalten - genau danach wird bei einem Spiel-Konto zuerst gesucht.';
+    }
+  }
+  return null;
+}
+
 // --- Registrierung (E-Mail optional, aber nötig für Passwort-Reset) ---
 app.post('/api/register', authRateLimit, async (req, res) => {
   const { username, password, email } = req.body || {};
@@ -1636,7 +1722,8 @@ app.post('/api/register', authRateLimit, async (req, res) => {
   if (!/^[a-zA-Z0-9_\-äöüÄÖÜß]{3,18}$/.test(cleanName)) {
     return res.status(400).json({ error: cleanName.includes('@') ? 'Das erste Feld ist dein Spielername (kein @-Zeichen) - deine E-Mail-Adresse gehört ins E-Mail-Feld darunter. Beispiel-Name: Sternenjäger_7' : 'Bitte wähle einen Spielernamen mit 3 bis 18 Zeichen. Erlaubt sind Buchstaben, Zahlen sowie _ und - (keine Leer- oder Sonderzeichen). Beispiel: Sternenjäger_7' });
   }
-  if (String(password).length < 6) return res.status(400).json({ error: 'Passwort muss mindestens 6 Zeichen haben.' });
+  const pwProblem = passwortProblem(password, cleanName);
+  if (pwProblem) return res.status(400).json({ error: pwProblem });
   if (containsBannedTerm(cleanName)) return res.status(400).json({ error: 'Dieser Spielername ist nicht erlaubt. Bitte wähle einen anderen.' });
   const key = cleanName.toLowerCase();
   if (db.users[key]) return res.status(409).json({ error: 'Dieser Name ist schon vergeben.' });
@@ -1955,9 +2042,12 @@ app.post('/api/reset-password', authRateLimit, async (req, res) => {
   const { token, newPassword } = req.body || {};
   const entry = db.resetTokens[token];
   if (!entry || entry.expires < Date.now()) return res.status(400).json({ error: 'Link ist ungültig oder abgelaufen. Fordere einen neuen an.' });
-  if (String(newPassword || '').length < 6) return res.status(400).json({ error: 'Passwort muss mindestens 6 Zeichen haben.' });
   const user = findUserById(entry.userId);
   if (!user) return res.status(404).json({ error: 'Account nicht gefunden.' });
+  // Die Pruefung steht bewusst HINTER findUserById: Nur so kennt sie den Spielernamen und
+  // kann ihn im Passwort abweisen. Der Token ist an dieser Stelle laengst geprueft.
+  const pwProblem = passwortProblem(newPassword, user.username);
+  if (pwProblem) return res.status(400).json({ error: pwProblem });
   user.passwordHash = await bcrypt.hash(newPassword, 10);
   // Alle bisher ausgestellten Tokens dieses Kontos ungültig machen (siehe authMiddleware) - wer das
   // Passwort zurücksetzt, wirft damit auch mögliche fremde/gekaperte Sitzungen sofort raus.

@@ -468,10 +468,10 @@ const mission = (id, nestId, sys) => ({
     check('11a: der Spawn-Schalter ist auffindbar', !!schalter, { steht_auf: schalter });
     check('11b: er trägt einen der beiden Werte', schalter === 'true' || schalter === 'false',
       { steht_auf: schalter });
-    check('11c: und er steht auf false, solange das Frontend der Phase 3 fehlt',
-      schalter === 'false',
+    check('11c: und er steht auf true, seit das Frontend der Phase 3 ausgeliefert ist',
+      schalter === 'true',
       { steht_auf: schalter,
-        hinweis: 'true ohne Frontend heisst: Nester entstehen, die niemand sieht und niemand angreifen kann' });
+        hinweis: 'false heisst ab jetzt NOTABSCHALTUNG - beabsichtigt? Dann gehoert der Grund in die CLAUDE.md' });
   }
 
   await stoppeServer();

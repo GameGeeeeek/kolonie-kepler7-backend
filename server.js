@@ -8921,9 +8921,16 @@ app.post('/api/asteroid/contest', authMiddleware, async (req, res) => {
    DER SCHALTER, wieder: Solange NEST_SPAWN_AKTIV aus ist, entsteht kein Nest, und der ganze
    Abschnitt tut nichts. Dieselbe Begruendung wie bei FESTUNG_SPAWN_AKTIV/FESTUNG_BAUTEILE_AKTIV -
    Backend und Frontend gehen ueber zwei getrennte fest verdrahtete Befehle desselben Webhooks
-   live und sind historisch mehrfach auseinandergelaufen. Umgelegt wird er im FRONTEND-PR der
-   Phase 3. */
-const NEST_SPAWN_AKTIV = false;
+   live und sind historisch mehrfach auseinandergelaufen.
+
+   UMGELEGT am 19.08.2026 mit dem Frontend der Phase 3 (v8.582.0): Karte, Kartenmenue,
+   Angriffsmission, Bericht und Hilfetext stehen, die Bedingung ist also erfuellt. Der
+   Schalter BLEIBT trotzdem stehen - als Notausschalter, aus demselben Grund wie
+   FESTUNG_SPAWN_AKTIV: Eine Zeile umzulegen ist schneller und sicherer, als einen Merge
+   zurueckzunehmen, und Endpunkte, Haertungen und Tests bleiben dabei unangetastet.
+   test_alien_nester_http.js 11c prueft jetzt, dass er auf true steht; ein Wechsel auf
+   false ist damit eine bewusste Notabschaltung, die auffaellt statt still zu geschehen. */
+const NEST_SPAWN_AKTIV = true;
 
 /* Die vier Voelker. Der `name` muss WOERTLICH zu ALIEN_RACE_NAMES passen - darueber laeuft die
    Zuordnung zwischen dem vorhandenen "Volk entdeckt"-Ereignis und seinem Nestbestand. Eine

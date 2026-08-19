@@ -909,6 +909,52 @@ das sie behebt. Der erste Schritt bleibt deshalb ein Blick ins Container-Log und
 Wiederherstellungsweg von Hand; ab dem nächsten erfolgreichen Pull greift der neue Timeout von
 selbst.
 
+**BEHOBEN 19.08.2026, 05:39 UTC – und der Befund macht aus der Vermutung oben einen Beweis.** Der
+Pi stand auf #122 und ist von Hand in einem Zug auf #138 vorgespult worden (16 Commits,
+`Fast-forward`, 11 Dateien, 5.923 Zeilen, `merge EXIT=0`). Beleg über den laufenden Prozess statt
+über `git log`, mit beiden Kontrollen im selben Lauf:
+
+```
+POST /api/festung/angriff        401   (neu ab #126 – vorher 404)
+POST /api/musterattack/create    401   (alte Kontrollroute)
+POST /api/gibtesnicht            404   (Negativkontrolle)
+```
+
+**Der Blocker war diesmal NICHT `index.lock`**, und genau darin liegt die Lehre. Gefunden wurde:
+
+- `git pull` scheiterte an `Your local changes to the following files would be overwritten by
+  merge: server.js` – und `git status --porcelain` zeigte `M␣server.js`, also **M in der ERSTEN
+  Spalte: vorgemerkt**, Arbeitsbaum sauber. Das ist die Falle, die in diesem Dokument seit dem
+  05.08. steht: `git diff` allein ist dabei leer, und `git checkout -- server.js` ist wirkungslos,
+  weil es aus dem Index zurückholt statt aus HEAD.
+- Zwei Sperren, aber `.git/HEAD.lock` und `.git/refs/heads/master.lock` – **nicht** `index.lock`.
+  Ein `rm -f .git/*.lock` hätte die zweite nicht einmal gefunden; nur `find .git -name '*.lock'`
+  sieht sie.
+
+**Welche Sperren liegen bleiben, sagt, WO der Pull gestorben ist.** `HEAD.lock` plus
+`refs/heads/master.lock` bei gleichzeitig schon geschriebenem Index und Arbeitsbaum heißt: Der
+Fast-Forward war fertig mit den Dateien und wurde **während der Ref-Aktualisierung** abgeschnitten.
+Genau dieser Fingerabdruck gehört zum Timeout-Mechanismus aus #134 – damit ist die dortige
+Vermutung („der wahrscheinliche Grund") bestätigt.
+
+**Wie der vorgemerkte Rest identifiziert wurde, ohne zu raten** – dieselbe Frage wie am 16.08., nur
+eine Ebene tiefer, weil er im INDEX lag statt im Arbeitsbaum:
+
+```
+git rev-parse :server.js          # der VORGEMERKTE Blob
+# dagegen jeden eingehenden Commit halten:
+for c in $(git rev-list --reverse <pi-stand>..origin/master); do
+  git --no-pager diff --numstat <pi-stand> $c -- server.js
+done
+```
+
+Nur `ea090dd` (#123) ergab die gemessenen 46/3, und der Blob stimmte exakt (`51c3bf2…`). Der
+vorgemerkte Stand war also byte-genau `server.js` bei #123 und längst im Ziel enthalten – es gab
+nichts zu retten, und das Verwerfen war belegt statt gehofft. **Die übertragbare Regel: Ein
+blockierender „lokaler Stand" wird über den BLOB-Hash einem Commit zugeordnet, bevor er verworfen
+wird – und zwar mit `git rev-parse :datei` für den Index, nicht nur `git hash-object datei` für den
+Arbeitsbaum.**
+
 **Der Wiederherstellungsweg, falls es wieder passiert** (am 18.08. so gefahren, jede Stufe gemessen,
 vorher von vier Prüfläufen adversarisch zerlegt):
 

@@ -1028,6 +1028,35 @@ blockierender „lokaler Stand" wird über den BLOB-Hash einem Commit zugeordnet
 wird – und zwar mit `git rev-parse :datei` für den Index, nicht nur `git hash-object datei` für den
 Arbeitsbaum.**
 
+**NACHTRAG 19.08.2026, 09:35 UTC – SECHSTES Mal, und diesmal hängt der Pi zwischen #137 und #142.**
+Gemessen unmittelbar nach dem Merge von #143 (Nest-Schalter), dreimal über zwei Minuten, mit beiden
+Kontrollen im selben Lauf:
+
+```
+POST /api/logout                 404   (neu mit #142)
+POST /api/alien/nest-angriff     401   (neu mit #137 - der Pi HAT den Nest-Code)
+POST /api/musterattack/create    401   (alte Kontrollroute)
+POST /api/gibtesnicht            404   (Negativkontrolle)
+```
+
+Der FRONTEND-Deploy lief im selben Moment einwandfrei durch: `www.gamegeeeeek.de` lieferte
+v8.582.0 innerhalb von Sekunden nach dem Merge. **Zum sechsten Mal dieselbe Asymmetrie.**
+
+**Was der Schalter hier geleistet hat, und warum das die Einordnung ändert:** Der Pi steht auf einem
+Stand MIT dem Nest-Code, aber VOR dem Umlegen von `NEST_SPAWN_AKTIV`. Es entsteht also kein Nest,
+das Frontend zeigt keines, und nichts sagt etwas Falsches – genau der Zustand, für den der Schalter
+gebaut ist (Frontend-Arbeitsregel 60). **Eine Sache bleibt trotzdem schief und gehört benannt:** Der
+Patchnote zu v8.582.0 kündigt die Alien-Nester an, und der ist live. Wer ihn liest und die Karte
+sucht, findet nichts. Das ist keine Falschaussage der Anzeigestellen, aber eine Lücke zwischen
+Ankündigung und Wirkung – der Preis dafür, dass die Auslieferung aus zwei getrennten Befehlen
+besteht.
+
+**Die Eingrenzung ist knapper als sonst, und das liegt am Gegenstand:** #143 legt nur eine Konstante
+um und bringt deshalb KEINE neue Route mit. Ein Schalter-Merge ist von außen grundsätzlich nicht
+messbar. Gemessen werden kann nur, ob der Pi den davorliegenden Stand hat – und das reicht: Ist
+#142 nicht angekommen, ist #143 es auch nicht. **Wer künftig einen reinen Schalter-Merge
+ausliefert, misst deshalb den letzten routentragenden Commit davor, nicht den eigenen.**
+
 **Der Wiederherstellungsweg, falls es wieder passiert** (am 18.08. so gefahren, jede Stufe gemessen,
 vorher von vier Prüfläufen adversarisch zerlegt):
 

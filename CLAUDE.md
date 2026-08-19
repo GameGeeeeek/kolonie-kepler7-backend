@@ -499,9 +499,19 @@ die Wirkung (Frontend-Arbeitsregel 61).
 Das Gegenstück zu den Festungen: Die Festung **steht** und drosselt, das Nest **wächst** und breitet
 sich aus. Wer nichts tut, hat übermorgen mehr davon als heute.
 
-**`NEST_SPAWN_AKTIV` steht auf `false`** und wird im Frontend-PR der Phase 3 umgelegt – dieselbe
-Begründung wie bei den beiden Festungs-Schaltern. Solange er aus ist, kehrt `nestTick()` in der
-ersten Zeile zurück und der ganze Abschnitt tut nichts.
+**`NEST_SPAWN_AKTIV` steht seit dem 19.08.2026 auf `true`** – das Frontend der Phase 3 ist
+ausgeliefert (v8.582.0), und damit ist die Bedingung erfüllt, unter der er auf `false` stehen
+musste. Karte, Kartenmenü, Angriffsmission, Bericht und Hilfetext stehen.
+
+**Der Schalter bleibt trotzdem stehen** – als Notausschalter, aus demselben Grund wie die beiden
+Festungs-Schalter. `test_alien_nester_http.js` 11c prüft jetzt, dass er auf `true` steht; ein
+Wechsel auf `false` ist damit eine bewusste Notabschaltung, die auffällt statt still zu
+geschehen – und ihr Grund gehört dann hierher.
+
+Warum er überhaupt gebaut wurde, bleibt als Begründung wichtig: Solange er aus war, kehrte
+`nestTick()` in der ersten Zeile zurück und der ganze Abschnitt tat nichts. Ging dieses Backend
+allein live, entstünden Nester, die niemand sieht und niemand angreifen kann – dieselbe
+Begründung wie bei den beiden Festungs-Schaltern.
 
 **Wo sie wohnen: `db.galaxy.alienNester`.** Das ist keine Geschmacksfrage. `db.galaxy` ist für
 Clients über `PUT /api/storage/:key` **gar nicht erreichbar** – anders als der Weltboss, dessen

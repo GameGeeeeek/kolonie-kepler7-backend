@@ -594,6 +594,55 @@ Spielstand zu schreiben – 10 statt 40 Prüfungen, und der rote Exit-Code sah a
 Gegenprobe. Seither lesen `liesSave()`/`schreibSave()` beide Formen, und die Gegenprobe zum
 Ablageort der Abklingzeit lässt sich überhaupt erst fahren.
 
+## Passwort-Regeln beim SETZEN (19.08.2026, Sicherheits-Audit P5)
+
+`passwortProblem(passwort, username)` ist die EINE Wache für neu gesetzte Passwörter. Sechs Regeln:
+Mindestlänge 8, Abgleich gegen `passwoerter-bekannt.txt`, lauter gleiche Zeichen, reine
+Ziffernfolgen, der eigene Spielername, der Name des Spiels.
+
+**Die wichtigste Eigenschaft ist, wo sie NICHT aufgerufen wird: niemals im Login.** Wer ein
+6-Zeichen-Passwort hat, meldet sich weiter damit an – eine neue Regel begrenzt das HINZUFÜGEN, nie
+den Bestand. Das ist dieselbe Überlegung wie bei „Deckel dürfen niemals Daten löschen", nur auf eine
+Zugangsregel angewandt, und sie wiegt hier schwerer: Ein ausgesperrtes Konto kommt nur über einen
+Reset zurück, den man per E-Mail erst anfordern muss. Die vier `bcrypt.compare`-Stellen bleiben
+unberührt; aufgerufen wird an den zwei `bcrypt.hash`-Stellen (Registrierung Z. ~1725, Reset ~2049).
+
+**Der Testbestand ist der lebende Beleg dafür:** ACHT bestehende Tests legen ihren Nutzern per
+`bcrypt.hashSync('test1234')` ein Passwort in die DB, das auf der Liste STEHT – und melden sich
+weiterhin an. Wäre die Prüfung fälschlich im Login gelandet, wären sie alle acht rot.
+
+**Die Liste enthält bewusst nur Einträge ab 8 Zeichen.** Kürzere fängt die Längenregel ohnehin ab,
+bevor die Liste befragt wird; von den 10.000 der Quelle (SecLists, MIT) bleiben so 2.086 wirksame,
+plus einer deutschen Ergänzung – die englische Liste kennt `passwort123` nicht. **Wer die
+Mindestlänge je senkt, muss die Liste neu aus der Quelle ziehen**, sonst fehlen ihr genau die
+kurzen Passwörter, die dann wieder erlaubt wären.
+
+**Fehlt die Datei, läuft der Dienst weiter** und protokolliert es laut. Das ist bewusst anders
+entschieden als bei `API_KEY` in AI Core (Befund A desselben Audits), und der Unterschied ist der
+Grund: Dort WAR die Konfiguration die Sicherung, ihr Ausfall hob den ganzen Schutz auf. Hier ist die
+Liste eine von sechs Regeln. Damit der Ausfall trotzdem nicht wie Normalbetrieb aussieht, ZÄHLT der
+Test die Einträge, statt nur ihre Existenz zu prüfen.
+
+**Die Prüfung im Reset steht HINTER `findUserById`** – nur so kennt sie den Spielernamen des Kontos
+hinter dem Token. Der Token ist an der Stelle längst geprüft.
+
+**Parität zum Frontend ist Pflicht.** Das Spiel prüft die Länge vorab (Komfort), die Liste bleibt
+hier – eine Kopie im Frontend wäre eine zweite Wahrheit und 19 kB in einer Datei, die jeder Spieler
+lädt. `tests/test_passwortregeln.js` im FRONTEND-Repo hält `PASSWORT_MIN` gegen die dortige Zahl;
+läuft sie auseinander, entsteht genau die Abweichung, vor der das Auslöser-Video warnt.
+
+`tests/test_passwortregeln_http.js` (Port 3223, 19 Prüfungen; **belegte Testports sind jetzt
+3195–3200, 3210–3223** – ein neuer Test nimmt 3224). Zwei Lehren aus seiner Gegenprobe:
+
+- **`qqqqqqqq` misst die falsche Regel** – jede achtfache Buchstaben-Wiederholung steht bereits auf
+  der Liste, dort hätte also die Listen-Regel geantwortet. Aufgefallen ist es nur, weil die Prüfung
+  den GRUND verlangt und nicht bloß den Statuscode. Sie misst jetzt `########`.
+- **Ein einziger Reset-Token deckte vier Prüfungen zu.** Am alten Stand ging die erste durch und
+  verbrauchte ihn dabei; die vier folgenden scheiterten danach an „Link ist ungültig" statt an dem,
+  was sie messen wollten – vier Fehlschläge aus dem falschen Grund, die die Gegenprobe stärker
+  aussehen ließen, als sie war. Jede Reset-Prüfung hat jetzt einen eigenen Token. **Übertragbar:
+  Wer eine Ressource prüft, die der Erfolgsfall VERBRAUCHT, braucht je Prüfung eine eigene.**
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

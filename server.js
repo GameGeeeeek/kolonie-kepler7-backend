@@ -251,7 +251,18 @@ function setzeSitzungsCookie(req, res, token) {
 }
 
 function loescheSitzungsCookie(req, res) {
-  res.append('Set-Cookie', cookieTeile(req, '', 0));
+  // Erst jede schon angehaengte Zeile FUER DIESES COOKIE wegwerfen, dann die Loeschung setzen.
+  // Der Grund ist gemessen (test_logout_cookie_http.js 8, 19.08.2026): Die Cookie-Nachreichung in
+  // authMiddleware feuert auch auf "Alle Sitzungen beenden" - dort kommt ein Bearer ohne Cookie
+  // an. Die Antwort trug danach ZWEI Set-Cookie-Zeilen: erst eine frische Sitzung ueber 180 Tage,
+  // dann deren Loeschung. Welche am Ende gewinnt, entscheidet die Reihenfolge im Browser; darauf
+  // zu bauen waere in einer Abmeldung der falsche Ort. Wer dieses Cookie loescht, meint es - und
+  // nichts weiter oben in derselben Antwort darf ihm widersprechen. Das gilt ab jetzt fuer jede
+  // kuenftige Route, nicht nur fuer die beiden von heute.
+  const bisher = res.getHeader('Set-Cookie');
+  const behalten = (Array.isArray(bisher) ? bisher : (bisher ? [bisher] : []))
+    .filter(z => !String(z).startsWith(SESSION_COOKIE + '='));
+  res.setHeader('Set-Cookie', behalten.concat(cookieTeile(req, '', 0)));
 }
 
 function authMiddleware(req, res, next) {
@@ -290,6 +301,19 @@ function authMiddleware(req, res, next) {
         error: 'Dieses Konto ist inzwischen auf einem anderen Gerät angemeldet.',
         sessionSuperseded: true
       });
+    }
+    // Cookie-Nachreichung fuer Bestandssitzungen (Etappe b). Wer sich vor dem 19.08.2026 zuletzt
+    // angemeldet hat, traegt seinen Token nur in localStorage - dort, wo die erste XSS-Luecke ihn
+    // abholen wuerde. Ohne diese drei Zeilen kaeme er da erst wieder heraus, wenn er sich von
+    // sich aus neu anmeldet; das JWT laeuft 180 Tage, die Behebung haette also ein halbes Jahr
+    // gebraucht. Hier holt der Server sie beim naechsten Seitenaufruf von selbst nach.
+    //
+    // NUR wenn gar kein Cookie anliegt: Ein vorhandenes zu ueberschreiben koennte sonst eine
+    // frische Anmeldung durch einen aelteren Bearer-Rest ersetzen. Die Sitzung ist an dieser
+    // Stelle vollstaendig geprueft (Signatur, Sperre, tokenVersion, sid) - es wandert also nichts
+    // ins Cookie, was nicht ohnehin gerade eine Anfrage beantworten darf.
+    if (header.startsWith('Bearer ') && !leseCookie(req, SESSION_COOKIE)) {
+      setzeSitzungsCookie(req, res, token);
     }
     req.userId = payload.userId;
     req.username = payload.username;
@@ -1991,6 +2015,27 @@ app.get('/api/me', authMiddleware, (req, res) => {
     // dem letzten Start vergleichen, den es nach einem Neuladen gar nicht mehr kennt.
     staub: Object.assign({ neu: staubNeu }, staubStand(user || {}))
   });
+});
+
+// --- Abmelden auf DIESEM Geraet (Sicherheits-Audit P3, Etappe b: 19.08.2026) ---------------
+// Bis hierher war Abmelden reine Client-Arbeit: localStorage leeren, neu laden, fertig. Mit dem
+// Sitzungs-Cookie geht das nicht mehr - es ist HttpOnly, JavaScript kann es gar nicht erst
+// anfassen. Ohne diese Route wuerde ein Klick auf "Abmelden" den Spieler beim naechsten Laden
+// stillschweigend wieder ANMELDEN, und das waere schlimmer als kein Abmeldeknopf.
+//
+// BEWUSST OHNE authMiddleware. Der Zweck ist, ein Sitzungsgeheimnis loszuwerden - wer das will,
+// darf daran nicht scheitern, weil genau dieses Geheimnis schon abgelaufen oder ungueltig ist.
+// Zu holen gibt es hier nichts: Die Route liest nichts, schreibt nichts und kann nur die eigene
+// Kopfzeile des Aufrufers loeschen. Ein fremder Ausloeser kaeme wegen SameSite=Lax ohnehin ohne
+// Cookie an und traefe damit gar keine Sitzung.
+//
+// Sie beendet die Sitzung BEWUSST NICHT serverseitig, und das ist die ehrliche Grenze dieser
+// Etappe: Sie uebersetzt, WO der Token liegt, nicht was Abmelden bedeutet. Vorher blieb das
+// ausgestellte Token nach dem Abmelden ebenfalls gueltig, es hatte nur niemand mehr. Wer die
+// Sitzung wirklich entwerten will, hat dafuer "Alle Sitzungen beenden" darunter.
+app.post('/api/logout', (req, res) => {
+  loescheSitzungsCookie(req, res);
+  res.json({ ok: true });
 });
 
 // --- Alle Sitzungen beenden ---

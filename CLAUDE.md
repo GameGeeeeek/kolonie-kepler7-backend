@@ -643,6 +643,47 @@ läuft sie auseinander, entsteht genau die Abweichung, vor der das Auslöser-Vid
   aussehen ließen, als sie war. Jede Reset-Prüfung hat jetzt einen eigenen Token. **Übertragbar:
   Wer eine Ressource prüft, die der Erfolgsfall VERBRAUCHT, braucht je Prüfung eine eigene.**
 
+## Sitzungs-Cookie (19.08.2026, Sicherheits-Audit P3, Etappe a)
+
+Der Token liegt im Frontend in `localStorage` und ist damit in JS-Reichweite. Diese Etappe legt ihn
+**zusätzlich** in ein HttpOnly-Cookie (`kepler7_sid`), das JavaScript gar nicht erst lesen kann.
+
+**Sie ist für sich genommen KEIN Sicherheitsgewinn**, und das gehört klar gesagt: Solange das
+Frontend den Token weiter in `localStorage` legt und per Bearer schickt, ist die Angriffsfläche
+unverändert. Was sie leistet, ist die **Reihenfolge**:
+
+- **Etappe a (dieser Stand)** ist rein additiv und ändert für jeden bestehenden Client exakt
+  nichts. Sie darf jederzeit allein live gehen – auch bei hängender Auslieferung.
+- **Etappe b (Frontend)** darf das NICHT. Ein Frontend, das nur noch auf das Cookie setzt, wäre
+  gegen einen Server ohne diesen Block sofort abgemeldet – **jeder Spieler, gleichzeitig**. Genau
+  deshalb die Teilung und nicht ein einzelner großer Umbau.
+
+**Vier Entscheidungen, die man beim Anfassen kennen muss:**
+
+1. **Der Bearer-Header hat VORRANG vor dem Cookie.** Solange a und b auseinander liegen, trägt ein
+   Browser beides; maßgeblich muss das sein, was das Frontend bewusst mitschickt. Ein alter
+   Cookie-Rest würde sonst ein frisch angemeldetes Gerät überstimmen.
+2. **Kein `cookie-parser`.** Eine neue Abhängigkeit ändert `package.json`, und die verlangt auf dem
+   Pi zusätzlich ein `docker restart` von Hand (nodemon installiert nichts nach). Für das Lesen
+   *eines* Namens ist das ein schlechter Tausch – `leseCookie()` sind zwölf Zeilen.
+3. **`Secure` hängt an `req.secure`, nicht an einer Konfiguration.** Der erste Entwurf prüfte
+   `PUBLIC_URL.startsWith('https://')` – das sah nach einer Entscheidung aus und war keine:
+   `web-push` verlangt für das VAPID-Subject zwingend `https:` oder `mailto:` und lässt den Server
+   sonst **gar nicht erst starten** (gemessen: „Vapid subject is not an https: or mailto: URL").
+   Die Bedingung wäre also immer wahr gewesen. `req.secure` misst, was wirklich anliegt, und ist
+   dank `app.set('trust proxy', 1)` auch hinter dem nginx des Pi korrekt.
+   **Übertragbar: Eine Fallunterscheidung über eine Konfiguration, die nur einen Wert annehmen
+   KANN, ist keine** – dieselbe Familie wie das `st.proto`-Feld, das nur der Ankündigungstext las.
+4. **`SameSite=Lax`, nicht `Strict`.** Das Spiel wird auch aus Mails heraus geöffnet (Bestätigungs-
+   und Reset-Links), und `Strict` schickt bei genau diesem Aufruf kein Cookie mit.
+
+`tests/test_sitzungscookie_http.js` (Port 3225 belegt der Gegenprobe-Lauf mit, **belegte Testports
+sind jetzt 3195–3200 und 3210–3225** – ein neuer Test nimmt 3226). Die Gegenprobe hat eine
+Besonderheit, die man kennen sollte: **Prüfung 3 (der Bearer-Weg funktioniert) muss an BEIDEN
+Ständen grün sein.** Bei einer additiven Änderung heißt „richtig" ja gerade, dass sich für
+bestehende Clients nichts ändert – wäre sie am alten Stand rot, hätte man etwas kaputtgemacht. Das
+ist die Umkehrung des Normalfalls und gilt nur für genau diese eine Prüffrage.
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

@@ -191,9 +191,76 @@ setInterval(() => { saveDb(); }, 5 * 60 * 1000);
 app.use(express.json({ limit: '2mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use('/api', globalApiRateLimit);
 
+// --- Sitzungs-Cookie (Sicherheits-Audit P3, Etappe a: 19.08.2026) ---------------------------
+// Der Token liegt im Frontend in localStorage und ist damit in JS-Reichweite: Die erste
+// XSS-Luecke, die je entsteht, ist sofort eine vollstaendige Kontouebernahme. Diese Etappe
+// bereitet die Behebung vor - sie legt den Token ZUSAETZLICH in ein HttpOnly-Cookie, das
+// JavaScript gar nicht erst lesen kann.
+//
+// SIE IST FUER SICH GENOMMEN KEIN SICHERHEITSGEWINN, und das gehoert klar gesagt: Solange das
+// Frontend den Token weiter in localStorage legt und per Bearer schickt, ist die Angriffsflaeche
+// unveraendert. Der Gewinn entsteht erst mit Etappe b im Frontend. Was diese Etappe leistet, ist
+// die REIHENFOLGE: Sie ist rein additiv und aendert fuer jeden bestehenden Client exakt nichts -
+// sie darf also jederzeit allein live gehen, auch wenn die Auslieferung gerade auseinanderlaeuft.
+// Etappe b darf das NICHT: Ein Frontend, das nur noch auf das Cookie setzt, waere gegen einen
+// Server ohne diesen Block sofort abgemeldet - jeder Spieler, gleichzeitig. Genau deshalb diese
+// Teilung und nicht ein einzelner grosser Umbau.
+const SESSION_COOKIE = 'kepler7_sid';
+// 180 Tage, dieselbe Frist wie das JWT selbst - ein Cookie, das frueher ablaeuft als sein Token,
+// meldet den Spieler ohne erkennbaren Grund ab.
+const SESSION_COOKIE_MAX_AGE = 180 * 24 * 60 * 60;
+
+// Eigener Parser statt cookie-parser: Eine neue Abhaengigkeit aendert package.json, und die
+// verlangt auf dem Pi zusaetzlich ein `docker restart` von Hand (nodemon installiert nichts nach).
+// Fuer das Lesen EINES Namens ist das ein schlechter Tausch.
+function leseCookie(req, name) {
+  const roh = req.headers.cookie;
+  if (!roh) return null;
+  for (const teil of roh.split(';')) {
+    const i = teil.indexOf('=');
+    if (i < 0) continue;
+    if (teil.slice(0, i).trim() !== name) continue;
+    const wert = teil.slice(i + 1).trim();
+    try { return decodeURIComponent(wert); } catch (e) { return wert; }
+  }
+  return null;
+}
+
+// `Secure` haengt an der TATSAECHLICHEN Verbindung (`req.secure`), nicht an einer Konfiguration.
+// Der erste Entwurf prüfte `PUBLIC_URL.startsWith('https://')` - das sah nach einer Entscheidung
+// aus und war keine: `web-push` verlangt fuer das VAPID-Subject zwingend `https:` oder `mailto:`
+// und laesst den Server sonst gar nicht erst starten (gemessen: "Vapid subject is not an https:
+// or mailto: URL"). Die Bedingung waere also IMMER wahr gewesen - eine Zeile, die eine Fallun-
+// terscheidung behauptet, die es nicht gibt. `req.secure` misst stattdessen, was wirklich
+// anliegt, und ist dank `app.set('trust proxy', 1)` auch hinter dem nginx des Pi korrekt.
+//
+// SameSite=Lax statt Strict: Das Spiel wird auch aus Mails heraus geoeffnet (Bestaetigungs- und
+// Reset-Links), und Strict schickt bei genau diesem Aufruf kein Cookie mit.
+function cookieTeile(req, wert, maxAge) {
+  const teile = [
+    SESSION_COOKIE + '=' + wert,
+    'Path=/', 'HttpOnly', 'SameSite=Lax',
+    'Max-Age=' + maxAge
+  ];
+  if (req.secure) teile.push('Secure');
+  return teile.join('; ');
+}
+
+function setzeSitzungsCookie(req, res, token) {
+  res.append('Set-Cookie', cookieTeile(req, encodeURIComponent(token), SESSION_COOKIE_MAX_AGE));
+}
+
+function loescheSitzungsCookie(req, res) {
+  res.append('Set-Cookie', cookieTeile(req, '', 0));
+}
+
 function authMiddleware(req, res, next) {
+  // Der Bearer-Header hat VORRANG vor dem Cookie, nicht umgekehrt. Grund: Solange Etappe a und b
+  // auseinander liegen, traegt ein Browser beides - und massgeblich muss das sein, was das
+  // Frontend bewusst mitschickt. Ein alter Cookie-Rest wuerde sonst ein frisch angemeldetes
+  // Geraet ueberstimmen und den Spieler mit einer fremden Sitzung weiterlaufen lassen.
   const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  const token = header.startsWith('Bearer ') ? header.slice(7) : leseCookie(req, SESSION_COOKIE);
   if (!token) return res.status(401).json({ error: 'Nicht angemeldet.' });
   try {
     const payload = jwt.verify(token, JWT_SECRET);
@@ -1861,6 +1928,9 @@ app.post('/api/login', authRateLimit, async (req, res) => {
   recordAnalyticsEvent(user.userId, 'funnel:login'); // Onboarding-Trichter: erfolgreiche Anmeldung
   // supersededPrevious sagt dem Frontend, dass diese Anmeldung ein anderes Gerät verdrängt hat -
   // damit kann es einen Hinweis zeigen, statt dass der Spieler am alten Gerät rätselt.
+  // Der Token reist WEITERHIN im Body mit - das ausgelieferte Frontend liest ihn dort, und ohne
+  // ihn waere diese Etappe nicht mehr additiv.
+  setzeSitzungsCookie(req, res, token);
   res.json({ token, userId: user.userId, username: user.username, supersededPrevious: !!previousSessionAt });
 });
 
@@ -1943,6 +2013,11 @@ app.post('/api/logout-all', authMiddleware, authRateLimit, async (req, res) => {
   delete user.activeSessionId;
   delete user.activeSessionAt;
   await saveDb();
+  // Das hochgezählte tokenVersion entwertet das Cookie ohnehin - authMiddleware lehnt es ab dem
+  // nächsten Aufruf ab. Es trotzdem zu löschen ist kein Schmuck: Ein abgemeldeter Browser soll
+  // kein totes Sitzungsgeheimnis mit sich herumtragen, auch kein wirkungsloses. Genau dafür ist
+  // "alle Sitzungen beenden" da.
+  loescheSitzungsCookie(req, res);
   res.json({ ok: true });
 });
 

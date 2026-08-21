@@ -7239,15 +7239,37 @@ function listMusterJoins(tag, musterAttackId) {
 
 app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
   const { tag, targetTag: targetTagRaw, gatherSeconds, message } = req.body || {};
-  const targetTag = String(targetTagRaw || '').trim().toUpperCase();
+  /* ZIELART (Phase 5). Ohne das Feld ist alles wie bisher - eine fremde Allianzbasis. Mit
+     'alien-nest' faellt der halbe Prueflauf darunter weg, und zwar nicht aus Bequemlichkeit:
+     Ein Nest hat keine Allianz, keine Basis, kein incomingmuster-Dokument und keinen
+     Schutzschild. Was stattdessen geprueft wird, steht im Zweig darunter. */
+  const zielArt = String((req.body && req.body.zielArt) || 'allianz');
+  const istNest = zielArt === 'alien-nest';
+  const targetTag = istNest ? null : String(targetTagRaw || '').trim().toUpperCase();
   const gatherOk = ALLIANCE_MUSTER_DURATIONS.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
-  if (!tag || !targetTag || targetTag === tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!istNest && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   const myRole = allianceRoleOf(tag, req.userId);
   if (myRole !== 'admin' && myRole !== 'officer') return res.status(403).json({ error: 'Nur Admins/Offiziere können einen koordinierten Angriff starten.' });
 
   const mine = getMusterAttackDoc(tag);
-  if (mine && (mine.phase === 'gathering' || mine.phase === 'enroute')) return res.status(409).json({ error: 'Es läuft bereits ein koordinierter Angriff eurer Allianz (gegen [' + mine.targetTag + ']).' });
+  if (mine && (mine.phase === 'gathering' || mine.phase === 'enroute')) {
+    const gegen = mine.zielArt === 'alien-nest' ? 'ein Alien-Nest bei ' + (mine.nestSystem || '?') : '[' + mine.targetTag + ']';
+    return res.status(409).json({ error: 'Es läuft bereits ein koordinierter Angriff eurer Allianz (gegen ' + gegen + ').' });
+  }
 
+  let nestZiel = null;
+  if (istNest) {
+    /* Der Schalter gilt hier mit: Ohne aktive Nester gibt es kein Ziel, der ganze Zweig ist dann
+       unerreichbar - deshalb braucht Phase 5 keinen EIGENEN Schalter. */
+    if (!NEST_SPAWN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Alien-Nester in der Galaxie.' });
+    const nestId = String((req.body && req.body.nestId) || '');
+    const g0 = loadOrInitGalaxy();
+    nestZiel = nestListe(g0).find(n => n.id === nestId);
+    if (!nestZiel) return res.status(404).json({ error: 'Dieses Alien-Nest gibt es nicht (mehr).' });
+  }
+
+  if (!istNest) {
   const targetBaseRaw = db.shared['alliance:' + targetTag + ':base'];
   let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
   if (!targetBase || !targetBase.foundedAt) return res.status(404).json({ error: 'Die Allianz [' + targetTag + '] hat keine (auffindbare) Allianzbasis.' });
@@ -7259,10 +7281,17 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     const cdLeft = Math.max(0, (incoming.lastAttackAt || 0) + ALLIANCE_MUSTER_COOLDOWN_MS - Date.now());
     if (cdLeft > 0) return res.status(429).json({ error: 'Die Allianzbasis von [' + targetTag + '] steht noch unter Schutz (Abklingzeit).', cdLeft });
   }
+  }
 
   const now = Date.now();
   const doc = {
     id: 'muster' + now, targetTag, createdBy: req.userId, createdByName: req.username || 'Kommandant',
+    zielArt,
+    nestId: nestZiel ? nestZiel.id : null,
+    nestSystem: nestZiel ? nestZiel.sys : null,
+    nestVolk: nestZiel ? nestZiel.volk : null,
+    nestVolkName: nestZiel ? ((ALIEN_VOELKER[nestZiel.volk] || {}).name || nestZiel.volk) : null,
+    nestStufeName: nestZiel ? nestStufe(nestZiel.stufe).name : null,
     message: String(message || '').replace(/[<>]/g, '').slice(0, 140),
     createdAt: now, museterEndsAt: now + gatherSeconds * 1000,
     phase: 'gathering', dispatch: null, result: null
@@ -7388,9 +7417,16 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
 
   const myBaseRaw = db.shared['alliance:' + tag + ':base'];
   let myBase = null; try { myBase = myBaseRaw ? JSON.parse(myBaseRaw) : null; } catch (e) {}
-  const targetBaseRaw = db.shared['alliance:' + doc.targetTag + ':base'];
-  let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
-  const sameSys = !!(myBase && targetBase && myBase.sector === targetBase.sector);
+  let sameSys;
+  if (doc.zielArt === 'alien-nest') {
+    // Dieselbe Regel wie bei einer fremden Basis, nur mit dem SYSTEM des Nestes als Gegenstueck:
+    // gleicher Sektor = kurzer Anflug. Eine zweite Entfernungsrechnung waere eine zweite Wahrheit.
+    sameSys = !!(myBase && doc.nestSystem && myBase.sector === doc.nestSystem);
+  } else {
+    const targetBaseRaw = db.shared['alliance:' + doc.targetTag + ':base'];
+    let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
+    sameSys = !!(myBase && targetBase && myBase.sector === targetBase.sector);
+  }
   // Fester Wert statt personenbezogener Geschwindigkeit (gleicher Grund wie beim Allianz-Raid: ein
   // gemeinsamer Verband hat keine "eine" persönliche Forschung).
   const dispatchSec = ALLIANCE_MUSTER_TEST_MODE ? ALLIANCE_MUSTER_TEST_DISPATCH_SEC : (sameSys ? 120 : 480);
@@ -7399,14 +7435,23 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
     departedAt: now, arrivalAt: now + dispatchSec * 1000, totalComposition,
     totalPower: Math.round(totalPower), totalShips, participantCount: parts.length,
     topParticipantId: topId, topParticipantPower: Math.round(Math.max(0, topPower)),
-    participantIds: parts.map(p => p.playerId)
+    participantIds: parts.map(p => p.playerId),
+    /* Die EINZELKRAEFTE frieren hier mit ein (Phase 5). Der Nest-Zweig der Aufloesung verteilt
+       den angerichteten Schaden danach; sie beim Aufloesen erneut aus den Beitritts-Dokumenten
+       zu lesen waere eine zweite Quelle, die sich inzwischen geaendert haben kann (ein Beitritt
+       laesst sich zurueckziehen). Der Versand ist der Zeitpunkt, an dem der Verband feststeht. */
+    participants: parts.map(p => ({ id: p.playerId, name: p.playerName || null, power: Math.round(p.power || 0) }))
   };
   doc.phase = 'enroute';
   setMusterAttackDoc(tag, doc);
-  db.shared['alliance:' + doc.targetTag + ':incomingmuster'] = JSON.stringify({
-    attackerTag: tag, musterAttackId: doc.id, phase: 'enroute', dispatchedAt: now,
-    arrivalAt: doc.dispatch.arrivalAt, lastAttackAt: now, totalShips, resolvedAt: null
-  });
+  // Ein Nest wird nicht gewarnt - es gibt keinen Verteidiger, der ein incomingmuster-Dokument
+  // lesen koennte, und ein Eintrag unter `alliance:null:incomingmuster` waere schlicht Muell.
+  if (doc.zielArt !== 'alien-nest') {
+    db.shared['alliance:' + doc.targetTag + ':incomingmuster'] = JSON.stringify({
+      attackerTag: tag, musterAttackId: doc.id, phase: 'enroute', dispatchedAt: now,
+      arrivalAt: doc.dispatch.arrivalAt, lastAttackAt: now, totalShips, resolvedAt: null
+    });
+  }
   await saveDb();
   res.json({ ok: true, doc });
 });
@@ -7424,10 +7469,82 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
   // siehe checkIncomingAllianceMuster im Frontend) - deshalb Mitgliedschaft in tag ODER in
   // doc.targetTag akzeptieren, nicht nur in tag wie sonst.
   const myRoleAttacker = allianceRoleOf(tag, req.userId);
-  const myRoleDefender = doc ? allianceRoleOf(doc.targetTag, req.userId) : null;
+  /* BEI EINEM NEST WIRD DER VERTEIDIGER-ZWEIG GAR NICHT ERST BETRETEN, und das ist keine
+     Bequemlichkeit: `allianceRoleOf` baut seinen Schluessel per Verkettung
+     ('alliance:' + tag + ':role:' + userId). Ein Nest hat kein targetTag; mit `undefined` entstuende
+     woertlich `alliance:undefined:role:<uid>` - ein Schluessel, der wie ein ganz normaler
+     Rolleneintrag aussieht. Wer einen solchen anlegen kann, duerfte damit JEDEN
+     Nest-Verbandsangriff aufloesen. Ein Nest hat keinen Verteidiger; also gibt es hier auch
+     keine Verteidiger-Rolle zu pruefen. */
+  const istNestZiel = !!(doc && doc.zielArt === 'alien-nest');
+  const myRoleDefender = (doc && !istNestZiel) ? allianceRoleOf(doc.targetTag, req.userId) : null;
   if (!myRoleAttacker && !myRoleDefender) return res.status(403).json({ error: 'Nur Mitglieder der angreifenden oder verteidigenden Allianz.' });
 
   if (!doc || doc.phase !== 'enroute' || !doc.dispatch || doc.dispatch.arrivalAt > Date.now()) return res.json({ ok: true, doc });
+
+  if (istNestZiel) {
+    const g = loadOrInitGalaxy();
+    const nest = nestListe(g).find(n => n.id === doc.nestId);
+    const jetzt = Date.now();
+
+    /* Weg oder weitergezogen: dieselbe Entscheidung wie beim Einzelangriff - es kostet NICHTS,
+       und die Antwort nennt den Grund. Ein stilles "erfolglos" waere hier die Falschaussage. */
+    if (!nest || (doc.nestSystem && nest.sys !== doc.nestSystem)) {
+      doc.phase = 'resolved';
+      doc.result = { nest: true, verpasst: true, grund: nest ? 'weitergezogen' : 'gefallen',
+        neuesSystem: nest ? nest.sys : null, success: false, destroyed: false, damage: 0,
+        defensePower: 0, ownLossPct: 0, resolvedAt: jetzt };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+
+    /* Die Teilnehmer kommen aus dem VERSAND, nicht aus den Beitritts-Dokumenten: Der Verband steht
+       seit dem Abflug fest, ein Beitritt laesst sich bis dahin zurueckziehen. Der Rueckfall auf
+       participantIds deckt Dokumente ab, die vor Phase 5 abgeflogen sind - dort zaehlen alle
+       gleich, weil ihre Einzelkraefte nicht mitgeschrieben wurden. */
+    const roh = doc.dispatch.participants;
+    const beteiligte = (Array.isArray(roh) && roh.length)
+      ? roh.map(p => ({ userId: p.id, name: p.name || 'Kommandant', gewicht: p.power || 0 }))
+      : (doc.dispatch.participantIds || []).map(id => ({ userId: id, name: 'Kommandant', gewicht: 1 }));
+    if (!beteiligte.length) {
+      doc.phase = 'resolved';
+      doc.result = { nest: true, noParticipants: true, success: false, destroyed: false, damage: 0,
+        defensePower: 0, ownLossPct: 0, resolvedAt: jetzt };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+
+    const erg = nestSchlagAusfuehren(g, nest, doc.dispatch.totalPower,
+      doc.dispatch.totalComposition || {}, beteiligte, jetzt);
+
+    doc.phase = 'resolved';
+    doc.result = {
+      nest: true, verpasst: false,
+      volkName: erg.volkName, stufeName: erg.stufeName, system: doc.nestSystem,
+      damage: erg.schaden, destroyed: erg.gefallen, success: erg.schaden > 0,
+      trifftSchwaeche: erg.trifftSchwaeche, schwaeche: erg.schwaeche,
+      lp: erg.lp, lpMax: erg.lpMax,
+      // Als QUOTE, nicht als Stueckzahlen: Jeder Client wendet sie auf SEINEN Beitrag an.
+      ownLossPct: Math.round(erg.quote * 1000) / 1000,
+      defensePower: 0, chancePct: null,
+      teilnehmer: erg.teilnehmer, schwarmGefallen: erg.schwarmGefallen, mitgerissen: erg.mitgerissen,
+      /* Die BELOHNUNG liegt bereits in __pendingRewards jedes Beitragenden (anteilig, ueber
+         nestSchlagAusfuehren). claim gibt deshalb nur die Schiffe zurueck und zahlt NICHT
+         zusaetzlich die Basisangriffs-Waehrung - zwei Belohnungswege fuer dasselbe Ereignis
+         waeren genau die Dopplung, die dieses Projekt sonst ueberall vermeidet. */
+      belohnungUeberPendingRewards: true,
+      resolvedAt: jetzt
+    };
+    setMusterAttackDoc(tag, doc);
+    console.log('[muster-nest] tag=' + tag + ' nest=' + doc.nestId + ' teilnehmer=' + beteiligte.length +
+      ' kraft=' + doc.dispatch.totalPower + ' schaden=' + erg.schaden +
+      ' lp=' + (erg.gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax +
+      (erg.schwarmGefallen ? ' SCHWARM ZERFALLEN (+' + erg.mitgerissen + ')' : ''));
+    await saveDb();
+    return res.json({ ok: true, doc });
+  }
 
   const targetTag = doc.targetTag;
   const targetBaseRaw = db.shared['alliance:' + targetTag + ':base'];
@@ -7549,6 +7666,32 @@ app.post('/api/musterattack/claim', authMiddleware, async (req, res) => {
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
     await saveDb();
     return res.json({ ok: true, noParticipants: true, saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
+  }
+
+  if (res_.nest) {
+    /* Bei einem Nest gibt claim NUR die Schiffe zurueck. Die eigentliche Belohnung liegt anteilig
+       in __pendingRewards (siehe Kommentar im Ergebnis) - sie hier ein zweites Mal auszuzahlen
+       waere eine Doppelzahlung fuer dasselbe Ereignis. Bei `verpasst` ist die Quote 0, der Verband
+       kommt also vollzaehlig heim: Das Nest war nicht da, das ist kein Fehler des Spielers. */
+    const verloren = {};
+    if (fleetObj) {
+      for (const [k, sentCount] of Object.entries(join.composition || {})) {
+        if (!sentCount) continue;
+        const lost = Math.min(sentCount, Math.round(sentCount * (res_.ownLossPct || 0)));
+        const survivors = sentCount - lost;
+        if (survivors > 0) fleetObj[k] = (fleetObj[k] || 0) + survivors;
+        if (lost > 0) verloren[k] = lost;
+      }
+    }
+    join.claimed = true;
+    db.shared[joinKey] = JSON.stringify(join);
+    const nestSaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+    await saveDb();
+    return res.json({ ok: true, nest: true, verpasst: !!res_.verpasst, grund: res_.grund || null,
+      destroyed: !!res_.destroyed, damage: res_.damage || 0, volkName: res_.volkName || null,
+      stufeName: res_.stufeName || null, lostShips: verloren,
+      belohnungUeberPendingRewards: true,
+      saveVersion: nestSaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
   }
 
   const totalPower = (doc.dispatch && doc.dispatch.totalPower) || 0;
@@ -9461,6 +9604,103 @@ function nestFindeMission(save, missionId, nestId) {
        Antwort, sein Client bucht sie - damit entsteht das Wettrennen mit dem Autosave gar nicht.
    Die Belohnung beim Fall geht ueber pushPendingReward an ALLE Beitragenden, auch an den
    Anfragenden selbst: ein Weg fuer alle statt zweier, die auseinanderlaufen koennen. */
+/* DER GEMEINSAME KERN EINES NEST-SCHLAGS. Zwei Wege fuehren hierher: der Einzelangriff
+   (/api/alien/nest-angriff) und - seit Phase 5 - der koordinierte Verbandsangriff
+   (/api/musterattack/resolve). Eine zweite Kopie der Rechnung waere die uebliche zweite Wahrheit;
+   dieselbe Ueberlegung wie bei astFreiePlaetze.
+
+   ZWEI ENTSCHEIDUNGEN AN DER SCHNITTSTELLE, beide aus dem Unterschied der zwei Wege:
+
+   1. REIN GEHT DIE KRAFT, nicht der Spielstand. Der Einzelangriff bildet sie aus dem Spielstand
+      des Angreifers; ein VERBAND hat keinen einen Spielstand - seine Kraft steht seit dem Beitritt
+      fest (doc.dispatch.totalPower, je Mitglied gemessen und summiert). Sie hier neu zu bilden
+      hiesse, sie aus dem Spielstand eines einzelnen Mitglieds zu raten.
+   2. RAUS KOMMEN DIE VERLUSTE ALS QUOTE, nicht als Stueckzahlen. Der Server schreibt fremde
+      Spielstaende nicht; jeder Client wendet die Quote auf SEINEN eigenen Beitrag an. Der
+      Einzelangriff rechnet daraus wie bisher konkrete Verluste, der Verband legt sie als
+      ownLossPct ins Ergebnisdokument - dasselbe Muster wie bei der Basisangriffs-Aufloesung.
+
+   `beteiligte` ist [{ userId, name, gewicht }]. Beim Einzelangriff ein Eintrag mit Gewicht 1.
+   Beim Verband ALLE Teilnehmer, gewichtet nach ihrer beim Beitritt gemessenen Kraft: Ein Verband,
+   dessen ganzer Schaden auf den Ausloeser gebucht wird, machte den Hort-Anteil zur Frage, wer
+   zufaellig auf den Knopf drueckt. Aus demselben Grund bekommen ALLE die Abklingzeit - sonst
+   schlaegt man im Verband zu und unmittelbar danach noch einmal allein. */
+function nestSchlagAusfuehren(g, nest, kraft, composition, beteiligte, jetzt) {
+  const liste = nestListe(g);
+  const volk = ALIEN_VOELKER[nest.volk] || { name: nest.volk, schwaeche: null };
+  const st = nestStufe(nest.stufe);
+  const trifftSchwaeche = !!(volk.schwaeche && fleetHasShipType(composition, volk.schwaeche));
+  const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4) * (trifftSchwaeche ? ALIEN_SCHWAECHE_MULT : 1));
+
+  const lpVorher = nest.lp || 0;
+  nest.lp = Math.max(0, lpVorher - wurf);
+  const schaden = lpVorher - nest.lp;          // was ANGEKOMMEN ist
+
+  nest.beitraege = nest.beitraege || {};
+  nest.schlaege = nest.schlaege || {};
+  const gewichtSumme = beteiligte.reduce((a, b) => a + (b.gewicht > 0 ? b.gewicht : 0), 0) || 1;
+  for (const t of beteiligte) {
+    const anteil = (t.gewicht > 0 ? t.gewicht : 0) / gewichtSumme;
+    const b = nest.beitraege[t.userId] || { name: t.name || 'Kommandant', schaden: 0 };
+    b.schaden = (b.schaden || 0) + schaden * anteil;
+    b.name = t.name || b.name;
+    nest.beitraege[t.userId] = b;
+    nest.schlaege[t.userId] = jetzt;
+  }
+
+  // Das Nest wehrt sich. Als Quote - siehe Punkt 2 oben.
+  const quote = Math.min(0.5, NEST_VERLUST + Math.random() * 0.06);
+
+  const gefallen = nest.lp <= 0;
+  const anteile = {};
+  let teilnehmer = 0, schwarmGefallen = false, mitgerissen = 0;
+  if (gefallen) {
+    const summe = Object.values(nest.beitraege).reduce((a, b) => a + (b.schaden || 0), 0) || 1;
+    for (const [uid, b] of Object.entries(nest.beitraege)) {
+      const anteil = (b.schaden || 0) / summe;
+      if (!(anteil > 0)) continue;
+      teilnehmer++;
+      anteile[uid] = anteil;
+      pushPendingReward(uid, {
+        type: 'alien-nest',
+        system: nest.sys, volk: nest.volk, volkName: volk.name,
+        stufe: nest.stufe, stufeName: st.name,
+        anteil: Math.round(anteil * 1000) / 1000,
+        kampfpunkte: Math.max(1, Math.round(st.kampfpunkte * anteil)),
+        xp: Math.max(1, Math.round(st.xp * anteil)),
+        credits: Math.max(1, Math.round(st.credits * anteil)),
+        koenigin: nest.stufe === 5,
+        zeit: jetzt
+      });
+    }
+    const idx = liste.indexOf(nest);
+    if (idx >= 0) liste.splice(idx, 1);
+
+    /* Faellt die KOENIGIN, stirbt der ganze Schwarm dieses Volkes. Das ist die Ausschuettung, auf
+       die eine Allianz hinarbeitet - und zugleich der Grund, warum Wachsenlassen eine ECHTE
+       Entscheidung ist: Wer frueh raeumt, zahlt wenig und bekommt wenig. */
+    if (nest.stufe === 5) {
+      schwarmGefallen = true;
+      for (let i = liste.length - 1; i >= 0; i--) {
+        if (liste[i].volk === nest.volk) { liste.splice(i, 1); mitgerissen++; }
+      }
+      g.alienPause = g.alienPause || {};
+      g.alienPause[nest.volk] = jetzt + NEST_PAUSE_MS;
+      pushGalaxyNews('ti-alien', 'Die Königin der ' + volk.name + ' bei ' + nest.sys + ' ist gefallen - ' +
+        'der ganze Schwarm zerfällt' + (mitgerissen ? ' (' + mitgerissen + ' weitere Nester)' : '') + '. ' +
+        'Das Volk sammelt sich für ' + Math.round(NEST_PAUSE_MS / 3600000) + ' Stunden.');
+    } else {
+      pushGalaxyNews('ti-alien', 'Der ' + st.name + ' der ' + volk.name + ' bei ' + nest.sys +
+        ' ist zerstört - ' + teilnehmer + ' Kommandant' + (teilnehmer === 1 ? '' : 'en') + ' teilen sich die Bergung.');
+    }
+    nestOrteNachfuehren(g);
+  }
+
+  return { wurf, schaden, trifftSchwaeche, schwaeche: volk.schwaeche, quote, gefallen,
+           anteile, teilnehmer, schwarmGefallen, mitgerissen,
+           volkName: volk.name, stufeName: st.name,
+           lp: gefallen ? 0 : nest.lp, lpMax: nest.lpMax, stufe: gefallen ? null : nest.stufe };
+}
 app.post('/api/alien/nest-angriff', authMiddleware, async (req, res) => {
   const nestId = String((req.body && req.body.nestId) || '');
   const missionId = String((req.body && req.body.missionId) || '');
@@ -9500,90 +9740,33 @@ app.post('/api/alien/nest-angriff', authMiddleware, async (req, res) => {
       Math.ceil((letzter + NEST_ABKLING_MS - jetzt) / 60000) + ' Minuten möglich.', abklingzeit: true });
   }
 
-  const volk = ALIEN_VOELKER[nest.volk] || { name: nest.volk, schwaeche: null };
-  const st = nestStufe(nest.stufe);
-  // Dritter Parameter 0: Der Weltboss-Schwaechenbonus gilt hier nicht - ein Nest hat keinen
-  // Archetyp. Die Volks-Schwaeche kommt gleich danach als EIGENER, flacher Faktor dazu.
   const kraft = computeAttackPowerFromComposition(save, mission.composition, 0);
   if (!(kraft > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
-  const trifftSchwaeche = !!(volk.schwaeche && fleetHasShipType(mission.composition, volk.schwaeche));
-  const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4) * (trifftSchwaeche ? ALIEN_SCHWAECHE_MULT : 1));
+  const erg = nestSchlagAusfuehren(g, nest, kraft, mission.composition,
+    [{ userId: req.userId, name: req.username || 'Kommandant', gewicht: 1 }], jetzt);
 
-  const lpVorher = nest.lp || 0;
-  nest.lp = Math.max(0, lpVorher - wurf);
-  const schaden = lpVorher - nest.lp;          // was ANGEKOMMEN ist
-
-  nest.beitraege = nest.beitraege || {};
-  const mein = nest.beitraege[req.userId] || { name: req.username || 'Kommandant', schaden: 0 };
-  mein.schaden = (mein.schaden || 0) + schaden;
-  mein.name = req.username || mein.name;
-  nest.beitraege[req.userId] = mein;
-  nest.schlaege[req.userId] = jetzt;
-
-  // Das Nest wehrt sich. Anteilig auf die losgeschickte Zusammensetzung; abgebucht wird im Client.
-  const quote = Math.min(0.5, NEST_VERLUST + Math.random() * 0.06);
+  /* Aus der Quote werden hier - und NUR hier - konkrete Verluste: Der Einzelangreifer hat genau
+     eine Zusammensetzung, der Verband hat viele und bekommt deshalb die Quote selbst. */
   const eigeneVerluste = {};
   for (const [typ, n] of Object.entries(mission.composition)) {
     if (typeof n !== 'number' || n <= 0) continue;
-    const weg = Math.min(n, Math.round(n * quote));
+    const weg = Math.min(n, Math.round(n * erg.quote));
     if (weg > 0) eigeneVerluste[typ] = weg;
   }
-
-  const gefallen = nest.lp <= 0;
-  let meinAnteil = 0, teilnehmer = 0, schwarmGefallen = false, mitgerissen = 0;
-  if (gefallen) {
-    const summe = Object.values(nest.beitraege).reduce((a, b) => a + (b.schaden || 0), 0) || 1;
-    for (const [uid, b] of Object.entries(nest.beitraege)) {
-      const anteil = (b.schaden || 0) / summe;
-      if (!(anteil > 0)) continue;
-      teilnehmer++;
-      if (uid === req.userId) meinAnteil = anteil;
-      pushPendingReward(uid, {
-        type: 'alien-nest',
-        system: nest.sys, volk: nest.volk, volkName: volk.name,
-        stufe: nest.stufe, stufeName: st.name,
-        anteil: Math.round(anteil * 1000) / 1000,
-        kampfpunkte: Math.max(1, Math.round(st.kampfpunkte * anteil)),
-        xp: Math.max(1, Math.round(st.xp * anteil)),
-        credits: Math.max(1, Math.round(st.credits * anteil)),
-        koenigin: nest.stufe === 5,
-        zeit: jetzt
-      });
-    }
-    const idx = liste.indexOf(nest);
-    if (idx >= 0) liste.splice(idx, 1);
-
-    /* Faellt die KOENIGIN, stirbt der ganze Schwarm dieses Volkes. Das ist die Ausschuettung, auf
-       die eine Allianz hinarbeitet - und zugleich der Grund, warum Wachsenlassen eine ECHTE
-       Entscheidung ist: Wer frueh raeumt, zahlt wenig und bekommt wenig. */
-    if (nest.stufe === 5) {
-      schwarmGefallen = true;
-      for (let i = liste.length - 1; i >= 0; i--) {
-        if (liste[i].volk === nest.volk) { liste.splice(i, 1); mitgerissen++; }
-      }
-      g.alienPause = g.alienPause || {};
-      g.alienPause[nest.volk] = jetzt + NEST_PAUSE_MS;
-      pushGalaxyNews('ti-alien', 'Die Königin der ' + volk.name + ' bei ' + nest.sys + ' ist gefallen - ' +
-        'der ganze Schwarm zerfällt' + (mitgerissen ? ' (' + mitgerissen + ' weitere Nester)' : '') + '. ' +
-        'Das Volk sammelt sich für ' + Math.round(NEST_PAUSE_MS / 3600000) + ' Stunden.');
-    } else {
-      pushGalaxyNews('ti-alien', 'Der ' + st.name + ' der ' + volk.name + ' bei ' + nest.sys +
-        ' ist zerstört - ' + teilnehmer + ' Kommandant' + (teilnehmer === 1 ? '' : 'en') + ' teilen sich die Bergung.');
-    }
-    nestOrteNachfuehren(g);
-  }
-
+  const { schaden, gefallen, trifftSchwaeche, schwarmGefallen, mitgerissen } = erg;
+  const meinAnteil = erg.anteile[req.userId] || 0;
+  const teilnehmer = erg.teilnehmer;
   console.log('[nest-angriff] userId=' + req.userId + ' nest=' + nestId + ' volk=' + nest.volk +
-    ' stufe=' + nest.stufe + ' schwaeche=' + trifftSchwaeche + ' schaden=' + schaden +
-    ' lp=' + (gefallen ? 'gefallen' : nest.lp) + '/' + nest.lpMax +
+    ' stufe=' + (erg.stufe === null ? 'gefallen' : erg.stufe) + ' schwaeche=' + trifftSchwaeche + ' schaden=' + schaden +
+    ' lp=' + (gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax +
     (schwarmGefallen ? ' SCHWARM ZERFALLEN (+' + mitgerissen + ')' : ''));
   await saveDb();
   res.json({
     ok: true, schaden, gefallen,
-    trifftSchwaeche, schwaeche: volk.schwaeche,
-    lp: gefallen ? 0 : nest.lp, lpMax: nest.lpMax,
-    stufe: gefallen ? null : nest.stufe, stufeName: st.name,
-    volk: nest.volk, volkName: volk.name,
+    trifftSchwaeche, schwaeche: erg.schwaeche,
+    lp: erg.lp, lpMax: erg.lpMax,
+    stufe: erg.stufe, stufeName: erg.stufeName,
+    volk: nest.volk, volkName: erg.volkName,
     eigeneVerluste,
     anteil: gefallen ? Math.round(meinAnteil * 1000) / 1000 : 0,
     teilnehmer: gefallen ? teilnehmer : Object.keys(nest.beitraege).length,

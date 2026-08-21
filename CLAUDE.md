@@ -494,6 +494,83 @@ sind **Vergleiche zweier Schläge derselben Flotte**, nicht Blicke auf ein Feld:
 33.732 Kernschaden, Türme 30,5 % gegen 12,6 % Verluste. Ein Feld allein wäre die Beschriftung, nicht
 die Wirkung (Frontend-Arbeitsregel 61).
 
+## Bonuscodes (21.08.2026, Auftrag Sascha)
+
+**Wortlaut:** „ich will ab und zu mal bonuscodes posten wo die spieler kleine geschenke bekommen die
+codes sollen aber nur eine gewisse gültigkeit haben also max 1 mal pro account einlösbar und nur
+1 woche etc aktiv am liebsten baust du mir das in den admin bereich ein."
+
+Vier Endpunkte: `POST /api/admin/bonuscode` (anlegen), `GET /api/admin/bonuscodes` (auflisten),
+`POST /api/admin/bonuscode/aktiv` (an/aus/entfernen) und `POST /api/bonuscode/einloesen` (Spieler).
+
+### Die Entscheidung, an der alles hängt: die Sperre liegt am KONTO
+
+Das naheliegende Vorbild `/api/referral/redeem` merkt sich seine Einlösung in
+`save.referralRedeemed` – also **im Spielstand**, und der ist bauartbedingt klientenautoritativ. Wer
+das Feld in der Entwicklerkonsole löscht, löst erneut ein. Für +50 Kredite unter Freunden ist das
+verkraftbar; bei einem Code, der **öffentlich gepostet** wird, wäre es die Selbstbedienung, vor der
+dieses Projekt bei jedem Belohnungssystem warnt. Die Sperre liegt deshalb in `user.bonusCodes`, wie
+`user.marktTag` und `user.staub` – dieselbe Entscheidung wie beim Kampfvermerk der Anfechtung.
+`tests/test_bonuscodes_http.js` 4b misst genau das; die Gegenprobe mit der Sperre im Spielstand
+liefert `{"amKonto":false,"imSpielstand":true}`.
+
+Der **Katalog** liegt in `db.bonusCodes`, ausdrücklich nicht in `db.shared`: Der generische
+Storage-Endpunkt ist für jeden eingeloggten Nutzer schreibbar, solange keine Sonderregel greift –
+dort ließe sich ein Code anlegen. `db.galaxy` ist das Vorbild.
+
+### `BONUSCODE_GABEN` ist die eigentliche Sicherung, nicht die Zahl darin
+
+Die Tabelle sagt, welche Felder ein Code überhaupt tragen darf und wie groß jedes höchstens sein
+kann. Ohne sie wäre ein Tippfehler beim Anlegen (1000000 statt 1000) ein Wirtschaftsereignis – und
+ein zu großer Wert reißt beim Beschenkten später `SAVE_SANITY_LIMITS`, was den **gesamten**
+Spielstand mit HTTP 400 ablehnen lässt. Die Deckel sind bewusst klein: Der Auftrag sagt „kleine
+geschenke". Wer eine neue Gabe aufnimmt, trägt sie dort ein – eine Gabe ohne Eintrag wird abgelehnt,
+und zwar mit ihrem Namen im Fehlertext.
+
+### `authRateLimit` steht bewusst NICHT an der Einlöse-Route
+
+Der naheliegende Griff, und im Test gemessen falsch: `authRateLimit` deckelt 15 Aufrufe je
+15 Minuten und IP und zählt **jeden** Aufruf, auch die erfolgreichen. Ein Konto hatte nach vier
+eingelösten Codes und elf Rateversuchen die IP-Grenze erreicht und bekam „Zu viele Versuche – bitte
+in ein paar Minuten erneut versuchen" – eine Meldung, die mit Bonuscodes nichts zu tun hat. **Beim
+Login ist jeder Aufruf ein Versuch; hier ist ein Erfolg keiner.**
+
+Die Sperre ist deshalb der **Fehlversuchs**-Zähler am Konto (`user.bonusVersuche`, 12/Tag). Er
+zählt ausschließlich unbekannte Codes; ein gültiger, nur abgelaufener Code zählt **nicht** – der
+Spieler hat nichts falsch gemacht (Prüfung 5a2). Nachgerechnet trägt das: acht Zeichen aus 36
+ergeben 2,8 Billionen Kombinationen; bei zwölf Fehlversuchen je Konto und Tag wäre selbst mit
+tausend Konten nichts zu holen. Der Grundschutz gegen bloßes Zuschütten bleibt
+`globalApiRateLimit`.
+
+### Vier Dinge, die man beim Anfassen wissen muss
+
+- **Jede Ablehnung nennt den Grund** – abgelaufen, schon eingelöst, aufgebraucht, unbekannt. Ein
+  pauschales „ungültig" macht aus einem abgelaufenen Code einen Fehlerbericht.
+- **Normalisiert wird beim Vergleichen, nicht beim Speichern.** `bonuscodeNormal()` wirft alles
+  außer `A-Z0-9` weg; wer „sternen-staub 25" tippt, hat den Code. Die Anzeigeform bleibt als
+  `anzeige` erhalten, damit der Admin-Bereich den Code so zeigt, wie er gepostet wurde.
+- **`maxGesamt` steht nicht im Auftrag und ist trotzdem drin.** Ein Code, der in einem fremden Forum
+  landet, ist mit einer Wochenfrist allein nicht zu bremsen; 0 heißt unbegrenzt.
+- **Die Belohnung geht über `pushPendingReward` mit eigenem `type:'bonuscode'`.** Ohne eigenen Typ
+  fällt sie im Client in den Rückfall-Zweig und meldet dem Spieler wörtlich „Dankeschön vom Team:
+  +500 Kredite für deinen Bug-Report!" – eine Falschaussage. Der Frontend-Zweig gehört also zwingend
+  dazu (Prüfung 3b, Gegenprobe ohne den Typ fällt).
+
+### Der Test ist das erste Admin-Vorbild im Repo
+
+Vor `tests/test_bonuscodes_http.js` (Port 3230, 32 Prüfungen, **vier Gegenproben**) legte **kein
+einziger** Test ein Admin-Konto an – `grep -rn "gamegeeeeek" tests/*.js` lieferte null Treffer, und
+die zehn `/api/admin`-Routen waren von keiner Prüfung abgedeckt. Wer einen weiteren Admin-Test baut,
+findet hier das Muster: Der Schlüssel in `db.users` muss **`gamegeeeeek` kleingeschrieben** sein –
+`isAdmin` schlägt genau dort nach, ein Eintrag unter `GameGeeeeek` liefert false.
+
+**Nebenbefund zu den Testports, gemessen:** Die Kopfkommentare zur Portbelegung sind in beide
+Richtungen falsch – sie führen 3198, 3200 und 3225 als belegt, obwohl kein Test sie benutzt, und
+haben zwei echte Doppelbelegungen nicht verhindert (3223 in `test_deploy_webhook_http` **und**
+`test_passwortregeln_http`; 3224 in `test_alien_nester_http` **und** `test_sitzungscookie_http`).
+Wer einen freien Port sucht, misst ihn selbst:
+`grep -hoE "PORT *= *[0-9]+" tests/*.js | sort -un`.
+
 ## Der Kampfvermerk am Vorkommen (21.08.2026)
 
 `/api/asteroid/contest` schreibt seit dem 21.08.2026 in **beiden** Ausgängen

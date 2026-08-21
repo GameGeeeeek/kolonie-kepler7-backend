@@ -831,6 +831,31 @@ Die 1f-Schleife von `test_kosmetik_http.js` deckt die zwei neuen Arten automatis
 filtert auf Bedingungsarten, die aus dem SPIELSTAND kommen (`ausSpielstand`), und diese beiden
 kommen aus dem Nutzerobjekt – genau wie `kauf` und `abgewehrt`.
 
+**Nachgemessen bei der adversarischen Prüfung des Änderungssatzes (21.08.2026), weil der Einwand
+kam, die Zähler hingen letztlich an einer klientenautoritativen Flottenangabe.** Das stimmt für die
+zugrundeliegende Schlagkraft und ist die dokumentierte Projektgrenze – aber die Einordnung fällt
+zugunsten der neuen Bedingungen aus. Gemessen an `kosmetikBedingungErfuellt`, woher jede Art ihren
+Wert nimmt:
+
+| Nutzerobjekt (`findUserById`) | Spielstand (klientenautoritativ) |
+|---|---|
+| `kauf`, `abgewehrt`, **`festungen`**, **`koeniginnen`** | `prestige`, `aufstieg`, `kampfpunkte`, `abgrund`, `erfolge`, `bosse` |
+
+**Sechs** bestehende Bedingungen lesen also direkt aus dem Spielstand – `em_schaedel` (30
+Sektor-Bosse) ist der nächste Verwandte der zwei neuen und steht auf der schwächeren Seite. Die
+Phase-6-Zähler sind damit besser verankert als die Nachbarn, die sie ergänzen; ein Handlungsbedarf
+folgt daraus nicht.
+
+**Ein Befund der Prüfung betraf allerdings das FRONTEND und war ein ausgelieferter Datenverlust:**
+`POST /api/pending-rewards/claim` entfernt die Belohnung mit `list.shift()` + `saveDb()`, bevor sie
+den Client erreicht – es gibt keinen zweiten Versuch. Die zwei Client-Zweige `festung` (v8.569.0)
+und `alien-nest` (v8.582.0) riefen als EINZIGE der acht kein `save()`. Wer den Reiter nach dem
+Spielstart schloss, verlor Hort, Protomaterie, Kampfpunkte, Erfahrung und Kredite endgültig.
+Behoben im Frontend; Wächter dort `tests/test_belohnungen_speichern.js`. **Für dieses Repo folgt
+daraus die Prüffrage bei jeder künftigen Warteschlange: Wer den Eintrag beim Ausliefern LÖSCHT,
+verpflichtet den Empfänger zum sofortigen Speichern** – das gehört in die Beschreibung des
+Endpunkts, nicht in die Erinnerung des Client-Autors.
+
 ## Passwort-Regeln beim SETZEN (19.08.2026, Sicherheits-Audit P5)
 
 `passwortProblem(passwort, username)` ist die EINE Wache für neu gesetzte Passwörter. Sechs Regeln:

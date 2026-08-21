@@ -1589,4 +1589,39 @@ trivial erfüllt. Beide verlangen jetzt zuerst einen **Wert**, dann die Beziehun
 Prüfung über zwei Felder formuliert, die es am Vergleichsstand gar nicht gibt, prüft sonst nur,
 dass beide fehlen.
 
+### Der erste SAUBERE Deploy seit acht Ausfällen – gemessen, nicht gehofft (21.08.2026, #150)
+
+Der Merge von Phase 6 (Backend #150, Frontend v8.594.0) ist der erste, bei dem die ganze Kette
+von außen belegt werden konnte. Gemessen unmittelbar nach dem Merge, mit beiden Kontrollen im
+selben Lauf:
+
+```
+GET  /api/health   {"commit":"03f047c","checkout":"03f047c","blob":"9ad26fc","uptimeSec":63}
+POST /api/musterattack/create   401   (alte Kontrollroute)
+POST /api/gibtesnicht           404   (Negativkontrolle)
+www.gamegeeeeek.de              VERSION = '8.594.0'
+```
+
+**Der Blob ist die Zeile, auf die es ankommt** – und dies ist seine erste Anwendung in der
+Richtung, für die er eigentlich gebaut wurde: nicht als Diagnose eines Ausfalls, sondern als
+Beleg eines Erfolgs. `git rev-parse 03f047c:server.js` liefert lokal `9ad26fc`, der Pi meldet
+`9ad26fc` – der Prozess führt also **byte-genau** die Datei aus, die gemergt wurde. Der
+Flickenteppich-Fall vom selben Tag (vier Stände in einem Verzeichnis) ist damit ausgeschlossen,
+und zwar ohne SSH. `uptimeSec: 63` belegt zusätzlich, dass nodemon nach dem Pull wirklich neu
+gestartet hat – der dritte Fehlerfall der Tabelle oben („`checkout` neuer als `commit`") kann
+gar nicht vorliegen.
+
+**Warum diese Messung überhaupt möglich war, ist die eigentliche Lehre:** #150 bringt **keine
+einzige neue Route** mit (maschinell über alle Commits seit #142 gemessen – #143 bis #153
+brachten zusammen keine). Nach der alten 401/404-Methode wäre der Stand schlicht **nicht
+messbar** gewesen; man hätte den letzten routentragenden Commit davor genommen und über #150
+selbst weiterhin nichts gewusst. Ein Werkzeug, das nur bei bestimmten Merges greift, hat genau
+dann Pause, wenn eine Serie von Logik-Änderungen ausgeliefert wird – also im Normalfall dieses
+Projekts.
+
+**Für #147 (die Sperrdatei je Ziel) ist das der erste positive Beleg**, aber ausdrücklich noch
+kein Freispruch: Ein einzelner erfolgreicher Deploy beweist nicht, dass die Kollision behoben
+ist – er beweist nur, dass sie diesmal nicht auftrat. Die Ausfälle Nr. 6 und 7 lagen Tage
+auseinander. Wer den nächsten Merge fährt, misst weiter.
+
 **Folge für PRs:** Der Merge ist nicht der Zwischenschritt zu einem späteren Deploy, sondern die Auslieferung selbst – was gemerged wird, läuft Sekunden später auf dem Pi. Offene PRs trotzdem sofort mergen statt sie liegen zu lassen, aber erst nach grünem Prüflauf.

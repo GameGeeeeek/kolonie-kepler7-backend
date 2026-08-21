@@ -18,6 +18,12 @@
 //   4. Die Route bleibt oeffentlich (kein Token noetig) - sie soll von aussen messbar sein.
 //   5. Faellt .git weg, antwortet der Endpunkt weiter und meldet null statt zu sterben. Der
 //      Diagnosefall ist ja gerade der, in dem im Repo etwas nicht stimmt.
+//   7. Das Feld `blob` ist der git-Blob-Hash der laufenden Datei - gemessen gegen `git
+//      hash-object`, also gegen eine FREMDE Implementierung, nicht gegen dieselbe Rechnung
+//      noch einmal. Anlass: Beim achten Deploy-Ausfall war der Arbeitsbaum ein Flickenteppich
+//      aus drei Commits, waehrend .git/HEAD unveraendert auf einen vierten zeigte - commit und
+//      checkout melden dann beide denselben alten Stand, obwohl der laufende Code ein anderer
+//      ist. Der Blob loest das auf.
 //   6. Die Umleitung per KEPLER_GIT_DIR GREIFT WIRKLICH. Eine still ignorierte Env-Variable
 //      sieht aus wie eine bestandene Pruefung (Frontend-Arbeitsregel 14, Korrektur 15.08.).
 //      Belegt an einem Hash, der im echten Repo nicht vorkommen kann.
@@ -29,7 +35,9 @@
 //   KEPLER_GIT_DIR=$G node tests/test_health_commit_http.js
 //
 // GEGENPROBE (Regel 1): Gegen den Stand vor dem Umbau fallen 1a-1c, 2a, 3a-3c, 5a und 6a-6b -
-// die Felder gibt es dort nicht. Gruen bleiben dort nur 1a, 1d und 4a - alle drei beschreiben
+// die Felder gibt es dort nicht (7b-bau bleibt gruen - es ist eine Aufbau-Pruefung nach
+// Frontend-Arbeitsregel 34 und sagt nur, dass das Messwerkzeug laeuft).
+// Gruen bleiben dort nur 1a, 1d, 4a und 7b-bau - alle drei beschreiben
 // Verhalten, das schon vorher richtig war (die Route antwortet, ihre alten Felder stehen noch,
 // sie ist oeffentlich); sie sichern, dass der Umbau nichts davon mitgenommen hat.
 // 2a und 6b waren im ersten Anlauf am alten Stand AUS DEM FALSCHEN GRUND gruen: Dort sind beide
@@ -38,6 +46,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 const PORT = process.env.TEST_PORT || 3229;
 const BASIS = 'http://127.0.0.1:' + PORT;
@@ -90,6 +99,16 @@ function setzeKopf(hash) {
   check('6a: KEPLER_GIT_DIR greift (der erfundene Hash steht in der Antwort)', a.body?.commit === ERFUNDEN.slice(0, 7), { gemeldet: a.body?.commit, erwartet: ERFUNDEN.slice(0, 7) });
   // Ebenso hier: ohne die Typpruefung waere undefined !== '<echter Hash>' trivial erfuellt.
   check('6b: und er stammt nicht zufaellig aus dem echten Repo', typeof a.body?.commit === 'string' && a.body.commit !== eigenerKopf(), { gemeldet: a.body?.commit, echtesRepo: eigenerKopf() });
+
+  // 7: der Blob-Hash der laufenden Datei. Gemessen gegen `git hash-object` - eine fremde
+  // Implementierung. Die Erwartung aus derselben Rechnung zu bilden koennte nicht fehlschlagen.
+  const SERVERDATEI = process.env.TEST_SERVERDATEI || path.join(__dirname, '..', 'server.js');
+  check('7a: das Feld blob ist da und ist ein Kurzhash', typeof a.body?.blob === 'string' && /^[0-9a-f]{7}$/.test(a.body.blob), { blob: a.body?.blob });
+  let vonGit = null, gitFehler = null;
+  try { vonGit = execFileSync('git', ['hash-object', SERVERDATEI], { encoding: 'utf8' }).trim().slice(0, 7); }
+  catch (e) { gitFehler = e.message; }
+  check('7b-bau: git hash-object laesst sich ausfuehren', vonGit !== null, { datei: SERVERDATEI, fehler: gitFehler });
+  check('7c: blob entspricht dem git-Blob der gestarteten Datei', typeof a.body?.blob === 'string' && a.body.blob === vonGit, { gemeldet: a.body?.blob, vonGit, datei: SERVERDATEI });
 
   // 3: der Plattenstand waechst unter dem laufenden Prozess weiter
   const NEUER = '0f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c';

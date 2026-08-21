@@ -3797,6 +3797,22 @@ function gitKopf() {
   } catch (e) { return null; }
 }
 const LAUFENDER_COMMIT = gitKopf();
+// Der git-Blob-Hash der Datei, die dieser Prozess WIRKLICH ausfuehrt (21.08.2026, nach dem
+// achten Deploy-Ausfall). Anlass: Der Arbeitsbaum auf dem Pi war kein "alter Stand", sondern ein
+// FLICKENTEPPICH - CLAUDE.md stammte aus #146, server.js aus #145, ein Test aus #143, waehrend
+// .git/HEAD unveraendert auf #141 zeigte. `commit` und `checkout` melden in dieser Lage beide
+// denselben alten Stand, obwohl der laufende Code ein ganz anderer ist; von aussen sah man nur
+// den Widerspruch, dass eine Route antwortete, die es im gemeldeten Commit gar nicht gibt.
+// Der Blob loest das auf: Er ist exakt der Wert von `git rev-parse <commit>:server.js`, laesst
+// sich also gegen jeden Commit halten, bis einer passt - genau die Analyse, die sonst einen
+// SSH-Zugang braucht. Gerechnet wird ueber __filename, also ueber die tatsaechlich geladene
+// Datei, nicht ueber einen Pfad aus der Konfiguration.
+const LAUFENDE_DATEI = (() => {
+  try {
+    const roh = fs.readFileSync(__filename);
+    return crypto.createHash('sha1').update('blob ' + roh.length + '\0').update(roh).digest('hex').slice(0, 7);
+  } catch (e) { return null; }
+})();
 // Der Plattenstand wird gepuffert: /api/health ist unauthentifiziert, und ein Dateizugriff je
 // Anfrage wäre der einzige Grund, warum ausgerechnet die Diagnoseroute Last erzeugt.
 let gitKopfCache = { stand: LAUFENDER_COMMIT, zeit: Date.now() };
@@ -3812,6 +3828,7 @@ app.get('/api/health', (req, res) => res.json({
   users: Object.keys(db.users).length,
   commit: LAUFENDER_COMMIT,
   checkout: gitKopfJetzt(),
+  blob: LAUFENDE_DATEI,
   uptimeSec: Math.round(process.uptime())
 }));
 

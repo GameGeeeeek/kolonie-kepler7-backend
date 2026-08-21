@@ -7979,6 +7979,81 @@ const DEPLOY_TARGETS = {
 // 6-MB-Spielstands und `chown -R` ueber .git kann auf einem Raspberry Pi die alten 30 Sekunden
 // ueberschreiten, ohne dass irgendetwas kaputt ist.
 const DEPLOY_TIMEOUT_MS = 10 * 60 * 1000;
+
+// ===== Ein Deploy je Ziel gleichzeitig (19.08.2026) =====
+// GEMESSEN am echten Vorfall: Der Webhook feuert bei JEDEM Push - auch auf Feature-Branches.
+// Wer einen Branch pusht und Sekunden spaeter den PR merged, loest ZWEI Ereignisse aus, und zwei
+// `git pull` im selben Repo sind genau die Kollision, die eine halb geschriebene Sperre
+// hinterlaesst. Am 19.08. um 05:41 UTC gemessen: .git/HEAD.lock (0 Bytes) und
+// .git/refs/heads/master.lock (41 Bytes = fertiger Hash plus Zeilenumbruch), dazu ein
+// VORGEMERKTER Stand, der byte-genau einem der eingehenden Commits entsprach. Der Pull war also
+// mit den Dateien fertig und wurde waehrend der Ref-Aktualisierung abgeschnitten. Danach
+// scheitert JEDER weitere Pull an "Your local changes would be overwritten" - der Deploy steht,
+// bis jemand von Hand aufraeumt. Am 16.08. war der zweite Schreiber ein Cron-Job, hier der
+// Webhook gegen sich selbst.
+//
+// Die Sperre liegt bewusst als DATEI vor und nicht als Variable im Prozess: Ein erfolgreicher
+// Backend-Pull aendert server.js, nodemon startet daraufhin neu - und der neue Prozess haette
+// eine leere Variable, waehrend der alte `git`-Enkel noch laeuft (nachgemessen: ein
+// nodemon-Neustart toetet den exec-Enkel NICHT, er laeuft zu Ende). Genau in diesem Fenster
+// entsteht die Kollision, und nur eine Datei ueberlebt den Neustart.
+//
+// Ein uebersprungener Deploy ist ungefaehrlich: `git pull` ist kumulativ, der naechste Lauf holt
+// alles mit. Deshalb wird ein waehrenddessen eingegangener Push nur VORGEMERKT und einmal am Ende
+// nachgeholt - kein Stapel, keine Warteschlange, die auflaufen kann.
+const DEPLOY_LOCK_DIR = process.env.DEPLOY_LOCK_DIR || '/tmp';
+// Ein Vorsprung auf den Timeout: Erst wenn eine Sperre aelter ist, als ein Deploy ueberhaupt
+// dauern DARF, gilt sie als Leiche. Sonst wuerde ein langsamer Pull sich selbst ueberholen.
+const DEPLOY_LOCK_STALE_MS = DEPLOY_TIMEOUT_MS + 60 * 1000;
+function deployPfad(repoName, endung) {
+  return path.join(DEPLOY_LOCK_DIR, 'kepler7-deploy-' + repoName.replace(/[^A-Za-z0-9._-]/g, '_') + endung);
+}
+// Exklusives Anlegen ist die eigentliche Sperre: 'wx' schlaegt fehl, wenn die Datei existiert -
+// atomar im Dateisystem, ohne Zusatzpaket und ohne Nachlese-Rennen zwischen Pruefen und Anlegen.
+function deploySperreNehmen(repoName) {
+  const pfad = deployPfad(repoName, '.lock');
+  try {
+    fs.writeFileSync(pfad, JSON.stringify({ pid: process.pid, seit: new Date().toISOString() }), { flag: 'wx' });
+    return true;
+  } catch (e) {
+    if (e.code !== 'EEXIST') { console.error('Deploy-Sperre nicht anlegbar (' + pfad + '):', e.message); return true; }
+    let alter = null;
+    try { alter = Date.now() - fs.statSync(pfad).mtimeMs; } catch (e2) {}
+    if (alter !== null && alter > DEPLOY_LOCK_STALE_MS) {
+      console.warn('Deploy-Sperre fuer ' + repoName + ' ist ' + Math.round(alter / 1000) + 's alt und gilt als verwaist - wird uebernommen.');
+      try { fs.unlinkSync(pfad); fs.writeFileSync(pfad, JSON.stringify({ pid: process.pid, seit: new Date().toISOString() }), { flag: 'wx' }); return true; } catch (e3) { return false; }
+    }
+    return false;
+  }
+}
+function deploySperreFreigeben(repoName) {
+  try { fs.unlinkSync(deployPfad(repoName, '.lock')); } catch (e) {}
+}
+function starteDeploy(repoName, command) {
+  if (!deploySperreNehmen(repoName)) {
+    // Nicht abweisen, sondern vormerken - sonst ginge ausgerechnet der Push verloren, der
+    // waehrend eines laufenden Deploys ankommt (also der haeufigste Fall bei Push + Merge).
+    try { fs.writeFileSync(deployPfad(repoName, '.pending'), String(Date.now())); } catch (e) {}
+    console.log('Deploy-Webhook: fuer ' + repoName + ' laeuft bereits ein Deploy - dieser Push wird nachgeholt.');
+    return;
+  }
+  exec(command, { timeout: DEPLOY_TIMEOUT_MS }, (err, stdout, stderr) => {
+    deploySperreFreigeben(repoName);
+    // Eine Zeitueberschreitung bekommt eine EIGENE Meldung: Sie bedeutet etwas anderes als ein
+    // gescheiterter Befehl - der git-Prozess darunter kann weiterlaufen und muss von Hand geprueft
+    // werden. Als generisches "Fehler" gemeldet, sieht der gefaehrlichste Ausgang aus wie der
+    // harmloseste.
+    if (err && err.killed) console.error('Deploy-Webhook ZEITUEBERSCHREITUNG für ' + repoName + ' nach ' + Math.round(DEPLOY_TIMEOUT_MS/1000) + 's (' + err.signal + '). ACHTUNG: der git-Prozess darunter laeuft moeglicherweise weiter und schreibt in .git - vor dem naechsten Deploy pruefen (ps nach lebendem git, find .git -name "*.lock").');
+    else if (err) console.error('Deploy-Webhook Fehler für ' + repoName + ':', err.message);
+    else console.log('Deploy-Webhook erfolgreich für ' + repoName + ':', stdout.trim() || '(keine Änderungen)');
+    const pending = deployPfad(repoName, '.pending');
+    if (fs.existsSync(pending)) {
+      try { fs.unlinkSync(pending); } catch (e) {}
+      console.log('Deploy-Webhook: hole den waehrenddessen eingegangenen Push fuer ' + repoName + ' nach.');
+      starteDeploy(repoName, command);
+    }
+  });
+}
 function verifyGithubSignature(req) {
   if (!DEPLOY_WEBHOOK_SECRET) return false;
   const sig = req.headers['x-hub-signature-256'];
@@ -9531,15 +9606,7 @@ app.post('/api/deploy-webhook', (req, res) => {
   // Sofort antworten, git pull läuft asynchron im Hintergrund weiter - GitHub erwartet eine
   // schnelle Antwort und markiert den Webhook sonst als fehlgeschlagen.
   res.json({ ok: true, repo: repoName });
-  exec(command, { timeout: DEPLOY_TIMEOUT_MS }, (err, stdout, stderr) => {
-    // Eine Zeitueberschreitung bekommt eine EIGENE Meldung: Sie bedeutet etwas anderes als ein
-    // gescheiterter Befehl - der git-Prozess darunter kann weiterlaufen und muss von Hand geprueft
-    // werden. Als generisches "Fehler" gemeldet, sieht der gefaehrlichste Ausgang aus wie der
-    // harmloseste.
-    if (err && err.killed) console.error('Deploy-Webhook ZEITUEBERSCHREITUNG für ' + repoName + ' nach ' + Math.round(DEPLOY_TIMEOUT_MS/1000) + 's (' + err.signal + '). ACHTUNG: der git-Prozess darunter laeuft moeglicherweise weiter und schreibt in .git - vor dem naechsten Deploy pruefen (ps nach lebendem git, find .git -name "*.lock").');
-    else if (err) console.error('Deploy-Webhook Fehler für ' + repoName + ':', err.message);
-    else console.log('Deploy-Webhook erfolgreich für ' + repoName + ':', stdout.trim() || '(keine Änderungen)');
-  });
+  starteDeploy(repoName, command);
 });
 
 // ===== Ko-fi-Spenden: Top-Unterstützer im Spiel anzeigen =====

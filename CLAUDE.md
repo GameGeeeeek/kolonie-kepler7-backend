@@ -1839,4 +1839,61 @@ kein Freispruch: Ein einzelner erfolgreicher Deploy beweist nicht, dass die Koll
 ist – er beweist nur, dass sie diesmal nicht auftrat. Die Ausfälle Nr. 6 und 7 lagen Tage
 auseinander. Wer den nächsten Merge fährt, misst weiter.
 
+### AUSFALL NR. 9 (21.08.2026) – und der Blob hat die Diagnose von AUSSEN geliefert
+
+Der Merge von #158 kam nicht an. Gemessen unmittelbar danach und über zehn Minuten hinweg
+unverändert:
+
+```
+GET /api/health   {"commit":"d8b6d89","checkout":"d8b6d89","blob":"a86145e","uptimeSec":10456}
+```
+
+Die drei Felder widersprechen sich, und **genau dieser Widerspruch IST der Befund**:
+
+| Feld | Wert | zugeordnet |
+|---|---|---|
+| `commit`/`checkout` | `d8b6d89` | #155 (Bonuscodes) |
+| `blob` | `a86145e` | = `0259f21:server.js`, also **#156** |
+| erwartet nach #158 | `36808e9` | = `fd2a0fd:server.js` |
+
+**Der Pi FÜHRT also #156 aus, während sein git-Ref auf #155 steht.** Das ist der
+Flickenteppich-Zustand vom 21.08. (Ausfall Nr. 8) in seiner reinen Form: Ein Pull ist mit dem
+Arbeitsbaum fertig geworden und wurde **vor** der Ref-Aktualisierung abgeschnitten. Aus git-Sicht
+ist `server.js` damit lokal geändert, und **jeder weitere Pull bricht mit „Your local changes
+would be overwritten by merge" ab** – der Deploy steht, bis jemand von Hand aufräumt.
+`uptimeSec` 10.456 (2,9 h) datiert den abgeschnittenen Lauf: Er hat die Datei geschrieben,
+nodemon hat neu gestartet, die Ref blieb stehen.
+
+**Das ist die erste Anwendung des Blob-Felds für genau die Analyse, die am 21.08. noch einen
+SSH-Zugang gebraucht hat.** Damals mussten vier Dateien einzeln per `git hash-object` einem
+Commit zugeordnet werden, um den Flickenteppich überhaupt zu sehen; hier steht er nach einem
+`curl` fest. Die Zuordnung läuft von außen gegen jeden Commit, bis einer passt:
+
+```bash
+blob=$(curl -s https://gamegeeeeek.de/api/health | grep -o '"blob":"[^"]*"' | cut -d'"' -f4)
+for c in $(git rev-list --reverse <alt>..origin/master); do
+  [ "$(git rev-parse $c:server.js | cut -c1-7)" = "$blob" ] && git log -1 --oneline $c
+done
+```
+
+**Und die Rettungsanalyse ist damit ebenfalls von außen erledigt, bevor jemand den Pi anfasst:**
+Der Arbeitsbaum-Rest ist byte-genau `0259f21:server.js` – also im Ziel `fd2a0fd` vollständig
+enthalten. Es gibt nichts zu retten, das Verwerfen ist **belegt statt gehofft** (die Regel vom
+19.08.: ein blockierender „lokaler Stand" wird über den BLOB-Hash einem Commit zugeordnet, bevor
+er verworfen wird). Was am Pi trotzdem gemessen werden muss, ist die SPALTE: Liegt der Rest im
+Arbeitsbaum (`git hash-object server.js`) oder im Index (`git rev-parse :server.js`)? Davon hängt
+ab, ob `git checkout HEAD -- server.js` überhaupt greift.
+
+**Die Auslieferung des Frontends hing daran und wurde deshalb ANGEHALTEN.** v8.605.0 bringt die
+Klassen-Sets, deren `atk`/`hull`/`shield` der Server mitrechnen muss; ohne #158 zeigte die
+Vorschau eine Kampfkraft, mit der nicht gekämpft wird. Der Frontend-PR steht als Entwurf mit der
+Freigabe-Bedingung im Text: **`blob` muss `36808e9` melden.** Das ist die Regel „eine
+Backend-Phase, die eine spielersichtbare Zahl ändert, geht zuerst live" (Frontend-Regel 60) – nur
+diesmal mit einem Messinstrument, das die Bedingung wirklich prüfen kann, statt mit einer
+401/404-Messung, die bei einem Merge ohne neue Route gar nichts sagt.
+
+**Kein Spielerschaden in diesem Zustand, und das ist kein Zufall:** Live steht v8.604.0, das die
+Sets nicht kennt. Frontend ohne Sets gegen Backend mit der Angleichung (#156) ist ein
+widerspruchsfreier Stand. Schief würde es erst, wenn das Frontend allein nachrückte.
+
 **Folge für PRs:** Der Merge ist nicht der Zwischenschritt zu einem späteren Deploy, sondern die Auslieferung selbst – was gemerged wird, läuft Sekunden später auf dem Pi. Offene PRs trotzdem sofort mergen statt sie liegen zu lassen, aber erst nach grünem Prüflauf.

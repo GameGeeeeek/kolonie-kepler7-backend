@@ -457,6 +457,28 @@ async function starteServer() {
       { halter: feldNach.halter === ANNA, jaeger: feldNach.eskorte && feldNach.eskorte.jaeger });
   }
 
+  /* 9k: Der Kampf wird AM VORKOMMEN vermerkt (21.08.2026). Das ist die einzige Spur, an der der
+     Client des VERTEIDIGERS erkennen kann, dass sein Recht durch einen KAMPF weg ist und nicht,
+     weil er es selbst aufgegeben hat - und ohne diese Unterscheidung liess er seine stationierte
+     Eskorte samt der gerade vernichteten Schiffe stehen.
+     Gemessen wird gegen die ANTWORT AN DEN ANGREIFER (kampf.body.gegnerVerluste): ein Anker von
+     ausserhalb der Rechnung, den ein Fehler im Vermerk nicht mitverschieben kann. */
+  const vermerk = feldNach.letzterKampf;
+  check('9k-vorab: das Vorkommen trägt überhaupt einen Kampfvermerk', !!vermerk, vermerk || null);
+  check('9k: der Vermerk nennt die VERTEIDIGERIN als Verliererin - nicht den neuen Halter',
+    !!vermerk && vermerk.verlierer === ANNA,
+    { verlierer: vermerk && vermerk.verlierer === ANNA ? 'anna' : (vermerk || {}).verlierer,
+      halterJetzt: feldNach.halter === BERT ? 'bert' : 'anna' });
+  check('9k2: er nennt den Angreifer beim Namen und sagt, ob das Recht weg ist',
+    !!vermerk && vermerk.angreifer === 'bert' && vermerk.verloren === kampf.body.gewonnen,
+    vermerk && { angreifer: vermerk.angreifer, verloren: vermerk.verloren, gewonnen: kampf.body.gewonnen });
+  check('9k3: die vermerkten Verluste sind GENAU die, die der Server dem Angreifer gemeldet hat',
+    !!vermerk && JSON.stringify(vermerk.verluste || {}) === JSON.stringify(kampf.body.gegnerVerluste || {}),
+    { vermerk: vermerk && vermerk.verluste, antwort: kampf.body.gegnerVerluste });
+  check('9k4: und der Zeitstempel liegt in der Gegenwart, nicht bei 0',
+    !!vermerk && vermerk.zeit > Date.now() - 120000 && vermerk.zeit <= Date.now() + 1000,
+    vermerk && { zeit: vermerk.zeit, jetzt: Date.now() });
+
   // 9f: derselbe Anflug lässt sich nicht zweimal einlösen (sonst reibt ein wiederholter Aufruf die
   // Eskorte in Sekunden auf). Geprueft wird der GRUND, nicht nur der Status.
   // Hat bert gewonnen, haelt er das Recht selbst - dann wuerde "eigenes Schuerfrecht" greifen und

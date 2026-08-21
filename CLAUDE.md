@@ -494,6 +494,45 @@ sind **Vergleiche zweier Schläge derselben Flotte**, nicht Blicke auf ein Feld:
 33.732 Kernschaden, Türme 30,5 % gegen 12,6 % Verluste. Ein Feld allein wäre die Beschriftung, nicht
 die Wirkung (Frontend-Arbeitsregel 61).
 
+## Der Kampfvermerk am Vorkommen (21.08.2026)
+
+`/api/asteroid/contest` schreibt seit dem 21.08.2026 in **beiden** Ausgängen
+`vork.letzterKampf = { zeit, verlierer, verloren, angreifer, verluste }`.
+
+**Der Anlass war kein fehlender Text, sondern eine fehlende UNTERSCHEIDUNG.** Der Client des
+Verteidigers konnte nicht erkennen, ob ein Schürfrecht durch einen **Kampf** weg ist oder weil er
+es **selbst aufgegeben** hat. Beide Fälle sehen im Felddokument gleich aus: Das Recht gehört ihm
+nicht mehr, und `vork.eskorte` ist leer (die Freigabe löscht sie ebenfalls). Sein
+`asteroidEskortenSync` übersprang den Platz deshalb komplett – gemessen im Browser: 20 Kreuzer
+stationiert, Recht verloren, der lokale Eintrag stand danach unverändert bei 20, und ein Rückruf
+gab **alle 20 zurück**, obwohl der Server sie in diesem Kampf vernichtet hatte. Ein verlorenes
+Schürfrecht kostete den Verteidiger damit keinen einzigen Schiffsverlust.
+
+**Warum am Vorkommen und nicht im Spielstand des Verteidigers:** Der Server schreibt hier
+grundsätzlich keinen fremden Spielstand (siehe den Kommentar am Festungsschlag). Das Felddokument
+gehört dagegen den Asteroiden-Endpunkten, der Client liest es bei jedem Kartenaufruf ohnehin, und
+ein nachwachsendes Vorkommen ist in `astNachschub` ein **frisches Objekt** – der Vermerk stirbt
+also mit dem Brocken, an dem er hängt, und kann nicht auf einen späteren Nachfolger durchschlagen.
+
+**Er wird auch bei einem ABGEWEHRTEN Angriff geschrieben.** Bis dahin stand über den Verlusten
+einer erfolgreichen Abwehr nur eine Protokollzeile ohne Angreifer und ohne Schiffstypen – und
+`#log` überschreibt sich mit der nächsten Meldung selbst.
+
+**Kein neues Leck.** `verlierer` ist eine Nutzer-ID, aber `vork.halter` ist längst eine, und
+`vork.eskorte` führt die Wache des Halters ohnehin vollständig und öffentlich.
+
+**Die Auslieferungsreihenfolge ist gleichgültig** (anders als bei den Festungen, Frontend-Regel 60):
+Geht dieses Backend allein live, schreibt es ein Feld, das niemand liest – folgenlos. Geht das
+Frontend allein live, liest es ein Feld, das es nicht gibt, der Zweig feuert nie, und es bleibt
+beim heutigen Zustand. Ein Schalter ist deshalb nicht nötig.
+
+Wächter: `tests/test_asteroidfeld_http.js` 9k–9k4. Gemessen wird gegen die **Antwort an den
+Angreifer** (`kampf.body.gegnerVerluste`) – ein Anker von außerhalb der Rechnung, den ein Fehler im
+Vermerk nicht mitverschieben kann (Frontend-Regel 62). Und 9k prüft, dass der Vermerk die
+**Verteidigerin** als Verliererin nennt und nicht den neuen Halter: Bei einem Sieg ist `vork.halter`
+zu diesem Zeitpunkt schon der Angreifer – derselbe Fallstrick, den der Postfach-Zweig eine Zeile
+weiter unten mit `halterIdVorher` löst.
+
 ## Alien-Nester (Phase 3, 18.08.2026)
 
 Das Gegenstück zu den Festungen: Die Festung **steht** und drosselt, das Nest **wächst** und breitet

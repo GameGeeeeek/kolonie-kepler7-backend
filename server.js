@@ -9063,6 +9063,36 @@ app.post('/api/asteroid/contest', authMiddleware, async (req, res) => {
   } else {
     vork.eskorte = neueEskorte;
   }
+
+  /* Der Kampf wird AM VORKOMMEN vermerkt, damit der Verteidiger ihn nachvollziehen kann (21.08.2026).
+     Vorher erfuhr er ihn nur ueber das Postfach - und das gibt es nur mit Server, es laesst sich
+     wegwischen und es nennt weder die verlorenen Schiffstypen noch einen Bericht. Vor allem aber
+     fehlte dem CLIENT jeder Anhaltspunkt, ob ein Recht durch KAMPF oder durch eigene Aufgabe weg
+     ist: Er hat seine stationierte Eskorte deshalb bei einem verlorenen Recht stehenlassen, samt
+     der Schiffe, die hier gerade vernichtet wurden (gemessen im Browser: 20 Kreuzer stationiert,
+     Recht verloren, Rueckruf gab 20 zurueck).
+
+     WARUM AM VORKOMMEN und nicht im Spielstand des Verteidigers: Der Server schreibt hier
+     grundsaetzlich keinen fremden Spielstand (siehe der Kommentar am Festungsschlag). Das
+     Felddokument gehoert dagegen den Asteroiden-Endpunkten, der Client liest es ohnehin bei jedem
+     Kartenaufruf, und ein neu nachwachsendes Vorkommen ist ein frisches Objekt - der Vermerk stirbt
+     also mit dem Brocken, an dem er haengt.
+
+     ES WIRD IN BEIDEN AUSGAENGEN GESCHRIEBEN, nicht nur beim Besitzwechsel: Auch ein ABGEWEHRTER
+     Angriff kostet den Verteidiger Schiffe, und bis hierher stand darueber nur eine Protokollzeile
+     ohne Angreifer und ohne Schiffstypen.
+
+     'verluste' ist die Verlustliste des VERTEIDIGERS (gegnerVerluste aus SICHT des Angreifers) -
+     der Client bucht daraus seinen Bericht. Neue Information gibt der Vermerk niemandem preis:
+     vork.halter ist schon eine Nutzer-ID, und vork.eskorte fuehrt die Wache des Halters ohnehin
+     vollstaendig und oeffentlich. */
+  vork.letzterKampf = {
+    zeit: jetzt,
+    verlierer: halterIdVorher || '',
+    verloren: gewonnen,                       // aus Sicht des Verteidigers: Recht weg?
+    angreifer: req.username || 'Ein Kommandant',
+    verluste: gegnerVerluste
+  };
   db.shared[astFeldKey(sysId)] = feld;
 
   /* Der Halter erfaehrt den Angriff, auch wenn sein Spiel geschlossen ist (Konzept 6.3). Ohne das

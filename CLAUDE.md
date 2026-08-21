@@ -1395,6 +1395,76 @@ Deshalb gehört zur Messung eine **Negativkontrolle**: eine frei erfundene Route
 muss im selben Lauf 404 liefern, und eine bekannte alte Route 401. Erst dann misst man den Server
 und nicht die eigene Anfrage.
 
+**AUSFALL NR. 8, am selben Tag behoben – und er hat den Marker gleich selbst geprüft.** Der
+Merge von #152 kam nicht an; 40 Abfragen über 15 Minuten lieferten unverändert
+`{"ok":true,"users":11}`. Der Diagnoseblock brachte:
+
+| | |
+|---|---|
+| Frontend-Webhook | erfolgreich, jedes Mal – **zum fünften Mal dieselbe Asymmetrie** |
+| Backend-Webhook | `Command failed: cd /app && git pull -q …`, neun Mal in 120 Logzeilen |
+| Stand | #141, es fehlten **10 Commits** |
+| Blocker | `.git/index.lock`, 0 Bytes, 06:14 – **kein lebender git-Prozess dazu**, also verwaist |
+| #147-Sperre | keine – die Serialisierung war nie angekommen, kann also weder geholfen noch versagt haben |
+
+**Der eigentliche Befund ist der Arbeitsbaum, und er ist neu:** Er war kein „alter Stand",
+sondern ein **Flickenteppich**. Per Blob-Hash einzeln zugeordnet:
+
+```
+CLAUDE.md                        -> byte-genau #146
+server.js                        -> byte-genau #145
+tests/test_alien_nester_http.js  -> byte-genau #143
+.git/HEAD                        -> #141
+```
+
+Vier verschiedene Stände in einem Verzeichnis. Mehrere Pulls waren jeweils unterschiedlich weit
+gekommen, bevor sie abgeschnitten wurden. **Kein `git log` der Welt zeigt das** – es meldet #141,
+und die Tests im Verzeichnis stammten aus drei anderen Commits.
+
+**Die Lehre, und sie kostet eine Rücknahme:** Die 401/404-Messung misst die laufende **Datei**,
+nicht den ausgecheckten **Commit**. Während des Ausfalls antwortete `/api/logout` mit 200,
+obwohl es die Route in #141 nicht gibt – die geladene `server.js` stammte ja aus #145. Aus
+diesem Widerspruch wurde zunächst geschlossen, die `git log`-Ausgabe sei veraltetes Scrollback.
+Sie war korrekt; falsch war der Schluss, eine antwortende Route belege den Commit. Ein halb
+angewendeter Pull entkoppelt beide, und dann sagt jede der beiden Messungen für sich die
+Wahrheit über etwas anderes.
+
+**Deshalb trägt `/api/health` seit #153 ein drittes Feld: `blob`** – den git-Blob-Hash der
+Datei, die der Prozess wirklich ausführt (über `__filename`, nicht über einen Pfad aus der
+Konfiguration). Er ist exakt der Wert von `git rev-parse <commit>:server.js` und lässt sich
+deshalb von außen gegen jeden Commit halten, bis einer passt – genau die Analyse, die am
+21.08. einen SSH-Zugang gebraucht hat:
+
+```bash
+blob=$(curl -s https://gamegeeeeek.de/api/health | grep -o '"blob":"[^"]*"' | cut -d'"' -f4)
+for c in $(git rev-list --reverse <alt>..origin/master); do
+  [ "$(git rev-parse $c:server.js | cut -c1-7)" = "$blob" ] && git log -1 --oneline $c
+done
+```
+
+Die drei Felder beantworten damit drei verschiedene Fragen: `commit` = welchen Stand hat der
+Prozess beim Start GELESEN, `checkout` = was liegt JETZT auf der Platte, `blob` = was FÜHRT er
+aus. Im Normalfall sind alle drei einig; jede Abweichung benennt eine andere Störung.
+
+`test_health_commit_http.js` 7a/7c misst den Blob gegen **`git hash-object`**, also gegen eine
+fremde Implementierung – die Erwartung aus derselben Rechnung zu bilden könnte nicht
+fehlschlagen (Frontend-Arbeitsregel 62). Dazwischen steht `7b-bau` als eigene Aufbau-Prüfung
+(Arbeitsregel 34): Scheitert der git-Aufruf, meldet das eine benannte Prüfung, statt den
+Testlauf mittendrin zu beenden.
+
+**Zwei Dinge, die beim Reparieren gelernt wurden und für das nächste Mal gelten:**
+
+- **Ein Skript, das über die Ausgabe von `git status --porcelain` iteriert, MUSS NUL-getrennt
+  lesen** (`-z`, dazu `git diff --name-only -z`). Im Verzeichnis lag eine Datei namens
+  `tash push -- server.js` – der Rest eines vertippten `git stash push`. Bei Wortzerlegung wird
+  daraus unter anderem das Wort `server.js`, das im Zielbaum existiert – das Aufräum-Skript
+  hätte ausgerechnet die getrackte `server.js` beiseitegeschoben. Aufgefallen beim Trockentest
+  an einem Wegwerf-Repo, nicht am Pi.
+- **Der Rest im Arbeitsbaum wird per Blob-Hash einem Commit zugeordnet, BEVOR er verworfen
+  wird** – und wenn keiner passt, wird abgebrochen statt geraten (dann ist die Datei
+  wahrscheinlich halb geschrieben und niemand weiß, was drinsteht). Das Skript vom 21.08. macht
+  genau das und legt kollidierende unversionierte Dateien **beiseite statt sie zu löschen**.
+
 ### `/api/health` nennt den Stand selbst (21.08.2026)
 
 Die 401/404-Messung oben trägt nur, solange ein Merge überhaupt eine **neue Route** mitbringt.

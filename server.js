@@ -10701,6 +10701,186 @@ app.get('/api/admin/supporters', authMiddleware, (req, res) => {
   liste.sort((a, b) => Math.max(b.vergebenBis, b.gespendetBis) - Math.max(a.vergebenBis, a.gespendetBis));
   res.json({ supporters: liste.slice(0, 200), laufzeiten: SUPPORTER_GRANT_DAYS });
 });
+/* ===== Bonuscodes (21.08.2026, Auftrag Sascha) ==================================================
+   "ich will ab und zu mal bonuscodes posten wo die spieler kleine geschenke bekommen die codes
+   sollen aber nur eine gewisse gueltigkeit haben also max 1 mal pro account einloesbar und nur
+   1 woche etc aktiv am liebsten baust du mir das in den admin bereich ein."
+
+   WO DIE DATEN LIEGEN, und warum genau dort:
+   - Der KATALOG in `db.bonusCodes`. Ausdruecklich NICHT in db.shared: Der generische
+     Storage-Endpunkt ist fuer jeden eingeloggten Nutzer schreibbar, solange keine Sonderregel
+     greift - ein Code liesse sich dort anlegen. `db.galaxy` ist das Vorbild: von aussen gar nicht
+     erreichbar.
+   - Die EINLOESESPERRE am user-Objekt (`user.bonusCodes`), nicht im Spielstand. Das Vorbild
+     /api/referral/redeem merkt sie sich in `save.referralRedeemed` - und der Spielstand ist
+     bauartbedingt klientenautoritativ. Wer das Feld in der Entwicklerkonsole loescht, loest erneut
+     ein. Bei einem Code, der OEFFENTLICH gepostet wird, waere das die Selbstbedienung, vor der die
+     CLAUDE.md bei jedem Belohnungssystem warnt (dieselbe Entscheidung wie bei user.marktTag und
+     user.staub).
+
+   DIE GABEN-TABELLE IST DIE EIGENTLICHE SICHERUNG. Sie sagt, welche Felder ein Code ueberhaupt
+   tragen darf und wie gross jedes hoechstens sein kann. Ohne sie waere ein Tippfehler beim Anlegen
+   (1000000 statt 1000) ein Wirtschaftsereignis - und ein zu grosser Wert reisst spaeter
+   SAVE_SANITY_LIMITS, was den GESAMTEN Spielstand des Beschenkten mit HTTP 400 ablehnen laesst.
+   Die Deckel sind bewusst klein gehalten: Der Auftrag sagt "kleine geschenke". */
+const BONUSCODE_MIN_LAENGE = 8;      // kuerzer waere in Stunden durchprobierbar
+const BONUSCODE_MAX_LAENGE = 24;
+const BONUSCODE_LAUFZEITEN = [1, 3, 7, 14, 30];   // Tage, zur Auswahl im Admin-Bereich
+const BONUSCODE_VERSUCHE_PRO_TAG = 12;            // FEHLversuche je Konto und Tag
+const BONUSCODE_MAX_AKTIV = 50;                   // Katalog-Obergrenze, damit db.json nicht waechst
+const BONUSCODE_GABEN = {
+  credits:          { max: 25000,   name: 'Kredite' },
+  erz:              { max: 2000000, name: 'Erz' },
+  kristalle:        { max: 2000000, name: 'Kristalle' },
+  deuterium:        { max: 2000000, name: 'Deuterium' },
+  energie:          { max: 2000000, name: 'Energie' },
+  antimaterie:      { max: 100000,  name: 'Antimaterie' },
+  forschungspunkte: { max: 50000,   name: 'Forschungspunkte' },
+  kampfpunkte:      { max: 25000,   name: 'Kampfpunkte' },
+  xp:               { max: 50000,   name: 'Erfahrung' }
+};
+
+/* Gross-/Kleinschreibung, Bindestriche und Leerzeichen sind egal - wer "sternen-staub 25" tippt,
+   hat den Code. Normalisiert wird beim VERGLEICHEN und beim Schluessel, die Anzeigeform bleibt
+   erhalten (der Katalog fuehrt sie als `anzeige`). */
+function bonuscodeNormal(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+function bonusCodes() { return (db.bonusCodes = db.bonusCodes || {}); }
+
+/* Die Gaben eines Codes pruefen und saeubern. Gibt { gaben, fehler } zurueck - `fehler` nennt den
+   GRUND, damit der Admin-Bereich ihn anzeigen kann statt eines pauschalen "ungueltig". */
+function bonuscodeGabenPruefen(roh) {
+  const gaben = {};
+  let anzahl = 0;
+  for (const [feld, wert] of Object.entries(roh || {})) {
+    const def = BONUSCODE_GABEN[feld];
+    if (!def) return { fehler: 'Unbekannte Gabe: ' + String(feld).slice(0, 30) + '.' };
+    const n = Math.floor(Number(wert));
+    if (!Number.isFinite(n) || n <= 0) return { fehler: def.name + ': Bitte eine ganze Zahl groesser als 0.' };
+    if (n > def.max) return { fehler: def.name + ': hoechstens ' + def.max + ' je Code.' };
+    gaben[feld] = n;
+    anzahl++;
+  }
+  if (!anzahl) return { fehler: 'Der Code verschenkt nichts - mindestens eine Gabe angeben.' };
+  return { gaben };
+}
+
+// Anlegen. Der Code selbst wird vom Admin vorgegeben (er soll ihn ja posten koennen), nicht erzeugt.
+app.post('/api/admin/bonuscode', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const { code, gaben, tage, maxGesamt, notiz } = req.body || {};
+  const schluessel = bonuscodeNormal(code);
+  if (schluessel.length < BONUSCODE_MIN_LAENGE || schluessel.length > BONUSCODE_MAX_LAENGE) {
+    return res.status(400).json({ error: 'Der Code braucht ' + BONUSCODE_MIN_LAENGE + ' bis ' + BONUSCODE_MAX_LAENGE + ' Zeichen (Buchstaben und Ziffern).' });
+  }
+  const katalog = bonusCodes();
+  if (katalog[schluessel]) return res.status(409).json({ error: 'Diesen Code gibt es schon.' });
+  if (Object.keys(katalog).length >= BONUSCODE_MAX_AKTIV) {
+    return res.status(400).json({ error: 'Es sind bereits ' + BONUSCODE_MAX_AKTIV + ' Codes angelegt - bitte alte entfernen.' });
+  }
+  const t = Number(tage);
+  if (BONUSCODE_LAUFZEITEN.indexOf(t) === -1) {
+    return res.status(400).json({ error: 'Laufzeit muss eine von ' + BONUSCODE_LAUFZEITEN.join(', ') + ' Tagen sein.' });
+  }
+  const geprueft = bonuscodeGabenPruefen(gaben);
+  if (geprueft.fehler) return res.status(400).json({ error: geprueft.fehler });
+  const gesamt = Math.max(0, Math.floor(Number(maxGesamt) || 0));   // 0 = unbegrenzt
+  const jetzt = Date.now();
+  katalog[schluessel] = {
+    anzeige: String(code || '').trim().slice(0, BONUSCODE_MAX_LAENGE + 8),
+    gaben: geprueft.gaben,
+    angelegt: jetzt,
+    gueltigBis: jetzt + t * 86400000,
+    maxGesamt: gesamt,
+    eingeloest: 0,
+    aktiv: true,
+    notiz: String(notiz || '').trim().slice(0, 120)
+  };
+  console.log('[bonuscode] angelegt code=' + schluessel + ' tage=' + t + ' gesamt=' + gesamt);
+  await saveDb();
+  res.json({ ok: true, code: schluessel, gueltigBis: katalog[schluessel].gueltigBis });
+});
+
+// Auflisten. Nennt auch die Tabellen, damit der Admin-Bereich keine zweite Kopie der Grenzen fuehrt.
+app.get('/api/admin/bonuscodes', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const katalog = bonusCodes();
+  const liste = Object.keys(katalog).map(k => Object.assign({ code: k }, katalog[k]));
+  liste.sort((a, b) => b.angelegt - a.angelegt);
+  res.json({ codes: liste, gaben: BONUSCODE_GABEN, laufzeiten: BONUSCODE_LAUFZEITEN, maxAktiv: BONUSCODE_MAX_AKTIV });
+});
+
+// An/aus schalten bzw. endgueltig entfernen. Abschalten laesst die Einloesungen stehen (der Zaehler
+// ist die einzige Auswertung, die es gibt); Entfernen gibt den Platz im Katalog frei.
+app.post('/api/admin/bonuscode/aktiv', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const { code, aktiv, entfernen } = req.body || {};
+  const schluessel = bonuscodeNormal(code);
+  const katalog = bonusCodes();
+  if (!katalog[schluessel]) return res.status(404).json({ error: 'Diesen Code gibt es nicht.' });
+  if (entfernen) { delete katalog[schluessel]; }
+  else { katalog[schluessel].aktiv = !!aktiv; }
+  await saveDb();
+  res.json({ ok: true });
+});
+
+/* Einloesen. Die Sperre gegen das Durchprobieren ist der FEHLVERSUCHS-Zaehler am Konto darunter -
+   und zwar BEWUSST OHNE `authRateLimit`, obwohl das der naheliegende Griff waere.
+
+   GEMESSEN, warum: `authRateLimit` deckelt 15 Aufrufe je 15 Minuten und IP-Adresse und zaehlt
+   dabei JEDEN Aufruf, auch die erfolgreichen. Im Test hatte ein Konto nach vier eingeloesten Codes
+   und elf Rateversuchen die IP-Grenze erreicht - der Spieler bekam dann "Zu viele Versuche - bitte
+   in ein paar Minuten erneut versuchen", eine Meldung, die mit Bonuscodes nichts zu tun hat und
+   ihm nicht sagt, was los ist. Beim Login ist jeder Aufruf ein Versuch; hier ist ein Erfolg keiner.
+
+   Der Konto-Zaehler ist die praezisere Sperre: Er zaehlt AUSSCHLIESSLICH Fehlversuche, wer seine
+   Codes einloest laeuft nie hinein, und er greift auch bei wechselnden IPs. Nachgerechnet reicht er:
+   Ein Code hat mindestens acht Zeichen aus 36 moeglichen, also 2,8 Billionen Kombinationen - bei
+   zwoelf Fehlversuchen je Konto und Tag waere selbst mit tausend Konten nichts zu holen. Der
+   Grundschutz gegen das blosse Zuschuetten des Servers bleibt `globalApiRateLimit` (240/Min fuer
+   alle /api-Routen). */
+app.post('/api/bonuscode/einloesen', authMiddleware, async (req, res) => {
+  const schluessel = bonuscodeNormal((req.body || {}).code);
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+
+  const heute = staubTagesschluessel();
+  if (!user.bonusVersuche || user.bonusVersuche.stempel !== heute) user.bonusVersuche = { stempel: heute, n: 0 };
+  if (user.bonusVersuche.n >= BONUSCODE_VERSUCHE_PRO_TAG) {
+    return res.status(429).json({ error: 'Zu viele Fehlversuche heute. Versuch es morgen wieder.', gesperrt: true });
+  }
+  const fehlversuch = async (status, fehler, extra) => {
+    user.bonusVersuche.n++;
+    await saveDb();
+    return res.status(status).json(Object.assign({ error: fehler, restVersuche: Math.max(0, BONUSCODE_VERSUCHE_PRO_TAG - user.bonusVersuche.n) }, extra || {}));
+  };
+
+  if (!schluessel) return fehlversuch(400, 'Bitte einen Code eingeben.');
+  const eintrag = bonusCodes()[schluessel];
+  if (!eintrag) return fehlversuch(404, 'Diesen Code gibt es nicht.');
+
+  /* Ab hier ist der Code ECHT - die Ablehnungen darunter zaehlen deshalb NICHT als Fehlversuch.
+     Wer einen gueltigen, aber abgelaufenen Code eintippt, hat nichts falsch gemacht. Und jede
+     Ablehnung nennt den GRUND: Ein pauschales "ungueltig" macht aus einem abgelaufenen Code einen
+     Fehlerbericht. */
+  if (!eintrag.aktiv) return res.status(410).json({ error: 'Dieser Code ist nicht mehr aktiv.' });
+  if (Date.now() > eintrag.gueltigBis) return res.status(410).json({ error: 'Dieser Code ist abgelaufen.', abgelaufen: true });
+  user.bonusCodes = user.bonusCodes || {};
+  if (user.bonusCodes[schluessel]) return res.status(409).json({ error: 'Diesen Code hast du bereits eingelöst.', schonEingeloest: true });
+  if (eintrag.maxGesamt > 0 && eintrag.eingeloest >= eintrag.maxGesamt) {
+    return res.status(409).json({ error: 'Dieser Code ist aufgebraucht - er galt nur für die ersten ' + eintrag.maxGesamt + ' Spieler.', aufgebraucht: true });
+  }
+
+  /* Buchung: Sperre und Zaehler VOR der Belohnung, beides im selben synchronen Block vor saveDb().
+     Zwei parallele Anfragen koennen den Deckel so nicht gemeinsam durchbrechen - dieselbe
+     Reihenfolge-Begruendung wie beim Markt-Tageskontingent. */
+  user.bonusCodes[schluessel] = Date.now();
+  eintrag.eingeloest++;
+  pushPendingReward(req.userId, Object.assign({ type: 'bonuscode', code: eintrag.anzeige || schluessel }, eintrag.gaben));
+  console.log('[bonuscode] eingeloest code=' + schluessel + ' userId=' + req.userId + ' gesamt=' + eintrag.eingeloest);
+  await saveDb();
+  res.json({ ok: true, code: eintrag.anzeige || schluessel, gaben: eintrag.gaben });
+});
+
 // Authentifizierter Selbstbedienungs-Endpunkt: Spieler trägt seine Ko-fi-E-Mail ein, Server gleicht
 // sie mit den beim Webhook gespeicherten Spenden ab. Absichtlich KEIN Enumerations-Leck - die
 // Fehlermeldung bei Nichttreffer verrät nicht, ob die E-Mail überhaupt schon einmal gespendet hat vs.

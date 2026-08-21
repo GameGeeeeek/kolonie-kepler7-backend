@@ -1129,6 +1129,55 @@ messbar. Gemessen werden kann nur, ob der Pi den davorliegenden Stand hat – un
 #142 nicht angekommen, ist #143 es auch nicht. **Wer künftig einen reinen Schalter-Merge
 ausliefert, misst deshalb den letzten routentragenden Commit davor, nicht den eigenen.**
 
+**NACHTRAG 21.08.2026, 03:51 UTC – SIEBTES Mal, und es ist DERSELBE Ausfall wie Nr. 6, nur
+44,5 Stunden alt.** Der Eintrag darüber (19.08., 09:35 UTC) beschreibt den Anfang; hier steht, was
+zwei Tage später daraus geworden ist. Gemessen mit allen Kontrollen im selben Lauf:
+
+```
+POST /api/logout                 404   (neu mit #142, gemergt 19.08. 07:16 UTC)
+POST /api/alien/nest-angriff     401   (neu mit #137 - der Pi HAT den Nest-Code)
+POST /api/musterattack/create    401   (alte Kontrollroute)
+POST /api/gibtesnicht            404   (Negativkontrolle)
+```
+
+Dem Pi fehlen inzwischen **vier** Commits: #142 (Abmelde-Route), #143 (Nest-Schalter), #144
+(Doku) und #145 (Phase 4). Der FRONTEND-Deploy lief in derselben Zeit dreimal sauber durch – live
+steht v8.585.0. **Zum siebten Mal dieselbe Asymmetrie.**
+
+**Die Marker-Prüfung, die diesmal ausdrücklich mitgelaufen ist** (sie ist billig und schließt die
+Fehlerklasse aus, die am 18.08. eine falsche Diagnose erzeugt hat): `/api/logout` kommt in
+`server.js` bei **#141 null**mal vor und bei **#142 einmal** – ein gültiger Marker, keine Route,
+die es vorher schon gab und die nur angefasst wurde.
+
+**Und die Eingrenzung war nur deshalb überhaupt möglich:** #143, #144 und #145 bringen **keine
+einzige neue Route** mit. Maschinell gemessen statt geschätzt, indem je Commit die Routenliste
+gegen die des Vorgängers gehalten wurde:
+
+```bash
+for c in $(git rev-list --reverse <von>..origin/master); do
+  neu=$(git show $c:server.js  | grep -oE "app\.(post|get)\('/api/[a-z0-9/-]+" | sort -u)
+  alt=$(git show $c~1:server.js | grep -oE "app\.(post|get)\('/api/[a-z0-9/-]+" | sort -u)
+  echo "$(git log -1 --format=%h $c) $(comm -13 <(echo "$alt") <(echo "$neu"))"
+done
+```
+
+Das ist die Regel vom 19.08. („wer einen reinen Schalter-Merge ausliefert, misst den letzten
+routentragenden Commit davor") als **Messung** statt als Erinnerung – bei vier Commits am Stück
+lässt sich sonst nicht sagen, welcher überhaupt einen Anker hergibt.
+
+**Was diesmal wirklich schiefsteht, und es sind zwei Dinge:**
+
+1. **Der Patchnote zu v8.582.0 kündigt die Alien-Nester an und ist live** – `NEST_SPAWN_AKTIV`
+   legt aber erst #143 um. Es entsteht keins. Der Schalter tut genau, wofür er gebaut ist (keine
+   Falschaussage einer Anzeigestelle), aber die Lücke zwischen Ankündigung und Wirkung ist jetzt
+   zwei Tage alt statt zwei Minuten. **Der Schalter schützt vor der stillen Verschlechterung, nicht
+   vor einem hängenden Deploy** – das ist der Unterschied zwischen „nichts sagt etwas Falsches" und
+   „alles ist in Ordnung".
+2. **Die Auslieferung der Etappe b hängt daran.** Der Frontend-PR darf nicht gemerged werden,
+   solange `/api/logout` mit 404 antwortet: Der Abmeldeknopf meldete dann nicht ab. Das Frontend
+   BENENNT diesen Fall zwar (`sitzungBeenden()` prüft den Status), aber eine benannte Störung ist
+   kein Ersatz für eine funktionierende Abmeldung.
+
 **Der Wiederherstellungsweg, falls es wieder passiert** (am 18.08. so gefahren, jede Stufe gemessen,
 vorher von vier Prüfläufen adversarisch zerlegt):
 

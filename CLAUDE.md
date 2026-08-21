@@ -676,6 +676,92 @@ daran ist im Nest-Test schon einmal eine Prüfung an einem Zufall gescheitert.
 nach dem Tick). Eine Erwartung, die aus derselben Rechnung stammt wie das Ergebnis, kann nicht
 fehlschlagen – Frontend-Arbeitsregel 62.
 
+## Verbandsangriff auf ein Alien-Nest (Phase 5, 21.08.2026)
+
+Der koordinierte Musterangriff konnte bisher nur eine fremde **Allianzbasis** treffen. Neu trägt
+sein Dokument eine `zielArt`; mit `'alien-nest'` fällt der halbe Prüflauf darunter weg – nicht aus
+Bequemlichkeit, sondern weil ein Nest keine Allianz, keine Basis, kein `incomingmuster`-Dokument
+und keinen Schutzschild hat.
+
+**Es gibt keinen eigenen Schalter.** `NEST_SPAWN_AKTIV` gilt mit: Ohne Nester existiert kein Ziel,
+`create` antwortet mit 404, und der ganze Zweig ist unerreichbar.
+
+### Die Sicherheitsstelle, und warum sie eine ist
+
+`resolve` darf ausnahmsweise auch der VERTEIDIGER auslösen – deshalb prüft es Mitgliedschaft in
+`tag` **oder** in `doc.targetTag`. Ein Nest hat kein `targetTag`. Und `allianceRoleOf` baut seinen
+Schlüssel per **Zeichenkettenverkettung**:
+
+```js
+const raw = db.shared['alliance:' + tag + ':role:' + userId];
+```
+
+Mit `null`/`undefined` entsteht daraus wörtlich `alliance:null:role:<uid>` – ein Schlüssel, der wie
+ein ganz normaler Rolleneintrag aussieht. Wer einen solchen anlegen kann, dürfte damit **jeden**
+Nest-Verbandsangriff auflösen.
+
+**Behoben nicht durch eine Null-Prüfung, sondern durch eine Verzweigung davor:** Bei
+`zielArt === 'alien-nest'` wird der Verteidiger-Zweig gar nicht erst betreten. Ein Nest hat keinen
+Verteidiger, also gibt es auch keine Verteidiger-Rolle zu prüfen.
+`tests/test_muster_nest_http.js` 2c **legt dem Außenstehenden genau diese zwei Schlüssel an** und
+verlangt trotzdem 403 – die Gegenprobe ohne den Zweig lässt ihn auflösen. Das ist die Grenze, die
+dieses Projekt überall verteidigt („kann ich etwas anfassen, das ANDEREN gehört?"), hier auf das
+Auflösen eines fremden Verbandsangriffs angewandt.
+
+### Der gemeinsame Kern – und wo seine Naht liegt
+
+`nestSchlagAusfuehren(g, nest, kraft, composition, beteiligte, jetzt)` wird von BEIDEN Wegen
+benutzt (Einzelangriff und Verband). Eine zweite Kopie der Schadensrechnung wäre die übliche
+zweite Wahrheit – dieselbe Antwort wie bei `astFreiePlaetze`.
+
+Zwei Entscheidungen an der Schnittstelle, beide aus dem Unterschied der zwei Wege:
+
+- **Rein geht die KRAFT, nicht der Spielstand.** Der Einzelangriff bildet sie aus dem Spielstand
+  des Angreifers; ein Verband hat **keinen einen Spielstand** – seine Kraft steht seit dem Beitritt
+  fest (`doc.dispatch.totalPower`, je Mitglied gemessen und summiert). Sie hier neu zu bilden hieße,
+  sie aus dem Spielstand eines einzelnen Mitglieds zu raten.
+- **Raus kommen die Verluste als QUOTE, nicht als Stückzahlen.** Der Server schreibt fremde
+  Spielstände nicht; jeder Client wendet sie auf SEINEN Beitrag an – dasselbe Muster wie bei der
+  Basisangriffs-Auflösung (`ownLossPct`).
+
+### Drei Entscheidungen, die nur der Verband kennt
+
+1. **Abklingzeit und Beitrag gehen an ALLE Teilnehmer**, gewichtet nach ihrer beim Beitritt
+   gemessenen Kraft. Nur den Auslöser gutzuschreiben machte den Hort-Anteil zur Frage, wer zufällig
+   auf den Knopf drückt – und ein Verbandsschlag gäbe danach den nächsten Einzelschlag sofort frei.
+   Gemessen (`4c`): Anna 18.967 Kraft gegen Bens 6.044 ergibt Beiträge von 19.665 zu 6.267, während
+   **Ben** ausgelöst hat.
+2. **Die Teilnehmer kommen aus dem VERSAND, nicht aus den Beitritts-Dokumenten.** `checkdispatch`
+   friert sie als `dispatch.participants` ein. Ein Beitritt lässt sich bis zum Abflug zurückziehen;
+   beim Auflösen erneut zu lesen wäre eine zweite Quelle, die inzwischen eine andere sein kann. Für
+   Dokumente aus der Zeit davor gibt es einen Rückfall auf `participantIds` (dort zählen alle
+   gleich, weil ihre Einzelkräfte nicht mitgeschrieben wurden).
+3. **`claim` gibt bei einem Nest NUR die Schiffe zurück** und zahlt die Basisangriffs-Währung
+   nicht. Die Nest-Belohnung liegt bereits anteilig in `__pendingRewards` (über den gemeinsamen
+   Kern) – beides zu zahlen wäre eine Doppelzahlung für dasselbe Ereignis. Gegenprobe: mit
+   ausgebautem Zweig fällt `5b`.
+
+### Der Test
+
+`tests/test_muster_nest_http.js` (Port 3228, **22 Prüfungen, drei Gegenproben** – Rechteprüfung,
+Beitrags-Verteilung, Doppelzahlung; alle in beide Richtungen gefahren, überall dieselben 22
+Prüfnamen). **Belegte Testports sind jetzt 3195–3200 und 3210–3228** – ein neuer Test nimmt 3229.
+
+Zwei Fallen, die je einen Anlauf gekostet haben und beide schon dokumentiert waren:
+
+- **`ALLIANCE_MUSTER_TEST_MODE` liest `ALLIANCE_RAID_TEST_MODE`** (derselbe Schalter wie beim
+  Raid). Wer den naheliegenden Namen setzt, bekommt „Ungültige Anfrage" – die Sammeldauer 2 s steht
+  nicht in `ALLIANCE_MUSTER_DURATIONS`.
+- **Der Spielstand liegt in ZWEI Formen vor** (blanke Zeichenkette oder `{ value, version }`).
+  Der Test starb beim Aufbau seiner Messvorrichtung an `JSON.parse('[object Object]')`, sobald
+  `claim` den Spielstand geschrieben hatte – und führte die restlichen Prüfungen nie aus
+  (Frontend-Arbeitsregel 34). Genau derselbe Anlauf wie beim Nest-Test; seither hat auch dieser
+  Test ein `liesSave()`.
+
+Und eine dritte, die den Wert des Protokolls zeigt: Vor der Behebung waren `5b` und `5c` **grün,
+aber aus dem falschen Grund** – `claim` hatte mit 404 geantwortet, es war also gar nichts passiert
+(Frontend-Arbeitsregel 28). Erst als die Kette lief, haben sie etwas gemessen.
+
 ## Passwort-Regeln beim SETZEN (19.08.2026, Sicherheits-Audit P5)
 
 `passwortProblem(passwort, username)` ist die EINE Wache für neu gesetzte Passwörter. Sechs Regeln:

@@ -2519,7 +2519,28 @@ function bastionMarkMultServer(save, buildingKey) {
 const SHIP_SHIELD_EXPLICIT = { enterschiff: 32, phantomschiff: 5, waechter: 14, quantenkreuzer: 20, metamaterialtitan: 80, superschlachtschiff: 110, paktkorvette: 14, bundeskreuzer: 60, sternenbanner: 100 };
 function shipShield(k) { return SHIP_SHIELD_EXPLICIT[k] !== undefined ? SHIP_SHIELD_EXPLICIT[k] : Math.round((SHIP_ATK_VALUES[k] || 0) * 0.5); }
 // marks (31.07.2026): +3% Schild je Werftmarke, identisch zum Frontend (defensePower/shieldSum).
-function fleetShieldSum(f, marks) { if (!f) return 0; let s = 0; for (const k of Object.keys(SHIP_ATK_VALUES)) s += (f[k] || 0) * shipShield(k) * shipMarkShieldMult(marks, k); return s; }
+/* Schildsumme - Spiegel von shipDefenseContribution() im Frontend. Der entscheidende Unterschied
+   zum Stand davor: Schiffe OHNE eigenen Schildwert bekommen keine erfundene Basis mehr. Das
+   Frontend gibt ihnen 0 und benutzt (atk*0.5) ausschliesslich als Bezugsgroesse fuer einen
+   prozentualen Modulbonus; shipShield() hatte daraus eine echte Basis gemacht und dem Server im
+   gemessenen Beispiel das 3,1-fache an Schild beschert. shipShield() selbst bleibt unangetastet -
+   es hat weitere Aufrufer. */
+function fleetShieldSum(f, marks, save) {
+  if (!f) return 0;
+  const schild = save ? shipModulKlassenBoni(save, 'shield') : null;
+  const df = einsatzbereiteJaeger(f);
+  let s = 0;
+  for (const k of Object.keys(SHIP_ATK_VALUES)) {
+    const count = k === 'jaeger' ? df.jaeger : k === 'bomber' ? df.bomber : (f[k] || 0);
+    if (!count) continue;
+    const klasse = SHIP_KLASSE_VON[k];
+    const sb = schild && klasse ? (schild[klasse] || 0) : 0;   // bewusst UNGEDECKELT, wie im Frontend
+    const eigen = SHIP_SHIELD_EXPLICIT[k];
+    s += count * (eigen !== undefined ? eigen * (shipMarkShieldMult(marks, k) + sb)
+                                      : (SHIP_ATK_VALUES[k] || 0) * sb * 0.5);
+  }
+  return s;
+}
 // Doktrin-Multiplikatoren (DOCTRINE_DEFS im Frontend). Neutral, wenn keine Doktrin aktiv.
 const DOCTRINE_MULTS = { doc_offensive: { atk: 1.20, def: 0.85 }, doc_defensive: { atk: 0.85, def: 1.20 }, doc_logistics: { atk: 1, def: 1 },
   // Die drei wirtschaftlichen Doktrinen (18.08.2026) sind im Kampf NEUTRAL. Sie stehen hier
@@ -3158,13 +3179,30 @@ const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, 
 const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130, metamaterialtitan:150, singularitaetsvernichter:280, kausalitaetsbrecher:340, paktkorvette:40, bundeskreuzer:110, sternenbanner:240 };
 // marks (31.07.2026): derselbe atk-Markenfaktor wie in rawFleetPower - es ist derselbe
 // Angriffswert, hier nur mit defWeight verrechnet.
-function weightedFleetDefensePower(f, marks) {
+/* save ist OPTIONAL: Die Asteroiden-Anfechtung ruft mit der Eskorte eines FREMDEN Spielers auf und
+   hat dessen Spielstand nicht zur Hand - dort bleibt es (wie schon bei den Marken) beim blanken
+   Flottenwert. Mit save spiegelt die Funktion shipDefenseContribution() im Frontend vollstaendig:
+   Huellen-Module, Traegerhangar und die Kampfforschung. */
+function weightedFleetDefensePower(f, marks, save) {
   if (!f) return 0;
+  const huelle = save ? shipModulKlassenBoni(save, 'hull') : null;
+  const df = einsatzbereiteJaeger(f);
   let sum = 0;
   for (const [k, atk] of Object.entries(SHIP_ATK_VALUES)) {
-    const count = f[k] || 0;
+    // Jaeger und Bomber fliegen nur, soweit Traegerhangars sie fassen - genau wie im Frontend.
+    let count = k === 'jaeger' ? df.jaeger : k === 'bomber' ? df.bomber : (f[k] || 0);
     if (!count) continue;
-    sum += diminishingShipCount(count) * atk * (SHIP_DEF_WEIGHTS[k] !== undefined ? SHIP_DEF_WEIGHTS[k] : 1) * shipMarkAtkMult(marks, k);
+    // Hart bei +100 % gedeckelt, NICHT weicherDeckel: Das Frontend schreibt an dieser Stelle
+    // Math.min(1.0, ...) - die weiche Form gilt dort nur fuer den atk-Kanal.
+    const klasse = SHIP_KLASSE_VON[k];
+    const hb = huelle && klasse ? Math.min(1.0, huelle[klasse] || 0) : 0;
+    sum += diminishingShipCount(count) * atk * (SHIP_DEF_WEIGHTS[k] !== undefined ? SHIP_DEF_WEIGHTS[k] : 1)
+         * (shipMarkAtkMult(marks, k) + hb);
+  }
+  if (save) {
+    const r = save.research || {};
+    if (r.rkampf) sum *= (1 + r.rkampf * 0.02);
+    if (r.rkampf2) sum *= (1 + r.rkampf2 * 0.02);
   }
   return sum;
 }
@@ -3261,10 +3299,16 @@ function computeDefensePower(save) {
     power += sub * BUILDING_SHIELD_FACTOR;
   }
   // Flotten-Verteidigung = Angriffs-abgeleiteter Anteil (×0,4) + Schildsumme, wie im Frontend.
-  power += Math.round((weightedFleetDefensePower(save.fleet, save.shipMarks) * 0.4 + fleetShieldSum(save.fleet, save.shipMarks)) * fleetDiversityMult(save.fleet)) * HOME_DEFENSE_BONUS;
+  /* Rundung wie im Frontend: dort steht `Math.round(atkDerivedSum * 0.4) + shieldSum` INNERHALB von
+     shipDefenseContribution, der Vielfalts-Faktor wirkt danach auf die fertige Summe. Vorher rundete
+     der Server erst nach dem Faktor - ein Unterschied von unter einer Einheit, aber eine
+     Paritaetspruefung muesste ihn sonst mit Spielraum umgehen statt die Regel zu messen. */
+  power += (Math.round(weightedFleetDefensePower(save.fleet, save.shipMarks, save) * 0.4)
+            + fleetShieldSum(save.fleet, save.shipMarks, save)) * fleetDiversityMult(save.fleet) * HOME_DEFENSE_BONUS;
   for (const c of Object.values(save.colonies || {})) {
     if (!c || !c.fleet) continue;
-    power += Math.round((weightedFleetDefensePower(c.fleet, save.shipMarks) * 0.4 + fleetShieldSum(c.fleet, save.shipMarks)) * fleetDiversityMult(c.fleet));
+    power += (Math.round(weightedFleetDefensePower(c.fleet, save.shipMarks, save) * 0.4)
+              + fleetShieldSum(c.fleet, save.shipMarks, save)) * fleetDiversityMult(c.fleet);
   }
   const p = research.rpanzer || 0, s = research.rschildmatrix || 0;
   if (p) power *= (1 + p * 0.02);
@@ -3329,8 +3373,127 @@ const SHIP_MODULE_COMBAT_BASE = {
   ss_zielcomputer: { klasse: 'schlachtschiff', effect: 'atk', base: 0.05 },
   mz_reaktorkern: { klasse: 'mondzerstoerer', effect: 'atk', base: 0.05 },
   t2_singularitaetsfokus: { klasse: 'raffiniert', effect: 'atk', base: 0.14 },
-  mz_praezisionslaser: { klasse: 'mondzerstoerer', effect: 'siegechance', base: 0.05 }
+  mz_praezisionslaser: { klasse: 'mondzerstoerer', effect: 'siegechance', base: 0.05 },
+  /* hull/shield (21.08.2026): Bis dahin fuehrte diese Tabelle 4 von 44 Modulen, und die
+     Flottenverteidigung des Servers kannte die Klassenmodule deshalb gar nicht - siehe den langen
+     Kommentar bei SHIP_KLASSE_VON. Die Basiswerte sind aus SHIP_MODULE_DEFS im Frontend erzeugt,
+     nicht abgetippt; tests/test_schiffsmodul_paritaet.js dort haelt beide Seiten zusammen. */
+  ss_panzerung: { klasse: 'schlachtschiff', effect: 'hull', base: 0.10 },
+  ss_schildverstaerker: { klasse: 'schlachtschiff', effect: 'shield', base: 0.08 },
+  au_scanner: { klasse: 'aufklaerer', effect: 'hull', base: 0.10 },
+  mz_huelle: { klasse: 'mondzerstoerer', effect: 'hull', base: 0.10 },
+  fr_notpanzerung: { klasse: 'frachter', effect: 'hull', base: 0.10 },
+  au_deflektor: { klasse: 'aufklaerer', effect: 'shield', base: 0.08 },
+  mz_schildmatrix: { klasse: 'mondzerstoerer', effect: 'shield', base: 0.08 },
+  t2_kristallhuelle: { klasse: 'raffiniert', effect: 'hull', base: 0.10 },
+  jg_staffelpanzer: { klasse: 'jagdgeschwader', effect: 'hull', base: 0.10 },
+  jg_deflektor: { klasse: 'jagdgeschwader', effect: 'shield', base: 0.08 },
+  sl_kompositpanzer: { klasse: 'schwerelinie', effect: 'hull', base: 0.10 },
+  sl_schildgitter: { klasse: 'schwerelinie', effect: 'shield', base: 0.08 },
+  t2_metamaterialpanzer: { klasse: 'raffiniert', effect: 'hull', base: 0.14 },
+  ev_kometenschild: { klasse: 'jagdgeschwader', effect: 'shield', base: 0.12 },
+  ev_enterhaken: { klasse: 'eventflotte', effect: 'hull', base: 0.12 },
+  ev_risskern: { klasse: 'eventflotte', effect: 'shield', base: 0.12 },
 };
+/* ===== Schiffsklassen-Module in der VERTEIDIGUNG (21.08.2026, Auftrag Sascha) ===============
+   Bis hierher war die serverseitige Flottenverteidigung eine VEREINFACHUNG des Frontends, und
+   sie war ueber Monate weit auseinandergelaufen. Gemessen an einer Flotte aus 200 Schlachtschiffen,
+   300 Kreuzern, 200 Zerstoerern und 100 Metamaterial-Titanen:
+
+     Frontend OHNE Module   35.000        Server (immer)   51.600   -> +47 % zu VIEL
+     Frontend MIT  Modulen  68.552        Server (immer)   51.600   -> -25 % zu WENIG
+     (die zweite Zeile mit je drei epischen Huellen- UND Schildmodulen auf allen drei beteiligten
+      Klassen - eine Zahl ohne genannte Messvorrichtung fuehrt beim naechsten Lesen in die Irre,
+      und genau das ist beim Nachrechnen dieser Zeile schon einmal passiert)
+
+   NACH der Angleichung gemessen, dieselbe Flotte, Frontend gegen Backend: 35.000 zu 35.000 ohne
+   Module und 63.944 zu 63.944 mit drei epischen Huellenmodulen je Klasse - Abweichung NULL.
+
+   Die beiden Fehler haben einander verdeckt - ein mittelmaessig ausgeruesteter Spieler landete
+   zufaellig nahe der Paritaet. Vier Ursachen, alle einzeln gemessen:
+
+   1. SCHILD-BASIS. Von 43 Schiffstypen haben 34 keinen eigenen `shield`-Wert. Das Frontend gibt
+      ihnen die Basis NULL - seine Konstruktion `(def.atk||0)*shieldBonus*0.5` existiert nur, damit
+      ein prozentualer Modulbonus ueberhaupt etwas zum Verstaerken hat (der Kommentar dort sagt es
+      woertlich). Der Server erfand ihnen ueber shipShield() eine Basis von atk*0.5 - im Beispiel
+      das 3,1-fache an Schild. Das war die groesste der vier Abweichungen.
+   2. MODULE. hull/shield der Schiffsklassen-Module kannte der Server gar nicht; SHIP_MODULE_COMBAT_BASE
+      fuehrte 4 von 44 Modulen, alle mit atk/siegechance.
+   3. FORSCHUNG. Das Frontend multipliziert den Flotten-Angriffsanteil der Verteidigung mit
+      rkampf/rkampf2 (je 2 %/Stufe, max 20) - bei einem ausgebauten Konto bis zum 1,96-fachen.
+      Der Server wandte auf die Verteidigung nur rpanzer/rschildmatrix an.
+   4. HANGAR. Das Frontend wertet Jaeger/Bomber nur bis zur Traegerkapazitaet (deployableFighters).
+      Der Server zaehlte sie voll - 2000 Jaeger ohne einen einzigen Traeger trugen 8.050 statt 0.
+
+   ENTSCHIEDEN (Sascha, 21.08.2026): alle vier angleichen, und zwar auf das FRONTEND. Es ist die
+   Seite, die der Spieler sieht, und seine Konstruktionen sind im Quelltext begruendet, waehrend die
+   Server-Vereinfachungen erfunden waren (ihre eigenen Kommentare sagen das: "der Backend-Ansatz
+   kennt generell keine Schilde, vorbestehende Vereinfachung" und "das Backend kennt den
+   Hangar-Mechanismus ohnehin nicht"). Folge fuer die Balance: Verteidigung wird MODULABHAENGIG -
+   wer ausgeruestet ist, gewinnt, wer nichts ausgeruestet hat, verliert.
+
+   WAS SICH DABEI AUCH AENDERT, und es steht hier, damit es niemanden ueberrascht: Die
+   Asteroiden-Anfechtung ruft dieselben zwei Funktionen mit `null` auf (der Halter-Spielstand liegt
+   dort nicht vor). Seine Eskorte verliert damit ebenfalls die erfundene Schild-Basis. Die Vorschau
+   der Anfechtung zeigt bewusst KEINE Zahl, es gibt dort also keine Anzeigestelle, die falsch
+   wuerde - aber die Kraefteverhaeltnisse verschieben sich. */
+const SHIP_KLASSE_VON = (() => {
+  // Kopie von SHIP_CLASS_DEFS[].shipKeys im Frontend - dieselbe Kopie-Familie wie SHIP_ATK_VALUES.
+  const k = {
+    schlachtschiff: ['schlachtschiff'],
+    frachter: ['frachter', 'frachtergross', 'bergungsfrachter'],
+    aufklaerer: ['ships', 'spaeher'],
+    mondzerstoerer: ['mondzerstoerer'],
+    raffiniert: ['nanoklinge', 'quantenkreuzer', 'fusionsdreadnought', 'metamaterialtitan', 'singularitaetsvernichter'],
+    jagdgeschwader: ['jaeger', 'hyperjaeger', 'leerenjaeger', 'kometenjaeger'],
+    schwerelinie: ['cruisers', 'destroyers', 'bomber', 'hyperbomber'],
+    eventflotte: ['enterschiff', 'phantomschiff', 'riftwaechter', 'gesandtenschiff', 'schuerfschiff']
+  };
+  const raus = {};
+  for (const kl of Object.keys(k)) for (const sk of k[kl]) raus[sk] = kl;
+  return raus;
+})();
+// Zweitwerte (Substats) - Spiegel von moduleSubsOf() im Frontend. Sie sind bewusst atk-frei, tragen
+// aber sehr wohl hull/shield (MODULE_SUB_POOL_SHIP), und ohne sie waere die Spiegelung unvollstaendig.
+function moduleSubsServer(instKey) {
+  const seg = String(instKey || '').split(':')[3] || '';
+  if (!seg) return [];
+  const out = [];
+  for (const tok of seg.split('.')) {
+    const m = tok.match(/^([a-z]+)(\d+)$/);
+    if (m && m[1] !== 'w') out.push({ effect: m[1], value: parseInt(m[2], 10) / 1000 });  // 'w' = Hauptwert-Wurf
+  }
+  return out;
+}
+/* Die Klassen-Boni EINMAL je Aufruf sammeln statt je Schiffstyp - weightedFleetDefensePower laeuft
+   ueber 40+ Typen, und shipModuleBonus iteriert jedes Mal die ausgeruesteten Module.
+   Die SYNERGIEN des Frontends (shipSynergyBonusFor) fehlen hier bewusst: gemessen tragen alle sechs
+   ausschliesslich speed/fuel/cargo, keine einzige hull/shield/atk. Wer dort je eine anlegt, muss sie
+   hier nachziehen - tests/test_schiffsmodul_paritaet.js im FRONTEND-Repo haelt das fest. */
+function shipModulKlassenBoni(save, effect) {
+  const raus = {};
+  const eq = ((save || {}).equippedShipModules) || {};
+  for (const klasse of Object.keys(eq)) {
+    let sum = 0;
+    for (const instKey of (eq[klasse] || [])) {
+      if (typeof instKey !== 'string') continue;
+      const [key, rarity] = instKey.split(':');
+      const def = SHIP_MODULE_COMBAT_BASE[key];
+      const mult = (MODULE_RARITY_MULT[rarity] || 1) * moduleLevelMultServer(instKey) * moduleWertMultServer(instKey);
+      if (def && def.klasse === klasse && def.effect === effect) sum += def.base * mult;
+      for (const sub of moduleSubsServer(instKey)) if (sub.effect === effect) sum += sub.value;
+    }
+    raus[klasse] = sum;
+  }
+  return raus;
+}
+// Traegerhangar - Spiegel von hangarCapacity()/deployableFighters() im Frontend.
+const SUPER_HANGAR_SLOTS_SERVER = 2, CARRIER_HANGAR_SLOTS_SERVER = 6;
+function einsatzbereiteJaeger(f) {
+  const cap = (f.carrier || 0) * CARRIER_HANGAR_SLOTS_SERVER + (f.superschlachtschiff || 0) * SUPER_HANGAR_SLOTS_SERVER;
+  const jaeger = Math.min(f.jaeger || 0, cap);
+  return { jaeger, bomber: Math.min(f.bomber || 0, Math.max(0, cap - jaeger)) };
+}
 // Modul-Level (FE/BE-Parität, Modul-Overhaul Runde 1): Instanzen sind als "typ:seltenheit:level"
 // kodiert; fehlt das Level-Segment, gilt Level 1. Der Level-Multiplikator (+10% je Stufe, max. Lvl 10)
 // muss serverseitig identisch wie im Frontend (moduleLevelMult) angewendet werden, sonst weicht die

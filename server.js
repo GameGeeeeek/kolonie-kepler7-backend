@@ -9642,6 +9642,7 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
       if (!(anteil > 0)) continue;
       teilnehmer++;
       if (uid === req.userId) meinAnteil = anteil;
+      pveKillZaehlen(uid, 'festungen');          // Meilenstein-Emblem, Phase 6
       pushPendingReward(uid, {
         type: 'festung',
         system: sysId, stufe: fest.stufe, stufeName: st.name,
@@ -9766,6 +9767,9 @@ function nestSchlagAusfuehren(g, nest, kraft, composition, beteiligte, jetzt) {
       if (!(anteil > 0)) continue;
       teilnehmer++;
       anteile[uid] = anteil;
+      // Nur die KOENIGIN zaehlt - ein Sporenherd ist kein Meilenstein. Gezaehlt wird vor dem
+      // Loeschen des Nestes, solange `nest.stufe` noch dasteht.
+      if (nest.stufe === 5) pveKillZaehlen(uid, 'koeniginnen');
       pushPendingReward(uid, {
         type: 'alien-nest',
         system: nest.sys, volk: nest.volk, volkName: volk.name,
@@ -10404,6 +10408,19 @@ const KOSMETIK_DEFS = [
   { key: 'em_kranz',      art: 'emblem',      bedingung: { typ: 'erfolge', wert: 60 } },
   { key: 'nf_trophae',    art: 'namensfarbe', bedingung: { typ: 'bosse', wert: 10 } },
   { key: 'em_schaedel',   art: 'emblem',      bedingung: { typ: 'bosse', wert: 30 } },
+  // --- PvE-Meilensteine (21.08.2026, Phase 6 der Asteroidenfestungen/Alien-Nester) ---
+  // Der Katalog kannte bis hierher keinen einzigen Weg ueber die neuen PvE-Ziele. Beide Zaehler
+  // liest der Server aus dem NUTZEROBJEKT (`pveKills`), nicht aus dem Spielstand - Begruendung
+  // bei pveKillZaehlen. Sie wachsen nur, gehoeren also NICHT in kosmetikBefristet.
+  //
+  // Die Schwellen sind an der gemessenen Kampfdauer gerechnet, nicht geschaetzt: Eine Festung
+  // braucht vier bis sieben Schlaege bei 6 h Abklingzeit, also ein bis zwei Tage fuer EINE. 25
+  // Stueck sind damit ein Ziel ueber Wochen - vergleichbar mit em_schaedel (30 Sektor-Bosse).
+  // Die Koenigin dagegen ZAEHLT NUR EINMAL, und das ist Absicht: Sie erscheint erst, wenn ein
+  // Volk vier Nester beisammen hat, faellt mit 4 Mio LP praktisch nur im Verband, und reisst
+  // dabei den ganzen Schwarm mit. Wer das einmal geschafft hat, hat die Aussage verdient.
+  { key: 'em_festungsbrecher', art: 'emblem', bedingung: { typ: 'festungen', wert: 25 } },
+  { key: 'em_schwarmbrecher',  art: 'emblem', bedingung: { typ: 'koeniginnen', wert: 1 } },
   // --- Meilenstein-Embleme (17.08.2026) ---
   // Die Gegenstücke zu em_tasse/em_komet, und der Unterschied ist der ganze Punkt: Jene tragen den
   // AKTUELLEN Rang und verschwinden, wenn er ausläuft. Diese hier bleiben. Sie sagen nicht
@@ -10446,6 +10463,21 @@ const KOSMETIK_VORGABE = { namensfarbe: 'nf_standard', emblem: 'em_keins' };
 // Spender-Stufen sind aufsteigend: Wer Gold hat, besitzt auch die Bronze- und Silber-Farbe. Ohne
 // diese Ordnung verlöre ein großzügiger Spender ausgerechnet die einfacheren Stücke.
 const KOSMETIK_STUFEN_RANG = { bronze: 1, silver: 2, gold: 3 };
+/* PVE-MEILENSTEINE (Phase 6). Zwei Zaehler am NUTZEROBJEKT, nicht im Spielstand - dieselbe
+   Entscheidung wie bei `staub.abwehrGesamt` und aus demselben Grund: Eine Namensfarbe oder ein
+   Emblem steht in der BESTENLISTE, also auf einer Flaeche, die allen gehoert. Der Spielstand ist
+   bauartbedingt klientenautoritativ; ein Zaehler darin waere in fuenf Sekunden gefaelscht.
+
+   Gezaehlt wird dort, wo der Server das Ereignis SELBST beobachtet: beim Fall einer Festung und
+   beim Fall einer Koenigin. Beide Male fuer JEDEN Beitragenden - wer ein Drittel des Schadens
+   getragen hat, hat die Festung genauso geschleift wie der, der zufaellig den letzten Schlag
+   fuehrte. Das ist dieselbe Ueberlegung, die den Hort anteilig auszahlt. */
+function pveKillZaehlen(userId, art) {
+  const u = findUserById(userId);
+  if (!u) return;
+  u.pveKills = u.pveKills || {};
+  u.pveKills[art] = (Number(u.pveKills[art]) || 0) + 1;
+}
 function kosmetikDef(key) { return KOSMETIK_DEFS.find(d => d.key === key) || null; }
 // Ist die Bedingung BEFRISTET? Nur solche werden beim Lesen erneut geprüft (siehe Kopfkommentar).
 // `spender_je` gehört ausdrücklich NICHT dazu, und das ist keine Nachlässigkeit, sondern der
@@ -10484,6 +10516,12 @@ function kosmetikBedingungErfuellt(userId, def, save) {
   if (b.typ === 'abgewehrt') {
     const u = findUserById(userId);
     return !!u && (Number((u.staub || {}).abwehrGesamt) || 0) >= b.wert;
+  }
+  // PvE-Meilensteine, ebenfalls aus dem Nutzerobjekt (Begruendung bei pveKillZaehlen). Beide
+  // Zaehler steigen nur - deshalb kein Eintrag in kosmetikBefristet.
+  if (b.typ === 'festungen' || b.typ === 'koeniginnen') {
+    const u = findUserById(userId);
+    return !!u && (Number((u.pveKills || {})[b.typ]) || 0) >= b.wert;
   }
   const s = save || {};
   if (b.typ === 'prestige') return (Number(s.prestige) || 0) >= b.wert;

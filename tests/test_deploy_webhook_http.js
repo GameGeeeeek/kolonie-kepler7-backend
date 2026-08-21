@@ -18,11 +18,24 @@
 //   5. Der Timeout ist grosszuegig genug, dass nur ein echter Haenger ihn ausloest, und der
 //      Zeitueberschreitungs-Fall hat eine EIGENE Meldung - als generisches "Fehler" gemeldet
 //      saehe der gefaehrlichste Ausgang aus wie der harmloseste.
+//   6. SERIALISIERUNG (19.08.2026): Laeuft fuer ein Ziel bereits ein Deploy, wird kein zweiter
+//      gestartet - der Push wird nur VORGEMERKT. Gemessen an der Sperrdatei, nicht am Zufall:
+//      Der Test haelt die Sperre selbst, damit nichts von Timing abhaengt.
+//   7. Eine VERWAISTE Sperre (aelter als ein Deploy dauern darf) wird uebernommen - sonst
+//      blockierte ein einziger abgestuerzter Lauf den Deploy fuer immer.
+//
+// ANLASS FUER 6/7, gemessen am 19.08.2026 um 05:41 UTC: Ein Branch-Push und der Merge Sekunden
+// spaeter loesten ZWEI Webhook-Ereignisse aus. Zwei `git pull` im selben Repo kollidierten; zurueck
+// blieben .git/HEAD.lock (0 Bytes) und .git/refs/heads/master.lock (41 Bytes - der fertige Hash
+// war schon geschrieben) sowie ein VORGEMERKTER Stand, der byte-genau einem eingehenden Commit
+// entsprach. Danach scheiterte jeder weitere Pull an "Your local changes would be overwritten".
 //
 // START (Server extern im SELBEN Bash-Aufruf, Muster der uebrigen HTTP-Tests):
 //   DB=$(mktemp /tmp/kepler-deploy-XXXX.json); rm -f "$DB"
-//   DB_FILE=$DB PORT=3223 JWT_SECRET=test DEPLOY_WEBHOOK_SECRET=geheim node server.js &
-//   node tests/test_deploy_webhook_http.js
+//   LOCKS=$(mktemp -d /tmp/kepler-deploylock-XXXX)
+//   DB_FILE=$DB PORT=3223 JWT_SECRET=test DEPLOY_WEBHOOK_SECRET=geheim DEPLOY_LOCK_DIR=$LOCKS node server.js &
+//   DEPLOY_LOCK_DIR=$LOCKS TEST_SERVER_LOG=/tmp/srv.log node tests/test_deploy_webhook_http.js
+// (der Server schreibt nach /tmp/srv.log; 6b liest dort mit, siehe dort)
 //
 // GEGENPROBE (Regel 1): Gegen den Stand vor dem Umbau faellt 5 (Timeout 30000, keine eigene
 // Meldung fuer die Zeitueberschreitung). 1-4 bleiben dort gruen - sie beschreiben Verhalten, das
@@ -93,6 +106,60 @@ const signiere = (body) => 'sha256=' + crypto.createHmac('sha256', SECRET).updat
   check('5b exec benutzt genau diese Konstante', /exec\(command,\s*\{\s*timeout:\s*DEPLOY_TIMEOUT_MS\s*\}/.test(S));
   check('5c die Zeitueberschreitung hat einen EIGENEN Zweig mit eigener Meldung',
     /if \(err && err\.killed\)/.test(S) && /ZEITUEBERSCHREITUNG/.test(S));
+
+  // ---- 6/7) Serialisierung, an der Sperrdatei gemessen -------------------------------------
+  const sperrOrdner = process.env.DEPLOY_LOCK_DIR || '/tmp';
+  const sperre = path.join(sperrOrdner, 'kepler7-deploy-kolonie-kepler7.lock');
+  const vorgemerkt = path.join(sperrOrdner, 'kepler7-deploy-kolonie-kepler7.pending');
+  const warte = (ms) => new Promise(r => setTimeout(r, ms));
+  try { fs.unlinkSync(vorgemerkt); } catch (e) {}
+  // Vor dem Halten abwarten, bis der Deploy aus Pruefung 4 durch ist - sonst misst 6 dessen
+  // Sperre statt der eigenen.
+  for (let i = 0; i < 30 && fs.existsSync(sperre); i++) await warte(200);
+  try { fs.unlinkSync(vorgemerkt); } catch (e) {}
+
+  // 6) Der Test HAELT die Sperre selbst. Damit haengt nichts an Timing: Der Endpunkt muss den
+  //    zweiten Deploy ueberspringen, egal wie schnell die Maschine ist.
+  fs.writeFileSync(sperre, JSON.stringify({ pid: -1, seit: new Date().toISOString() }));
+  // 6b misst, ob wirklich ein zweiter Deploy GELAUFEN ist - nicht, ob die Sperrdatei unberuehrt
+  // blieb. Die erste Fassung tat Letzteres und war am Stand OHNE Serialisierung gruen: Dort
+  // kennt der Server die Datei gar nicht, fasst sie also auch nicht an (Arbeitsregel 28 - eine
+  // Pruefung, die aus dem falschen Grund gruen ist, ist so schlecht wie eine rote). Gemessen wird
+  // deshalb am Serverprotokoll: Jeder ANGELAUFENE Deploy hinterlaesst dort genau eine
+  // Ergebniszeile ("erfolgreich" oder "Fehler").
+  const logPfad = process.env.TEST_SERVER_LOG;
+  const ergebnisZeilen = () => {
+    try { return (fs.readFileSync(logPfad, 'utf8').match(/Deploy-Webhook (erfolgreich|Fehler|ZEITUEBERSCHREITUNG) für kolonie-kepler7:/g) || []).length; }
+    catch (e) { return null; }
+  };
+  check('6b-vorab: TEST_SERVER_LOG zeigt auf das Serverprotokoll', !!logPfad && ergebnisZeilen() !== null,
+    { TEST_SERVER_LOG: logPfad || '(nicht gesetzt)' });
+  const vorherZeilen = ergebnisZeilen();
+  const zweiter = await post('/api/deploy-webhook', echt, signiere(echt));
+  await warte(1500);
+  check('6a bei laufendem Deploy antwortet der Webhook trotzdem mit 200', zweiter.status === 200, { status: zweiter.status });
+  check('6b der zweite Deploy laeuft NICHT an (keine neue Ergebniszeile im Protokoll)',
+    ergebnisZeilen() === vorherZeilen, { vorher: vorherZeilen, nachher: ergebnisZeilen() });
+  check('6c der Push geht nicht verloren, sondern wird vorgemerkt', fs.existsSync(vorgemerkt));
+
+  // 7) Verwaiste Sperre: Zeitstempel weit in die Vergangenheit, dann muss sie uebernommen werden.
+  //    Gegenrichtung zu 6 - ohne sie legte ein einziger abgestuerzter Lauf den Deploy fuer immer
+  //    still, und die Behebung waere schlimmer als das Problem.
+  try { fs.unlinkSync(vorgemerkt); } catch (e) {}
+  const alt = new Date(Date.now() - 24 * 3600 * 1000);
+  fs.utimesSync(sperre, alt, alt);
+  const dritter = await post('/api/deploy-webhook', echt, signiere(echt));
+  let uebernommen = false;
+  for (let i = 0; i < 30; i++) {
+    await warte(200);
+    // Uebernommen heisst: entweder traegt sie einen frischen Zeitstempel (laeuft gerade),
+    // oder sie ist nach dem Lauf wieder weg. Beides beweist, dass der Deploy angelaufen ist.
+    if (!fs.existsSync(sperre) || fs.statSync(sperre).mtimeMs > alt.getTime() + 1000) { uebernommen = true; break; }
+  }
+  check('7a eine verwaiste Sperre wird uebernommen', uebernommen && dritter.status === 200,
+    { status: dritter.status, sperreNochDa: fs.existsSync(sperre) });
+  check('7b und dabei wird nichts vorgemerkt', !fs.existsSync(vorgemerkt));
+  try { fs.unlinkSync(sperre); } catch (e) {}
 
   console.log(fehl ? 'FEHLGESCHLAGEN' : 'ALLES GRUEN');
   process.exit(fehl);

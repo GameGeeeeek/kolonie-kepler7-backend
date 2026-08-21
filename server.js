@@ -2760,7 +2760,12 @@ const SHIP_SCORE_WEIGHTS = {
   // (weltraum_kolonie.html SHIP_SCORE_WEIGHTS) synchron gehalten.
   mondzerstoerer:250,
   // Allianzflotte (05.08.2026) - Gewichte identisch zur Frontend-Kopie SHIP_SCORE_WEIGHTS.
-  paktkorvette:42, bundeskreuzer:105, sternenbanner:195
+  paktkorvette:42, bundeskreuzer:105, sternenbanner:195,
+  // Urmaterie-Koloss (21.08.2026, Etappe D): der erste wiederkehrende Protomaterie-Abnehmer.
+  // Ohne diese Zeile bewertet der Server den Score seiner Besitzer zu niedrig - derselbe
+  // Fallstrick wie bei den drei Apex-Schiffen darueber, und in beiden CLAUDE.md ausdruecklich
+  // als WIEDERKEHREND vermerkt. Gewicht identisch zur Frontend-Kopie (weltraum_kolonie.html).
+  urmateriekoloss:175
 };
 // Bug/Sicherheitslücke behoben (13.07.2026, danke an Sascha für den Hinweis): der Bestenlisten-Score
 // wurde bisher komplett clientseitig berechnet und ungeprüft übernommen - jeder hätte sich per
@@ -2824,7 +2829,14 @@ const COUNTER_ROLE_OF = {
   carrier: 'abfang', riftwaechter: 'abfang', enterschiff: 'bomber',
   // Allianzflotte (05.08.2026): bewusst auf alle drei Rollen verteilt statt geschlossen ins
   // Kapital-Lager - sonst waere die muehsam auf 7/6/8 gebrachte Verteilung sofort wieder schief.
-  paktkorvette: 'abfang', bundeskreuzer: 'kapital', sternenbanner: 'bomber'
+  paktkorvette: 'abfang', bundeskreuzer: 'kapital', sternenbanner: 'bomber',
+  // Urmaterie-Koloss (21.08.2026, Etappe D): KAPITAL - breiter, langsamer Belagerungsrumpf mit
+  // Frachtraum, kein Praezisionsangreifer. Die Rolle entscheidet hier nicht nur das Konter-
+  // verhaeltnis, sondern ueber shipMarkShieldPerStep auch den Werftmarken-Schildzuwachs
+  // (kapital 0,04 statt 0,03). Genau daran hat tests/test_werftmarken.js im Frontend die Luecke
+  // gefunden: Frontend 1,04 gegen Backend 1,03 bei Mk 2 - der Server haette den Schild jedes
+  // Koloss-Besitzers zu niedrig gerechnet.
+  urmateriekoloss: 'kapital'
 };
 const SHIP_COUNTERS = (() => {
   const byRole = {}; for (const r of COUNTER_ROLE_DEFS) byRole[r.key] = [];

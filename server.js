@@ -3483,9 +3483,45 @@ function shipModulKlassenBoni(save, effect) {
       if (def && def.klasse === klasse && def.effect === effect) sum += def.base * mult;
       for (const sub of moduleSubsServer(instKey)) if (sub.effect === effect) sum += sub.value;
     }
-    raus[klasse] = sum;
+    // Der Set-Bonus faellt VOR den Deckel, genau wie im Frontend (dort steckt er in
+    // shipModuleBonusFor, und Math.min(1.0, ...) greift erst an der Verbrauchsstelle).
+    raus[klasse] = sum + shipModulSetBonusServer(save, klasse, effect);
   }
+  /* Eine Klasse ohne ein einziges ausgeruestetes Modul steht gar nicht in equippedShipModules und
+     bekaeme oben nichts - fuer den Set-Bonus ist das folgenlos (er braucht mindestens zwei Teile),
+     die Zeile bleibt trotzdem hier stehen, damit beim naechsten Lesen niemand danach sucht. */
   return raus;
+}
+/* ===== Klassen-Sets der Schiffsmodule (21.08.2026) - Kopie von SHIP_MODULE_SET_DEFS im Frontend.
+   Hier stehen nur die maschinell noetigen Felder; Name, Symbol und Beschreibung bleiben vorne.
+   Der Set-Bonus traegt `atk`, `hull` und `shield` und entscheidet damit PvP - deshalb MUSS er
+   gespiegelt sein. tests/test_schiffsmodul_paritaet.js im FRONTEND-Repo haelt beide Seiten
+   zusammen, Feld fuer Feld.
+   Die uebrigen Kanaele (speed/fuel/cargo) rechnet der Server ohnehin nicht nach; sie stehen
+   trotzdem in der Tabelle, damit sie vollstaendig neben der Frontend-Kopie liegt und beim
+   naechsten Balance-Pass niemand denkt, sie seien vergessen worden - dieselbe Begruendung wie bei
+   den drei wirtschaftlichen Doktrinen in DOCTRINE_MULTS. */
+const SHIP_MODULE_SET_DEFS = [
+  { key: 'linienschiff', klasse: 'schlachtschiff', req: ['ss_panzerung', 'ss_zielcomputer', 'ss_schildverstaerker'], stufen: [{ teile: 2, bonuses: { hull: 0.08 } }, { teile: 3, bonuses: { atk: 0.06 } }] },
+  { key: 'handelskonvoi', klasse: 'frachter', req: ['fr_frachtraum', 'fr_treibstoff', 'fr_triebwerke'], stufen: [{ teile: 2, bonuses: { cargo: 0.1 } }, { teile: 3, bonuses: { fuel: 0.08 } }] },
+  { key: 'spaehverband', klasse: 'aufklaerer', req: ['au_sensoren', 'au_tarnmodul', 'au_scanner'], stufen: [{ teile: 2, bonuses: { speed: 0.1 } }, { teile: 3, bonuses: { fuel: 0.08 } }] },
+  { key: 'belagerungsflotte', klasse: 'mondzerstoerer', req: ['mz_huelle', 'mz_schildmatrix', 'mz_antrieb'], stufen: [{ teile: 2, bonuses: { hull: 0.08 } }, { teile: 3, bonuses: { shield: 0.08 } }] },
+  { key: 'singularitaet', klasse: 'raffiniert', req: ['t2_kristallhuelle', 't2_singularitaetsfokus', 't2_quantenkondensator'], stufen: [{ teile: 2, bonuses: { hull: 0.08 } }, { teile: 3, bonuses: { atk: 0.06 } }] },
+  { key: 'schwarmtaktik', klasse: 'jagdgeschwader', req: ['jg_leichtbau', 'jg_staffelpanzer', 'jg_deflektor'], stufen: [{ teile: 2, bonuses: { speed: 0.1 } }, { teile: 3, bonuses: { shield: 0.08 } }] },
+  { key: 'sturmlinie', klasse: 'schwerelinie', req: ['sl_kompositpanzer', 'sl_schildgitter', 'sl_marschtriebwerk'], stufen: [{ teile: 2, bonuses: { hull: 0.08 } }, { teile: 3, bonuses: { shield: 0.08 } }] },
+  { key: 'beutezug', klasse: 'eventflotte', req: ['ev_enterhaken', 'ev_risskern', 'ev_phasenfeld'], stufen: [{ teile: 2, bonuses: { hull: 0.08 } }, { teile: 3, bonuses: { speed: 0.1 } }] }
+];
+/* Wie viele Teile des Klassen-Sets sind ausgeruestet? Verglichen wird der TYP (erstes Segment des
+   Instanzschluessels) - das Frontend verbietet zwei Module desselben Typs je Klasse ohnehin. */
+function shipModulSetBonusServer(save, klasse, effect) {
+  const def = SHIP_MODULE_SET_DEFS.find(x => x.klasse === klasse);
+  if (!def) return 0;
+  const typen = (((save || {}).equippedShipModules || {})[klasse] || [])
+    .filter(k => typeof k === 'string').map(k => k.split(':')[0]);
+  const teile = def.req.filter(r => typen.indexOf(r) >= 0).length;
+  let sum = 0;
+  for (const st of def.stufen) if (teile >= st.teile) sum += (st.bonuses[effect] || 0);
+  return sum;
 }
 // Traegerhangar - Spiegel von hangarCapacity()/deployableFighters() im Frontend.
 const SUPER_HANGAR_SLOTS_SERVER = 2, CARRIER_HANGAR_SLOTS_SERVER = 6;
@@ -3524,6 +3560,7 @@ function shipModuleBonus(save, klasse, effect) {
     if (!def || def.klasse !== klasse || def.effect !== effect) continue;
     sum += def.base * (MODULE_RARITY_MULT[rarity] || 1) * moduleLevelMultServer(instKey) * moduleWertMultServer(instKey);
   }
+  sum += shipModulSetBonusServer(save, klasse, effect);   // Klassen-Set, vor dem Deckel wie vorne
   // Schiffsmodul-Angriff: derselbe Deckel wie im Frontend an seinen beiden Verbrauchsstellen
   // (schlachtschiffAtkMult, t2AtkMult) - dort steht dieselbe Umstellung.
   return effect === 'atk' ? weicherDeckel(sum, 1.0 * deckelAusbauServer(save)) : sum;

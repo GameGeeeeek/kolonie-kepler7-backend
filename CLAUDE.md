@@ -1178,6 +1178,52 @@ ab statt an `4a`, fuhr **14 statt 22** Prüfungen, und die Sabotage sah grün au
 nur die `WERKZEUGFEHLER`-Wache des Messskripts (Frontend-Regel 71). Der Sammler holt seither
 Konstanten **und Funktionen** transitiv; die Liste ist auf die zwei Zielfunktionen geschrumpft.
 
+## Klassen-Sets der Schiffsmodule (21.08.2026, Teil A des Beute-Konzepts)
+
+Auftrag Sascha: „Findbare Module die zusammen set Bonus geben". Set-Boni gab es schon – aber nur
+bei den STANDORT-Modulen und den Boss-Sets. Die 44 Schiffsklassen-Module hatten **keinen einzigen**
+(gemessen: 0 Treffer). Jede der acht Klassen hat jetzt ein Set aus drei namentlich festgelegten
+Modulen, gestaffelt bei zwei und drei Teilen.
+
+**Warum die Tabelle hier liegt:** Der Set-Bonus trägt `atk`, `hull` und `shield` und entscheidet
+damit PvP. `SHIP_MODULE_SET_DEFS` ist deshalb eine Kopie – dieselbe Familie wie
+`SHIP_MODULE_COMBAT_BASE` daneben. `tests/test_schiffsmodul_paritaet.js` im FRONTEND-Repo hält
+beide Seiten Feld für Feld zusammen.
+
+**Eingespeist wird an ZWEI Stellen**, weil es zwei Verbrauchspfade gibt: `shipModuleBonus`
+(der `atk`-Pfad) und `shipModulKlassenBoni` (`hull`/`shield`). Beide addieren **vor** dem Deckel –
+genau wie das Frontend, wo der Set-Bonus in `shipModuleBonusFor` steckt und `Math.min(1.0, …)`
+erst an der Verbrauchsstelle greift.
+
+**Drei Entscheidungen, die vorher gemessen wurden:**
+
+- **Bestimmte Schlüssel statt „N beliebige".** Der erste Entwurf wollte nach ANZAHL staffeln wie
+  die Boss-Sets. Gemessen ist das hier keine Entscheidung: `equipShipModule` im Frontend verbietet
+  zwei Module desselben TYPS an einer Klasse, es gibt also gar keine Stapel-Alternative – „zwei
+  beliebige" wäre schlicht eine Belohnung dafür, einen zweiten Slot gekauft zu haben.
+- **Kein Set trägt einen Kanal, den seine Klasse nicht verbraucht.** Gemessen wirken
+  `hull`/`shield`/`speed`/`fuel` in allen Klassen, `atk` nur in `schlachtschiff` und `raffiniert`,
+  `cargo` nur in `frachter`. Ein Set-Bonus auf `atk` für die Schwere Linie wäre ein Tabellenfeld,
+  das nur der Anzeigetext liest (Frontend-Regel 59). `test_schiffsmodul_paritaet.js` 5d leitet
+  diese Zuordnung aus der Spieldatei AB und prüft sie – sie ist nicht eingetippt.
+- **Der Mondzerstörer bekommt bewusst kein `atk`.** Der Server verbraucht es (Mondangriff), das
+  Frontend nicht – die Vorschau verschwiege sonst eine Wirkung, die im Kampf eintritt.
+
+**Ein Nebenbefund, der beim Vermessen der Kanäle herausfiel und NICHT behoben ist:** Das
+Event-Modul `ev_erzgreifer` („Erzgreifer-Ausleger", `cargo`, `base:0.25`) bewirkt **nichts**.
+`cargo` wird ausschließlich für die Frachter-Klasse gelesen, und die drei Frachtschiffe
+(`frachter`, `frachtergross`, `bergungsfrachter`) gehören alle dorthin – Event-Schiffe haben
+überhaupt keine Frachtkapazität. Seine Beschreibung verspricht ausdrücklich „erhöht die
+Frachtkapazität aller Event-Schiffe deutlich". Eine per-Klasse-Umstellung von
+`fleetCargoCapacity` würde daran nichts ändern; es bräuchte entweder Frachtraum für Event-Schiffe
+oder eine Umwidmung des Moduls. **Das ist eine Entscheidung über die Identität eines
+Event-Gegenstands und liegt bei Sascha.**
+
+**Die Auslieferungsreihenfolge ist hier NICHT gleichgültig** (anders als bei der Angleichung
+darüber): Geht ein Repo allein live, entsteht genau die Divergenz, die gerade behoben wurde –
+einmal in die eine, einmal in die andere Richtung. Beide PRs gehören unmittelbar nacheinander
+gemergt, das Backend zuerst und per `/api/health`-Blob belegt, bevor das Frontend folgt.
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

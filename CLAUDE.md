@@ -1395,4 +1395,73 @@ Deshalb gehört zur Messung eine **Negativkontrolle**: eine frei erfundene Route
 muss im selben Lauf 404 liefern, und eine bekannte alte Route 401. Erst dann misst man den Server
 und nicht die eigene Anfrage.
 
+### `/api/health` nennt den Stand selbst (21.08.2026)
+
+Die 401/404-Messung oben trägt nur, solange ein Merge überhaupt eine **neue Route** mitbringt.
+Am 21.08.2026 einmal maschinell über alle Commits seit #142 gemessen (Routenliste je Commit
+gegen die des Vorgängers, der Schleifenbefehl steht im Nachtrag vom 21.08.): **#143 bis #151
+brachten zusammen KEINE EINZIGE neue Route** – allein #149–#151 ändern dabei 363 Zeilen in
+`server.js`. Der Pi-Stand war in dieser ganzen Zeit von außen schlicht nicht messbar, und
+`/api/logout` (#142, gemergt am 19.08.) war neun Tage lang der jüngste Anker, den es gab.
+
+`/api/health` trägt deshalb zwei Felder, und **der Unterschied zwischen ihnen ist der ganze
+Zweck**:
+
+| Feld | woher | sagt |
+|---|---|---|
+| `commit` | beim Start **einmal** gelesen | mit welchem Stand dieser Prozess läuft |
+| `checkout` | jetzt von der Platte (10 s gepuffert) | welchen Stand der letzte Pull hinterließ |
+
+Drei Lagen lassen sich damit von außen unterscheiden, die vorher alle gleich aussahen:
+
+- **beide gleich und aktuell** – alles in Ordnung.
+- **beide gleich und alt** – der Pull selbst hängt. Weiter mit dem Container-Log.
+- **`checkout` neuer als `commit`** – der Pull ist durch, **nodemon hat nicht neu gestartet**.
+  Genau der Fall, für den die Doku `docker restart kepler7-backend` empfiehlt und den man
+  bisher nur im Container-Log sehen konnte.
+
+**git wird dafür NICHT aufgerufen.** Der Diagnosefall ist ja gerade der, in dem git im Repo
+nicht mehr durchkommt (liegengebliebene Sperrdatei, root-eigene Objekte) – gelesen wird nur
+`.git/HEAD` und die Referenz dahinter, notfalls aus `packed-refs`. Ein Kurzhash aus einem
+öffentlichen Repo gibt nichts preis, was nicht ohnehin auf GitHub steht.
+
+**Der Befund, der dabei nebenbei herausfiel: `/health` ist von außen gar nicht erreichbar.**
+Der Endpunkt trägt seit dem 13.07.2026 den Kommentar „für externe Monitoring-Dienste wie
+UptimeRobot gedacht" – er liegt aber **außerhalb** von `/api`, und der nginx des Pi proxyt nur
+`/api/` zum Backend. Gemessen:
+
+```
+https://gamegeeeeek.de/health        200   <!DOCTYPE html> …   (die Spieldatei!)
+https://gamegeeeeek.de/api/health    200   {"ok":true,"users":11}
+```
+
+Ein Monitor, der auf `https://gamegeeeeek.de/health` zeigt, bekommt also von nginx die
+Startseite und meldet „up" – **auch wenn das Backend vollständig tot ist**. Eine Überwachung,
+die nicht fehlschlagen kann, überwacht nichts (dieselbe Familie wie „aus dem falschen Grund
+grün"). Wer sie einrichtet, nimmt `/api/health`; das Rate-Limit von 240/min ist für einen
+Minutentakt reichlich. Ob dort wirklich ein Monitor hängt, weiß nur Sascha – die Messung sagt
+nur, dass die öffentliche Adresse den Backend-Endpunkt nicht trifft.
+
+**`KEPLER_GIT_DIR`** leitet das gelesene Verzeichnis um; nur damit lässt sich der Fall
+„`checkout` wandert unter dem laufenden Prozess" überhaupt prüfen, ohne das echte Repo
+anzufassen. Weil eine still ignorierte Env-Variable wie eine bestandene Prüfung aussieht
+(Frontend-Arbeitsregel 14), belegt `test_health_commit_http.js` 6a/6b, dass die Umleitung
+greift – an einem Hash, der im echten Repo nicht vorkommen kann.
+
+**Und weil dieser Test damit ausschließlich den umgeleiteten Weg fährt, kann er den
+Normalweg nicht belegen.** Diese Lücke schließt `test_serverstart.js` 2b: Der startet den
+Server ohne jede Umleitung und vergleicht `commit` gegen `.git/HEAD` des Repos. Ohne die
+Prüfung hätte eine Umleitung, die *immer* greift, nie auffallen können.
+
+`tests/test_health_commit_http.js` (Port 3229, 12 Prüfungen, Gegenprobe in beide Richtungen:
+9 von 12 fallen am alten Stand, identische Prüfnamen per `diff` verglichen). **Belegte
+Testports sind jetzt 3195–3200 und 3210–3229** – ein neuer Test nimmt 3230.
+
+Eine Lehre aus der Gegenprobe, zum wiederholten Mal dieselbe: Zwei Prüfungen waren am alten
+Stand **aus dem falschen Grund grün**. Dort fehlen beide Felder, und `undefined === undefined`
+(„beim Start gleich") wie `undefined !== '<hash>'` („stammt nicht aus dem echten Repo") sind
+trivial erfüllt. Beide verlangen jetzt zuerst einen **Wert**, dann die Beziehung. Wer eine
+Prüfung über zwei Felder formuliert, die es am Vergleichsstand gar nicht gibt, prüft sonst nur,
+dass beide fehlen.
+
 **Folge für PRs:** Der Merge ist nicht der Zwischenschritt zu einem späteren Deploy, sondern die Auslieferung selbst – was gemerged wird, läuft Sekunden später auf dem Pi. Offene PRs trotzdem sofort mergen statt sie liegen zu lassen, aber erst nach grünem Prüflauf.

@@ -79,18 +79,25 @@ const warte = ms => new Promise(r => setTimeout(r, ms));
 
   // Warten, bis er horcht - oder bis er gestorben ist. Nicht blind schlafen: Bei einem Absturz
   // waere die Wartezeit sonst reine Verzoegerung, und der Fehlertext soll frueh vorliegen.
-  let horcht = false;
+  let horcht = false, gesundheit = null;
   for (let i = 0; i < 40 && beendetMit === null && !horcht; i++) {
     await warte(250);
     try {
       const r = await fetch('http://127.0.0.1:' + PORT + '/api/health');
-      if (r.ok) horcht = true;
+      if (r.ok) { horcht = true; gesundheit = await r.json(); }
     } catch (e) { /* noch nicht oben */ }
   }
 
   check('1a: der Prozess laeuft nach dem Start noch', beendetMit === null,
     { beendetMit, ausgabe: beendetMit === null ? undefined : ausgabe.slice(-600) });
   check('2a: /api/health antwortet', horcht, { horcht, ausgabe: horcht ? undefined : ausgabe.slice(-600) });
+
+  // 2b (21.08.2026): Der Commit-Marker wird hier gemessen und NICHT in seinem eigenen Test -
+  // der laeuft ausschliesslich mit umgeleitetem KEPLER_GIT_DIR und kann deshalb gar nicht
+  // belegen, dass der Normalweg (.git neben server.js) trifft. Genau diese Luecke haette eine
+  // Umleitung, die immer greift, unsichtbar gemacht.
+  check('2b: /api/health nennt den ECHTEN Kopf des Repos', gesundheit && gesundheit.commit === echterKopf(),
+    { gemeldet: gesundheit && gesundheit.commit, repo: echterKopf() });
 
   // Punkt 3: Der setImmediate-Startlauf feuert NACH der Modulauswertung. Ein Fehler darin toetet
   // den Prozess erst danach - ein Test, der nur den Start prueft, saehe ihn nicht. Deshalb hier
@@ -113,3 +120,15 @@ const warte = ms => new Promise(r => setTimeout(r, ms));
   console.log(fail ? '\nFEHLGESCHLAGEN' : '\nAlles gruen.');
   process.exit(fail ? 1 : 0);
 })();
+
+// Der Kopf des Repos, in dem dieser Test liegt - fuer 2b. Bewusst ohne git-Aufruf, damit die
+// Pruefung auch dann noch misst, wenn im Repo etwas klemmt (genau der Diagnosefall).
+function echterKopf() {
+  const fs = require('fs'), path = require('path');
+  try {
+    const dir = path.join(__dirname, '..', '.git');
+    const head = fs.readFileSync(path.join(dir, 'HEAD'), 'utf8').trim();
+    if (!head.startsWith('ref:')) return head.slice(0, 7);
+    return fs.readFileSync(path.join(dir, head.slice(4).trim()), 'utf8').trim().slice(0, 7);
+  } catch (e) { return null; }
+}

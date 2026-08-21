@@ -3755,7 +3755,65 @@ app.post('/api/sabotage', attackRateLimit, authMiddleware, async (req, res) => {
   }
 });
 
-app.get('/api/health', (req, res) => res.json({ ok: true, users: Object.keys(db.users).length }));
+// --- Welchen Stand fährt dieser Prozess wirklich? (21.08.2026) ---
+// Sieben Deploy-Ausfälle in zwei Wochen, und jedes Mal lief die Eingrenzung von außen über
+// dieselbe Bastelei: eine Route suchen, die es im neuen Stand gibt und im alten nicht. Das
+// trägt nur, solange ein Merge überhaupt eine neue Route mitbringt - #143 bis #151 brachten
+// zusammen KEINE EINZIGE (allein #149-#151 ändern 363 Zeilen in dieser Datei), der Pi-Stand
+// war in dieser ganzen Zeit von außen gar nicht messbar. Deshalb nennt der Server ihn selbst.
+//
+// ZWEI Felder, und der Unterschied zwischen ihnen ist der ganze Zweck:
+//   commit   - beim Start EINMAL gelesen, also der Stand, mit dem dieser Prozess läuft.
+//   checkout - jetzt von der Platte gelesen, also der Stand, den der letzte Pull hinterließ.
+// Laufen sie auseinander, ist der Pull durch und nodemon hat nicht neu gestartet - genau der
+// Fall, für den die Doku bisher "docker restart" empfiehlt und den man von außen nicht sehen
+// konnte. Sind beide gleich und alt, hängt der Pull selbst.
+//
+// git wird dafür NICHT aufgerufen: Der Diagnosefall ist ja gerade der, in dem git im Repo
+// nicht mehr durchkommt (liegengebliebene Sperrdatei, root-eigene Objekte). Gelesen wird nur
+// .git/HEAD - eine Datei, die auch dann noch dasteht. Ein Kurzhash aus einem öffentlichen
+// Repo gibt nichts preis, was nicht ohnehin auf GitHub steht.
+const GIT_DIR = process.env.KEPLER_GIT_DIR || path.join(__dirname, '.git');
+function gitKopf() {
+  try {
+    let dir = GIT_DIR;
+    // .git kann eine DATEI sein (Worktree/Submodul), die auf das echte Verzeichnis zeigt
+    if (fs.statSync(dir).isFile()) {
+      const zeiger = fs.readFileSync(dir, 'utf8').trim();
+      if (!zeiger.startsWith('gitdir:')) return null;
+      dir = path.resolve(path.dirname(GIT_DIR), zeiger.slice(7).trim());
+    }
+    const head = fs.readFileSync(path.join(dir, 'HEAD'), 'utf8').trim();
+    if (!head.startsWith('ref:')) return /^[0-9a-f]{40}$/.test(head) ? head.slice(0, 7) : null;
+    const ref = head.slice(4).trim();
+    try {
+      const hash = fs.readFileSync(path.join(dir, ref), 'utf8').trim();
+      if (/^[0-9a-f]{40}$/.test(hash)) return hash.slice(0, 7);
+    } catch (e) {}
+    // gepackte Referenzen - git räumt lose refs beim gc dorthin weg
+    const packed = fs.readFileSync(path.join(dir, 'packed-refs'), 'utf8');
+    const zeile = packed.split('\n').find(z => z.endsWith(' ' + ref));
+    return (zeile && /^[0-9a-f]{40} /.test(zeile)) ? zeile.slice(0, 7) : null;
+  } catch (e) { return null; }
+}
+const LAUFENDER_COMMIT = gitKopf();
+// Der Plattenstand wird gepuffert: /api/health ist unauthentifiziert, und ein Dateizugriff je
+// Anfrage wäre der einzige Grund, warum ausgerechnet die Diagnoseroute Last erzeugt.
+let gitKopfCache = { stand: LAUFENDER_COMMIT, zeit: Date.now() };
+function gitKopfJetzt() {
+  const jetzt = Date.now();
+  if (jetzt - gitKopfCache.zeit < 10000) return gitKopfCache.stand;
+  gitKopfCache = { stand: gitKopf(), zeit: jetzt };
+  return gitKopfCache.stand;
+}
+
+app.get('/api/health', (req, res) => res.json({
+  ok: true,
+  users: Object.keys(db.users).length,
+  commit: LAUFENDER_COMMIT,
+  checkout: gitKopfJetzt(),
+  uptimeSec: Math.round(process.uptime())
+}));
 
 // --- Andere Spieler in einem Sternensystem (für die Sektorkarte) ---
 app.get('/api/players-map', authMiddleware, (req, res) => {

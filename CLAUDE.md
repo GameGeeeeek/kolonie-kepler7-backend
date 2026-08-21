@@ -801,6 +801,36 @@ Und eine dritte, die den Wert des Protokolls zeigt: Vor der Behebung waren `5b` 
 aber aus dem falschen Grund** – `claim` hatte mit 404 geantwortet, es war also gar nichts passiert
 (Frontend-Arbeitsregel 28). Erst als die Kette lief, haben sie etwas gemessen.
 
+## Zwei PvE-Meilenstein-Embleme (Phase 6, 21.08.2026)
+
+`em_festungsbrecher` (25 geschleifte Asteroidenfestungen) und `em_schwarmbrecher` (eine gefallene
+Alien-Königin). Der Kosmetik-Katalog kannte bis dahin keinen einzigen Weg über die neuen PvE-Ziele.
+
+**Die Zähler liegen am NUTZEROBJEKT (`user.pveKills`), nicht im Spielstand** – dieselbe
+Entscheidung wie bei `staub.abwehrGesamt` und aus demselben Grund: Ein Emblem steht in der
+BESTENLISTE, also auf einer Fläche, die allen gehört. Der Spielstand ist klientenautoritativ; ein
+Zähler darin wäre in fünf Sekunden gefälscht.
+
+**Gezählt wird dort, wo der Server das Ereignis SELBST beobachtet** – beim Fall einer Festung und
+beim Fall einer Königin, und zwar für **jeden Beitragenden**. Wer ein Drittel des Schadens getragen
+hat, hat die Festung genauso geschleift wie der, der zufällig den letzten Schlag führte; das ist
+dieselbe Überlegung, die den Hort anteilig auszahlt. Beide Zähler wachsen nur und gehören deshalb
+**nicht** in `kosmetikBefristet()`.
+
+**Die Schwellen sind gerechnet, nicht geschätzt.** Eine Festung braucht vier bis sieben Schläge bei
+6 h Abklingzeit, also ein bis zwei Tage für EINE – 25 Stück sind damit ein Ziel über Wochen,
+vergleichbar mit `em_schaedel` (30 Sektor-Bosse). Die Königin zählt bewusst **einmal**: Sie
+erscheint erst ab vier Nestern eines Volkes, fällt mit 4 Mio LP praktisch nur im Verband und reißt
+den ganzen Schwarm mit.
+
+**Die Auslieferung muss mit dem Frontend zusammen erfolgen.** `tests/test_kosmetik_paritaet.js` im
+FRONTEND-Repo vergleicht `KOSMETIK_DEFS` gegen `KOSMETIK_LOOK`; ein Stück, das nur eine Seite
+kennt, lässt ihn fallen – in beide Richtungen. Das ist kein Mangel, sondern der Zweck des Tests.
+
+Die 1f-Schleife von `test_kosmetik_http.js` deckt die zwei neuen Arten automatisch NICHT ab: Sie
+filtert auf Bedingungsarten, die aus dem SPIELSTAND kommen (`ausSpielstand`), und diese beiden
+kommen aus dem Nutzerobjekt – genau wie `kauf` und `abgewehrt`.
+
 ## Passwort-Regeln beim SETZEN (19.08.2026, Sicherheits-Audit P5)
 
 `passwortProblem(passwort, username)` ist die EINE Wache für neu gesetzte Passwörter. Sechs Regeln:

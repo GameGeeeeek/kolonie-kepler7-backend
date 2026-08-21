@@ -1086,6 +1086,98 @@ Eine Falle beim Auswerten der Gegenprobe, die hier zugeschlagen hat: `grep -cE '
 passt auf dasselbe Muster. Verglichen werden deshalb die Prüf-NAMEN beider Läufe per `diff`, nicht
 ihre Anzahl (Frontend-Arbeitsregel 60, hier zum zweiten Mal bestätigt).
 
+## Die Flottenverteidigung war eine Vereinfachung – vier Abweichungen (21.08.2026)
+
+Auftrag Sascha, nach vorgelegter Messung: „Alle drei angleichen, Frontend gilt." (Gefunden wurden
+am Ende **vier**; die vierte folgt derselben Regel und ist mitgezogen.)
+
+**Anlass war eine ganz andere Frage** – ob die neuen Klassen-Set-Boni (`docs/beute-und-instanzen-konzept.md`,
+Teil A) auf `atk`/`hull`/`shield` wirken dürfen. Beim Nachmessen stellte sich heraus, dass der
+Server von 44 Schiffsmodulen nur **vier** kennt und seine Flottenverteidigung seit Monaten etwas
+anderes rechnet als das Frontend.
+
+**Gemessen an einer Flotte aus 200 Schlachtschiffen, 300 Kreuzern, 200 Zerstörern und
+100 Metamaterial-Titanen:**
+
+| | Verteidigungsbeitrag |
+|---|---|
+| Frontend **ohne** Module | 35.000 |
+| Frontend **mit** je drei epischen Hüllen- und Schildmodulen | 68.552 |
+| **Backend** (immer) | **51.600** |
+
+Ohne Module schrieb der Server **+47 %** zu viel gut, mit Modulen **−25 %** zu wenig. **Die beiden
+Fehler haben einander verdeckt** – ein mittelmäßig ausgerüsteter Spieler landete zufällig nahe der
+Parität, und genau deshalb ist es nie aufgefallen.
+
+### Die vier Ursachen
+
+1. **Die Schild-Basis** (der größte Posten). Von 43 Schiffstypen haben **34 keinen** eigenen
+   `shield`-Wert. Das Frontend gibt ihnen die Basis **0**; seine Konstruktion
+   `(def.atk||0)*shieldBonus*0.5` existiert nur, damit ein prozentualer Modulbonus überhaupt etwas
+   zum Verstärken hat – der Kommentar dort sagt das wörtlich. `shipShield()` machte daraus eine
+   echte Basis: im Beispiel **3,1× so viel Schild**.
+2. **Die Module.** `hull`/`shield` kannte der Server gar nicht; `SHIP_MODULE_COMBAT_BASE` führte
+   4 von 44 Einträgen, alle mit `atk`/`siegechance`.
+3. **Die Kampfforschung.** Das Frontend multipliziert den Flotten-Angriffsanteil mit
+   `rkampf`/`rkampf2` (je 2 %/Stufe, max 20) – bis **×1,96**. Der Server wandte auf die
+   Verteidigung nur `rpanzer`/`rschildmatrix` an.
+4. **Der Trägerhangar.** Das Frontend wertet Jäger/Bomber nur bis zur Trägerkapazität
+   (`deployableFighters`). Der Server zählte sie voll: **2000 Jäger ohne einen einzigen Träger
+   trugen 8.050 statt 0.**
+
+**Keine dieser Vereinfachungen war ein Versehen** – zwei sind im Backend sogar auskommentiert
+(„der Backend-Ansatz kennt generell keine Schilde, vorbestehende Vereinfachung" und „das Backend
+kennt den Hangar-Mechanismus ohnehin nicht"). Sie sind über Monate angewachsen, bis die Summe
+weit neben dem stand, was der Spieler sieht.
+
+### Warum das FRONTEND gilt
+
+Es ist die Seite, die der Spieler sieht, und seine Konstruktionen sind im Quelltext begründet,
+während die Server-Vereinfachungen erfunden waren. **Folge für die Balance, und sie gehört
+benannt:** Verteidigung wird **modulabhängig** – wer ausgerüstet ist, gewinnt, wer nichts
+ausgerüstet hat, verliert.
+
+**Nach der Angleichung gemessen, dieselbe Flotte, Frontend gegen Backend: 35.000 zu 35.000 ohne
+Module, 63.944 zu 63.944 mit drei epischen Hüllenmodulen je Klasse – Abweichung NULL.**
+
+### Vier Dinge, die man beim Anfassen wissen muss
+
+- **Der Hüllen-Deckel ist HART** (`Math.min(1.0, …)`), nicht `weicherDeckel`. Die weiche Form gilt
+  im Frontend ausschließlich für den `atk`-Kanal. Der Schild-Bonus ist **ungedeckelt** – ebenfalls
+  wie vorne.
+- **Zweitwerte zählen mit.** `MODULE_SUB_POOL_SHIP` trägt `hull` und `shield`; ohne
+  `moduleSubsServer()` wäre die Spiegelung unvollständig, und ein Spieler mit hull-Substats bekäme
+  serverseitig weniger, als sein Spiel ihm anzeigt.
+- **Die Synergien fehlen bewusst.** Gemessen tragen alle sechs ausschließlich `speed`/`fuel`/`cargo`.
+  `test_schiffsmodul_paritaet.js` 3a hält das fest – wer dort je eine auf `hull`/`shield`/`atk`
+  anlegt, muss sie hier nachziehen.
+- **`save` ist optional.** Die Asteroiden-Anfechtung ruft mit der Eskorte eines FREMDEN Spielers
+  auf und hat dessen Spielstand nicht zur Hand – dort bleibt es (wie schon bei den Marken) beim
+  blanken Flottenwert. Seine Eskorte verliert damit ebenfalls die erfundene Schild-Basis; die
+  Vorschau der Anfechtung zeigt bewusst keine Zahl, es wird dort also nichts falsch, aber die
+  Kräfteverhältnisse verschieben sich. **Nebenbefund:** Der Kommentar dieser Vorschau sagt, der
+  Server rechne mit „Werftmarken, Module des Halters" – die Aufrufstelle übergibt beides als `null`.
+
+### Die Auslieferungsreihenfolge ist hier ausnahmsweise gleichgültig
+
+Anders als bei den Festungen (Frontend-Regel 60) entsteht keine stille Verschlechterung: Der Server
+**konvergiert auf die Zahl, die das Frontend längst anzeigt**. Geht dieses Backend allein live,
+stimmen Anzeige und Kampf zum ersten Mal überein. Ein Schalter ist deshalb nicht nötig.
+
+### Der Wächter
+
+`tests/test_schiffsmodul_paritaet.js` liegt im FRONTEND-Repo (dort liegen die Paritätstests) und
+hat 22 Prüfungen: Tabellen, Klassenzuordnung, die Synergie-Wache und **vier ausgeführte
+Wirkungsmessungen**. Vier Gegenproben, jede speist genau eine der vier Abweichungen wieder ein und
+muss ihre eigene Prüfung reißen – bei jeweils 22 gelaufenen Prüfungen.
+
+**Eine Lehre aus dem Bau dieses Tests, die über ihn hinausgeht:** Seine Bausteinliste war zuerst
+eine Liste von 21 benannten Blöcken – und hatte damit die Schwäche jeder Namensliste. Die Gegenprobe
+zur Schild-Basis baute `shipShield()` wieder ein, das in der Liste fehlte; der Test brach am Aufbau
+ab statt an `4a`, fuhr **14 statt 22** Prüfungen, und die Sabotage sah grün aus. Gefangen hat das
+nur die `WERKZEUGFEHLER`-Wache des Messskripts (Frontend-Regel 71). Der Sammler holt seither
+Konstanten **und Funktionen** transitiv; die Liste ist auf die zwei Zielfunktionen geschrumpft.
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

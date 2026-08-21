@@ -604,6 +604,78 @@ Spielstand zu schreiben – 10 statt 40 Prüfungen, und der rote Exit-Code sah a
 Gegenprobe. Seither lesen `liesSave()`/`schreibSave()` beide Formen, und die Gegenprobe zum
 Ablageort der Abklingzeit lässt sich überhaupt erst fahren.
 
+## Die galaktische Gegnerstärke wird beweglich (Phase 4, 19.08.2026)
+
+`npcEmpireStrength` wuchs bis hierher monoton bis 2,5 und blieb dort – ein Schwierigkeitsregler,
+den niemand bewegen kann. Neu leitet der `galaxyTick` einen **Zielwert** aus dem Nestbestand ab und
+lässt den Ist-Wert dorthin driften: Wer aufräumt, macht die Galaxie für alle leichter; wer die
+Nester wachsen lässt, bezahlt es mit härteren NPC-Gegnern.
+
+**Die Drift läuft NUR, wenn `NEST_SPAWN_AKTIV` an ist – und das ist keine Vorsicht, sondern
+gemessen.** Ohne Nester ist die Stufensumme 0, der Zielwert wäre die Basis, und die
+NPC-Verteidigung fiele sofort um 44 % – allein dadurch, dass diese Phase gemergt wird, während
+Phase 3 noch schläft. Steht der Schalter aus, bleibt deshalb das alte monotone Wachstum.
+`test_npc_staerke_http.js` 3a misst genau das; die Gegenprobe mit ausgebautem Tor lässt sie fallen.
+
+**Die Basis ist die KONSERVATIVE Variante** (das Konzept führt sie in 11.2 als offene
+Entscheidung), gerechnet gegen den bisherigen Stand 2,5:
+
+| Lage | Stufensumme | Konzept (1,0 + 0,080) | gewählt (1,4 + 0,046) |
+|---|---|---|---|
+| geräumt | 0 | 1,00 (−60 %) | **1,40 (−44 %)** |
+| ruhig (4 Nester Stufe 2) | 8 | 1,64 (−34 %) | 1,77 (−29 %) |
+| angespannt (8 Nester Stufe 3) | 24 | 2,50 (±0) | 2,50 (±0) |
+
+Beide Kurven enden am selben Deckel, aber **nicht bei derselben Dichte**: Die Konzept-Kurve ist
+schon bei 18,75 Stufenpunkten oben, die gewählte erst bei 23,9. Der eigentliche Unterschied liegt
+am unteren Ende, und genau dort steht der Spieler **am Tag der Umstellung**, wenn es null bis ein
+Nest gibt – die Konzept-Basis verschenkte in den ersten 19 Stunden 60 % der NPC-Verteidigung, ohne
+dass jemand etwas dafür getan hätte. **Hier stand im ersten Entwurf „beide treffen den Deckel bei
+Stufensumme 24" – das war aus der Tabellenzeile abgelesen statt gerechnet** (die Zeile zeigt nur,
+dass beide dort bereits gedeckelt SIND). Frontend-Arbeitsregel 41 an einer eigenen Zahl.
+
+**4 % Annäherung je Tick** (96 Ticks/Tag): halber Abstand nach 4,2 h, 95 % nach 18,3 h. Die Galaxie
+reagiert innerhalb eines Tages sichtbar, aber ein einzelner Angriff schaltet die Weltlage nicht um.
+
+**`g.npcStaerkeZiel` reist über `galaxyFuerClient()` zum Client** – und wird **nur im Tor-Zweig
+geschrieben**. Ein Server ohne wirkende Drift führt das Feld also GAR NICHT; das Frontend kann
+daran erkennen, dass es nichts zu behaupten gibt, statt eine Weltlage anzuzeigen, die nirgends
+gilt. `test_npc_staerke_http.js` 4a hält diese Richtung fest, 4b die andere.
+
+**Kein Helfer `nestStufen(n)` neben `nestStufe(zahl)`.** Der erste Entwurf hatte einen – ein
+Buchstabe Unterschied, und das eine nimmt ein Nest-OBJEKT, das andere eine Stufenzahl. Genau die
+Sorte Namenspaar, die später jemand verwechselt; die Summe steht deshalb ausgeschrieben in
+`nestStufenSumme`.
+
+**Beim Anfassen mitgenommen: die erfundene Begründung beim Wandern.** `nestTick` leerte beim
+Weiterziehen eines Nomaden-Nestes die Abklingzeiten (`n.schlaege = {}`) mit dem Kommentar „die
+Abklingzeit hängt am ORT, nicht am Nest". Das ist beim Schreiben erfunden worden und widerspricht
+dem Entwurf: Die Sperre hängt am NEST, und das Nest ist nach dem Wandern dasselbe Nest. Praktisch
+folgenlos (Wanderung alle 12 h, Abklingzeit 4 h – sie wäre ohnehin abgelaufen), aber es ist genau
+die Sorte Kommentar, die beim nächsten Lesen als REGEL gelesen wird. Zeile und Kommentar sind weg.
+
+### Der Test
+
+`tests/test_npc_staerke_http.js` (Port 3227, 14 Prüfungen, **drei Gegenproben** – Tor, Sprung statt
+Drift, fehlender Deckel; alle in beide Richtungen gefahren, überall dieselben 14 Prüfnamen, per
+`diff` verglichen statt gezählt). **Belegte Testports sind jetzt 3195–3200 und 3210–3227** – ein
+neuer Test nimmt 3228.
+
+Er startet **zwei** Kopien von `server.js`, eine je Schalterstellung. Der Gegenstand ist ein
+Schalter; beide Stellungen gehören gemessen, und welche gerade committet ist, darf das Ergebnis
+nicht verschieben.
+
+**Die wichtigste Zeile des Tests ist `einfrieren()`** – vier Riegel, einer je Zweig des `nestTick`:
+`letzteReifung` auf jetzt (reift nicht), `naechsterWurf` und `naechsteWanderung` weit in die
+Zukunft, und `alienPause` für **alle vier** Völker. Der letzte ist der unauffälligste und der
+nötigste: Der `galaxyTick` entdeckt mit 6 % je Takt ein neues Volk, und der Nachschub-Zweig legt
+ihm sofort ein Nest an – die gemessene Eingabe wäre also mitten in der Messung eine andere. Genau
+daran ist im Nest-Test schon einmal eine Prüfung an einem Zufall gescheitert.
+
+**Die Erwartung wird im Test neu gerechnet, die Eingabe dagegen BEOBACHTET** (Nestliste aus der DB
+nach dem Tick). Eine Erwartung, die aus derselben Rechnung stammt wie das Ergebnis, kann nicht
+fehlschlagen – Frontend-Arbeitsregel 62.
+
 ## Passwort-Regeln beim SETZEN (19.08.2026, Sicherheits-Audit P5)
 
 `passwortProblem(passwort, username)` ist die EINE Wache für neu gesetzte Passwörter. Sechs Regeln:

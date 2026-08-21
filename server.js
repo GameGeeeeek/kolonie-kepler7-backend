@@ -5368,8 +5368,19 @@ function galaxyTick() {
   // Takts sein, nicht die des vorigen.
   nestTick(g);
 
-  // NPC-Reiche wachsen langsam, gedeckelt bei 2.5x, damit es nicht unendlich eskaliert.
-  g.npcEmpireStrength = Math.min(2.5, g.npcEmpireStrength * (1 + 0.002 + Math.random() * 0.003));
+  /* Die galaktische Gegnerstaerke. Mit aktiven Nestern ein TAUZIEHEN gegen ihren Bestand
+     (Phase 4, Begruendung und Messung bei NPC_STAERKE_BASIS); ohne sie das alte monotone
+     Wachstum - sonst baute diese Phase die Galaxie um, obwohl Phase 3 noch schlaeft. */
+  if (NEST_SPAWN_AKTIV) {
+    const ziel = npcStaerkeZiel(g);
+    g.npcEmpireStrength += (ziel - g.npcEmpireStrength) * NPC_STAERKE_DRIFT;
+    g.npcEmpireStrength = Math.max(1, Math.min(NPC_STAERKE_DECKEL, g.npcEmpireStrength));
+    // Reist ueber galaxyFuerClient() mit, damit das Frontend die Weltlage BENENNEN kann statt sie
+    // den Spieler an schwankenden Gegnerwerten erraten zu lassen.
+    g.npcStaerkeZiel = Math.round(ziel * 1000) / 1000;
+  } else {
+    g.npcEmpireStrength = Math.min(2.5, g.npcEmpireStrength * (1 + 0.002 + Math.random() * 0.003));
+  }
   // Handelsmarkt: leichter Random Walk zwischen 0.75x und 1.30x.
   g.marketTrend = Math.max(0.75, Math.min(1.30, g.marketTrend + (Math.random() - 0.5) * 0.08));
 
@@ -8980,7 +8991,50 @@ const NEST_WURF_CHANCE = 0.35;
 const NEST_KOENIGIN_AB = 4;               // Nester eines Volkes, ab denen die Koenigin schluepft
 const NEST_PAUSE_MS = 72 * 3600 * 1000;   // Sperre des Volkes nach einem Koeniginnen-Fall
 const NEST_WANDER_MS = 12 * 3600 * 1000;  // nur die Nomaden von Vex
-const NEST_VERLUST = 0.10;                // Grundverlust des Angreifers je Schlag
+const NEST_VERLUST = 0.10;
+
+/* ===== PHASE 4: die galaktische Gegnerstaerke wird beweglich ==================================
+   Bis hierher wuchs `npcEmpireStrength` monoton bis 2,5 und blieb dort - ein Schwierigkeitsregler,
+   den niemand bewegen kann. Neu leitet der galaxyTick einen ZIELWERT aus dem Nestbestand ab und
+   laesst den Ist-Wert dorthin driften: Wer aufraeumt, macht die Galaxie fuer alle leichter; wer
+   die Nester wachsen laesst, bezahlt es mit haerteren NPC-Gegnern.
+
+   DIE DRIFT LAEUFT NUR, WENN NEST_SPAWN_AKTIV AN IST - und das ist keine Vorsicht, sondern
+   gemessen: Ohne Nester ist die Stufensumme 0, der Zielwert waere die Basis, und die
+   NPC-Verteidigung fiele sofort um 44 %. Allein dadurch, dass diese Phase gemergt wird, waehrend
+   Phase 3 noch schlaeft. Steht der Schalter aus, bleibt deshalb das alte monotone Wachstum.
+
+   DIE BASIS IST DIE KONSERVATIVE VARIANTE (Konzept 11.2 fuehrt sie als offene Entscheidung).
+   Gerechnet gegen den heutigen Stand 2,5:
+
+     Lage                        Summe   Konzept (1,0 + 0,080)   gewaehlt (1,4 + 0,046)
+     geraeumt                        0   1,00  (-60 %)           1,40  (-44 %)
+     ruhig (4 Nester Stufe 2)        8   1,64  (-34 %)           1,77  (-29 %)
+     angespannt (8 Nester Stufe 3)  24   2,50  (+-0)             2,50  (+-0)
+
+   Beide Kurven enden am selben Deckel, aber NICHT bei derselben Dichte: Die Konzept-Kurve ist
+   schon bei 18,75 Stufenpunkten oben, die gewaehlte erst bei 23,9 - sie laesst der Galaxie also
+   ein Stueck mehr Luft, bevor sie nichts mehr haerter machen kann. Der eigentliche Unterschied
+   liegt am unteren Ende, und genau dort steht der Spieler AM TAG DER UMSTELLUNG, wenn es null bis
+   ein Nest gibt: Die Konzept-Basis verschenkte in den ersten 19 Stunden 60 % der
+   NPC-Verteidigung, ohne dass jemand etwas dafuer getan haette.
+
+   4 % Annaeherung je Tick (96 Ticks/Tag): halber Abstand nach 4,2 h, 95 % nach 18,3 h. Die
+   Galaxie reagiert also innerhalb eines Tages sichtbar, aber ein einzelner Angriff schaltet die
+   Weltlage nicht um. */
+const NPC_STAERKE_BASIS = 1.4;
+const NPC_STAERKE_JE_STUFENPUNKT = 0.046;
+const NPC_STAERKE_DECKEL = 2.5;
+const NPC_STAERKE_DRIFT = 0.04;
+/* Bewusst OHNE Helfer `nestStufen(n)` daneben: Der haette sich von `nestStufe(zahl)` um einen
+   Buchstaben unterschieden und ein Nest-OBJEKT statt einer Stufenzahl genommen - genau die Sorte
+   Namenspaar, die spaeter jemand verwechselt. Die Summe steht deshalb hier ausgeschrieben. */
+function nestStufenSumme(g) {
+  return nestListe(g).reduce((a, n) => a + (nestStufe(n && n.stufe).punkte || 0), 0);
+}
+function npcStaerkeZiel(g) {
+  return Math.min(NPC_STAERKE_DECKEL, NPC_STAERKE_BASIS + NPC_STAERKE_JE_STUFENPUNKT * nestStufenSumme(g));
+}                // Grundverlust des Angreifers je Schlag
 
 function nestVolkVonName(name) {
   for (const [k, v] of Object.entries(ALIEN_VOELKER)) if (v.name === name) return k;
@@ -9096,7 +9150,6 @@ function nestTick(g) {
     if (!frei.length) continue;
     const alt = n.sys;
     n.sys = frei[Math.floor(Math.random() * frei.length)];
-    n.schlaege = {};                                     // die Abklingzeit haengt am ORT, nicht am Nest
     pushGalaxyNews('ti-alien', 'Die ' + v.name + ' sind von ' + alt + ' nach ' + n.sys +
       ' weitergezogen - ihr Nest ist dort nicht mehr zu finden.');
   }

@@ -1213,6 +1213,56 @@ Deploy still lahm. Wer dort etwas ausprobiert, macht es rückgängig (`git check
 sobald er fertig ist – und prüft vor dem Verwerfen mit `git --no-pager diff --numstat -- <datei>`,
 ob überhaupt Inhalt drinsteckt (`0 0` heißt: nur ein Dateimodus).
 
+**URSACHE VON NR. 6 UND NR. 7 GEFUNDEN UND BEHOBEN, 21.08.2026 (#147) – der Webhook kollidierte
+mit SICH SELBST.** Die zwei Einträge darüber beschreiben denselben Ausfall und lassen ihn als
+Rätsel stehen: Die Cron-Jobs waren weg, der Timeout aus #134 war behoben, und trotzdem hing es
+wieder. Der fehlende Baustein ist eine Eigenschaft, die weiter oben in diesem Dokument längst
+steht, nur nie mit dem Ausfall verbunden wurde: **Der Webhook feuert bei JEDEM Push, auch auf
+Feature-Branches.** Wer einen Branch pusht und Sekunden später den PR merged – also der normale
+Auslieferungsablauf dieses Projekts – löst damit ZWEI Ereignisse aus, und beide starten
+`cd /app && git pull` im selben Repo.
+
+Gemessen am Vorfall vom 19.08.2026, 05:41 UTC (der Minute, in der genau das passierte):
+
+```
+.git/HEAD.lock                    0 Bytes
+.git/refs/heads/master.lock      41 Bytes   <- der fertige Hash war schon geschrieben
+git status --porcelain           M␣server.js, M␣CLAUDE.md, A␣tests/…   (VORGEMERKT)
+```
+
+Der vorgemerkte Stand entsprach byte-genau Commit #140. Der Pull war also mit Index und
+Arbeitsbaum fertig und wurde **während der Ref-Aktualisierung** abgeschnitten – derselbe
+Fingerabdruck wie bei den Cron-Kollisionen, nur mit dem Webhook als zweitem Schreiber. Danach
+scheitert jeder weitere Pull an „Your local changes would be overwritten", und der Deploy steht,
+bis jemand von Hand aufräumt.
+
+**Behoben in #147: eine Sperrdatei je Ziel.** Läuft für ein Repo schon ein Deploy, wird kein
+zweiter gestartet; der Push wird nur VORGEMERKT und einmal am Ende nachgeholt (kein Stapel –
+`git pull` ist kumulativ). Eine verwaiste Sperre, älter als `DEPLOY_TIMEOUT_MS`, wird übernommen:
+Ohne diese Gegenrichtung legte ein einziger abgestürzter Lauf den Deploy für immer still, und die
+Behebung wäre schlimmer als das Problem.
+
+**Warum als DATEI und nicht als Variable im Prozess** – das ist die eigentliche Pointe und
+nachgemessen: Ein erfolgreicher Backend-Pull ändert `server.js`, nodemon startet daraufhin neu,
+und der neue Prozess hätte eine leere Variable, während der alte `git`-Enkel noch läuft. Dass der
+Enkel einen nodemon-Neustart ÜBERLEBT, wurde im Nachbau gemessen (er lief zu Ende und schrieb
+seine Marke) – genau in diesem Fenster entsteht die Kollision, und nur eine Datei übersteht den
+Neustart.
+
+**Was daran übertragbar ist, unabhängig von diesem Webhook:** Nr. 6 und Nr. 7 sind zweimal
+sorgfältig gemessen und richtig als „derselbe Ausfall" erkannt worden – gefehlt hat nicht die
+Messung, sondern die Verbindung zu einer Eigenschaft, die drei Absätze weiter oben im selben
+Dokument steht. Wer einen wiederkehrenden Ausfall untersucht, liest die bekannten Eigenschaften
+des Systems noch einmal durch und fragt bei jeder: *kann DIE das erklären?* – statt nur neue
+Messungen zu sammeln.
+
+**Und ein Befund über die eigene Prüfung** (Arbeitsregel-Familie „aus dem falschen Grund grün"):
+Der erste Test zu #147 prüfte, ob die Sperrdatei bei einem zweiten Webhook **unberührt** bleibt.
+Er war am alten Stand grün – dort kennt der Server die Datei gar nicht und fasst sie deshalb auch
+nicht an. Gemessen wird jetzt am Serverprotokoll, ob ein zweiter Deploy wirklich ANGELAUFEN ist;
+die Gegenprobe liefert dort `{"vorher":0,"nachher":2}`, also zwei parallel gelaufene Deploys – der
+Vorfall selbst, im Test reproduziert.
+
 **Nachtrag zur Messmethode oben:** Die 401/404-Messung muss die **HTTP-Methode der Route treffen**.
 `curl -X POST` auf `/api/cosmetics` (eine GET-Route) liefert 404 von Express – das sieht aus wie
 „Route fehlt", obwohl der Server sie kennt. Genau dieser falsche Alarm ist am 16.08. entstanden.

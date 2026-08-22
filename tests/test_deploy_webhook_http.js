@@ -161,6 +161,26 @@ const signiere = (body) => 'sha256=' + crypto.createHmac('sha256', SECRET).updat
   check('7b und dabei wird nichts vorgemerkt', !fs.existsSync(vorgemerkt));
   try { fs.unlinkSync(sperre); } catch (e) {}
 
+  // ---- 8) Deploy-Alarm (22.08.2026): ein gescheiterter Deploy meldet sich selbst -----------
+  // In der Testumgebung scheitert JEDER echte Deploy-Lauf (cd /deploy bzw. /app existiert
+  // nicht) - genau dieser Fehlerpfad muss den Alarm betreten. Gemessen am Serverprotokoll,
+  // nicht am Quelltext: Der Server laeuft hier ohne DEPLOY_ALARM_MAIL, also muss der Alarm
+  // seinen Ausfall BENENNEN statt still nichts zu tun (dieselbe Fail-open-Ehrlichkeit wie
+  // beim fehlenden RESEND_API_KEY). Gegenprobe: am Stand ohne den Alarm existiert keine der
+  // beiden Zeilen - 8a und 8b fallen.
+  const logInhalt = () => { try { return fs.readFileSync(logPfad, 'utf8'); } catch (e) { return ''; } };
+  let alarmDa = false;
+  for (let i = 0; i < 30 && !alarmDa; i++) { await warte(200); alarmDa = /Deploy-Alarm für kolonie-kepler7:/.test(logInhalt()); }
+  check('8a der gescheiterte Deploy betritt den Alarm-Pfad (Protokollzeile mit Grund)',
+    alarmDa, { logAuszug: logInhalt().split('\n').filter(z => /Alarm|Fehler für/.test(z)).slice(-4) });
+  check('8b ohne DEPLOY_ALARM_MAIL wird der Ausfall BENANNT statt verschwiegen',
+    /DEPLOY_ALARM_MAIL ist nicht gesetzt/.test(logInhalt()), { logAuszug: logInhalt().split('\n').filter(z => /Alarm/.test(z)).slice(-4) });
+  // 8c: Die Drossel (hoechstens eine Mail je Repo und Stunde) haengt NICHT vor der Protokoll-
+  // zeile - jeder Fehlschlag bleibt im Log sichtbar, gedrosselt wird nur der Mailversand.
+  // Quelltext-Pruefung, weil der Versand selbst hier ohne Schluessel nicht messbar ist.
+  check('8c die Stundendrossel sitzt HINTER der Protokollzeile, nicht davor',
+    (() => { const i1 = S.indexOf("console.error('Deploy-Alarm für '"); const i2 = S.indexOf('DEPLOY_ALARM_PAUSE_MS)', i1); return i1 > 0 && i2 > i1; })());
+
   console.log(fehl ? 'FEHLGESCHLAGEN' : 'ALLES GRUEN');
   process.exit(fehl);
 })();

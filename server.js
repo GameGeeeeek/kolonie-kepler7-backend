@@ -8466,6 +8466,37 @@ function deploySperreNehmen(repoName) {
 function deploySperreFreigeben(repoName) {
   try { fs.unlinkSync(deployPfad(repoName, '.lock')); } catch (e) {}
 }
+// ---- Deploy-Alarm (22.08.2026, Auftrag Sascha) ----
+// NEUN Deploy-Ausfaelle in Folge (14.08.-22.08.) wurden alle erst zufaellig bemerkt, weil der
+// Fehler ausschliesslich im Container-Log stand, das niemand liest. Ein gescheiterter Deploy
+// meldet sich seither selbst: Mail an DEPLOY_ALARM_MAIL ueber denselben Resend-Mailer wie
+// Verify/Reset. Bewusst FAIL-OPEN - der Alarm ist eine Benachrichtigung, keine Sicherung
+// (Gegenstueck zur fail-closed Signaturpruefung darunter): Fehlt die Adresse oder scheitert der
+// Versand, laeuft der Deploy-Weg unveraendert, und der Grund steht benannt im Log.
+const DEPLOY_ALARM_MAIL = process.env.DEPLOY_ALARM_MAIL || '';
+// Hoechstens eine Mail je Repo und Stunde: Ein dauerhaft kaputter Deploy feuert bei JEDEM Push
+// (Branch-Push UND Merge, siehe Serialisierung), und ein Postfach voller identischer Alarme ist
+// so unlesbar wie das Container-Log. Der Speicher ist bewusst nur im RAM - im Fehlerfall aendert
+// sich server.js gerade NICHT, nodemon startet also nicht neu und die Stunde haelt.
+const DEPLOY_ALARM_PAUSE_MS = 60 * 60 * 1000;
+const deployAlarmZuletzt = {};
+function deployAlarm(repoName, betreff, detail) {
+  console.error('Deploy-Alarm für ' + repoName + ': ' + betreff);
+  if (!DEPLOY_ALARM_MAIL) { console.error('Deploy-Alarm: DEPLOY_ALARM_MAIL ist nicht gesetzt - keine Mail verschickt.'); return; }
+  const jetzt = Date.now();
+  if (deployAlarmZuletzt[repoName] && jetzt - deployAlarmZuletzt[repoName] < DEPLOY_ALARM_PAUSE_MS) return;
+  deployAlarmZuletzt[repoName] = jetzt;
+  const text = 'Deploy-Webhook für ' + repoName + ' ist gescheitert.\n\n' + betreff +
+    (detail ? '\n\n' + String(detail).slice(0, 2000) : '') +
+    '\n\nNächste Schritte:\n' +
+    '- docker logs --tail 80 kepler7-backend | grep -i deploy-webhook\n' +
+    '- Stand von außen: curl -s https://gamegeeeeek.de/api/health (commit/checkout/blob vergleichen)\n' +
+    '- Rettungsweg: CLAUDE.md des Backend-Repos, Abschnitt "Der Wiederherstellungsweg"';
+  sendEmail(DEPLOY_ALARM_MAIL, '[Kepler-7] Deploy-Fehler: ' + repoName,
+    '<pre style="font-family:monospace;white-space:pre-wrap">' + text.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre>', text)
+    .then(() => console.log('Deploy-Alarm-Mail für ' + repoName + ' verschickt.'))
+    .catch((e) => console.error('Deploy-Alarm-Mail für ' + repoName + ' fehlgeschlagen:', e.message));
+}
 function starteDeploy(repoName, command) {
   if (!deploySperreNehmen(repoName)) {
     // Nicht abweisen, sondern vormerken - sonst ginge ausgerechnet der Push verloren, der
@@ -8480,8 +8511,14 @@ function starteDeploy(repoName, command) {
     // gescheiterter Befehl - der git-Prozess darunter kann weiterlaufen und muss von Hand geprueft
     // werden. Als generisches "Fehler" gemeldet, sieht der gefaehrlichste Ausgang aus wie der
     // harmloseste.
-    if (err && err.killed) console.error('Deploy-Webhook ZEITUEBERSCHREITUNG für ' + repoName + ' nach ' + Math.round(DEPLOY_TIMEOUT_MS/1000) + 's (' + err.signal + '). ACHTUNG: der git-Prozess darunter laeuft moeglicherweise weiter und schreibt in .git - vor dem naechsten Deploy pruefen (ps nach lebendem git, find .git -name "*.lock").');
-    else if (err) console.error('Deploy-Webhook Fehler für ' + repoName + ':', err.message);
+    if (err && err.killed) {
+      console.error('Deploy-Webhook ZEITUEBERSCHREITUNG für ' + repoName + ' nach ' + Math.round(DEPLOY_TIMEOUT_MS/1000) + 's (' + err.signal + '). ACHTUNG: der git-Prozess darunter laeuft moeglicherweise weiter und schreibt in .git - vor dem naechsten Deploy pruefen (ps nach lebendem git, find .git -name "*.lock").');
+      deployAlarm(repoName, 'ZEITUEBERSCHREITUNG nach ' + Math.round(DEPLOY_TIMEOUT_MS/1000) + 's (' + err.signal + ') - der git-Prozess darunter laeuft moeglicherweise weiter und schreibt in .git.', stderr);
+    }
+    else if (err) {
+      console.error('Deploy-Webhook Fehler für ' + repoName + ':', err.message);
+      deployAlarm(repoName, err.message, stderr);
+    }
     else console.log('Deploy-Webhook erfolgreich für ' + repoName + ':', stdout.trim() || '(keine Änderungen)');
     const pending = deployPfad(repoName, '.pending');
     if (fs.existsSync(pending)) {

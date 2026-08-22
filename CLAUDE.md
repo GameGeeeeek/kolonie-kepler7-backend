@@ -1840,8 +1840,16 @@ Drei Lagen lassen sich damit von außen unterscheiden, die vorher alle gleich au
 - **beide gleich und aktuell** – alles in Ordnung.
 - **beide gleich und alt** – der Pull selbst hängt. Weiter mit dem Container-Log.
 - **`checkout` neuer als `commit`** – der Pull ist durch, **nodemon hat nicht neu gestartet**.
-  Genau der Fall, für den die Doku `docker restart kepler7-backend` empfiehlt und den man
-  bisher nur im Container-Log sehen konnte.
+  **Das ist nur dann eine Störung, wenn der Commit eine beobachtete Datei angefasst hat**
+  (nodemon läuft mit `--ext js,json`). Am 22.08.2026 gemessen an einem reinen Doku-Merge
+  (`a1ecd8e`, nur `CLAUDE.md`): `commit` blieb `d881b45`, `checkout` sprang auf `a1ecd8e`,
+  `uptimeSec` wuchs ruhig weiter – der korrekte und erwartete Zustand. Hier stand vorher
+  pauschal „genau der Fall, für den die Doku `docker restart kepler7-backend` empfiehlt";
+  ein Neustart wäre in diesem Fall grundlose Unruhe. Die Prüffrage lautet also nicht „laufen
+  die zwei Felder auseinander?", sondern **„laufen sie auseinander, obwohl der Commit `.js`
+  oder `.json` geändert hat?"** – zu klären mit
+  `git diff --name-only <commit> <checkout> | grep -E '\.(js|json)$'`. Kommt dort nichts,
+  ist alles in Ordnung.
 
 **git wird dafür NICHT aufgerufen.** Der Diagnosefall ist ja gerade der, in dem git im Repo
 nicht mehr durchkommt (liegengebliebene Sperrdatei, root-eigene Objekte) – gelesen wird nur

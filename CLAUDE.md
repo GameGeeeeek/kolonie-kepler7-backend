@@ -1224,76 +1224,39 @@ darüber): Geht ein Repo allein live, entsteht genau die Divergenz, die gerade b
 einmal in die eine, einmal in die andere Richtung. Beide PRs gehören unmittelbar nacheinander
 gemergt, das Backend zuerst und per `/api/health`-Blob belegt, bevor das Frontend folgt.
 
-## Die Belohnungsvorschau des Allianz-Raids (22.08.2026)
+## Die Belohnungsvorschau des Allianz-Raids liegt im FRONTEND (22.08.2026)
 
 Auftrag Sascha: „allianz raid deutlich optisch aktraktiver gestalkten weniger text und vsl.
-belohnungen einblenden." Vorgelegt wurden zwei Wege; **gewählt: das Feld kommt vom Server.**
+belohnungen einblenden." **Dieses Repo liefert dafür nichts** — die Vorschau rechnet das Frontend
+(v8.607.0), abgesichert durch `tests/test_raid_belohnung_paritaet.js`, das beide Fassungen von
+`allianceRaidRewardFor` **ausgeführt** gegeneinander rechnet.
 
-`checkdispatch` legt beim Abflug `doc.dispatch.vorschau` an — je Teilnehmer **zwei exakte Werte**,
-einen für „Boss fällt" und einen für „Boss überlebt".
+**Der Abschnitt steht hier, weil dieses Repo die Vorschau schon einmal hatte — für 23 Minuten.**
+Vorgelegt wurden zwei Wege, gewählt wurde zuerst das Serverfeld (keine Kopie-Familie). Es war
+gebaut, getestet und gemergt (#161), als sich zeigte, dass eine parallele Sitzung dieselbe Aufgabe
+im Frontend gelöst und bereits ausgeliefert hatte. Das Feld `doc.dispatch.vorschau` las damit
+**niemand** — genau die Sorte Eintrag, die beim nächsten `grep` wie umgesetzte Mechanik aussieht
+(Regel 59). Es ist deshalb wieder draußen; `server.js` ist byte-identisch mit dem Stand davor.
 
-**Warum sie überhaupt EXAKT sein kann** (gemessen, nicht angenommen): Nach dem Abflug stehen alle
-Eingaben von `allianceRaidRewardFor` fest — Anteil aus `power/totalPower`, Platz und Anzahl aus der
-`ranking`, die zwei Zeilen darüber entsteht, Stufe aus `doc.level`, Boss aus demselben
-`allianceRaidBossFor`, das auch der Kampf benutzt. Offen ist **einzig**, ob der Boss fällt. Eine
-Vorschau ist deshalb kein Schätzwert mit Spanne, sondern ein Paar aus zwei exakten Werten.
+**Zwei Argumente sprachen bei der Neubewertung FÜR die Frontend-Lösung**, und beide lagen bei der
+ursprünglichen Wahl nicht auf dem Tisch:
 
-**Drei Entscheidungen, die man beim Anfassen kennen muss:**
+1. Die Kopie-Familie ist durch einen **ausgeführten** Paritätstest zusammengehalten, nicht durch
+   einen Textvergleich — also genau der Wächter, dessen Fehlen das Argument gegen Kopien trägt.
+2. Sie funktioniert, **wenn der Backend-Deploy hängt**. Das ist hier zehnmal passiert, zuletzt am
+   selben Tag: Ein Serverfeld hätte die Zeile in genau diesen Stunden verschwinden lassen.
 
-- **Die Formel bleibt hier.** Sie im Frontend nachzubauen wäre eine weitere Kopie-Familie wie
-  `FESTUNG_STUFEN` oder `SHIP_SCORE_WEIGHTS` — und die laufen bei Balance-Änderungen
-  erfahrungsgemäß auseinander. Der Server rechnet die Zahl, die er später auch auszahlt.
-- **Sie liegt im DOKUMENT, nicht in einer Antwort.** Das Frontend liest den Raid über
-  `storageGet('alliance:<TAG>:raid')`; eine Leseroute gibt es gar nicht. Ein Feld in der
-  `checkdispatch`-Antwort erreichte nur den einen Client, der zufällig zuerst pollt.
-- **Kein neues Leck.** Das Dokument ist für Allianzmitglieder ohnehin lesbar, und die `ranking`
-  daneben nennt Namen und Angriffskraft jedes Teilnehmers längst.
+**Wer sie doch einmal hierher holt**, braucht `doc.dispatch` als Ablageort (das Frontend liest den
+Raid über `storageGet('alliance:<TAG>:raid')`, eine Leseroute gibt es nicht), muss beide Varianten
+ablegen (nach dem Abflug steht alles fest außer dem Kampfausgang) und die Frontend-Kopie samt
+Paritätstest im selben Zug entfernen — sonst stehen wieder zwei Wahrheiten nebeneinander.
 
-**Altbestand:** Eine Welle, die beim Update schon unterwegs war, trägt kein `vorschau`-Feld. Das
-Frontend zeigt die Zeile dann **ersatzlos nicht** — derselbe dritte Zustand wie bei der
-Weltlage-Zeile, keine erfundene Zahl.
-
-**Auslieferungsreihenfolge: dieses Repo ZUERST** (Regel 60). Umgekehrt zeigte das Frontend eine
-Zeile ohne Datengrundlage; andersherum liefert der Server ein Feld, das niemand liest — folgenlos.
-
-### Der Wächter, und die zwei Lehren aus seinem Bau
-
-`tests/test_raid_vorschau_http.js` (Port **3231**, 25 Prüfungen). **Belegte Testports sind jetzt
-3195–3200, 3210–3224, 3226–3231** — selbst gemessen, und die erste Messung war zu eng: Das Muster
-`PORT *= *[0-9]+` übersah 3226 und 3230.
-
-Er misst die **WIRKUNG**, und der Anker liegt außerhalb der geprüften Rechnung (Regel 62): Der Test
-rechnet die Belohnung nicht nach, sondern hält die Vorschau gegen das, was `claim` wirklich in den
-Spielstand schreibt. Ein Fehler in der Formel verschöbe beide Seiten gleichzeitig — eine
-nachgerechnete Erwartung könnte ihn nicht finden. Gemessen: 433 versprochen, 433 gezahlt.
-
-**Lehre 1 — eine Prüfung, die aus dem falschen Grund grün war, und der Grund war der Zufall des
-Kampfausgangs.** Der Boss überlebte, also verglich die Ressourcen-Prüfung bei der Antimaterie
-`0 === 0`. Genau die zwei Felder, die den Unterschied zwischen den Varianten ausmachen
-(Antimaterie und Modulfragmente), waren damit **nie gemessen**. Abschnitt 6 stellt deshalb den
-anderen Ausgang her — zweite Welle gegen einen auf 1 LP gesetzten Boss —, und dort steht
-`Antimaterie 3 gezahlt, 3 versprochen`. **Wer einen Test schreibt, dessen Aussage von einem
-Kampfausgang abhängt, misst beide Ausgänge** — sonst prüft die Hälfte der Felder nichts.
-
-**Lehre 2 — mein eigener `process.exit(1)` hat die Gegenprobe entwertet.** Nach der ersten
-Prüfung stand ein harter Abbruch; die Gegenprobe (Kopie ohne den Block) lief dadurch mit **5 statt
-25** Prüfungen, und ob die eigentlichen Kernprüfungen ebenfalls fallen, war nicht zu sehen — Regel
-34, am selben Tag zum zweiten Mal. Statt abzubrechen setzt der Test jetzt einen leeren Ersatz ein;
-jede Folgeprüfung fällt dann **benannt** und mit eigenem Beleg. Danach fallen 13 von 25 bei
-identischer Prüfliste.
-
-Und **drei geratene Namen** hat der Aufbau gekostet, jeder von der Antwort selbst widerlegt
-(Regel 4): Der Parameter heißt `raidId`, das Dokumentfeld aber `id`; `originPlanet` muss `'home'`
-sein (`allianceRaidFleetObj` löst alles andere über `save.colonies` auf); und `resolve` liefert
-`{ ok, doc }` — das Ergebnis steht in `doc.lastWaveResult.destroyed`, nicht auf der obersten Ebene.
-Die dritte Verwechslung war die gefährlichste: In der ersten Welle traf mein geratenes `false`
-zufällig zu, und der Test sah richtig aus.
-
-**Die Kopie für die Gegenprobe muss im REPO-Verzeichnis liegen.** Unter `/tmp` löst
-`require('./mailer')` nicht auf, der Server startet gar nicht, und der Test meldet
-`TypeError: fetch failed` bei **1 statt 25** Prüfungen — das sieht aus wie ein Befund und ist ein
-Werkzeugfehler. Dieselbe Falle kennen `test_alien_nester_http` und `test_muster_nest_http` schon;
-der Pfad ist über `RAID_TEST_SERVER` umleitbar, damit die Gegenprobe überhaupt fahrbar ist.
+**Die eigentliche Lehre ist Regel 69, und sie hat diesmal zu spät gegriffen.** Geprüft wurde vor
+dem ersten Zeichen Code, ob die Aufgabe auf `origin/main` schon steht — `allianceRaidRewardFor` kam
+im Frontend **null**mal vor. Die fremde Lieferung kam eine Stunde später. **Ein Blick zu Beginn
+genügt nicht, wenn die eigene Arbeit über eine Stunde läuft**; er gehört auch unmittelbar vor den
+Merge, und zwar mit einem Suchbegriff aus der SACHE (hier `allianceRaidRewardFor`), nicht aus der
+eigenen Umsetzung — deren Namen kennt eine fremde Lösung ja gerade nicht.
 
 ## Eine neue Schiffsklasse lebt in SECHS Tabellen dieses Repos (21.08.2026, Urmaterie-Koloss)
 

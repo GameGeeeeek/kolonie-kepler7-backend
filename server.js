@@ -2517,14 +2517,16 @@ function bastionMarkMultServer(save, buildingKey) {
 }
 // Schiffs-Schildpunkte – wie im Frontend (SHIP_DEFS): explizite Werte, sonst round(atk*0.5).
 const SHIP_SHIELD_EXPLICIT = { enterschiff: 32, phantomschiff: 5, waechter: 14, quantenkreuzer: 20, metamaterialtitan: 80, superschlachtschiff: 110, paktkorvette: 14, bundeskreuzer: 60, sternenbanner: 100 };
-function shipShield(k) { return SHIP_SHIELD_EXPLICIT[k] !== undefined ? SHIP_SHIELD_EXPLICIT[k] : Math.round((SHIP_ATK_VALUES[k] || 0) * 0.5); }
 // marks (31.07.2026): +3% Schild je Werftmarke, identisch zum Frontend (defensePower/shieldSum).
 /* Schildsumme - Spiegel von shipDefenseContribution() im Frontend. Der entscheidende Unterschied
    zum Stand davor: Schiffe OHNE eigenen Schildwert bekommen keine erfundene Basis mehr. Das
    Frontend gibt ihnen 0 und benutzt (atk*0.5) ausschliesslich als Bezugsgroesse fuer einen
    prozentualen Modulbonus; shipShield() hatte daraus eine echte Basis gemacht und dem Server im
-   gemessenen Beispiel das 3,1-fache an Schild beschert. shipShield() selbst bleibt unangetastet -
-   es hat weitere Aufrufer. */
+   gemessenen Beispiel das 3,1-fache an Schild beschert.
+   Hier stand "shipShield() selbst bleibt unangetastet - es hat weitere Aufrufer". Am 22.08.2026
+   nachgemessen (Kommentare vorher GELEERT, Regel 33) war das falsch: genau EINE Fundstelle
+   ausserhalb von Kommentaren, und das war die Definition selbst. Die Funktion ist deshalb
+   entfernt; SHIP_SHIELD_EXPLICIT bleibt und wird zwanzig Zeilen weiter unten wirklich gelesen. */
 function fleetShieldSum(f, marks, save) {
   if (!f) return 0;
   const schild = save ? shipModulKlassenBoni(save, 'shield') : null;

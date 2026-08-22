@@ -1292,11 +1292,13 @@ vergleicht die zwei Tabellen per `JSON.stringify`, und das ist reihenfolgeabhän
 deshalb an derselben Stelle wie dort (hinter `metamaterialtitan`), nicht am Tabellenende — dort hatte
 er zuerst gestanden und den Test auf völlig korrekten Werten reißen lassen.
 
-**Zwei Klassen sind bewusst NICHT ergänzt**, obwohl derselbe Durchgang sie als fehlend zeigte:
+**Zwei Klassen waren bewusst NICHT ergänzt**, obwohl derselbe Durchgang sie als fehlend zeigte:
 `mondzerstoerer` (dokumentierte Absicht — der Kommentar an der Stelle nennt sie ausdrücklich) und
-`kausalitaetsbrecher` in `SHIP_DEF_WEIGHTS`/`SHIP_SHIELD_EXPLICIT` (Vorgabe 1 statt 1,8 bzw. 170
-statt 120). Das zweite ist ein gemessener Bestands-Balancefall und gehört in eine eigene
-Entscheidung — eine PvP-Zahl im Vorbeigehen zu verschieben wäre eine unbestellte Zweitänderung.
+`kausalitaetsbrecher` in `SHIP_DEF_WEIGHTS`/`SHIP_SHIELD_EXPLICIT`. Das zweite war ein gemessener
+Bestands-Balancefall und gehörte in eine eigene Entscheidung — eine PvP-Zahl im Vorbeigehen zu
+verschieben wäre eine unbestellte Zweitänderung gewesen. **Sascha hat sie am 22.08.2026 getroffen:
+angleichen.** Der eigene Abschnitt weiter unten hält fest, was gemessen wurde und welcher Wächter
+seither darüber steht.
 
 **Kein `t2AtkMult` am Koloss:** Der Multiplikator kommt aus der Modulgruppe `raffiniert`, und die
 führt ihn nicht. Dieselbe Begründung steht an derselben Zeile in `attackPowerRaw` des Frontends —
@@ -1306,6 +1308,73 @@ Stellen beseitigt hat.
 **Auslieferungsreihenfolge: dieses Repo ZUERST** (Regel 60). Umgekehrt könnte ein Spieler einen
 Koloss bauen, dessen Punktestand, Schild und Kampfkraft der Server still falsch rechnet.
 Andersherum kennt der Server ein Schiff, das noch niemand hat — folgenlos.
+
+## Der Kausalitätsbrecher zählte im PvP nur ein Drittel (22.08.2026)
+
+Auftrag Sascha, nach vorgelegter Messung: **„Angleichen."** Damit ist der letzte der beiden
+Bestandsfälle aus dem Abschnitt darüber erledigt; `mondzerstoerer` bleibt die eine dokumentierte
+Ausnahme.
+
+Das stärkste Schiff des Spiels (`atk:340, shield:120, defWeight:1.8`) fehlte in **beiden**
+Verteidigungstabellen. Beide Schleifen laufen über `SHIP_ATK_VALUES` – dort stand er korrekt –,
+holen ihre Faktoren aber aus `SHIP_DEF_WEIGHTS` und `SHIP_SHIELD_EXPLICIT`, und ein fehlender
+Eintrag heißt dort Vorgabegewicht 1 bzw. **Schildbasis 0**.
+
+**Gemessen, indem `weightedFleetDefensePower` und `fleetShieldSum` aus dieser Datei geschnitten und
+ausgeführt wurden** – nicht nachgerechnet:
+
+| je Schiff | vorher | angeglichen |
+|---|---|---|
+| ohne Kampfforschung | **136** | 365 |
+| mit `rkampf`/`rkampf2` auf Maximum | 267 | 600 |
+| 100 Stück, ohne Forschung | 13.600 | 36.480 |
+
+**Eine Korrektur in eigener Sache gehört dazu:** Die Entscheidungsvorlage nannte den heutigen Wert
+mit 306 (`340·1·0,4 + 170`) und damit einen Zuwachs von 19 %. Die 170 waren die halbe
+Angriffskraft – also genau die **erfundene Schildbasis, die `shipShield()` bis zum 21.08.2026
+lieferte** und die mit dessen Entfernung weggefallen ist. Wirklich beitragen tut das Schiff heute
+**136**, der Zuwachs ist also **+168 %** statt +19 %. Die Entscheidung wird dadurch nicht anders,
+die Lücke war nur größer als vorgelegt. Dieselbe 170 stand als „Vorgabe … bzw. 170 statt 120" auch
+im Abschnitt darüber und ist dort mit korrigiert.
+
+**Die Auslieferungsreihenfolge ist dieses Repo ZUERST** (Regel 60): Bis der Server nachzieht, zeigt
+die Werft einen Schild- und Verteidigungswert an, mit dem im PvP nicht gerechnet wird – umgekehrt
+gibt es keinen Zustand, in dem eine Zahl still falsch würde.
+
+### Der Wächter, den es bis dahin nicht gab
+
+`tests/test_paritaet_tabellen.js` im FRONTEND-Repo, Abschnitt 5 (7 Prüfungen). **Kein einziger Test
+hat diese zwei Tabellen bis dahin gelesen** – der Abschnitt über den Urmaterie-Koloss nennt genau
+das als offene Flanke („Zwei der sechs hat KEIN Test gemeldet"), und der Kausalitätsbrecher ist
+monatelang durch sie hindurchgefallen.
+
+Geprüft wird die **WIRKUNG, nicht die Tabellenmitgliedschaft**: Ein Schiff ohne Eintrag ist kein
+Fehler, es bekommt dann den Vorgabewert. Falsch ist erst ein abweichender wirksamer Wert. Dazu drei
+Richtungen, die eine reine Feld-für-Feld-Prüfung nicht hätte:
+
+- **5c2** – ein Eintrag in `SHIP_DEF_WEIGHTS`/`SHIP_SHIELD_EXPLICIT`, den `SHIP_ATK_VALUES` nicht
+  kennt, wird von beiden Schleifen gar nicht erst gelesen: stiller toter Code (Regel 59).
+- **5d** – ein Schiff **mit** Kampfwerten, das in `SHIP_ATK_VALUES` fehlt, trägt **null** ohne
+  jeden Vorgabewert. Das ist die Richtung, an der der Urmaterie-Koloss beinahe gescheitert wäre.
+- **5b** – das Superschlachtschiff hat keinen `SHIP_DEFS`-Eintrag und wird trotzdem verglichen: Es
+  aus dem Wächter zu nehmen wäre die schwächere Lösung, seine drei Werte stehen im Frontend
+  genauso schwarz auf weiß, nur in eigenen Konstanten (`SUPERSCHLACHTSCHIFF_SHIELD`,
+  `SUPERSCHLACHTSCHIFF_DEF_WEIGHT`, `shipBaseAtk`).
+
+Sieben Gegenproben, jede mit ihrer eigenen „was muss fallen"-Liste (Regel 71), alle mit 37
+gelaufenen Prüfungen in beide Richtungen: Kausalitätsbrecher aus beiden Tabellen → `5a` mit
+`["kausalitaetsbrecher defWeight: FE=1.8 BE=1","kausalitaetsbrecher Schild: FE=120 BE=0"]`; je
+einzeln → `5a`; Superschlachtschiff-Schild verstellt → `5b`; ungelesener Eintrag → `5c2`;
+Kampfschiff aus `SHIP_ATK_VALUES` entfernt → `5c2` und `5d`; erfundenes Backend-Schiff → `5c`.
+
+**Ein Werkzeugfehler beim Bau, und er ist die eigentliche Lehre des Abschnitts:** Die erste Messung
+las `SHIP_DEFS` **zeilenweise** – wie Abschnitt 4 daneben, wo das richtig ist – und meldete drei
+Abweichungen bei Paktkorvette, Bundeskreuzer und Sternenbanner. Die drei Allianzschiffe tragen ihr
+`defWeight` aber auf der **zweiten Zeile** ihres Eintrags; es gab keine einzige Abweichung.
+Beinahe wären drei erfundene Befunde weitergegeben worden (Regel 10 hat sie abgefangen). Geschnitten
+wird seither vom Eintragsanfang bis zum nächsten Eintragsanfang, und `5-vorab` belegt an der
+Paktkorvette, dass die mehrzeilige Lesung wirklich greift – sonst wäre der ganze Abschnitt still
+blind für jedes mehrzeilig definierte Schiff.
 
 ## Deploy-Alarm: ein gescheiterter Deploy meldet sich selbst (22.08.2026)
 

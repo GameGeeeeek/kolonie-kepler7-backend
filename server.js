@@ -7182,6 +7182,36 @@ app.post('/api/allianceraid/checkdispatch', authMiddleware, async (req, res) => 
       .sort((a, b) => (b.power || 0) - (a.power || 0))
       .map(p => ({ id: p.playerId, name: p.name || 'Kommandant', power: Math.round(p.power || 0) }))
   };
+  /* ===== Belohnungsvorschau (22.08.2026, Auftrag Sascha: "vsl. belohnungen einblenden") =====
+     Sie steht HIER und nicht im Frontend, und das ist eine Entscheidung: allianceRaidRewardFor
+     dort nachzubauen waere eine weitere Kopie-Familie wie FESTUNG_STUFEN oder SHIP_SCORE_WEIGHTS -
+     und die laufen bei Balance-Aenderungen erfahrungsgemaess auseinander. Der Server rechnet die
+     Zahl, die er spaeter auch auszahlt.
+
+     Warum sie ueberhaupt EXAKT sein kann: Nach dem Abflug stehen alle Eingaben der Formel fest -
+     Anteil (power/totalPower), Platz und Anzahl aus der ranking oben, Stufe aus doc.level, Boss aus
+     demselben allianceRaidBossFor, das auch der Kampf benutzt. Offen ist einzig, ob der Boss
+     faellt. Deshalb ZWEI exakte Werte je Teilnehmer statt einer geschaetzten Spanne.
+
+     Sie liegt an derselben Stelle wie ranking - im Dokument, nicht in einer Antwort: Das Frontend
+     liest den Raid ueber storageGet('alliance:<TAG>:raid'), es gibt gar keine Leseroute.
+
+     Kein neues Leck: Das Dokument ist fuer Allianzmitglieder ohnehin lesbar, und die ranking
+     daneben nennt Namen und Angriffskraft jedes Teilnehmers laengst. */
+  {
+    const vorschauBoss = allianceRaidBossFor(doc);
+    const anzahl = doc.dispatch.ranking.length || 1;
+    const gesamtKraft = doc.dispatch.totalPower || 0;
+    const vorschau = {};
+    doc.dispatch.ranking.forEach((e, i) => {
+      const share = gesamtKraft > 0 ? Math.min(1, (e.power || 0) / gesamtKraft) : 0;
+      vorschau[e.id] = {
+        faellt:    allianceRaidRewardFor(doc.level, share, i + 1, anzahl, true,  vorschauBoss),
+        ueberlebt: allianceRaidRewardFor(doc.level, share, i + 1, anzahl, false, vorschauBoss)
+      };
+    });
+    doc.dispatch.vorschau = vorschau;
+  }
   doc.phase = 'enroute';
   setAllianceRaidDoc(tag, doc);
   await saveDb();

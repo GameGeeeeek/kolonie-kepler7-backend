@@ -1307,6 +1307,36 @@ Stellen beseitigt hat.
 Koloss bauen, dessen Punktestand, Schild und Kampfkraft der Server still falsch rechnet.
 Andersherum kennt der Server ein Schiff, das noch niemand hat — folgenlos.
 
+## Deploy-Alarm: ein gescheiterter Deploy meldet sich selbst (22.08.2026)
+
+Auftrag Sascha (AI-Hub-Runde). Anlass: **Neun** Deploy-Ausfälle in Folge (14.–22.08.) wurden
+alle erst zufällig bemerkt – der Webhook schrieb seinen Fehler ausschließlich ins
+Container-Log, das niemand liest, und nichts holte einen gescheiterten Pull später nach.
+
+`deployAlarm(repoName, betreff, detail)` sitzt an BEIDEN Fehlerausgängen von `starteDeploy`
+(Zeitüberschreitung und Befehlsfehler) und schickt eine Mail an `DEPLOY_ALARM_MAIL` über
+denselben Resend-Mailer wie Verify/Reset – mit Grund, stderr-Auszug und den drei nächsten
+Schritten (Container-Log, `/api/health`-Dreifelder-Vergleich, Rettungsweg-Abschnitt).
+
+**Vier Entscheidungen, die man beim Anfassen kennen muss:**
+
+- **Bewusst FAIL-OPEN** – das Gegenstück zur fail-closed Signaturprüfung darunter, und der
+  Unterschied ist der Punkt: Die Signaturprüfung ist eine SICHERUNG (ihr Ausfall öffnet etwas),
+  der Alarm ist eine BENACHRICHTIGUNG (sein Ausfall lässt nur den alten Zustand zurück). Fehlt
+  die Adresse oder scheitert Resend, läuft der Deploy-Weg unverändert – aber der Ausfall wird
+  BENANNT („DEPLOY_ALARM_MAIL ist nicht gesetzt") statt verschwiegen. Test 8b hält das fest.
+- **Höchstens eine Mail je Repo und Stunde** (`DEPLOY_ALARM_PAUSE_MS`): Ein dauerhaft kaputter
+  Deploy feuert bei JEDEM Push doppelt (Branch-Push + Merge), und ein Postfach voller
+  identischer Alarme ist so unlesbar wie das Container-Log. Die Drossel sitzt HINTER der
+  Protokollzeile – jeder Fehlschlag bleibt im Log sichtbar, gedrosselt wird nur der Versand
+  (Test 8c). Der Zähler lebt bewusst nur im RAM: Im Fehlerfall ändert sich `server.js` gerade
+  NICHT, nodemon startet also nicht neu, und die Stunde hält.
+- **`DEPLOY_ALARM_MAIL` muss auf dem Pi als Container-Env gesetzt werden** (plus vorhandenes
+  `RESEND_API_KEY`) – eine Env-Änderung braucht ein Neuerzeugen des Containers, der Webhook-Pull
+  allein reicht dafür nicht.
+- Wächter: `tests/test_deploy_webhook_http.js` Abschnitt 8 (am echten gescheiterten Deploy
+  gemessen, nicht am Quelltext). Gegenprobe beidseitig: am Stand davor fallen genau 8a/8b/8c.
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score, seit v8.565.0 auch `WORLDBOSS_ARCHETYPES_PLAYABLE`/`WORLDBOSS_ARCHETYPE_FOLGE` gegen die gleichnamigen Frontend-Tabellen – die FOLGE muss deckungsgleich sein, sonst zeigt die Boss-Karte andere Kampffaktoren an, als `/api/worldboss`-Kämpfe benutzen; Wächter ist `test_inhalt_v8373.js` im Frontend-Repo, 60 Stufen). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

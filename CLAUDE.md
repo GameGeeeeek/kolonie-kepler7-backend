@@ -1224,6 +1224,55 @@ darüber): Geht ein Repo allein live, entsteht genau die Divergenz, die gerade b
 einmal in die eine, einmal in die andere Richtung. Beide PRs gehören unmittelbar nacheinander
 gemergt, das Backend zuerst und per `/api/health`-Blob belegt, bevor das Frontend folgt.
 
+## Eine neue Schiffsklasse lebt in SECHS Tabellen dieses Repos (21.08.2026, Urmaterie-Koloss)
+
+Das Frontend hat mit Etappe D den **Urmaterie-Koloss** bekommen (`atk:250`, Frachtraum 2.000,
+Punktegewicht 175) — der erste wiederkehrende Protomaterie-Abnehmer. Dieses Repo führt davon
+**sechs** Kopien (gemessen: `grep -c urmateriekoloss server.js`), und beim ersten Anlauf waren nur
+zwei davon gepflegt.
+
+| Tabelle | ohne Eintrag |
+|---|---|
+| `SHIP_SCORE_WEIGHTS` | Punktestand seiner Besitzer zu niedrig |
+| `COUNTER_ROLE_OF` | Werftmarken-Schild 0,03 statt kapital 0,04 (über `shipMarkShieldPerStep`) |
+| `rawFleetPower` | trägt **0** Angriff bei — der Koloss existiert im PvP-Angriff nicht |
+| `SHIP_ATK_VALUES` | **0** in der Verteidigung UND in `fleetShieldSum` |
+| `SHIP_DEF_WEIGHTS` | Vorgabegewicht 1 statt 1,8 |
+| `COUNTER_ROLE_ATK` | zählt nicht in die Flottenbalance |
+
+**`SHIP_ATK_VALUES` ist die unangenehmste der sechs**, und der Grund steht in der Schleife selbst:
+`weightedFleetDefensePower` und `fleetShieldSum` iterieren über `Object.keys(SHIP_ATK_VALUES)` — ein
+fehlender Schlüssel trägt also **0 ohne jeden Vorgabewert**, und zwar in zwei Rechnungen auf einmal.
+`SHIP_DEF_WEIGHTS` daneben hat ein `!== undefined ? … : 1`, fällt also weich aus. Eine Klasse, die
+in der einen Tabelle fehlt, ist damit im Kampf unsichtbar; fehlt sie nur in der anderen, ist sie
+bloß falsch gewichtet.
+
+**Zwei der sechs hat KEIN Test gemeldet.** `SHIP_ATK_VALUES` und `SHIP_DEF_WEIGHTS` fielen erst beim
+Durchgehen aller Tabellen auf, die eine Schiffsklasse führen — die Paritätstests im Frontend decken
+`SHIP_SCORE_WEIGHTS`, `COUNTER_ROLE_OF` und `COUNTER_ROLE_ATK` ab, diese beiden nicht.
+**Vorgehen beim Anlegen einer neuen Schiffsklasse:** `grep -c "<schluessel>" server.js` — die Zahl
+muss **sechs** sein, und wer eine der sechs bewusst auslässt, schreibt den Grund daneben.
+
+**Die Reihenfolge in `COUNTER_ROLE_OF` ist nicht gleichgültig.** `test_konter_paritaet` im Frontend
+vergleicht die zwei Tabellen per `JSON.stringify`, und das ist reihenfolgeabhängig. Der Eintrag steht
+deshalb an derselben Stelle wie dort (hinter `metamaterialtitan`), nicht am Tabellenende — dort hatte
+er zuerst gestanden und den Test auf völlig korrekten Werten reißen lassen.
+
+**Zwei Klassen sind bewusst NICHT ergänzt**, obwohl derselbe Durchgang sie als fehlend zeigte:
+`mondzerstoerer` (dokumentierte Absicht — der Kommentar an der Stelle nennt sie ausdrücklich) und
+`kausalitaetsbrecher` in `SHIP_DEF_WEIGHTS`/`SHIP_SHIELD_EXPLICIT` (Vorgabe 1 statt 1,8 bzw. 170
+statt 120). Das zweite ist ein gemessener Bestands-Balancefall und gehört in eine eigene
+Entscheidung — eine PvP-Zahl im Vorbeigehen zu verschieben wäre eine unbestellte Zweitänderung.
+
+**Kein `t2AtkMult` am Koloss:** Der Multiplikator kommt aus der Modulgruppe `raffiniert`, und die
+führt ihn nicht. Dieselbe Begründung steht an derselben Zeile in `attackPowerRaw` des Frontends —
+wer sie hier ergänzt, ohne dort nachzusehen, erzeugt genau die Abweichung, die `#156` gerade an vier
+Stellen beseitigt hat.
+
+**Auslieferungsreihenfolge: dieses Repo ZUERST** (Regel 60). Umgekehrt könnte ein Spieler einen
+Koloss bauen, dessen Punktestand, Schild und Kampfkraft der Server still falsch rechnet.
+Andersherum kennt der Server ein Schiff, das noch niemand hat — folgenlos.
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score, seit v8.565.0 auch `WORLDBOSS_ARCHETYPES_PLAYABLE`/`WORLDBOSS_ARCHETYPE_FOLGE` gegen die gleichnamigen Frontend-Tabellen – die FOLGE muss deckungsgleich sein, sonst zeigt die Boss-Karte andere Kampffaktoren an, als `/api/worldboss`-Kämpfe benutzen; Wächter ist `test_inhalt_v8373.js` im Frontend-Repo, 60 Stufen). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

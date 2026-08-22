@@ -1979,4 +1979,66 @@ diesmal mit einem Messinstrument, das die Bedingung wirklich prüfen kann, statt
 Sets nicht kennt. Frontend ohne Sets gegen Backend mit der Angleichung (#156) ist ein
 widerspruchsfreier Stand. Schief würde es erst, wenn das Frontend allein nachrückte.
 
+### AUSFALL NR. 10 (22.08.2026) – drei Befunde, und zwei davon betreffen die Werkzeuge
+
+Der Merge von #162 (Rücknahme der Raid-Vorschau) kam nicht an. `/api/health` meldete über
+Minuten unverändert:
+
+```
+{"commit":"19430fc","checkout":"19430fc","blob":"e0810f3","uptimeSec":…}
+```
+
+**Wieder der Flickenteppich, und diesmal ist die Abbruchstelle byte-genau messbar.** Der
+Arbeitsbaum trug drei Dateien aus #161 (`9392852`) bei einem git-Ref auf #157 (`19430fc`).
+Gemessen, nachdem Sascha die Blob-Hashes gezogen hatte:
+
+| Datei | Größe in #161 | auf dem Pi |
+|---|---|---|
+| `CLAUDE.md` | 144.925 B | vollständig (`ca1a5ec`) |
+| `server.js` | 696.893 B | vollständig (`e0810f3`) |
+| `tests/test_raid_vorschau_http.js` | 19.745 B | **angelegt, 0 Bytes** (`e69de29`) |
+
+git schreibt in Index-Reihenfolge; `tests/` steht hinter `CLAUDE.md` und `server.js`. Der Pull
+ist also beim **letzten** Eintrag gestorben – nach dem Anlegen, vor dem Inhalt, und lange vor der
+Ref-Aktualisierung. Damit ist der Ausfall vollständig rekonstruiert, ohne Rätselrest.
+
+**Befund 1 – das `blob`-Feld ist bei einem REVERT blind, und das ist strukturell.** `d881b45`
+nimmt `9392852` zurück; seine `server.js` ist damit byte-identisch mit der von `19430fc`.
+Gemessen liefern **beide** `0455a14`. Ein Blob-Hash kann zwei Commits nur unterscheiden, wenn sie
+verschiedene Dateiinhalte haben – bei einer Rücknahme, einem reinen Doku-Commit oder einem
+Schalter-Merge in einer anderen Datei ist das per Definition nicht der Fall.
+**Vorgehen:** Vor dem Merge ausrechnen, welches Feld den Erfolg überhaupt belegen KANN
+(`git rev-parse <ziel>:server.js` gegen `<davor>:server.js` halten). Sind sie gleich, tragen die
+Aussage allein `commit`/`checkout` – wer dann auf den Blob wartet, wartet auf eine Zahl, die sich
+nie ändert. Das ist dieselbe Familie wie die 401/404-Messung bei einem Merge ohne neue Route: ein
+Messinstrument, das für genau diesen Merge keinen Gegenstand hat.
+
+**Befund 2 – der leere Blob ist eine ANTWORT, keine Panne.** Meine Reparatur-Anleitung sagte für
+die Testdatei `9e6047b` an (ihr Inhalt in #161) und bekam `e69de29`. Das ist gemessen der leere
+Blob (`printf '' | git hash-object --stdin`). Die Regel „ein blockierender lokaler Stand wird über
+den Blob-Hash einem Commit zugeordnet, bevor er verworfen wird" braucht deshalb einen dritten
+Ausgang neben *passt* und *passt nicht*: **der leere Blob heißt „hier ist der Pull abgebrochen"**.
+Verworfen werden darf er, sobald die Datei im Ziel-Commit gar nicht existiert oder ihr Inhalt in
+der Historie steht – hier beides.
+
+**Befund 3 – mein eigener Befehlssatz war unvollständig, und zwar nach Regel 54.** Ich hatte nur
+`server.js` versorgt, obwohl mein Commit **drei** Dateien anfasst; Saschas `git pull` brach danach
+an `CLAUDE.md` ab und kostete eine zweite Runde. Die Regel steht seit dem 17.08. in der
+Frontend-CLAUDE.md, dort für eine Sicherung vor einem Rebase – sie gilt genauso für eine
+Reparaturanleitung: **nicht überlegen, was zu versorgen ist, sondern `git status --short` lesen und
+JEDE Zeile versorgen.** Und noch billiger wäre der Blick in den eigenen Commit gewesen:
+`git show --stat <hash>` nennt die Dateien, die der halb angewendete Pull auf dem Pi hinterlassen
+haben MUSS.
+
+Der Ablauf, der es dann behoben hat (je Datei erst messen, dann verwerfen):
+
+```bash
+cd /DATA/kepler7/backend
+git hash-object CLAUDE.md | cut -c1-7      # erwartet ca1a5ec = 9392852:CLAUDE.md
+git checkout HEAD -- CLAUDE.md
+mv tests/test_raid_vorschau_http.js /tmp/  # 0 Bytes, im Ziel nicht vorhanden
+git pull origin master                     # Fast-forward, 1 Datei
+curl -s https://gamegeeeeek.de/api/health  # commit/checkout d881b45, uptimeSec 11
+```
+
 **Folge für PRs:** Der Merge ist nicht der Zwischenschritt zu einem späteren Deploy, sondern die Auslieferung selbst – was gemerged wird, läuft Sekunden später auf dem Pi. Offene PRs trotzdem sofort mergen statt sie liegen zu lassen, aber erst nach grünem Prüflauf.

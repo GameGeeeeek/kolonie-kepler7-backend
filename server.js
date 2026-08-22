@@ -2817,6 +2817,13 @@ const COUNTER_ROLE_OF = {
   bomber: 'bomber', hyperbomber: 'bomber', nanoklinge: 'bomber', singularitaetsvernichter: 'bomber', mondzerstoerer: 'bomber',
   cruisers: 'kapital', destroyers: 'kapital', schlachtschiff: 'kapital', superschlachtschiff: 'kapital',
   waechter: 'kapital', quantenkreuzer: 'kapital', fusionsdreadnought: 'kapital', metamaterialtitan: 'kapital',
+  // Urmaterie-Koloss (21.08.2026, Etappe D): KAPITAL - breiter, langsamer Belagerungsrumpf mit
+  // Frachtraum, kein Praezisionsangreifer. Die Rolle entscheidet hier nicht nur das Konter-
+  // verhaeltnis, sondern ueber shipMarkShieldPerStep auch den Werftmarken-Schildzuwachs
+  // (kapital 0,04 statt 0,03). Genau daran hat tests/test_werftmarken.js im Frontend die Luecke
+  // gefunden: Frontend 1,04 gegen Backend 1,03 bei Mk 2 - der Server haette den Schild jedes
+  // Koloss-Besitzers zu niedrig gerechnet.
+  urmateriekoloss: 'kapital',
   // Umwidmung 02.08.2026 (Frontend: COUNTER_ROLE_OF, dort steht die ausfuehrliche Begruendung).
   // Kurz: Die Verteilung war 5/5/11, und die elf Grosskampfschiffe waren ausgerechnet die spaeten
   // Klassen - im Endspiel fiel Schere-Stein-Papier damit auf "Stein gegen Stein" zusammen. Carrier
@@ -2829,14 +2836,7 @@ const COUNTER_ROLE_OF = {
   carrier: 'abfang', riftwaechter: 'abfang', enterschiff: 'bomber',
   // Allianzflotte (05.08.2026): bewusst auf alle drei Rollen verteilt statt geschlossen ins
   // Kapital-Lager - sonst waere die muehsam auf 7/6/8 gebrachte Verteilung sofort wieder schief.
-  paktkorvette: 'abfang', bundeskreuzer: 'kapital', sternenbanner: 'bomber',
-  // Urmaterie-Koloss (21.08.2026, Etappe D): KAPITAL - breiter, langsamer Belagerungsrumpf mit
-  // Frachtraum, kein Praezisionsangreifer. Die Rolle entscheidet hier nicht nur das Konter-
-  // verhaeltnis, sondern ueber shipMarkShieldPerStep auch den Werftmarken-Schildzuwachs
-  // (kapital 0,04 statt 0,03). Genau daran hat tests/test_werftmarken.js im Frontend die Luecke
-  // gefunden: Frontend 1,04 gegen Backend 1,03 bei Mk 2 - der Server haette den Schild jedes
-  // Koloss-Besitzers zu niedrig gerechnet.
-  urmateriekoloss: 'kapital'
+  paktkorvette: 'abfang', bundeskreuzer: 'kapital', sternenbanner: 'bomber'
 };
 const SHIP_COUNTERS = (() => {
   const byRole = {}; for (const r of COUNTER_ROLE_DEFS) byRole[r.key] = [];
@@ -3171,7 +3171,12 @@ function rawFleetPower(f, ssAtkMult, t2AtkMult, marks) {
     // Apex-Flaggschiff, stärkster regulärer Angriffswert (280). War bisher NUR in der Verteidigung
     // (SHIP_ATK_VALUES/SHIP_DEF_WEIGHTS), trug hier 0 Angriff bei - identisch zum Frontend nachgezogen
     // (attackPowerRaw/ATTACK_SHIP_KEYS). Metamaterial-Titan bleibt bewusst draußen (reine Verteidigung).
-    dm('singularitaetsvernichter', f.singularitaetsvernichter) * 280 * t2M;
+    dm('singularitaetsvernichter', f.singularitaetsvernichter) * 280 * t2M +
+    // Urmaterie-Koloss (21.08.2026, Etappe D) - Angriffswert identisch zum Frontend (SHIP_DEFS,
+    // atk 250). Bewusst OHNE t2M: Der Multiplikator kommt aus der Modulgruppe 'raffiniert', und
+    // die fuehrt den Koloss nicht - siehe die ausfuehrliche Begruendung an derselben Zeile in
+    // attackPowerRaw des Frontends.
+    dm('urmateriekoloss', f.urmateriekoloss) * 250;
 }
 // Verteidigungsspezialisierung (13.07.2026) - defWeight-Gewichte identisch zum Frontend (SHIP_DEFS),
 // wirken NUR hier auf die Verteidigung, nie auf die Angriffskraft. Keine Schilde hier (der Backend-
@@ -3187,8 +3192,8 @@ function rawFleetPower(f, ssAtkMult, t2AtkMult, marks) {
 // clientseitig). Was er tut, ist dasselbe wie fuer jede andere Klasse: Er kennt ihre Kampf- und
 // Punktwerte, damit ein PvP-Angriff und der Bestenlisten-Score sie nicht stillschweigend mit 0
 // bewerten - genau der Fallstrick, an dem SHIP_SCORE_WEIGHTS hier schon dreimal veraltet ist.
-const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5, leerenjaeger:1.1, kometenjaeger:0.6, enterschiff:1.6, phantomschiff:0.3, riftwaechter:0.8, hyperjaeger:0.6, hyperbomber:0.9, metamaterialtitan:2.0, singularitaetsvernichter:1.6, paktkorvette:0.7, bundeskreuzer:1.7, sternenbanner:1.5 };
-const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130, metamaterialtitan:150, singularitaetsvernichter:280, kausalitaetsbrecher:340, paktkorvette:40, bundeskreuzer:110, sternenbanner:240 };
+const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5, leerenjaeger:1.1, kometenjaeger:0.6, enterschiff:1.6, phantomschiff:0.3, riftwaechter:0.8, hyperjaeger:0.6, hyperbomber:0.9, metamaterialtitan:2.0, singularitaetsvernichter:1.6, urmateriekoloss:1.8, paktkorvette:0.7, bundeskreuzer:1.7, sternenbanner:1.5 };
+const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130, metamaterialtitan:150, singularitaetsvernichter:280, kausalitaetsbrecher:340, urmateriekoloss:250, paktkorvette:40, bundeskreuzer:110, sternenbanner:240 };
 // marks (31.07.2026): derselbe atk-Markenfaktor wie in rawFleetPower - es ist derselbe
 // Angriffswert, hier nur mit defWeight verrechnet.
 /* save ist OPTIONAL: Die Asteroiden-Anfechtung ruft mit der Eskorte eines FREMDEN Spielers auf und
@@ -3230,7 +3235,7 @@ const FLEET_BALANCE_MAX_BONUS = 0.08;
 // dortige Balance-Rechnung sie direkt zieht; test_flottenbalance.js vergleicht beide Seiten.
 const COUNTER_ROLE_ATK = {
   jaeger: 10, hyperjaeger: 30, kometenjaeger: 18, phantomschiff: 35, leerenjaeger: 140,
-  bomber: 60, hyperbomber: 130, nanoklinge: 55, singularitaetsvernichter: 280, mondzerstoerer: 300,
+  bomber: 60, hyperbomber: 130, nanoklinge: 55, singularitaetsvernichter: 280, mondzerstoerer: 300, urmateriekoloss: 250,
   cruisers: 20, destroyers: 45, schlachtschiff: 90, superschlachtschiff: 220, carrier: 15,
   waechter: 8, quantenkreuzer: 80, fusionsdreadnought: 180, metamaterialtitan: 150,
   enterschiff: 25, riftwaechter: 20,

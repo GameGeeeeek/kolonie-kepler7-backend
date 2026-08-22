@@ -1309,8 +1309,8 @@ Andersherum kennt der Server ein Schiff, das noch niemand hat — folgenlos.
 
 ## Deploy-Alarm: ein gescheiterter Deploy meldet sich selbst (22.08.2026)
 
-Auftrag Sascha (AI-Hub-Runde). Anlass: **Neun** Deploy-Ausfälle in Folge (14.–22.08.) wurden
-alle erst zufällig bemerkt – der Webhook schrieb seinen Fehler ausschließlich ins
+Auftrag Sascha (AI-Hub-Runde). Anlass: die **Serie** von Deploy-Ausfällen seit dem 14.08. wurde
+durchweg erst zufällig bemerkt – der Webhook schrieb seinen Fehler ausschließlich ins
 Container-Log, das niemand liest, und nichts holte einen gescheiterten Pull später nach.
 
 `deployAlarm(repoName, betreff, detail)` sitzt an BEIDEN Fehlerausgängen von `starteDeploy`
@@ -2078,5 +2078,52 @@ mv tests/test_raid_vorschau_http.js /tmp/  # 0 Bytes, im Ziel nicht vorhanden
 git pull origin master                     # Fast-forward, 1 Datei
 curl -s https://gamegeeeeek.de/api/health  # commit/checkout d881b45, uptimeSec 11
 ```
+
+### AUSFALL NR. 11 (22.08.2026) – der Blob hat ihn WÄHREND des Ausfalls gezeigt
+
+Der Merge von #165 lief an, und `/api/health` meldete über 14 Minuten unverändert:
+
+```
+{"commit":"48d8676","checkout":"48d8676","blob":"e93a879","uptimeSec":821}
+```
+
+**Die drei Felder widersprechen sich, und das ist die Diagnose:** `e93a879` ist
+`d5a861c:server.js` – der Prozess führte also die **neue** Datei aus, während `.git/HEAD` noch
+auf dem alten Commit stand. Derselbe Fingerabdruck wie Nr. 9: Der Pull hat den Arbeitsbaum
+geschrieben, nodemon hat daraufhin neu gestartet, und der Ref wurde nie aktualisiert.
+
+**Das Neue daran ist der Zeitpunkt.** Bei Nr. 8 und 9 fiel derselbe Zustand erst auf, als der
+NÄCHSTE Merge nicht ankam – der Blob war die Diagnose *hinterher*. Hier stand der Widerspruch
+schon in der ersten Messung nach dem Merge. Das ist die Richtung, für die das Feld gebaut wurde,
+und ihre erste Anwendung.
+
+**Vor dem Alarm wurde das Instrument geprüft** (dieselbe Familie wie Regel 15/17/19), sonst wäre
+die Meldung nicht von einem Messfehler zu unterscheiden gewesen:
+
+- `gitKopfJetzt()` puffert **10 Sekunden**; die Messungen lagen 20–30 s auseinander, waren also
+  alle frisch. `commit` ist ohnehin ein zweiter, unabhängiger Lesevorgang (einmalig beim Start).
+- Der Deploy-Timeout aus #134 liegt bei **10 Minuten** – ein langsamer Pull hätte den Ref also
+  noch nachziehen können. 14 Minuten beobachtet, `uptimeSec` wuchs dabei lückenlos weiter (kein
+  Neustart, kein zweiter Versuch).
+
+**Aufgelöst hat es der Pull von #166**, nicht eine Reparatur, die von hier aus sichtbar gewesen
+wäre. Und #166 kann das nicht selbst getan haben: Es fügt ausschließlich den Mail-Alarm hinzu und
+enthält gemessen **keine** Aufräum-Logik (kein `checkout`, `reset`, `clean`, `stash`, keine
+Änderung an `DEPLOY_TARGETS`). Ein Pull überschreibt einen verschmutzten Arbeitsbaum nicht – er
+ist also auf einen bereits sauberen gelaufen. Von außen ist nicht messbar, wodurch.
+
+**Eine Vorhersage von mir ist damit weder bestätigt noch widerlegt, und das gehört dazu:** Ich
+hatte gemeldet, jeder künftige Pull, der `server.js` anfasst, breche ab. Die Begründung steht
+weiterhin (`server.js` galt git als lokal geändert, und `48d8676` gegen `origin/master`
+unterschied sich in genau dieser einen Datei) – belegt hat dieser Lauf sie nicht, weil der Baum
+vorher sauber war. **Eine Vorhersage, deren Bedingung jemand wegräumt, ist nicht geprüft**, und
+sie als bestätigt zu führen wäre genau die Sorte Behauptung, die dieses Dokument sonst misst.
+
+**Für den Alarm aus #166 ist Nr. 11 der Anlassfall** – und die Prüffrage dazu: Er hängt an den
+zwei FEHLERAUSGÄNGEN von `starteDeploy`. Ein Pull, der abgeschnitten wird, meldet mit hoher
+Wahrscheinlichkeit einen Fehler oder eine Zeitüberschreitung, träfe also einen davon; sicher ist
+das von außen nicht (die Antwort steht nur im Container-Log). **Und er feuert erst, wenn
+`DEPLOY_ALARM_MAIL` als Container-Env gesetzt ist** – dafür genügt der Webhook-Pull nicht, der
+Container muss neu erzeugt werden. Solange das aussteht, ist der Alarm gebaut und still.
 
 **Folge für PRs:** Der Merge ist nicht der Zwischenschritt zu einem späteren Deploy, sondern die Auslieferung selbst – was gemerged wird, läuft Sekunden später auf dem Pi. Offene PRs trotzdem sofort mergen statt sie liegen zu lassen, aber erst nach grünem Prüflauf.

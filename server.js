@@ -2516,7 +2516,7 @@ function bastionMarkMultServer(save, buildingKey) {
   return 1 + (mk - 1) * BASTION_MARK_PER_STEP;
 }
 // Schiffs-Schildpunkte – wie im Frontend (SHIP_DEFS): explizite Werte, sonst round(atk*0.5).
-const SHIP_SHIELD_EXPLICIT = { enterschiff: 32, phantomschiff: 5, waechter: 14, quantenkreuzer: 20, metamaterialtitan: 80, superschlachtschiff: 110, paktkorvette: 14, bundeskreuzer: 60, sternenbanner: 100 };
+const SHIP_SHIELD_EXPLICIT = { enterschiff: 32, phantomschiff: 5, waechter: 14, quantenkreuzer: 20, metamaterialtitan: 80, superschlachtschiff: 110, kausalitaetsbrecher: 120, paktkorvette: 14, bundeskreuzer: 60, sternenbanner: 100 };
 // marks (31.07.2026): +3% Schild je Werftmarke, identisch zum Frontend (defensePower/shieldSum).
 /* Schildsumme - Spiegel von shipDefenseContribution() im Frontend. Der entscheidende Unterschied
    zum Stand davor: Schiffe OHNE eigenen Schildwert bekommen keine erfundene Basis mehr. Das
@@ -3194,7 +3194,7 @@ function rawFleetPower(f, ssAtkMult, t2AtkMult, marks) {
 // clientseitig). Was er tut, ist dasselbe wie fuer jede andere Klasse: Er kennt ihre Kampf- und
 // Punktwerte, damit ein PvP-Angriff und der Bestenlisten-Score sie nicht stillschweigend mit 0
 // bewerten - genau der Fallstrick, an dem SHIP_SCORE_WEIGHTS hier schon dreimal veraltet ist.
-const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5, leerenjaeger:1.1, kometenjaeger:0.6, enterschiff:1.6, phantomschiff:0.3, riftwaechter:0.8, hyperjaeger:0.6, hyperbomber:0.9, metamaterialtitan:2.0, singularitaetsvernichter:1.6, urmateriekoloss:1.8, paktkorvette:0.7, bundeskreuzer:1.7, sternenbanner:1.5 };
+const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5, leerenjaeger:1.1, kometenjaeger:0.6, enterschiff:1.6, phantomschiff:0.3, riftwaechter:0.8, hyperjaeger:0.6, hyperbomber:0.9, metamaterialtitan:2.0, singularitaetsvernichter:1.6, kausalitaetsbrecher:1.8, urmateriekoloss:1.8, paktkorvette:0.7, bundeskreuzer:1.7, sternenbanner:1.5 };
 const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130, metamaterialtitan:150, singularitaetsvernichter:280, kausalitaetsbrecher:340, urmateriekoloss:250, paktkorvette:40, bundeskreuzer:110, sternenbanner:240 };
 // marks (31.07.2026): derselbe atk-Markenfaktor wie in rawFleetPower - es ist derselbe
 // Angriffswert, hier nur mit defWeight verrechnet.

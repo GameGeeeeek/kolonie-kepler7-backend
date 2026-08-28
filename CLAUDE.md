@@ -2,6 +2,31 @@
 
 Node.js/Express-Backend für Kolonie Kepler-7. Läuft als Docker-Container `kepler7-backend` auf einem Raspberry Pi 4 (CasaOS). Einfache JSON-Datei als "Datenbank" (`db.json`), kein echtes DBMS.
 
+## Was sich am 28.08.2026 geändert hat – für parallel arbeitende Sitzungen
+
+Wer dieses Repo aus einer anderen Sitzung anfasst, braucht davon vier Sätze. Die Begründungen und
+alle Messungen stehen unten unter „nodemon fliegt aus dem Deploy-Pfad".
+
+1. **Der Deploy blockiert sich nicht mehr selbst. Merge, wann du willst.** Dreizehn Ausfälle hatten
+   dieselbe Ursache: `git pull` schrieb `server.js`, nodemon startete daraufhin neu und räumte den
+   laufenden git-Prozess mit ab, bevor er den Ref gesetzt hatte. Der Container läuft seither **ohne
+   nodemon**; der Server beendet sich nach einem erfolgreichen Pull selbst, Docker startet ihn neu.
+   Zwei gleichzeitige Webhooks fängt die Sperre aus #147 ab (der zweite wird vorgemerkt und
+   nachgeholt). **Die Parallelität war nie die Ursache** – sie hat die Häufigkeit erhöht.
+2. **Ein Code-Deploy kostet rund 7 Sekunden 502**, gemessen im Sekundentakt. Ein Commit ohne
+   `.js`/`.json`-Änderung startet gar nichts neu – dann laufen `commit` und `checkout` in
+   `/api/health` auseinander, und das ist KORREKT, keine Störung.
+3. **`/api/health` hat ein Feld `selbstNeustart`.** Damit ist von außen erkennbar, ob der Container
+   umgebaut ist; vorher brauchte diese Frage einen SSH-Zugang. Die vier Felder zusammen
+   (`commit`, `checkout`, `blob`, `selbstNeustart`) beantworten jede Deploy-Frage ohne den Pi.
+4. **Wer auf dem Pi von Hand an `server.js` etwas ausprobiert, bekommt keinen Neustart mehr
+   geschenkt** – `docker restart kepler7-backend`. Und eine Handänderung dort blockiert weiterhin
+   jeden Pull, bis sie zurückgenommen ist.
+
+**Der Compose-Stack liegt in Portainer**, nicht auf dem Host: `big-bear-portainer:/data/compose/6/`.
+Er enthält **Geheimnisse im Klartext** (Resend-Schlüssel, Deploy-Webhook-Secret, Ko-fi-Token) – sie
+gehören in kein Repo, keinen Fehlerbericht und keinen Chat-Verlauf.
+
 ## Kritische Regel: DB_FILE nie hart pfaden
 
 ```js
@@ -16,7 +41,8 @@ Gilt für **jedes** Skript, auch neue Standalone-Skripte (wie `thank_bugreporter
    offenlässt: `node --check` **parst nur und führt nie aus**. Am 18.08.2026 hat genau das einen
    Absturz durchgelassen, der den Server bei JEDEM Start getötet hätte (Einzelheiten unten unter
    „Die temporale Todeszone…"). Ein Backend, das nicht startet, ist der teuerste denkbare Fehler
-   dieses Projekts – der Merge ist die Auslieferung, und nodemon startet Sekunden später neu.
+   dieses Projekts – der Merge ist die Auslieferung, und der Server startet sich Sekunden später
+   selbst neu (seit dem 28.08.2026; vorher tat das nodemon).
 3. Bei sicherheitsrelevanten Änderungen an geteiltem Speicher (`alliance:*`-Schlüssel, Markt, o.ä.): **echte HTTP-Tests**, nicht nur Syntax-Check. Test-DB in `/tmp` aufsetzen (bcrypt-Hash für Testnutzer, `crypto.randomUUID()` für IDs), Server mit `DB_FILE=/tmp/...` lokal starten, curl-Requests gegen echte Endpunkte. **Serverstart und Test müssen im selben Bash-Aufruf laufen** – über mehrere Tool-Aufrufe hinweg verliert die Sandbox den Hintergrundprozess.
 4. Testartefakte (`/tmp/...`, `package.json`/`package-lock.json` falls nur für den Test installiert) vor dem Commit wieder entfernen. `node_modules` steht in `.gitignore` und darf liegen bleiben.
 
@@ -1003,9 +1029,11 @@ unverändert. Was sie leistet, ist die **Reihenfolge**:
 1. **Der Bearer-Header hat VORRANG vor dem Cookie.** Solange a und b auseinander liegen, trägt ein
    Browser beides; maßgeblich muss das sein, was das Frontend bewusst mitschickt. Ein alter
    Cookie-Rest würde sonst ein frisch angemeldetes Gerät überstimmen.
-2. **Kein `cookie-parser`.** Eine neue Abhängigkeit ändert `package.json`, und die verlangt auf dem
-   Pi zusätzlich ein `docker restart` von Hand (nodemon installiert nichts nach). Für das Lesen
-   *eines* Namens ist das ein schlechter Tausch – `leseCookie()` sind zwölf Zeilen.
+2. **Kein `cookie-parser`.** Für das Lesen *eines* Namens ist eine Abhängigkeit ein schlechter
+   Tausch – `leseCookie()` sind zwölf Zeilen. (Die frühere Begründung „das verlangt ein
+   `docker restart` von Hand" gilt seit dem 28.08.2026 nicht mehr: Der Selbst-Neustart startet den
+   ganzen Container neu, und `npm install` läuft dabei mit. Eine neue Abhängigkeit ändert immer
+   auch Code, also greift der Neustart auch wirklich.)
 3. **`Secure` hängt an `req.secure`, nicht an einer Konfiguration.** Der erste Entwurf prüfte
    `PUBLIC_URL.startsWith('https://')` – das sah nach einer Entscheidung aus und war keine:
    `web-push` verlangt für das VAPID-Subject zwingend `https:` oder `mailto:` und lässt den Server
@@ -1564,7 +1592,17 @@ cd /app && git pull -q && (chown -R 1000:1000 .git || true)
 
 Der Server antwortet sofort und lässt `git pull` asynchron weiterlaufen, weil GitHub eine schnelle Antwort erwartet. Das `chown` ist Pflicht: Der Container läuft als root und `/app` **ist** der Bind-Mount `/DATA/kepler7/backend` – ohne die Zeile gehören die erzeugten `.git/objects` root und Sascha kann in seinem eigenen Repo kein `git` mehr ausführen. Genau so hing der Pi am 05.08.2026 sechzehn Commits zurück.
 
-Container-Setup (per `docker inspect` verifiziert, 19.07.2026): Startbefehl ist `npm install && npx nodemon --watch . --ext js,json server.js` – der Container beobachtet Code-Änderungen im Bind-Mount selbst und startet `server.js` automatisch neu. Der Webhook-Pull genügt deshalb für die meisten Deploys; **nur bei geänderter `package.json`/`package-lock.json` braucht es zusätzlich `docker restart kepler7-backend`**, weil nodemon keine neuen Abhängigkeiten nachinstalliert. Das ist der einzige Fall, der noch einen manuellen Schritt von Sascha verlangt.
+Container-Setup (per `docker inspect` verifiziert, **umgebaut am 28.08.2026**): Startbefehl ist
+`sh -c "git config --global --add safe.directory '*' && npm install --no-audit --no-fund && node server.js"`,
+dazu `DEPLOY_SELBST_NEUSTART=1` und `restart: unless-stopped`. **Es läuft KEIN nodemon mehr im
+Deploy-Pfad** – der Server beendet sich nach einem erfolgreichen Pull selbst, wenn sich geladener
+Code geändert hat, und Docker startet ihn neu (Einzelheiten und die Messungen im Abschnitt
+„nodemon fliegt aus dem Deploy-Pfad").
+
+Der Webhook-Pull genügt damit für JEDEN Deploy, auch bei geänderter `package.json` – `npm install`
+läuft beim Neustart mit. **Ein `docker restart kepler7-backend` von Hand braucht es nur noch, wenn
+jemand auf dem Pi direkt an `server.js` etwas ausprobiert hat**: Diese Änderung kommt über keinen
+Pull und löst deshalb auch keinen Neustart aus.
 
 Das ältere Auto-Pull-Skript unter `deploy/autodeploy.sh` ist damit **hinfällig** – es löste dasselbe Problem vor dem Webhook und braucht keine Einrichtung mehr.
 
@@ -1667,8 +1705,10 @@ systemctl list-timers --all
   retten – der Inhalt stand längst im Ursprung, und ein Stash wäre eine Zeitbombe gewesen (ein
   späteres `git stash pop` schreibt bei 278 geänderten Zeilen Konfliktmarker in die
   Produktivdatei, nodemon lädt sie, und das Backend ist komplett aus).
-- **Der Container sammelt Zombies.** PID 1 im Container ist `npm exec nodemon`, und das erntet
-  verwaiste Kinder nicht ab. Gemessen am 18.08.: mehrere hundert `[git] <defunct>` (dazu ein
+- **Der Container sammelt Zombies.** PID 1 im Container war bis zum 28.08.2026 `npm exec nodemon`,
+  und das erntet verwaiste Kinder nicht ab. Seit dem Umbau ist PID 1 die `sh` des Startbefehls –
+  **ob die es besser macht, ist NICHT gemessen**, und bis dahin gilt der Absatz unverändert
+  weiter. Die Messung steht unten (`ps` mit Zustandsfeld, nie `pgrep`). Gemessen am 18.08.: mehrere hundert `[git] <defunct>` (dazu ein
   `[chown]`), alle mit PPID 3307, der älteste zweieinhalb Tage alt. Sie halten nichts und sind
   harmlos – aber sie **verfälschen jede Prozessprüfung**: `pgrep -x git` findet einen Zombie über
   den Prozessnamen, `ps … | awk '$4 ~ /git$/'` findet ihn nicht, weil die Kommandozeile fehlt.
@@ -1722,8 +1762,11 @@ Webhook schreibt seinen Fehler ausschliesslich ins Container-Log, und nichts hol
 docker logs --tail 80 kepler7-backend | grep -i "deploy-webhook"
 ```
 
-Steht dort „erfolgreich", ist der Pull durch und nodemon hat nicht neu gestartet (dann `docker
-restart kepler7-backend` – Vorsicht, der Startbefehl beginnt mit `npm install`). Steht dort ein
+Steht dort „erfolgreich", ist der Pull durch und der Selbst-Neustart hat nicht gefeuert. Das ist
+seit dem 28.08.2026 der NORMALFALL bei einem Commit ohne Codeänderung (etwa reiner Doku) und keine
+Störung – `/api/health` zeigt dann `checkout` neuer als `commit`, und beide Felder sind korrekt.
+Störend ist es nur, wenn der Commit `.js`/`.json` angefasst hat; dann hilft `docker restart
+kepler7-backend` (Vorsicht, der Startbefehl beginnt mit `npm install`). Steht dort ein
 Fehler, nennt er die Ursache. Steht dort GAR NICHTS zum Zeitpunkt des Merges, kam der Webhook nicht
 an – dann liegt es an GitHub (Settings → Webhooks → Recent Deliveries) und nicht am Pi.
 
@@ -2071,9 +2114,11 @@ Drei Lagen lassen sich damit von außen unterscheiden, die vorher alle gleich au
 
 - **beide gleich und aktuell** – alles in Ordnung.
 - **beide gleich und alt** – der Pull selbst hängt. Weiter mit dem Container-Log.
-- **`checkout` neuer als `commit`** – der Pull ist durch, **nodemon hat nicht neu gestartet**.
-  **Das ist nur dann eine Störung, wenn der Commit eine beobachtete Datei angefasst hat**
-  (nodemon läuft mit `--ext js,json`). Am 22.08.2026 gemessen an einem reinen Doku-Merge
+- **`checkout` neuer als `commit`** – der Pull ist durch, **der Neustart ist ausgeblieben**.
+  **Das ist nur dann eine Störung, wenn der Commit geladenen Code angefasst hat.** Seit dem
+  28.08.2026 entscheidet das der Server selbst über `require.cache`; vorher tat es nodemon über
+  `--ext js,json`. Ob der Umbau überhaupt aktiv ist, sagt seither das Feld `selbstNeustart`
+  derselben Antwort – vorher brauchte diese Frage einen SSH-Zugang. Am 22.08.2026 gemessen an einem reinen Doku-Merge
   (`a1ecd8e`, nur `CLAUDE.md`): `commit` blieb `d881b45`, `checkout` sprang auf `a1ecd8e`,
   `uptimeSec` wuchs ruhig weiter – der korrekte und erwartete Zustand. Hier stand vorher
   pauschal „genau der Fall, für den die Doku `docker restart kepler7-backend` empfiehlt";

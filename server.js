@@ -1069,7 +1069,16 @@ function getNotifPrefs(user) {
     spy: p.spy !== false,
     attack: p.attack !== false,
     leaderboard: p.leaderboard !== false,
-    completion: p.completion !== false
+    completion: p.completion !== false,
+    // 'neuspieler' = ein neu angelegtes Konto hat das Spiel zum ersten Mal geoeffnet (22.08.2026,
+    // Auftrag Sascha). Betrifft praktisch nur das Betreiberkonto - aber genau deshalb braucht es
+    // die Kategorie: Sascha hat die Buendelung ausdruecklich abgewaehlt ("immer sofort, eine
+    // Meldung je Neuling"), und /api/register laesst gemessen 1.440 Konten je Tag und IP zu. Das
+    // Postfach haelt 30 Eintraege ohne Bevorzugung; eine Flut verdraengt also feedback-received
+    // und player-reported, also den einzigen Meldungskanal, den der Betreiber im Spiel hat. Der
+    // Schalter ist die Notbremse fuer genau diesen Fall - er ersetzt keine Drosselung, er macht
+    // den Schaden abstellbar.
+    neuspieler: p.neuspieler !== false
   };
 }
 function pushNotificationEvent(userId, type, payload, opts) {
@@ -1173,6 +1182,15 @@ function pushNotificationText(type, payload) {
   if (type === 'referral-redeemed') return { title: 'Einladungs-Bonus erhalten', body: (payload.username || 'Ein Spieler') + ' hat deinen Einladungscode eingelöst - +50 Kredite für dich!' };
   if (type === 'referral-milestone') return { title: 'Werbe-Meilenstein erreicht!', body: 'Schon ' + (payload.count || '?') + ' Spieler geworben! Bonus: +' + (payload.credits || 0) + ' Kredite und +' + (payload.fragments || 0) + ' Modulfragmente.' };
   if (type === 'player-reported') return { title: 'Spieler gemeldet', body: (payload.reporterName||'Jemand') + ' hat ' + (payload.targetName||'einen Spieler') + ' gemeldet: ' + (payload.reason||'') };
+  if (type === 'neuer-spieler') {
+    // 'gesamt' ist die Zahl der Konten, die je einen Spielstand angelegt haben - NICHT die Zahl
+    // der Registrierungen. Der Unterschied ist der ganze Punkt dieser Meldung: Zwischen
+    // Registrierung und erstem Oeffnen liegt die E-Mail-Bestaetigung, und ein Konto, das den Link
+    // nie anklickt, hat nie gespielt. Eine Meldung mit Object.keys(db.users).length haette eine
+    // Zahl genannt, die etwas anderes sagt als der Satz um sie herum.
+    const wieVielte = payload.gesamt ? ' (' + payload.gesamt + '. Kommandant insgesamt)' : '';
+    return { title: 'Neuer Spieler hat angefangen', body: (payload.username || 'Ein Kommandant') + ' hat die Kolonie zum ersten Mal geoeffnet' + wieVielte + '.' };
+  }
   return { title: 'Kolonie Kepler-7', body: 'Es gibt Neuigkeiten.' };
 }
 // Wohin führt ein Ereignis? (02.08.2026, Wunsch: "wenn man auf die Push klickt, das entsprechende
@@ -1198,6 +1216,10 @@ function notificationTarget(type, payload) {
     case 'weltboss-kill': return 'galaxie:kampf';
     case 'weltboss-spawn': return 'galaxie:kampf';
     case 'leaderboard-overtaken': return 'galaxie:rang';
+    // Der Neuling steht in der Bestenliste, sobald er gespeichert hat - das ist die Flaeche, auf
+    // der man ihn wirklich ANSEHEN kann. Ein Ziel 'berichte' waere nur das Postfach selbst, aus
+    // dem der Klick ohnehin kommt.
+    case 'neuer-spieler': return 'galaxie:rang';
     case 'raid-incoming': return 'verteidigung';
     case 'spy-detected': return 'verteidigung';
     case 'attack-received': return 'berichte';
@@ -2374,7 +2396,43 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   }
 
   const newVersion = existingVersion + 1;
+  const istErsterSpielstand = key === SAVE_KEY && existing === undefined;
   db.private[req.userId][key] = { value, version: newVersion };
+  // Ein neuer Spieler hat die Kolonie zum ersten Mal geoeffnet -> Push an das Betreiberkonto
+  // (22.08.2026, Auftrag Sascha: "wenn sich neuer spieler anmeldet und spielt bekommt gamegeeeeek
+  // eine push nachricht"; Ausloesepunkt und Buendelung von ihm gewaehlt).
+  //
+  // WARUM HIER und nicht bei /api/register: Die Registrierung stellt bewusst kein Token aus, und
+  // /api/login lehnt emailVerified === false mit 403 ab. Erst dieser Endpunkt ist also hinter der
+  // E-Mail-Bestaetigung erreichbar. An /api/register gehaengt waere die Meldung mit gemessen 1.440
+  // Aufrufen je Tag und IP flutbar, ohne dass der Absender je eine Mail lesen muesste.
+  //
+  // WARUM ES KEINE ZUSAETZLICHE MARKE BRAUCHT: 'existing === undefined' bei SAVE_KEY ist einmalig
+  // je Konto - gemessen gibt es keinen Pfad, der einen Spielstand LOESCHT (kein 'delete
+  // db.private[...]', kein Ueberschreiben des Kontos mit {}), und kein Fremdzugriff kann dem
+  // ersten Save zuvorkommen: /api/attack bricht mit 404 ab, wenn das Ziel keinen Spielstand hat.
+  // Die Bedingung ist damit selbst die Idempotenz-Marke.
+  //
+  // Und die ehrliche Grenze der Aussage: Der erste Save feuert automatisch beim ersten Boot des
+  // Spiels ('Neue Kolonie gestartet'), also Sekunden nach dem ersten Login. Die Meldung sagt
+  // deshalb "hat die Kolonie zum ersten Mal geoeffnet" und nicht "spielt" - sie behauptet nur,
+  // was sie belegen kann.
+  if (istErsterSpielstand) {
+    // In try/catch UND vor saveDb(): Der Save des Spielers darf an einer Betreiber-Meldung nie
+    // scheitern (er ist der Vorgang, um den es hier geht), und pushNotificationEvent schreibt den
+    // Postfach-Eintrag nur in den Arbeitsspeicher - hinter dem saveDb() eingebaut waere er beim
+    // naechsten Neustart weg. Genau dieser Fehler ist bei der Feedback-Push schon einmal passiert.
+    try {
+      const devUser = db.users['gamegeeeeek'];
+      if (devUser) {
+        const prefs = getNotifPrefs(devUser);
+        if (prefs.enabled && prefs.neuspieler) {
+          const gesamt = Object.keys(db.private).filter(uid => db.private[uid] && db.private[uid][SAVE_KEY] !== undefined).length;
+          pushNotificationEvent(devUser.userId, 'neuer-spieler', { username: req.username, gesamt });
+        }
+      }
+    } catch (e) { console.error('Neuer-Spieler-Push fehlgeschlagen (der Spielstand ist gespeichert):', e.message); }
+  }
   await saveDb();
   res.json({ key, value, shared, version: newVersion });
 });
@@ -4512,7 +4570,8 @@ app.post('/api/notification-prefs', authMiddleware, async (req, res) => {
     spy: b.spy !== false,
     attack: b.attack !== false,
     leaderboard: b.leaderboard !== false,
-    completion: b.completion !== false
+    completion: b.completion !== false,
+    neuspieler: b.neuspieler !== false
   };
   await saveDb();
   res.json(getNotifPrefs(user));

@@ -1454,6 +1454,91 @@ Schritten (Container-Log, `/api/health`-Dreifelder-Vergleich, Rettungsweg-Abschn
 - Wächter: `tests/test_deploy_webhook_http.js` Abschnitt 8 (am echten gescheiterten Deploy
   gemessen, nicht am Quelltext). Gegenprobe beidseitig: am Stand davor fallen genau 8a/8b/8c.
 
+## Push an den Betreiber, wenn ein neuer Spieler anfängt (22.08.2026)
+
+**Auftrag Sascha:** „füge hinzu wenn sich neuer spieler anmeldet und spielt bekommt gamegeeeeek
+eine push nachricht."
+
+Der Auslöser ist der **erste Spielstand-Save** (`existing === undefined` bei `SAVE_KEY` in
+`PUT /api/storage/:key`) — von Sascha gewählt aus drei vorgelegten, gemessenen Möglichkeiten
+(erstes Öffnen / nach ~5 Min Spielzeit / bei echtem Fortschritt). Ebenso von ihm entschieden:
+**eine Meldung je Neuling, sofort, ausdrücklich ohne Bündelung.**
+
+### Warum dieser Punkt trägt — und warum die Registrierung ausschied
+
+Beides gemessen, nicht angenommen:
+
+- **Er liegt hinter der E-Mail-Bestätigung.** `/api/register` stellt bewusst kein Token aus,
+  `/api/login` weist `emailVerified === false` mit 403 ab. An der Registrierung gehängt wäre die
+  Meldung mit **1.440 Konten je Tag und IP** flutbar (`authRateLimit` = 15/15 Min, und es gibt
+  weder Captcha noch E-Mail-Eindeutigkeit), ohne dass der Absender je eine Mail lesen müsste.
+- **`existing === undefined` ist EINMALIG je Konto**, es braucht also keine Idempotenz-Marke:
+  Gemessen gibt es keinen Pfad, der einen Spielstand löscht, und kein Fremdzugriff kann dem ersten
+  Save zuvorkommen — `/api/attack` bricht mit 404 ab (`if (!attackerRaw || !targetRaw)`), wenn das
+  Ziel keinen Spielstand hat. **Die Bedingung ist selbst die Marke.**
+
+**Die ehrliche Grenze der Aussage steht im Meldungstext:** Der erste Save feuert automatisch beim
+ersten Boot des Spiels („Neue Kolonie gestartet"), also Sekunden nach dem ersten Login. Die Meldung
+sagt deshalb „hat die Kolonie zum ersten Mal geöffnet" und **nicht** „spielt".
+
+### Der Abschalter ist die Notbremse, die die abgewählte Bündelung ersetzt
+
+Die Kategorie `neuspieler` gibt es, **weil** Sascha die Bündelung abgelehnt hat. Gemessen hält das
+Postfach **30 Einträge** (`list.unshift` + `slice(0, 30)`) ohne jede Bevorzugung — eine Flut
+verdrängt zuerst `feedback-received` und `player-reported`, also den einzigen Meldungskanal, den
+der Betreiber im Spiel hat. Der Schalter macht den Schaden abstellbar; er ersetzt keine Drosselung.
+
+Damit ist diese Meldung die **erste** Betreiber-Push mit Kategorie: `feedback-received` und
+`player-reported` rufen `pushNotificationEvent` ungefiltert auf. Das war bei zwei seltenen
+Ereignissen vertretbar, bei einem minütlich auslösbaren nicht.
+
+### Die Gesamtzahl zählt Spielstände, nicht Registrierungen
+
+`payload.gesamt` ist `Object.keys(db.private).filter(uid => …[SAVE_KEY] !== undefined).length`.
+`Object.keys(db.users).length` wäre die naheliegende und falsche Zahl: Zwischen Registrierung und
+erstem Öffnen liegt die E-Mail-Bestätigung, ein Konto ohne Klick hat nie gespielt. Die Meldung
+nennte sonst eine Zahl, die etwas anderes sagt als der Satz um sie herum.
+`test_neuspieler_push_http.js` 1c misst das an einer Fixture mit drei Konten und zwei Spielständen.
+
+### Der Wächter und die Falle, die er fangen musste
+
+`tests/test_neuspieler_push_http.js` (Port 3231, 30 Prüfungen, **fünf Gegenproben** — jede mit
+„was fallen MUSS"-Liste, identische Prüflisten in allen sechs Läufen).
+
+**Abschnitt 6 ist der wichtigste, und der erste Entwurf konnte seine Falle prinzipiell nicht
+fangen.** `pushNotificationEvent` schreibt den Postfach-Eintrag nur in den Arbeitsspeicher; steht
+der Aufruf hinter dem `saveDb()` des Endpunkts, ist er beim nächsten Neustart weg — im Quelltext
+sieht das völlig unauffällig aus, und genau dieser Fehler ist bei der Feedback-Push schon einmal
+passiert. Mein Test stoppte den Server dafür mit **SIGTERM** und dem Kommentar, SIGKILL messe
+„etwas anderes". Das war ungemessen und falsch: **Der Graceful Shutdown flusht die db und nimmt
+genau den Eintrag mit, dessen Verlust gemessen werden soll.** Die Gegenprobe hat es als
+`WERKZEUGFEHLER` gemeldet (Frontend-Regel 71) — ohne diese Wache wäre der Test mit einer Lücke
+ausgeliefert worden, die genau den Anlassfall durchlässt.
+
+Seit dem Umbau auf SIGKILL fällt die Sabotage „Aufruf hinter `saveDb()`" an `6a`. Und `6a3` ist die
+Gegenkontrolle: Der **Spielstand** muss den harten Stopp ebenfalls überleben — sonst wäre `6a` auch
+dann grün, wenn schlicht gar nichts gespeichert wurde.
+
+**Die übertragbare Lehre, unabhängig von diesem Endpunkt: Ein Persistenz-Test, der mit einem
+Graceful Shutdown stoppt, kann einen fehlenden `saveDb()`-Aufruf nicht fangen.** Wer misst, ob
+etwas wirklich auf Platte steht, beendet den Prozess hart — sonst misst er die Aufräumroutine
+statt der Schreibstelle.
+
+### Auslieferungsreihenfolge: gleichgültig, aber beide zusammen
+
+Anders als bei den Festungen (Frontend-Regel 60) entsteht keine stille Verschlechterung. Geht das
+**Backend allein** live, schreibt es Postfach-Einträge, die das Spiel mit Glocke und dem Wort
+„Ereignis" zeichnet — sichtbar unvollständig, nicht falsch. Geht das **Frontend allein** live, gibt
+es einen Schalter für eine Kategorie, die nie feuert. Beides ist harmlos; die zwei PRs gehören
+trotzdem zusammen gemerged, damit `test_pushkategorien.js` im Frontend-Repo nicht gegen die halbe
+Wahrheit läuft (es hält Backend-Kategorien und Frontend-Schalter zusammen und fällt bei einer
+Seite allein).
+
+**Belegte Testports sind jetzt 3195–3231** — ein neuer Test nimmt 3232. Und beim Suchen eines
+freien Ports gilt: `grep -hoE "3[12][0-9][0-9]" tests/*.js | sort -un`, nicht ein Muster auf
+`PORT = <zahl>` — das übersieht die Form `Number(process.env.TEST_PORT || 3230)` und meldete
+3230 fälschlich als frei.
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score, seit v8.565.0 auch `WORLDBOSS_ARCHETYPES_PLAYABLE`/`WORLDBOSS_ARCHETYPE_FOLGE` gegen die gleichnamigen Frontend-Tabellen – die FOLGE muss deckungsgleich sein, sonst zeigt die Boss-Karte andere Kampffaktoren an, als `/api/worldboss`-Kämpfe benutzen; Wächter ist `test_inhalt_v8373.js` im Frontend-Repo, 60 Stufen). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

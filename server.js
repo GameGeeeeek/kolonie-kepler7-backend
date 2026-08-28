@@ -9,6 +9,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
 
 const PORT = process.env.PORT || 3001;
 const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'db.json');
@@ -8655,6 +8656,28 @@ function deployAufraeumen(repoName, dir) {
         catch (e) { bericht.push(datei + ' nicht zuruecksetzbar: ' + e.message); }
       } else {
         bericht.push(datei + ' ist eine FREMDE Aenderung (Blob ' + String(ist).slice(0,7) + ', Ursprung ' + String(soll).slice(0,7) + ') - bleibt liegen, der Pull wird daran scheitern');
+      }
+    }
+
+    // Der dritte Fall, gemessen am 28.08.2026: Ein abgeschnittener Pull laesst auch DATEIEN
+    // liegen, die der eingehende Stand erst ANLEGT - sie sind unversioniert und fallen durch
+    // beide Wachen oben. git bricht an ihnen ab ("untracked working tree files would be
+    // overwritten by merge"), und die Heilung half deshalb ausgerechnet bei jedem Commit nicht,
+    // der eine Datei hinzufuegt - bei diesem Projekt fast jedem, weil zu jeder Etappe ein neuer
+    // Waechter gehoert. Weggelegt wird, nie geloescht, und nur mit demselben Beweis wie oben:
+    // der Pfad muss im eingehenden Stand vorkommen. Alles andere ist eine fremde Datei.
+    const unversioniert = git('ls-files --others --exclude-standard -z').split('\0').filter(Boolean);
+    for (const datei of unversioniert) {
+      let soll = null;
+      try { soll = git('rev-parse FETCH_HEAD:"' + datei + '"'); } catch (e) { soll = null; }
+      if (!soll) continue; // der eingehende Stand kennt sie nicht - der Pull stoert sich nicht an ihr
+      const ziel = path.join(os.tmpdir(), 'kepler7-deploy-beiseite', String(Date.now()), datei);
+      try {
+        fs.mkdirSync(path.dirname(ziel), { recursive: true });
+        fs.renameSync(path.join(dir, datei), ziel);
+        bericht.push('unversionierte Datei beiseitegelegt: ' + datei + ' -> ' + ziel + ' (der eingehende Stand legt sie an)');
+      } catch (e) {
+        bericht.push(datei + ' nicht beiseitezulegen: ' + e.message + ' - der Pull wird daran scheitern');
       }
     }
   } catch (e) {

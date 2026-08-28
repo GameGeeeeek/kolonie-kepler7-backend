@@ -110,6 +110,18 @@ function setzeKopf(hash) {
   check('7b-bau: git hash-object laesst sich ausfuehren', vonGit !== null, { datei: SERVERDATEI, fehler: gitFehler });
   check('7c: blob entspricht dem git-Blob der gestarteten Datei', typeof a.body?.blob === 'string' && a.body.blob === vonGit, { gemeldet: a.body?.blob, vonGit, datei: SERVERDATEI });
 
+  // 8: selbstNeustart - ob der Container umgebaut ist, war von aussen nicht erkennbar; man
+  // brauchte einen SSH-Zugang fuer `docker inspect`. Geprueft wird gegen die Umgebung, die DIESER
+  // Lauf dem Server mitgegeben hat (Test und Server starten im selben Bash-Aufruf) - damit ist die
+  // Zeile in BEIDE Richtungen aussagekraeftig: Ein Lauf mit gesetzter Variable muss true melden,
+  // einer ohne false. Eine Pruefung auf "das Feld ist da" allein waere bei einem fest verdrahteten
+  // Wert genauso gruen.
+  check('8a: das Feld selbstNeustart ist da und ist ein Boolean',
+    typeof a.body?.selbstNeustart === 'boolean', { selbstNeustart: a.body?.selbstNeustart });
+  check('8b: und es spiegelt die Umgebung des laufenden Servers',
+    a.body?.selbstNeustart === (process.env.DEPLOY_SELBST_NEUSTART === '1'),
+    { gemeldet: a.body?.selbstNeustart, umgebung: process.env.DEPLOY_SELBST_NEUSTART || '(nicht gesetzt)' });
+
   // 3: der Plattenstand waechst unter dem laufenden Prozess weiter
   const NEUER = '0f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c';
   setzeKopf(NEUER);

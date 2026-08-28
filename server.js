@@ -4134,7 +4134,15 @@ app.get('/api/health', (req, res) => res.json({
   commit: LAUFENDER_COMMIT,
   checkout: gitKopfJetzt(),
   blob: LAUFENDE_DATEI,
-  uptimeSec: Math.round(process.uptime())
+  uptimeSec: Math.round(process.uptime()),
+  // Ob der Container umgebaut ist (nodemon raus, Selbst-Neustart an), war von aussen bisher gar
+  // nicht erkennbar - man musste `docker inspect` fahren, also einen SSH-Zugang haben. Genau
+  // diese Luecke hatten `commit` und `blob` vorher auch. Der Wert ist ein blankes Ja/Nein und
+  // verraet nichts, was nicht ohnehin im oeffentlichen Repo steht.
+  // Der Zugriff auf die weiter unten definierte Konstante ist unkritisch: Dieser Rumpf laeuft
+  // erst zur Anfragezeit, also lange nach der Modulauswertung (anders als ein Array-Literal, das
+  // beim LADEN ausgewertet wird - die Falle, die den Serverstart schon einmal gekostet hat).
+  selbstNeustart: DEPLOY_SELBST_NEUSTART
 }));
 
 // --- Andere Spieler in einem Sternensystem (für die Sektorkarte) ---

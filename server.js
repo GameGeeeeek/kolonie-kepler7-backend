@@ -4923,7 +4923,7 @@ function loadOrInitGalaxy() {
   // mit A2_SPAWN_AKTIV. Liegt in db.galaxy, weil das ueber PUT /api/storage gar nicht schreibbar ist
   // (kein offener Shared-Storage) und galaxyFuerClient() alles aus db.galaxy automatisch lesend
   // an den Client schickt.
-  if (!Array.isArray(db.galaxy.a2Ziele)) db.galaxy.a2Ziele = [];
+  if (!Array.isArray(db.galaxy.wrackKonvois)) db.galaxy.wrackKonvois = [];
   if (db.galaxy.activeWar === undefined) db.galaxy.activeWar = null;
   if (!db.galaxy.collapsedSystems) db.galaxy.collapsedSystems = {};
   if (db.galaxy.activeWormhole === undefined) db.galaxy.activeWormhole = null;
@@ -10337,10 +10337,10 @@ function nestTick(g) {
      1. EXKLUSIVE BEUTE ueber das Herkunfts-Schloss (quelle:'konvoi') - Task 2, hier noch nicht.
      2. DAS ENTKOMMEN - der Kern-Reiz. Das Nest kann durchs Ignorieren NICHT verschwinden
         ('weitergezogen' heisst dort 'ins Nachbarsystem, weiter angreifbar'). Ein A2-Ziel dagegen
-        wird bei erreichter Lebensdauer GANZ aus db.galaxy.a2Ziele entfernt (Zweig 1 des Ticks).
+        wird bei erreichter Lebensdauer GANZ aus db.galaxy.wrackKonvois entfernt (Zweig 1 des Ticks).
         Der Endpunkt braucht dafuer einen DRITTEN verpasst-Grund 'entkommen' - Task 2.
 
-   Ablageort ist db.galaxy.a2Ziele (Feld-Init in loadOrInitGalaxy): ueber PUT /api/storage gar
+   Ablageort ist db.galaxy.wrackKonvois (Feld-Init in loadOrInitGalaxy): ueber PUT /api/storage gar
    nicht schreibbar, und galaxyFuerClient() schickt alles aus db.galaxy automatisch lesend an den
    Client. Damit ist die ganze Fehlerklasse 'offener Shared-Storage' umgangen (kein
    checkKeyPermission noetig), und die Abklingzeit liegt AN DAS ZIEL (ziel.schlaege[uid]), nie im
@@ -10381,8 +10381,11 @@ const A2_MAX = 2;                        // galaxieweit gleichzeitig
 const A2_VERLUST = 0.08;                 // Grundverlust des Angreifers je Schlag
 
 function a2Liste(g) {
-  if (!Array.isArray(g.a2Ziele)) g.a2Ziele = [];
-  return g.a2Ziele;
+  // Client-Feldname bewusst als Spielbegriff (wrackKonvois), nicht als Etappencode: galaxyFuerClient
+  // schickt db.galaxy roh an den Client, das Feld IST damit Teil des Client-Vertrags (wie alienNester).
+  // Die internen Helfer (A2Tick, a2Neu, a2Liste, A2_*) behalten den Etappen-Prefix - sie sind intern.
+  if (!Array.isArray(g.wrackKonvois)) g.wrackKonvois = [];
+  return g.wrackKonvois;
 }
 /* Eine kurze Spur der zuletzt verschwundenen Ziele (id -> grund), gedeckelt. Sie hat EINEN Zweck:
    Ist das Ziel bei der Ankunft weg, unterscheidet der Endpunkt damit "gefallen" von "entkommen" -
@@ -10428,7 +10431,12 @@ function a2Neu(g, sysId, now) {
     lp: A2_LP, lpMax: A2_LP,
     seit: now,
     naechsteWanderung: now + A2_WANDER_MS,
-    beitraege: {}, schlaege: {}
+    beitraege: {}, schlaege: {},
+    // Die BEUTE reist im Objekt mit (Konzept Abschnitt 10): das Frontend zeigt die Vorschau daraus,
+    // statt eine zweite, driftende Kopie der Zahlen zu fuehren. A2 ist einstufig - deshalb genuegt
+    // EIN flacher Deskriptor je Konvoi (keine Stufentabelle wie beim Nest, keine Paritaetspflicht).
+    // Die Werte sind der VOLLE Konvoi; jeder Angreifer bekommt seinen Schadensanteil davon.
+    beute: { essenz: A2_ESSENZ, kampfpunkte: A2_KAMPFPUNKTE, xp: A2_XP, credits: A2_CREDITS, modulChance: A2_MODUL_CHANCE }
   };
   a2Liste(g).push(ziel);
   return ziel;

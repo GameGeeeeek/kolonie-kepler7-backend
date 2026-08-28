@@ -4,7 +4,7 @@
 //   KEPLER_A2_SABOTAGE=<name> node tests/test_A2_http.js     (Gegenprobe, siehe unten)
 //
 // Konzept: docs/wandernde-beute-ziele-konzept.md (Frontend-Repo). A2 ist das Gegenstueck zum
-// Alien-Nest: Es lebt in db.galaxy.a2Ziele, driftet und ENTKOMMT (die eine Mechanik, die es vom
+// Alien-Nest: Es lebt in db.galaxy.wrackKonvois, driftet und ENTKOMMT (die eine Mechanik, die es vom
 // Nest strukturell unterscheidet), und seine Belohnung ist "alle 3" (Sternenessenz + Standort-Modul
 // + Kampf-Modul, Entscheidung Sascha). Gemessen wird an einem echten Server mit echter DB - die
 // entscheidenden Eigenschaften haengen an db.galaxy und lassen sich durch Lesen des Quelltextes
@@ -89,7 +89,7 @@ function grunddb() {
     shared: {}, resetTokens: {},
     galaxy: { npcEmpireStrength: 1, marketTrend: 1, collapsedSystems: {}, controlledSystems: {},
       news: [], activeWar: null, activeWormhole: null, lastTick: Date.now(), factions: {},
-      unlockedAlienRaces: [], alienNester: [], alienPause: {}, a2Ziele: [], a2Verlauf: [] }
+      unlockedAlienRaces: [], alienNester: [], alienPause: {}, wrackKonvois: [], a2Verlauf: [] }
   };
 }
 
@@ -201,7 +201,7 @@ const a2mission = (id, zielId, sys) => ({
   // ---- 1) Ein Schlag kommt an -----------------------------------------------------------------
   const SYS1 = 'testsys-a';
   await aendereDb(d => {
-    d.galaxy.a2Ziele = [zielObj('z1', SYS1, 40000, 40000)];
+    d.galaxy.wrackKonvois = [zielObj('z1', SYS1, 40000, 40000)];
     const sv = liesSave(d, ANNA);
     sv.fleet.missions = [a2mission('m1', 'z1', SYS1)];
     schreibSave(d, ANNA, sv);
@@ -215,7 +215,7 @@ const a2mission = (id, zielId, sys) => ({
   {
     await stoppeServer();
     const d = liesDb();
-    const z = (d.galaxy.a2Ziele || []).find(x => x.id === 'z1');
+    const z = (d.galaxy.wrackKonvois || []).find(x => x.id === 'z1');
     check('1e: der Beitrag steht in db.galaxy, nicht im Spielstand',
       !!z && !!z.beitraege && (z.beitraege[ANNA] || {}).schaden > 0, { beitraege: z && z.beitraege });
     s = await starteServer(); tokA = await s.anmelden('anna'); tokB = await s.anmelden('ben');
@@ -245,7 +245,7 @@ const a2mission = (id, zielId, sys) => ({
   // ---- 3) Gezaehlt wird, was ANGEKOMMEN ist ---------------------------------------------------
   const SYS2 = 'testsys-b';
   await aendereDb(d => {
-    d.galaxy.a2Ziele = [zielObj('z3', SYS2, 500, 40000)];   // fast tot
+    d.galaxy.wrackKonvois = [zielObj('z3', SYS2, 500, 40000)];   // fast tot
     const sv = liesSave(d, BEN);
     sv.fleet.missions = [a2mission('m3b', 'z3', SYS2)];
     schreibSave(d, BEN, sv);
@@ -260,7 +260,7 @@ const a2mission = (id, zielId, sys) => ({
   // ---- 4) Der Fall zahlt anteilig an ALLE, type:'wrackkonvoi', Sternenessenz -------------------
   const SYS4 = 'testsys-c';
   await aendereDb(d => {
-    d.galaxy.a2Ziele = [zielObj('z4', SYS4, 40000, 40000)];
+    d.galaxy.wrackKonvois = [zielObj('z4', SYS4, 40000, 40000)];
     for (const [uid, id] of [[ANNA, 'm4a'], [BEN, 'm4b']]) {
       const sv = liesSave(d, uid);
       sv.fleet.missions = [a2mission(id, 'z4', SYS4)];
@@ -270,7 +270,7 @@ const a2mission = (id, zielId, sys) => ({
   });
   await schlag(tokA, 'z4', 'm4a');
   await aendereDb(d => {
-    const z = d.galaxy.a2Ziele.find(x => x.id === 'z4');
+    const z = d.galaxy.wrackKonvois.find(x => x.id === 'z4');
     if (z) z.lp = 1;                       // Ben führt den letzten Schlag
   });
   const r4 = await schlag(tokB, 'z4', 'm4b');
@@ -292,15 +292,15 @@ const a2mission = (id, zielId, sys) => ({
       Math.abs(((rA[0] || {}).anteil || 0) + ((rB[0] || {}).anteil || 0) - 1) < 0.01,
       { anna: (rA[0] || {}).anteil, ben: (rB[0] || {}).anteil });
     check('4e: das Ziel ist aus db.galaxy verschwunden',
-      !(d.galaxy.a2Ziele || []).some(x => x.id === 'z4'),
-      { ziele: (d.galaxy.a2Ziele || []).map(x => x.id) });
+      !(d.galaxy.wrackKonvois || []).some(x => x.id === 'z4'),
+      { ziele: (d.galaxy.wrackKonvois || []).map(x => x.id) });
     s = await starteServer(); tokA = await s.anmelden('anna'); tokB = await s.anmelden('ben');
   }
 
   // ---- 5) Die drei verpasst-Gruende -----------------------------------------------------------
   // 5a: weitergezogen - die Mission zeigt auf das ALTE System, das Ziel steht woanders.
   await aendereDb(d => {
-    d.galaxy.a2Ziele = [zielObj('z5', 'jetzt-hier', 40000, 40000)];
+    d.galaxy.wrackKonvois = [zielObj('z5', 'jetzt-hier', 40000, 40000)];
     const sv = liesSave(d, ANNA);
     sv.fleet.missions = [a2mission('m5', 'z5', 'war-dort')];
     schreibSave(d, ANNA, sv);
@@ -311,7 +311,7 @@ const a2mission = (id, zielId, sys) => ({
     { grund: r5a.body.grund, verluste: r5a.body.eigeneVerluste });
   // 5b: gefallen - das Ziel wurde gestellt (nicht mehr in der Liste), Verlaufsgrund 'gefallen'.
   await aendereDb(d => {
-    d.galaxy.a2Ziele = [];
+    d.galaxy.wrackKonvois = [];
     d.galaxy.a2Verlauf = [{ id: 'z6', grund: 'gefallen', zeit: Date.now() }];
     const sv = liesSave(d, ANNA);
     sv.fleet.missions = [a2mission('m6', 'z6', 'irgendwo')];
@@ -325,7 +325,7 @@ const a2mission = (id, zielId, sys) => ({
   await aendereDb(d => {
     const z = zielObj('z7', 'testsys-e', 40000, 40000);
     z.seit = Date.now() - 19 * 3600 * 1000;   // aelter als A2_LEBENSDAUER_MS (18 h)
-    d.galaxy.a2Ziele = [z];
+    d.galaxy.wrackKonvois = [z];
     d.galaxy.a2Verlauf = [];
     const sv = liesSave(d, ANNA);
     sv.fleet.missions = [a2mission('m7', 'z7', 'testsys-e')];
@@ -336,7 +336,7 @@ const a2mission = (id, zielId, sys) => ({
     await stoppeServer();
     const d = liesDb();
     check('5d: der Tick hat das überalterte Ziel GANZ entfernt (nicht verschoben)',
-      !(d.galaxy.a2Ziele || []).some(x => x.id === 'z7'), { ziele: (d.galaxy.a2Ziele || []).map(x => x.id) });
+      !(d.galaxy.wrackKonvois || []).some(x => x.id === 'z7'), { ziele: (d.galaxy.wrackKonvois || []).map(x => x.id) });
     check('5d2: und einen Verlaufs-Vermerk "entkommen" hinterlassen',
       (d.galaxy.a2Verlauf || []).some(v => v.id === 'z7' && v.grund === 'entkommen'),
       { verlauf: d.galaxy.a2Verlauf });
@@ -350,7 +350,7 @@ const a2mission = (id, zielId, sys) => ({
   // ---- 6) Der Server schreibt den Spielstand des Angreifers NICHT -----------------------------
   const SYS6 = 'testsys-f';
   await aendereDb(d => {
-    d.galaxy.a2Ziele = [zielObj('z8', SYS6, 40000, 40000)];
+    d.galaxy.wrackKonvois = [zielObj('z8', SYS6, 40000, 40000)];
     const sv = liesSave(d, ANNA);
     sv.fleet.missions = [a2mission('m8', 'z8', SYS6)];
     sv.__marke = 'unberuehrt';
@@ -373,15 +373,15 @@ const a2mission = (id, zielId, sys) => ({
     const A2_MAX = parseInt((roh.match(/const A2_MAX = (\d+);/) || [])[1], 10);
     check('7-anker: A2_MAX steht im Quelltext', A2_MAX > 0, { A2_MAX });
     await aendereDb(d => {
-      d.galaxy.a2Ziele = [];
-      for (let i = 0; i < A2_MAX; i++) d.galaxy.a2Ziele.push(zielObj('cap' + i, 'cap-sys-' + i, 40000, 40000));
+      d.galaxy.wrackKonvois = [];
+      for (let i = 0; i < A2_MAX; i++) d.galaxy.wrackKonvois.push(zielObj('cap' + i, 'cap-sys-' + i, 40000, 40000));
       d.galaxy.a2NaechsterWurf = 0;             // der Entstehungs-Zweig ist faellig
     });
     // Der Start hat den galaxyTick gefahren; der Deckel muss den Entstehungs-Versuch abgelehnt haben.
     await stoppeServer();
     const d = liesDb();
     check('7a: der Tick lässt die Zahl NICHT über A2_MAX steigen',
-      (d.galaxy.a2Ziele || []).length === A2_MAX, { anzahl: (d.galaxy.a2Ziele || []).length, A2_MAX });
+      (d.galaxy.wrackKonvois || []).length === A2_MAX, { anzahl: (d.galaxy.wrackKonvois || []).length, A2_MAX });
     s = await starteServer(); tokA = await s.anmelden('anna'); tokB = await s.anmelden('ben');
   }
 
@@ -395,7 +395,7 @@ const a2mission = (id, zielId, sys) => ({
     const RUNDEN = 30;
     for (let i = 0; i < RUNDEN; i++) {
       await aendereDb(d => {
-        d.galaxy.a2Ziele = [zielObj('zm' + i, 'm-sys', 1, 40000)];   // ein Schlag faellt es
+        d.galaxy.wrackKonvois = [zielObj('zm' + i, 'm-sys', 1, 40000)];   // ein Schlag faellt es
         const sv = liesSave(d, ANNA);
         sv.fleet.missions = [a2mission('mm' + i, 'zm' + i, 'm-sys')];
         schreibSave(d, ANNA, sv);

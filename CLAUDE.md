@@ -2196,6 +2196,132 @@ git pull origin master                     # Fast-forward, 1 Datei
 curl -s https://gamegeeeeek.de/api/health  # commit/checkout d881b45, uptimeSec 11
 ```
 
+### AUSFALL NR. 12, DIE URSACHE (28.08.2026) – nodemon killt den eigenen Pull
+
+*Ergänzt den Abschnitt „AUSFALL NR. 12 … der Rest lag im ARBEITSBAUM, nicht im Index" weiter oben:
+Dort steht, WIE der Zustand aussah (die Spalte: Arbeitsbaum geändert, Index unberührt) und wie er
+repariert wurde. Hier steht, WOHER er kommt — und was seither dagegen gebaut ist. Beide Hälften
+entstanden am selben Tag in zwei Sitzungen; die zweite hat die erste beim Rebase vorgefunden.*
+
+Sechs Ausfälle (Nr. 6, 7, 8, 9, 11, 12) zeigten denselben Fingerabdruck – der Arbeitsbaum trug den
+neuen Stand, `.git/HEAD` den alten, eine `*.lock` blieb liegen –, und die Ursache war jedes Mal
+Vermutung. Bei Nr. 12 stand sie im Container-Log, Zeile für Zeile:
+
+```
+Deploy-Webhook erfolgreich für kolonie-kepler7-backend: (keine Änderungen)   <- Branch-Push
+[nodemon] restarting due to changes...            <- der Merge-Pull hat server.js geschrieben
+SIGUSR2 (nodemon-Neustart) - flushe DB...
+[nodemon] still waiting for 1 sub-process to finish...   <- DAS ist der laufende git-Prozess
+Deploy-Webhook Fehler für kolonie-kepler7-backend: Command failed: cd /app && git pull -q && (chown -R 1000:1000 .git || true)
+Deploy-Alarm für kolonie-kepler7-backend: Command failed: ...
+Deploy-Alarm: DEPLOY_ALARM_MAIL ist nicht gesetzt - keine Mail verschickt.
+[nodemon] starting `node server.js`
+```
+
+**Der Deploy sabotiert sich über seinen EIGENEN Neustart.** `git pull` schreibt `server.js`,
+nodemon sieht die Änderung sofort, wartet kurz auf den Subprozess (`still waiting for 1
+sub-process to finish`) und beendet ihn – **bevor** git den Ref aktualisiert hat. Zurück bleiben
+`.git/index.lock` und ein `HEAD` auf dem alten Commit; ab da bricht jeder weitere Pull mit
+„local changes would be overwritten" ab.
+
+**Damit ist auch erklärt, warum die Sperrdatei aus #147 nicht half:** Sie serialisiert zwei
+WEBHOOKS gegeneinander. Hier gab es nur einen – der zweite Schreiber war der eigene Prozess-
+neustart. Die Zeitstempel stützen es unabhängig: Sperre 22.08. 20:23, Prozessstart (aus
+`uptimeSec` zurückgerechnet) 20:26.
+
+**Cron ist bei diesem Ausfall nachweislich unschuldig**, alle fünf Ablagen gemessen: Nutzer-crontab
+leer, root-crontab nur die certbot-Erneuerung, `/etc/crontab` Debian-Standard, `/etc/cron.d/` nur
+certbot und e2scrub, Systemtimer nur Standard. `deploy/autodeploy.log` lag mit Zeitstempel
+18.08. 10:50 da, also zehn Tage tot. Die Bereinigung vom 18.08.2026 hält.
+
+**Der zweite Befund erklärt die Dauer: `DEPLOY_ALARM_MAIL` ist am Container nicht gesetzt.** Der
+Alarm aus #166 hat korrekt gefeuert UND seinen eigenen Ausfall benannt (das ist die fail-open-
+Entscheidung, wie gebaut) – nur ging keine Mail raus. Der Ausfall lief deshalb **fünf Tage**
+unbemerkt, obwohl das Werkzeug dagegen längst existiert. Eine Env-Änderung verlangt ein
+Neuerzeugen des Containers; der Webhook-Pull allein reicht dafür nicht.
+
+**GEBAUT (28.08.2026, #170): die Selbstheilung.** `deployAufraeumen(repoName, dir)` läuft in
+`starteDeploy` **hinter der Sperre und vor dem Pull** — davor könnte sie einem parallel laufenden
+Deploy ins Verzeichnis greifen, danach wäre sie wirkungslos. Sie räumt genau zwei Dinge weg, beide
+nur unter Beweis:
+
+1. **Eine verwaiste `*.lock`** — aber nur, wenn KEIN git-Prozess lebt und die Sperre älter ist, als
+   ein Deploy dauern darf (`DEPLOY_TIMEOUT_MS + 60 s`).
+2. **Eine geänderte Datei, deren Blob NACHWEISLICH schon im Ursprung steht** (`git hash-object`
+   gegen `git rev-parse FETCH_HEAD:<datei>`), also genau der halb angewendete Pull. Geprüft wird
+   **je Datei einzeln**.
+
+**Alles andere bleibt liegen und wird benannt.** Eine Handänderung an `server.js` auf dem Pi hat
+den Deploy am 18.08.2026 schon einmal blockiert; sie automatisch wegzuwerfen wäre Datenverlust mit
+gutem Gewissen — die teurere Fehlerrichtung als ein stehender Deploy. Der Bericht sagt dann
+wörtlich „ist eine FREMDE Aenderung … bleibt liegen, der Pull wird daran scheitern".
+
+**Der Zombie-Test ist der Kern der ersten Wache.** `lebenderGitProzess()` liest `/proc/<pid>/stat`
+und wertet **Feld 3, den Zustand**, mit aus: Der Container sammelt verwaiste `[git] <defunct>`
+(gemessen mehrere hundert, der älteste zweieinhalb Tage), und `pgrep -x git` findet einen Zombie
+über den Prozessnamen. Wer eine Leiche für einen laufenden Pull hält, räumt nie auf. Der `comm`
+wird ab der **schließenden** Klammer zerlegt, nie durch Splitten des ganzen Strings — ein
+Prozessname darf Leerzeichen enthalten.
+
+**`DEPLOY_TARGETS` führt sein Verzeichnis seither benannt** (`{ dir, command }`) statt es nur im
+Befehlsstring zu tragen. Der `command` bleibt unverändert fest verdrahtet — er ist die
+Sicherheitsentscheidung, nichts daran kommt je aus einem Request. Einen Pfad aus dem String zu
+parsen wäre die Sorte Ableitung, die beim nächsten Umbau still danebengreift.
+
+Wächter: `tests/test_deploy_selbstheilung.js` (17 Prüfungen). Er **führt** die Funktion samt ihrer
+Konstanten aus `server.js` geschnitten gegen ein echtes Wegwerf-Repo-Paar in `/tmp` aus, in dem der
+Ausfall-Fingerabdruck von Hand hergestellt wird — ein Test, der bei einer Aufräumfunktion nur nach
+Zeichenketten sucht, belegt gar nichts. Die entscheidende Zeile ist `2b`: **der Pull läuft danach
+durch.** Drei Wirkungs-Gegenproben, jede mit ihrer Soll-Liste, alle mit 17 gelaufenen Prüfungen:
+
+| Sabotage | fällt | Beleg |
+|---|---|---|
+| Alters-Wache raus | `1b` | eine frische Sperre wird entfernt |
+| Blob-Vergleich raus | `3`, `3b` | eine fremde Änderung würde weggeworfen |
+| git-Prozess-Wache raus | `4`, `4b` | `{"lebenderGit":true,"sperreNochDa":false}` |
+
+### Drei Werkzeugfehler beim Bau dieses Tests, alle über den Einzelfall hinaus
+
+1. **Ein `//`-Zeilenkommentar, der `/*` enthält, sprengt jeden naiven Blockkommentar-Ersetzer.**
+   `server.js` hat davon mehrere („NGINX leitet /api/* per Reverse-Proxy", „*.js/*.json-Platzhalter").
+   Wer zuerst nach Blöcken sucht, öffnet dort ein Fenster bis zum nächsten `*/` — gemessen **77.612**
+   bzw. **20.018 Zeichen** — und leert echten Code mit; der Test fand seine eigenen Funktionen nicht
+   mehr. **Zuerst die ZEILEN-Kommentare leeren, dann die Blöcke.** Das ist die Familie „Naive Regex
+   über die ganze Datei", nur mit besonders großem Radius.
+2. **Eine Bausteinliste aus Namen veraltet beim nächsten Umbau** — der erste Entwurf gab
+   `DEPLOY_TIMEOUT_MS` mit und starb beim AUFRUF an `GIT_LOCK_STALE_MS`. Die Konstanten werden
+   seither **gesammelt** (jeder GROSS_-Bezeichner in den geschnittenen Blöcken, transitiv) und **in
+   der Reihenfolge der DATEI** eingesetzt: Nach Fund-Reihenfolge sortiert wirft eine abgeleitete
+   Konstante „Cannot access … before initialization". Und jeder Messaufruf ist gefasst und meldet
+   seinen Fehlschlag als eigene Prüfung (`0-lauf`) — ein `try/catch` um den Aufbau allein genügt
+   nicht.
+3. **Ein zu kurzlebiger Hilfsprozess machte zwei Prüfungen trivial grün.** Der lebende git-Prozess
+   war zuerst `git --paginate help -a` und endete, bevor gemessen wurde; `4`/`4b` hingen an einer
+   `lief ? … : true`-Bedingung und waren damit ohne Aussage. Jetzt blockiert `git hash-object
+   --stdin` zuverlässig, und ohne lebenden Prozess fallen `4`/`4b` **mit**.
+
+**Und ein Werkzeugfehler beim Aufräumen danach, zum zweiten Mal derselbe:** Ein `pkill -f "PORT=3223"`
+traf die eigene Shell (Exit 144) — wörtlich Arbeitsregel 15, die seit dem 06.08.2026 samt Exit-Code
+in diesem Dokument steht. Prozesse werden über `ps` identifiziert und einzeln per PID beendet.
+
+**Was NICHT gebaut ist, und warum es weiterhin lohnt:**
+
+1. **Das Fenster verkleinern (Infrastruktur):** `nodemon --delay 5` im Startbefehl. nodemon wartet
+   dann fünf Sekunden nach der letzten Dateiänderung, und der Pull hat nach dem Schreiben von
+   `server.js` nur noch Index und Ref zu setzen. Das verkleinert das Fenster, schließt es nicht.
+2. **Selbstheilung (Code):** Der Webhook erkennt beim NÄCHSTEN Anlauf eine verwaiste Sperre (älter
+   als `DEPLOY_TIMEOUT_MS`, kein lebender git-Prozess) und räumt sie weg, bevor er pullt – dazu
+   ein `git checkout HEAD -- .`, wenn der Arbeitsbaum-Blob nachweislich einem der eingehenden
+   Commits entspricht. Erst das macht den Deploy wieder selbstständig, statt dass er bis zum
+   nächsten SSH-Zugang steht.
+
+Der Fingerabdruck ist bei allen sechs Ausfällen derselbe gewesen – die Selbstheilung würde also
+rückwirkend jeden davon abgefangen haben. **Wer sie baut, prüft die Zombie-Falle mit:** Der
+Container sammelt `[git] <defunct>`, und `pgrep -x git` findet einen Zombie über den Prozessnamen,
+während `ps … | awk '$4=="git"'` ihn nicht findet. Ein „lebt noch ein git?" muss den Zustand
+mitlesen (`$2 !~ /Z/`), sonst hält die Selbstheilung eine Leiche für einen laufenden Pull und
+räumt nie auf.
+
 ### AUSFALL NR. 11 (22.08.2026) – der Blob hat ihn WÄHREND des Ausfalls gezeigt
 
 Der Merge von #165 lief an, und `/api/health` meldete über 14 Minuten unverändert:

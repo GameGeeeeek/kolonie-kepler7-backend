@@ -8365,7 +8365,7 @@ app.post('/api/randkriege/lager', authMiddleware, async (req, res) => {
 // (DEPLOY_TARGETS) und werden NIEMALS aus dem Request-Body übernommen - nur der Repo-NAME aus dem
 // GitHub-Payload entscheidet, welcher der zwei festen Befehle läuft. Das verhindert Command-
 // Injection über einen manipulierten Payload, selbst wenn die Signaturprüfung umgangen würde.
-const { exec } = require('child_process');
+const { exec, execSync } = require('child_process');
 const DEPLOY_WEBHOOK_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
 // Die Kopierliste war bis zum 05.08.2026 von Hand gepflegt - und genau deshalb veraltet. Gemessen
 // am echten Ausgabeverzeichnis (`docker exec kepler7-nginx ls -la /usr/share/nginx/html/`) lagen
@@ -8389,8 +8389,13 @@ const DEPLOY_WEBHOOK_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
 // einzeln abgesichert - `cp` bricht mit Fehlercode ab, sobald EINE Quelle fehlt, und ohne die
 // Trennung haette ein fehlendes Bild die Auslieferung von robots.txt und manifest.json verhindert.
 const DEPLOY_WEB_COPY = 'cp -f *.html /deploy/web/ && (cp -f *.png /deploy/web/ || true) && (cp -f robots.txt sitemap.xml /deploy/web/ || true) && (cp -f manifest.json service-worker.js /deploy/web/ || true)';
+// Das VERZEICHNIS steht seit der Selbstheilung (28.08.2026) benannt daneben, statt nur im
+// Befehlsstring: deployAufraeumen() arbeitet darin, und ein aus dem String geparster Pfad waere
+// genau die Sorte Ableitung, die beim naechsten Umbau still danebengreift. Der `command` bleibt
+// unveraendert fest verdrahtet - er ist die Sicherheitsentscheidung, nichts daran kommt je aus
+// einem Request.
 const DEPLOY_TARGETS = {
-  'kolonie-kepler7': 'cd /deploy/kolonie-kepler7 && git pull -q && ' + DEPLOY_WEB_COPY,
+  'kolonie-kepler7': { dir: '/deploy/kolonie-kepler7', command: 'cd /deploy/kolonie-kepler7 && git pull -q && ' + DEPLOY_WEB_COPY },
   // `chown` nach dem Pull, weil dieser Container als root laeuft und /app per Bind-Mount
   // /DATA/kepler7/backend auf dem Host IST. Ohne die Zeile gehoeren die von hier erzeugten Objekte
   // in .git/objects root - und Sascha kann in seinem eigenen Repo kein git mehr ausfuehren
@@ -8399,7 +8404,7 @@ const DEPLOY_TARGETS = {
   // abgebrochener Webhook-Pull hinterliess Sperrdateien und einen halb angewendeten, vorgemerkten
   // Stand, den niemand mehr aufraeumen konnte. uid/gid 1000 ist Sascha (am Ausgabeverzeichnis
   // verifiziert). Numerisch und nicht per Name, weil der Container den Benutzer nicht kennt.
-  'kolonie-kepler7-backend': 'cd /app && git pull -q && (chown -R 1000:1000 .git || true)'
+  'kolonie-kepler7-backend': { dir: '/app', command: 'cd /app && git pull -q && (chown -R 1000:1000 .git || true)' }
 };
 // Der Deploy-Timeout darf NICHT knapp sein, und das ist keine Geschmacksfrage, sondern gemessen
 // (18.08.2026, Nachbau in Node): exec() schickt beim Ablauf SIGTERM an die SHELL - nicht an das
@@ -8497,7 +8502,108 @@ function deployAlarm(repoName, betreff, detail) {
     .then(() => console.log('Deploy-Alarm-Mail für ' + repoName + ' verschickt.'))
     .catch((e) => console.error('Deploy-Alarm-Mail für ' + repoName + ' fehlgeschlagen:', e.message));
 }
-function starteDeploy(repoName, command) {
+// ===== Selbstheilung vor dem Pull (28.08.2026, Auftrag Sascha) ===============================
+// ZWOELF Deploy-Ausfaelle, und sechs davon (Nr. 6, 7, 8, 9, 11, 12) hatten denselben
+// Fingerabdruck: Arbeitsbaum neu, .git/HEAD alt, eine *.lock liegengeblieben. Ab da bricht JEDER
+// weitere Pull ab, und der Deploy steht bis zum naechsten SSH-Zugang - beim schlimmsten Mal
+// 49 Stunden, beim letzten fuenf Tage.
+//
+// DIE URSACHE IST SEIT NR. 12 BELEGT und steht im Container-Log: `git pull` schreibt server.js,
+// nodemon sieht die Aenderung, wartet kurz auf den Subprozess ("still waiting for 1 sub-process
+// to finish") und beendet ihn - BEVOR git den Ref aktualisiert hat. Der Deploy sabotiert sich
+// also ueber seinen eigenen Neustart; die Sperrdatei je Ziel (#147) kann das nicht abfangen, sie
+// serialisiert zwei WEBHOOKS gegeneinander und hier gab es nur einen.
+//
+// Diese Funktion behebt nicht die Ursache - sie macht den Zustand danach reparabel, ohne dass
+// jemand sich einloggen muss. Sie laeuft VOR jedem Pull und raeumt genau zwei Dinge weg, beide
+// nur unter Beweis:
+//   (1) eine verwaiste *.lock - aber ausschliesslich, wenn KEIN git-Prozess lebt und die Sperre
+//       aelter ist, als ein Deploy ueberhaupt dauern darf;
+//   (2) eine geaenderte Datei, deren Inhalt NACHWEISLICH schon im Ursprung steht (der Blob
+//       stimmt mit FETCH_HEAD ueberein) - also genau der halb angewendete Pull.
+// Alles andere bleibt liegen und wird gemeldet. Eine Handaenderung an server.js auf dem Pi hat
+// den Deploy am 18.08.2026 schon einmal blockiert; sie automatisch wegzuwerfen waere die
+// teurere Fehlerrichtung als ein stehender Deploy.
+const GIT_LOCK_STALE_MS = DEPLOY_TIMEOUT_MS + 60 * 1000;
+// Lebt ein git-Prozess? ueber /proc, nicht ueber `ps` oder `pgrep`: Der Container sammelt
+// verwaiste `[git] <defunct>`-Zombies (gemessen: mehrere hundert, der aelteste zweieinhalb Tage),
+// und `pgrep -x git` findet einen Zombie ueber den Prozessnamen. Wer eine Leiche fuer einen
+// laufenden Pull haelt, raeumt nie auf - deshalb wird der ZUSTAND mitgelesen (Feld 3 in
+// /proc/<pid>/stat, 'Z' = Zombie).
+function lebenderGitProzess() {
+  let pids;
+  try { pids = fs.readdirSync('/proc').filter(n => /^\d+$/.test(n)); } catch (e) { return false; }
+  for (const pid of pids) {
+    let roh;
+    try { roh = fs.readFileSync('/proc/' + pid + '/stat', 'utf8'); } catch (e) { continue; }
+    // comm steht in Klammern und kann selbst Leerzeichen enthalten - deshalb ab der SCHLIESSENDEN
+    // Klammer zerlegen, nie den ganzen String splitten.
+    const zu = roh.lastIndexOf(')');
+    if (zu < 0) continue;
+    const comm = roh.slice(roh.indexOf('(') + 1, zu);
+    const zustand = (roh.slice(zu + 2).trim().split(/\s+/)[0] || '');
+    if (comm === 'git' && zustand !== 'Z') return true;
+  }
+  return false;
+}
+function gitSperrenFinden(gitDir) {
+  const treffer = [];
+  const gehe = (d, tiefe) => {
+    if (tiefe > 4) return;
+    let eintraege;
+    try { eintraege = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+    for (const e of eintraege) {
+      const voll = path.join(d, e.name);
+      if (e.isDirectory()) gehe(voll, tiefe + 1);
+      else if (e.name.endsWith('.lock')) treffer.push(voll);
+    }
+  };
+  gehe(gitDir, 0);
+  return treffer;
+}
+function deployAufraeumen(repoName, dir) {
+  const bericht = [];
+  if (!dir) return bericht;
+  const gitDir = path.join(dir, '.git');
+  try { if (!fs.statSync(gitDir).isDirectory()) return bericht; } catch (e) { return bericht; }
+  // Laeuft ein echter Pull, ist JEDE Sperre und jede Aenderung seine - nichts anfassen.
+  if (lebenderGitProzess()) { bericht.push('ein git-Prozess laeuft - nicht aufgeraeumt'); return bericht; }
+
+  for (const pfad of gitSperrenFinden(gitDir)) {
+    let alter = null;
+    try { alter = Date.now() - fs.statSync(pfad).mtimeMs; } catch (e) { continue; }
+    if (alter === null || alter < GIT_LOCK_STALE_MS) {
+      bericht.push('Sperre ' + path.relative(dir, pfad) + ' ist erst ' + Math.round((alter||0)/1000) + 's alt - bleibt liegen');
+      continue;
+    }
+    try { fs.unlinkSync(pfad); bericht.push('verwaiste Sperre entfernt: ' + path.relative(dir, pfad) + ' (' + Math.round(alter/1000) + 's alt)'); }
+    catch (e) { bericht.push('Sperre ' + path.relative(dir, pfad) + ' nicht entfernbar: ' + e.message); }
+  }
+
+  // Der halb angewendete Pull: geaenderte Dateien, deren Blob schon dem eingehenden Stand
+  // entspricht. Der Vergleich laeuft gegen FETCH_HEAD, nicht gegen einen geratenen Commit -
+  // und je Datei EINZELN, damit eine fremde Handaenderung daneben unangetastet bleibt.
+  const git = (args) => execSync('git ' + args, { cwd: dir, timeout: 60000, encoding: 'utf8', stdio: ['ignore','pipe','pipe'] }).trim();
+  try {
+    git('fetch -q');
+    const geaendert = git('diff --name-only -z').split('\0').filter(Boolean);
+    for (const datei of geaendert) {
+      let ist, soll;
+      try { ist = git('hash-object -- "' + datei + '"'); } catch (e) { continue; }
+      try { soll = git('rev-parse FETCH_HEAD:"' + datei + '"'); } catch (e) { soll = null; }
+      if (soll && ist === soll) {
+        try { git('checkout HEAD -- "' + datei + '"'); bericht.push('halb angewendeter Pull zurueckgesetzt: ' + datei + ' (Blob ' + ist.slice(0,7) + ' steht bereits im Ursprung)'); }
+        catch (e) { bericht.push(datei + ' nicht zuruecksetzbar: ' + e.message); }
+      } else {
+        bericht.push(datei + ' ist eine FREMDE Aenderung (Blob ' + String(ist).slice(0,7) + ', Ursprung ' + String(soll).slice(0,7) + ') - bleibt liegen, der Pull wird daran scheitern');
+      }
+    }
+  } catch (e) {
+    bericht.push('Arbeitsbaum nicht pruefbar: ' + e.message);
+  }
+  return bericht;
+}
+function starteDeploy(repoName, command, dir) {
   if (!deploySperreNehmen(repoName)) {
     // Nicht abweisen, sondern vormerken - sonst ginge ausgerechnet der Push verloren, der
     // waehrend eines laufenden Deploys ankommt (also der haeufigste Fall bei Push + Merge).
@@ -8505,6 +8611,12 @@ function starteDeploy(repoName, command) {
     console.log('Deploy-Webhook: fuer ' + repoName + ' laeuft bereits ein Deploy - dieser Push wird nachgeholt.');
     return;
   }
+  // Die Selbstheilung steht HINTER der Sperre und VOR dem Pull: Waere sie davor, koennte sie
+  // einem parallel laufenden Deploy ins Verzeichnis greifen; danach waere sie wirkungslos, weil
+  // der Pull an genau dem Zustand scheitert, den sie aufraeumen soll.
+  try {
+    for (const zeile of deployAufraeumen(repoName, dir)) console.warn('Deploy-Aufraeumen (' + repoName + '): ' + zeile);
+  } catch (e) { console.error('Deploy-Aufraeumen (' + repoName + ') fehlgeschlagen:', e.message); }
   exec(command, { timeout: DEPLOY_TIMEOUT_MS }, (err, stdout, stderr) => {
     deploySperreFreigeben(repoName);
     // Eine Zeitueberschreitung bekommt eine EIGENE Meldung: Sie bedeutet etwas anderes als ein
@@ -8524,7 +8636,7 @@ function starteDeploy(repoName, command) {
     if (fs.existsSync(pending)) {
       try { fs.unlinkSync(pending); } catch (e) {}
       console.log('Deploy-Webhook: hole den waehrenddessen eingegangenen Push fuer ' + repoName + ' nach.');
-      starteDeploy(repoName, command);
+      starteDeploy(repoName, command, dir);
     }
   });
 }
@@ -10146,15 +10258,15 @@ app.post('/api/deploy-webhook', (req, res) => {
     return res.status(401).json({ error: 'invalid signature' });
   }
   const repoName = req.body && req.body.repository && req.body.repository.name;
-  const command = DEPLOY_TARGETS[repoName];
-  if (!command) {
+  const ziel = DEPLOY_TARGETS[repoName];
+  if (!ziel) {
     console.warn('Deploy-Webhook: unbekanntes Repo im Payload:', repoName);
     return res.status(400).json({ error: 'unknown repo' });
   }
   // Sofort antworten, git pull läuft asynchron im Hintergrund weiter - GitHub erwartet eine
   // schnelle Antwort und markiert den Webhook sonst als fehlgeschlagen.
   res.json({ ok: true, repo: repoName });
-  starteDeploy(repoName, command);
+  starteDeploy(repoName, ziel.command, ziel.dir);
 });
 
 // ===== Ko-fi-Spenden: Top-Unterstützer im Spiel anzeigen =====

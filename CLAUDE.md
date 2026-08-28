@@ -2694,17 +2694,42 @@ DEPLOY_SELBST_NEUSTART=1
 /api/health   commit 74d4600  checkout 74d4600  blob a596512  uptimeSec 21
 ```
 
-**Was der Umbau kostet, ehrlich benannt:** Ohne nodemon startet bei einem Codewechsel der ganze
-CONTAINER neu, und damit läuft `npm install --no-audit --no-fund` jedes Mal mit – auf dem Pi
-spürbar länger als nodemons zwei bis drei Sekunden. Das Backend ist in dieser Zeit auf 502, das
-Spiel selbst (statisch über nginx) bleibt erreichbar. Wenn das je stört, ist die Antwort, den
-`npm install` zu überspringen, solange `package-lock.json` nicht neuer ist als `node_modules` –
-gebaut ist das bewusst NICHT, weil die Zahl noch nicht gemessen ist und eine Optimierung ohne
-Messwert genau die Sorte Änderung ist, die dieses Projekt sonst zurückweist.
+**Was der Umbau kostet – jetzt GEMESSEN statt geschätzt.** Ohne nodemon startet bei einem
+Codewechsel der ganze CONTAINER neu, und damit läuft `npm install --no-audit --no-fund` jedes Mal
+mit. Hier stand zuerst „spürbar länger als nodemons zwei bis drei Sekunden" und weiter unten die
+Vermutung 10–20 Sekunden. Am ersten echten Code-Deploy (#178) im Sekundentakt nachgemessen:
+
+```
+09:36:05  200  commit 74d4600  checkout 6d63908  uptimeSec 512    <- alter Prozess
+09:36:08  502  AUSFALL
+09:36:10  502  AUSFALL
+09:36:12  200  commit 1b0679f  checkout 1b0679f  blob 4b0b3ec  uptimeSec 1  selbstNeustart true
+```
+
+**Rund sieben Sekunden**, also gut das Doppelte von nodemon und nicht das Fünffache. Das Backend
+ist in dieser Zeit auf 502, das Spiel selbst (statisch über nginx) bleibt erreichbar.
+
+**Damit ist die naheliegende Optimierung erledigt, bevor sie gebaut wurde:** `npm install` zu
+überspringen, solange `package-lock.json` nicht neuer ist als `node_modules`, würde ein paar
+Sekunden bei einem Vorgang sparen, der ein paar Mal am Tag stattfindet – und dafür eine
+Bedingung in den Startbefehl setzen, die im Fehlerfall einen Container ohne Abhängigkeiten
+hochfahren lässt. Der Messwert sagt: nicht bauen.
 
 **Und wer auf dem Pi von Hand an `server.js` etwas ausprobiert, bekommt seinen Neustart nicht mehr
 geschenkt:** `docker restart kepler7-backend`. Das ist der Preis dafür, dass niemand mehr in einen
 laufenden Pull hineingreift.
+
+**Der Selbst-Neustart ist am 28.08.2026 im Betrieb belegt, in BEIDE Richtungen** – und das PAAR
+ist der eigentliche Beweis, nicht die eine Hälfte:
+
+| Merge | Änderung | Ergebnis |
+|---|---|---|
+| `6d63908` | nur `CLAUDE.md` | `checkout` sprang, `commit` blieb, `uptimeSec` wuchs **178 → 190** durch |
+| `1b0679f` | `server.js` | alle drei Felder sprangen, `uptimeSec` **512 → 1** |
+
+Ohne die erste Zeile wäre auch ein Neustart bei JEDEM Deploy grün gewesen; ohne die zweite auch
+einer, der nie feuert. `/api/health` meldet seit `1b0679f` zusätzlich `selbstNeustart`, damit von
+außen erkennbar ist, ob der Container umgebaut ist – vorher brauchte diese Frage einen SSH-Zugang.
 
 ### Was das NICHT löst
 

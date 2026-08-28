@@ -2235,7 +2235,71 @@ Entscheidung, wie gebaut) – nur ging keine Mail raus. Der Ausfall lief deshalb
 unbemerkt, obwohl das Werkzeug dagegen längst existiert. Eine Env-Änderung verlangt ein
 Neuerzeugen des Containers; der Webhook-Pull allein reicht dafür nicht.
 
-**Zwei Hebel, und sie sind komplementär:**
+**GEBAUT (28.08.2026, #170): die Selbstheilung.** `deployAufraeumen(repoName, dir)` läuft in
+`starteDeploy` **hinter der Sperre und vor dem Pull** — davor könnte sie einem parallel laufenden
+Deploy ins Verzeichnis greifen, danach wäre sie wirkungslos. Sie räumt genau zwei Dinge weg, beide
+nur unter Beweis:
+
+1. **Eine verwaiste `*.lock`** — aber nur, wenn KEIN git-Prozess lebt und die Sperre älter ist, als
+   ein Deploy dauern darf (`DEPLOY_TIMEOUT_MS + 60 s`).
+2. **Eine geänderte Datei, deren Blob NACHWEISLICH schon im Ursprung steht** (`git hash-object`
+   gegen `git rev-parse FETCH_HEAD:<datei>`), also genau der halb angewendete Pull. Geprüft wird
+   **je Datei einzeln**.
+
+**Alles andere bleibt liegen und wird benannt.** Eine Handänderung an `server.js` auf dem Pi hat
+den Deploy am 18.08.2026 schon einmal blockiert; sie automatisch wegzuwerfen wäre Datenverlust mit
+gutem Gewissen — die teurere Fehlerrichtung als ein stehender Deploy. Der Bericht sagt dann
+wörtlich „ist eine FREMDE Aenderung … bleibt liegen, der Pull wird daran scheitern".
+
+**Der Zombie-Test ist der Kern der ersten Wache.** `lebenderGitProzess()` liest `/proc/<pid>/stat`
+und wertet **Feld 3, den Zustand**, mit aus: Der Container sammelt verwaiste `[git] <defunct>`
+(gemessen mehrere hundert, der älteste zweieinhalb Tage), und `pgrep -x git` findet einen Zombie
+über den Prozessnamen. Wer eine Leiche für einen laufenden Pull hält, räumt nie auf. Der `comm`
+wird ab der **schließenden** Klammer zerlegt, nie durch Splitten des ganzen Strings — ein
+Prozessname darf Leerzeichen enthalten.
+
+**`DEPLOY_TARGETS` führt sein Verzeichnis seither benannt** (`{ dir, command }`) statt es nur im
+Befehlsstring zu tragen. Der `command` bleibt unverändert fest verdrahtet — er ist die
+Sicherheitsentscheidung, nichts daran kommt je aus einem Request. Einen Pfad aus dem String zu
+parsen wäre die Sorte Ableitung, die beim nächsten Umbau still danebengreift.
+
+Wächter: `tests/test_deploy_selbstheilung.js` (17 Prüfungen). Er **führt** die Funktion samt ihrer
+Konstanten aus `server.js` geschnitten gegen ein echtes Wegwerf-Repo-Paar in `/tmp` aus, in dem der
+Ausfall-Fingerabdruck von Hand hergestellt wird — ein Test, der bei einer Aufräumfunktion nur nach
+Zeichenketten sucht, belegt gar nichts. Die entscheidende Zeile ist `2b`: **der Pull läuft danach
+durch.** Drei Wirkungs-Gegenproben, jede mit ihrer Soll-Liste, alle mit 17 gelaufenen Prüfungen:
+
+| Sabotage | fällt | Beleg |
+|---|---|---|
+| Alters-Wache raus | `1b` | eine frische Sperre wird entfernt |
+| Blob-Vergleich raus | `3`, `3b` | eine fremde Änderung würde weggeworfen |
+| git-Prozess-Wache raus | `4`, `4b` | `{"lebenderGit":true,"sperreNochDa":false}` |
+
+### Drei Werkzeugfehler beim Bau dieses Tests, alle über den Einzelfall hinaus
+
+1. **Ein `//`-Zeilenkommentar, der `/*` enthält, sprengt jeden naiven Blockkommentar-Ersetzer.**
+   `server.js` hat davon mehrere („NGINX leitet /api/* per Reverse-Proxy", „*.js/*.json-Platzhalter").
+   Wer zuerst nach Blöcken sucht, öffnet dort ein Fenster bis zum nächsten `*/` — gemessen **77.612**
+   bzw. **20.018 Zeichen** — und leert echten Code mit; der Test fand seine eigenen Funktionen nicht
+   mehr. **Zuerst die ZEILEN-Kommentare leeren, dann die Blöcke.** Das ist die Familie „Naive Regex
+   über die ganze Datei", nur mit besonders großem Radius.
+2. **Eine Bausteinliste aus Namen veraltet beim nächsten Umbau** — der erste Entwurf gab
+   `DEPLOY_TIMEOUT_MS` mit und starb beim AUFRUF an `GIT_LOCK_STALE_MS`. Die Konstanten werden
+   seither **gesammelt** (jeder GROSS_-Bezeichner in den geschnittenen Blöcken, transitiv) und **in
+   der Reihenfolge der DATEI** eingesetzt: Nach Fund-Reihenfolge sortiert wirft eine abgeleitete
+   Konstante „Cannot access … before initialization". Und jeder Messaufruf ist gefasst und meldet
+   seinen Fehlschlag als eigene Prüfung (`0-lauf`) — ein `try/catch` um den Aufbau allein genügt
+   nicht.
+3. **Ein zu kurzlebiger Hilfsprozess machte zwei Prüfungen trivial grün.** Der lebende git-Prozess
+   war zuerst `git --paginate help -a` und endete, bevor gemessen wurde; `4`/`4b` hingen an einer
+   `lief ? … : true`-Bedingung und waren damit ohne Aussage. Jetzt blockiert `git hash-object
+   --stdin` zuverlässig, und ohne lebenden Prozess fallen `4`/`4b` **mit**.
+
+**Und ein Werkzeugfehler beim Aufräumen danach, zum zweiten Mal derselbe:** Ein `pkill -f "PORT=3223"`
+traf die eigene Shell (Exit 144) — wörtlich Arbeitsregel 15, die seit dem 06.08.2026 samt Exit-Code
+in diesem Dokument steht. Prozesse werden über `ps` identifiziert und einzeln per PID beendet.
+
+**Was NICHT gebaut ist, und warum es weiterhin lohnt:**
 
 1. **Das Fenster verkleinern (Infrastruktur):** `nodemon --delay 5` im Startbefehl. nodemon wartet
    dann fünf Sekunden nach der letzten Dateiänderung, und der Pull hat nach dem Schreiben von

@@ -2546,3 +2546,45 @@ das von außen nicht (die Antwort steht nur im Container-Log). **Und er feuert e
 Container muss neu erzeugt werden. Solange das aussteht, ist der Alarm gebaut und still.
 
 **Folge für PRs:** Der Merge ist nicht der Zwischenschritt zu einem späteren Deploy, sondern die Auslieferung selbst – was gemerged wird, läuft Sekunden später auf dem Pi. Offene PRs trotzdem sofort mergen statt sie liegen zu lassen, aber erst nach grünem Prüflauf.
+
+## Urmaterie-Nachsaat und -Boden in astAlleFelder (28.08.2026)
+
+**Anlass:** Spieler-Report Sascha „kein einziger Urmaterie-Asteroid" — die Felder entstanden am
+16.08. mit der Sortentabelle VOR #117 und wurden nie migriert; die Startpopulation konnte
+bauartbedingt keinen Urmateriekern enthalten, und neue Sorten entstehen nur nach vollständiger
+Leerförderung (p = 3/103 je Neuwurf). Die Frontend-Hälfte (Sichtbarkeit) steht in der
+Frontend-CLAUDE.md; hier die zwei Mechaniken.
+
+**Beide leben in `astAlleFelder()` — dem EINEN Tor**, durch das jeder Feldzugriff läuft (lazy
+Erzeugung, Nachschub, Festungs-Reifung). Eine dritte Stelle daneben wäre die übliche zweite
+Wahrheit; hier erben künftige Aufrufer beides automatisch.
+
+1. **Die Nachsaat läuft GENAU EINMAL** und setzt so viele Urmateriekerne nach, dass 3 stehen.
+   Ihr Marker `db.galaxy.urmaterieNachsaat` liegt bewusst in `db.galaxy`: Das ist für Clients über
+   die Storage-Route **gar nicht erreichbar** (dieselbe Begründung wie bei den Alien-Nestern) —
+   ein löschbarer Marker wäre eine wiederholbare Geldquelle. Gesetzt wird er nur, wenn `db.galaxy`
+   schon existiert; ein hier angelegtes leeres Objekt hebelte die Voll-Initialisierung im
+   `galaxyTick` aus.
+2. **Der Boden greift NUR bei Bestand 0** und setzt genau EINEN Kern. Kein Ziel-Bestand, keine
+   Quote — die Sorte bleibt selten, aber „in der ganzen Galaxie liegt keiner" kann nicht mehr
+   vorkommen. Bei Bestand ≥ 1 tut er nachweislich nichts (`test_urmaterie_boden_http` 3b).
+
+**`astUrmaterieSetzen` verteilt statt zu fluten:** je Durchgang höchstens EIN Kern je System
+(gemischte Systemliste), nur auf Plätze aus `astFreiePlaetze` (festungsbewusst), unter
+`AST_GRENZE_MAX`, als ganz normales Vorkommen über `astNeuesVorkommen` mit `sorte = 'urmaterie'`.
+**Nichts Bestehendes wird gelöscht oder umgewürfelt** — eine Migration, die Bestand anfasst, nähme
+Spielern etwas weg, das sie gerade anfliegen.
+
+**Die Auslieferungsreihenfolge ist gleichgültig** (anders als bei den Festungs-Schaltern): Das
+Backend allein setzt Vorkommen, die das alte Frontend als normale graue Brocken zeichnet — korrekt,
+nur unauffällig; das Frontend allein zeichnet gold, was der Zufall irgendwann liefert. Kein
+Schalter nötig; die zwei PRs gehören trotzdem zusammen gemerged.
+
+Wächter: `tests/test_urmaterie_boden_http.js` (Port 3232, 11 Prüfungen — Nachsaat exakt 3 in DREI
+verschiedenen Systemen, nichts gelöscht, Idempotenz über einen Neustart, Boden 0→1 und ≥1→nichts,
+Marker-Zeitstempel unverändert). Gegenprobe über `URMATERIE_TEST_SERVER` an einer Kopie ohne den
+Block (die Kopie MUSS im Repo-Verzeichnis liegen, `require('./mailer')`): **8 rot, 3 grün bei
+identischen Prüfnamen** — die gemessene Pflichtliste steht im Test-Kopf, samt der Lehre, dass die
+ERSTE Fassung dieser Liste doppelt falsch war (drei Prüfungen aus dem falschen Grund grün über
+leeren Listen bzw. `undefined === undefined`, Frontend-Regel 28; seither verlangen sie erst einen
+WERT, dann die Beziehung).

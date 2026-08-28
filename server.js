@@ -9295,6 +9295,52 @@ function astNachschub(sysId, feld, alleFelder) {
   return geaendert;
 }
 // Alle Gürtelfelder lesen, dabei fällige Termine auflösen und fehlende Systeme erstbelegen.
+/* Urmaterie-Nachsaat und -Boden (28.08.2026, Spieler-Report: "alle Systeme durchgeschaut,
+   kein einziger Urmaterie-Asteroid"). Die Ursache war deterministisch, kein Pech: Die Felder
+   wurden am 16.08. erzeugt, als der Pi noch auf #109 stand - die Sorte kam erst mit #117
+   (17.08.) in AST_SORTEN, und eine Migration gab es nie. Die gesamte Startpopulation konnte
+   also bauartbedingt keinen Urmateriekern enthalten; neue Sorten entstehen nur nach
+   vollstaendiger Leerfoerderung (Neuwurf mit p = 3/103 je Vorkommen).
+   Zwei Mechanismen, beide ADDITIV (nichts wird geloescht oder umgewuerfelt - dieselbe Regel
+   wie bei den Komfort-Grenzen: nur das Hinzufuegen), beide an EINER Stelle statt an den
+   Aufrufern (Hausregel 43):
+   - Nachsaat: EINMALIG auf 3 Stueck auffuellen - der stationaere Erwartungswert
+     (rund 100 Vorkommen x 3/103 = 2,9). Der Marker liegt in db.galaxy, weil db.galaxy ueber
+     die Storage-Route nicht erreichbar ist - ein Marker in db.shared waere von jedem Konto
+     loeschbar und die Nachsaat liefe erneut.
+   - Boden: Steht der galaxieweite Bestand auf 0, wird EIN Vorkommen gesetzt statt gewuerfelt.
+     Urmaterie ist die einzige Asteroiden-Protomateriequelle; ohne den Boden kann sie nach dem
+     Leerschuerfen wieder wochenlang verschwinden (fuer 95 % Wiederkehr-Sicherheit braeuchte es
+     ~102 Neuwuerfe). Er greift NUR bei 0 - die Verteilung aller uebrigen Wuerfe bleibt
+     unberuehrt. */
+function astUrmaterieBestand(felder) {
+  let n = 0;
+  for (const feld of Object.values(felder)) {
+    for (const p of Object.values(feld.plaetze || {})) {
+      if (p && !p.frei && p.sorte === 'urmaterie' && (p.vorrat || 0) > 0) n++;
+    }
+  }
+  return n;
+}
+function astUrmaterieSetzen(felder, anzahl) {
+  // Je Durchgang hoechstens EIN Kern je System, damit sich die Nachsaat verteilt statt einen
+  // Guertel zu fluten. Kapazitaet und Festungsplatz respektieren AST_GRENZE_MAX/astFreiePlaetze -
+  // dieselben Schranken wie beim regulaeren Nachschub.
+  const systeme = Object.keys(felder).sort(() => Math.random() - 0.5);
+  let gesetzt = 0;
+  for (const sysId of systeme) {
+    if (gesetzt >= anzahl) break;
+    const feld = felder[sysId];
+    if (astBelegtZahl(feld) >= AST_GRENZE_MAX) continue;
+    const frei = astFreiePlaetze(feld);
+    if (!frei.length) continue;
+    const v = astNeuesVorkommen(sysId);
+    v.sorte = 'urmaterie';
+    feld.plaetze[frei[Math.floor(Math.random() * frei.length)]] = v;
+    gesetzt++;
+  }
+  return gesetzt;
+}
 function astAlleFelder() {
   if (!db.shared) db.shared = {};
   const felder = {};
@@ -9307,6 +9353,16 @@ function astAlleFelder() {
   }
   // Nachschub NACH dem Einsammeln aller Felder: Ein wandernder Brocken braucht das Zielsystem.
   for (const sysId of Object.keys(felder)) if (astNachschub(sysId, felder[sysId], felder)) geaendert = true;
+  // Urmaterie-Nachsaat (einmalig) und -Boden (dauerhaft) - Begruendung am Kommentar der Helfer.
+  // Der Marker wird nur gesetzt, wenn db.galaxy schon existiert: Ein leeres Objekt von hier aus
+  // wuerde die vollstaendige Galaxy-Erstbelegung im galaxyTick aushebeln (dort haengt sie an
+  // `if (!db.galaxy)`); im schlimmsten Fall verschiebt sich die Nachsaat um einen Aufruf.
+  if (db.galaxy && !db.galaxy.urmaterieNachsaat) {
+    const fehlen = Math.max(0, 3 - astUrmaterieBestand(felder));
+    if (fehlen > 0 && astUrmaterieSetzen(felder, fehlen) > 0) geaendert = true;
+    db.galaxy.urmaterieNachsaat = Date.now();
+  }
+  if (astUrmaterieBestand(felder) < 1 && astUrmaterieSetzen(felder, 1) > 0) geaendert = true;
   // Der Hort der Festungen wächst beim Lesen mit (siehe festungReifen).
   const jetztR = Date.now();
   for (const sysId of Object.keys(felder)) if (festungReifen(felder[sysId], jetztR)) geaendert = true;

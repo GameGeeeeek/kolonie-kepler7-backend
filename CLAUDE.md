@@ -2608,6 +2608,114 @@ Aufräumen und den Pull in EINEN git-Aufruf legen, damit zwischen Schreiben und 
 zweiter Prozessstart liegt. Solange das nicht gebaut ist, gilt: **Ein Deploy, dem eine Heilung
 vorausgeht, braucht zwei Anläufe** – der erste räumt, der zweite pullt.
 
+### nodemon fliegt aus dem Deploy-Pfad: der Server startet sich selbst neu (28.08.2026)
+
+Auftrag Sascha: „schau mal wir haben die ganze zeit das problem mit dem backend weil ich mehrere
+claude chats habe die unterchiedliche aufgaben im backend machen finde eine lösung das jeder chat
+mit dem backend arbeiten kann und sich nicht selbst blockeirt." Vorgelegt wurden vier Wege,
+gewählt: **die Ursache beseitigen.**
+
+**Die naheliegende Diagnose ist gemessen FALSCH: Die Parallelität war nie die Ursache.** Der Beleg
+ist eine Asymmetrie, die durch alle dreizehn Ausfälle läuft:
+
+| | Frontend | Backend |
+|---|---|---|
+| Deploy | `git pull` → `cp` nach `/deploy/web/` | `git pull` in `/app` |
+| wer beobachtet das gepullte Verzeichnis | niemand | **nodemon** `--watch . --ext js,json` |
+| Ausfälle seit dem 14.08.2026 | **0** | **13** |
+
+Derselbe Webhook, dieselben Pushes, dieselben parallel arbeitenden Sitzungen (gemessen: 4 aktive
+Branches, Merges im 3–10-Minuten-Abstand, jeder Merge = zwei Webhooks). Der einzige Unterschied
+ist der Beobachter. Mehr Sitzungen erhöhen die **Häufigkeit**, nicht die Fehlerklasse – der
+Ausfall tritt auch bei einem einzigen Merge einer einzigen Sitzung auf.
+
+Damit ist auch klar, warum die Serialisierung aus #147 nicht half, obwohl sie funktioniert: Sie
+hält zwei WEBHOOKS auseinander. Der zweite Schreiber war aber nie ein zweiter Webhook, sondern
+der **eigene Prozessneustart**.
+
+**Der Weg: Der Pull läuft vollständig durch, und ERST DANACH beendet sich der Prozess selbst** –
+über `handleTerminate`, damit die Datenbank geflusht wird; Docker startet ihn per
+`--restart unless-stopped` neu. Kein Watcher, kein Kill-Fenster.
+
+**Vier Entscheidungen, die man beim Anfassen kennen muss:**
+
+- **`DEPLOY_SELBST_NEUSTART` ist Pflicht, keine Vorsicht.** Solange nodemon läuft, ist ein
+  Selbst-Exit für nodemon ein **Crash**, nach dem es ausdrücklich auf eine Dateiänderung WARTET
+  (`app crashed - waiting for file changes`) – der Server bliebe unten, bis jemand eine Datei
+  anfasst. Der Schalter gehört deshalb gemeinsam mit dem Container-Umbau gesetzt, nie vorher.
+  Ohne ihn verhält sich alles exakt wie bisher.
+- **Neu gestartet wird nur bei GEÄNDERTEM Code**, gemessen über `require.cache`: die Dateien, die
+  dieser Prozess wirklich geladen hat. Das ist dieselbe Semantik, die nodemon mit `--ext js,json`
+  hatte – ein reiner Doku-Commit startet nichts neu. `node_modules` bleibt draußen: Neue
+  Abhängigkeiten brauchen ohnehin `npm install` und damit einen echten Neustart von Hand.
+- **Nur das EIGENE Verzeichnis.** Der Frontend-Deploy zieht ein fremdes Repo; ein Neustart darauf
+  wäre grundlose Unruhe. Verglichen wird gegen `__dirname`, also gegen die tatsächlich geladene
+  Datei – nicht gegen einen Pfad aus der Konfiguration.
+- **Der vorgemerkte Push kommt VOR dem Neustart** – und wird beim START nachgeholt, falls doch
+  einer liegen bleibt. Ohne diese zwei Stellen risse der Selbst-Neustart genau die Lücke auf, die
+  die Vormerkung aus #147 schließen soll: Der `.pending`-Marker ist eine Datei, sie überlebt den
+  Prozess, gelesen wurde sie bisher aber nur im laufenden Deploy.
+
+### Was Sascha am Container ändern muss
+
+Der Code ist ohne diesen Schritt wirkungslos – und das ist Absicht.
+
+```
+alt:  npm install && npx nodemon --watch . --ext js,json server.js
+neu:  npm install && node server.js
+dazu: Umgebungsvariable  DEPLOY_SELBST_NEUSTART=1
+```
+
+Die Restart-Policy `unless-stopped` steht bereits. Prüfen lässt sich beides von der Kommandozeile
+des Pi:
+
+```bash
+docker inspect -f '{{.Config.Cmd}}' kepler7-backend
+docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' kepler7-backend
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' kepler7-backend | grep DEPLOY_SELBST
+```
+
+Danach ist der nächste Merge der Beleg: `/api/health` muss `commit`, `checkout` und `blob` einig
+melden, und `uptimeSec` muss klein sein (der Neustart hat stattgefunden).
+
+**Was der Umbau kostet, ehrlich benannt:** Ohne nodemon startet ein Codewechsel den ganzen
+Prozess neu statt nur den Watcher – gemessen sind das dieselben zwei bis drei Sekunden, die
+nodemon auch braucht. Und wer auf dem Pi von Hand an `server.js` etwas ausprobiert, bekommt
+seinen Neustart nicht mehr geschenkt: `docker restart kepler7-backend`. Das ist der Preis dafür,
+dass niemand mehr in einen laufenden Pull hineingreift.
+
+### Was das NICHT löst
+
+Ein Container, der gar nicht mehr lauscht (die halb geschriebene `server.js` aus dem Ausfall vom
+28.08.2026), wird davon nicht geheilt – die Selbstheilung läuft IM Server. Dagegen hilft nur die
+Restart-Policy plus, falls es wieder auftritt, der Handgriff aus dem Abschnitt darüber.
+
+Wächter: `tests/test_deploy_neustart.js` (19 Prüfungen). Er führt `deploySelbstNeustart`
+geschnitten aus und stellt jede der vier Bedingungen EINZELN; `1-paar` belegt, dass sich die vier
+Läufe wirklich unterscheiden – ohne diese Zeile wäre `1b` auch bei einer Funktion grün, die immer
+`true` liefert. Sechs Gegenproben, jede mit Soll-Liste, identische Prüflisten:
+
+| Sabotage | fällt |
+|---|---|
+| Schalter ignoriert | `1`, `1-paar` |
+| Verzeichnis-Wache raus | `1d`, `1-paar` |
+| `process.exit` statt `handleTerminate` | `2`, `2b` |
+| Neustart vor dem Nachholen | `4` |
+| kein `return` nach dem Nachholen | `4b2` |
+| Stand davor (`origin/master`) | `0-bau` |
+
+**Zwei Werkzeugfehler beim Bau, beide von den Soll-Listen gefangen und beide lehrreich:**
+
+1. **Die `process.exit`-Sabotage beendete den TEST.** Gemessen: **2 statt 19** Prüfungen und
+   **EXIT=0** – eine Gegenprobe, die wie ein sauberer Lauf aussieht (Regel 34 in ihrer
+   gefährlichsten Ausprägung, weil der Exit-Code hier nicht rot, sondern GRÜN log). Seitdem
+   bekommt die geschnittene Funktion ein `process` mit abgefangenem `exit`.
+2. **`4` suchte `.pending` per `indexOf`** – und fand den ersten Treffer, der schon ganz oben im
+   Sperr-Zweig steht, wo der Marker GESCHRIEBEN wird. Eine Sabotage, die den Neustart davorzieht,
+   blieb dadurch grün. Gescopt wird jetzt auf die Nachhol-Stelle (den rekursiven Aufruf), und
+   `4b2` prüft zusätzlich das `return` dahinter – ohne das liefe der Neustart trotzdem und der
+   gerade angestoßene Deploy verlöre seinen Prozess mitten im Pull.
+
 ### AUSFALL NR. 11 (22.08.2026) – der Blob hat ihn WÄHREND des Ausfalls gezeigt
 
 Der Merge von #165 lief an, und `/api/health` meldete über 14 Minuten unverändert:

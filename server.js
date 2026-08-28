@@ -4091,6 +4091,33 @@ const LAUFENDE_DATEI = (() => {
     return crypto.createHash('sha1').update('blob ' + roh.length + '\0').update(roh).digest('hex').slice(0, 7);
   } catch (e) { return null; }
 })();
+// Dieselbe Rechnung fuer JEDE eigene Datei, die dieser Prozess geladen hat (28.08.2026). Sie
+// beantwortet die Frage, die frueher nodemon beantwortet hat: Laeuft hier noch der Code, der auf
+// Platte liegt? Gelesen wird require.cache, also die tatsaechlich geladene Menge - nicht ein
+// Verzeichnis-Sweep, der auch Dateien zaehlt, die niemand ausfuehrt. node_modules bleibt draussen:
+// Neue Abhaengigkeiten brauchen ohnehin `npm install` und damit einen echten Neustart von Hand.
+function eigeneModulHashes() {
+  const map = {};
+  for (const datei of Object.keys(require.cache)) {
+    if (!datei.startsWith(__dirname + path.sep)) continue;
+    if (datei.includes(path.sep + 'node_modules' + path.sep)) continue;
+    const name = path.relative(__dirname, datei);
+    try {
+      const roh = fs.readFileSync(datei);
+      map[name] = crypto.createHash('sha1').update('blob ' + roh.length + '\0').update(roh).digest('hex').slice(0, 7);
+    } catch (e) { map[name] = 'WEG'; }
+  }
+  return map;
+}
+const LAUFENDE_MODULE = eigeneModulHashes();
+// Welche der geladenen Dateien sich seit dem Start geaendert haben. Eine NEUE Datei taucht hier
+// bewusst nicht auf - sie ist noch nicht geladen, und wenn server.js sie braucht, hat sich
+// server.js mitgeaendert.
+function geaenderteModule() {
+  const jetzt = eigeneModulHashes();
+  return Object.keys(LAUFENDE_MODULE).filter(name => jetzt[name] !== LAUFENDE_MODULE[name]);
+}
+
 // Der Plattenstand wird gepuffert: /api/health ist unauthentifiziert, und ein Dateizugriff je
 // Anfrage wäre der einzige Grund, warum ausgerechnet die Diagnoseroute Last erzeugt.
 let gitKopfCache = { stand: LAUFENDER_COMMIT, zeit: Date.now() };
@@ -8685,6 +8712,41 @@ function deployAufraeumen(repoName, dir) {
   }
   return bericht;
 }
+// ---- Selbst-Neustart nach einem erfolgreichen Deploy (28.08.2026, Entscheidung Sascha) -------
+// WARUM es das gibt, ist gemessen und nicht vermutet: Bis hierher lief dieser Container mit
+// `nodemon --watch . --ext js,json`. `git pull` schreibt server.js, nodemon sieht das SOFORT und
+// startet neu - und raeumt dabei den noch laufenden git-Prozess mit ab, BEVOR er den Ref gesetzt
+// hat. Zurueck bleiben ein neuer Arbeitsbaum bei altem HEAD und eine liegengebliebene Sperre; ab
+// da prallt jeder weitere Pull ab. Dreizehn Deploy-Ausfaelle, alle mit diesem Fingerabdruck.
+//
+// Der BELEG fuer die Ursache ist die Asymmetrie: Der Frontend-Deploy laeuft ueber denselben
+// Webhook, dieselben Pushes und dieselben parallel arbeitenden Sitzungen - und hatte NULL
+// Ausfaelle. Der einzige Unterschied ist, dass dort niemand das gepullte Verzeichnis beobachtet.
+// Die Parallelitaet war also nie die Ursache, sie hat die Haeufigkeit erhoeht.
+//
+// Ohne nodemon gibt es dieses Fenster nicht: Der Pull laeuft vollstaendig durch, und ERST DANACH
+// beendet sich der Prozess selbst - ueber handleTerminate, damit die DB geflusht wird (ein nacktes
+// process.exit haette hier einen Datenverlust gegen einen Deploy-Ausfall getauscht). Docker
+// startet ihn per restart-policy `unless-stopped` neu.
+//
+// DER SCHALTER IST PFLICHT, keine Vorsicht: Solange nodemon laeuft, ist ein Selbst-Exit fuer
+// nodemon ein CRASH, nach dem es ausdruecklich auf eine Dateiaenderung WARTET
+// ("app crashed - waiting for file changes") - der Server bliebe unten, bis jemand eine Datei
+// anfasst. Er gehoert deshalb gemeinsam mit dem Container-Umbau gesetzt, nie vorher.
+const DEPLOY_SELBST_NEUSTART = process.env.DEPLOY_SELBST_NEUSTART === '1';
+
+function deploySelbstNeustart(repoName, dir) {
+  if (!DEPLOY_SELBST_NEUSTART) return false;
+  // Nur das EIGENE Verzeichnis: Der Frontend-Deploy zieht ein fremdes Repo, dessen Dateien mit
+  // diesem Prozess nichts zu tun haben - ein Neustart darauf waere grundlose Unruhe.
+  try { if (path.resolve(dir || '') !== path.resolve(__dirname)) return false; } catch (e) { return false; }
+  const geaendert = geaenderteModule();
+  if (!geaendert.length) return false;   // z.B. ein reiner Doku-Commit: kein Neustart
+  console.log('Deploy-Webhook: geaenderter Code (' + geaendert.join(', ') + ') - dieser Prozess beendet sich, Docker startet ihn neu.');
+  handleTerminate('DEPLOY-NEUSTART');
+  return true;
+}
+
 function starteDeploy(repoName, command, dir) {
   if (!deploySperreNehmen(repoName)) {
     // Nicht abweisen, sondern vormerken - sonst ginge ausgerechnet der Push verloren, der
@@ -8719,8 +8781,27 @@ function starteDeploy(repoName, command, dir) {
       try { fs.unlinkSync(pending); } catch (e) {}
       console.log('Deploy-Webhook: hole den waehrenddessen eingegangenen Push fuer ' + repoName + ' nach.');
       starteDeploy(repoName, command, dir);
+      return;   // ueber den Neustart entscheidet der nachgeholte Lauf - sonst ginge er verloren
     }
+    if (!err) deploySelbstNeustart(repoName, dir);
   });
+
+// Ein vorgemerkter Push darf den Neustart nicht ueberleben, ohne dass ihn jemand nachholt: Der
+// .pending-Marker ist eine DATEI, sie ueberdauert den Prozess - gelesen wurde sie bisher aber nur
+// im laufenden Deploy. Ohne diese Zeilen risse der Selbst-Neustart genau die Luecke auf, die die
+// Vormerkung schliessen soll (ein Push, der in der Spanne zwischen Pruefung und Exit ankommt).
+// setImmediate, damit der Rumpf keine Konstante in ihrer temporalen Todeszone trifft - dieselbe
+// Falle, die den Startlauf von galaxyTick einmal den ganzen Serverstart gekostet hat.
+setImmediate(() => {
+  for (const [repoName, ziel] of Object.entries(DEPLOY_TARGETS)) {
+    try {
+      if (!fs.existsSync(deployPfad(repoName, '.pending'))) continue;
+      console.log('Deploy-Webhook: beim Start einen vorgemerkten Push fuer ' + repoName + ' gefunden - wird nachgeholt.');
+      fs.unlinkSync(deployPfad(repoName, '.pending'));
+      starteDeploy(repoName, ziel.command, ziel.dir);
+    } catch (e) { console.error('Deploy-Webhook: vorgemerkten Push fuer ' + repoName + ' nicht nachholbar:', e.message); }
+  }
+});
 }
 function verifyGithubSignature(req) {
   if (!DEPLOY_WEBHOOK_SECRET) return false;

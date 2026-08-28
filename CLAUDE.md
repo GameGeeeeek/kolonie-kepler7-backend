@@ -2196,6 +2196,63 @@ git pull origin master                     # Fast-forward, 1 Datei
 curl -s https://gamegeeeeek.de/api/health  # commit/checkout d881b45, uptimeSec 11
 ```
 
+### AUSFALL NR. 12 (22.–28.08.2026) – die Ursache ist ENDLICH belegt: nodemon killt den eigenen Pull
+
+Sechs Ausfälle (Nr. 6, 7, 8, 9, 11, 12) zeigten denselben Fingerabdruck – der Arbeitsbaum trug den
+neuen Stand, `.git/HEAD` den alten, eine `*.lock` blieb liegen –, und die Ursache war jedes Mal
+Vermutung. Bei Nr. 12 stand sie im Container-Log, Zeile für Zeile:
+
+```
+Deploy-Webhook erfolgreich für kolonie-kepler7-backend: (keine Änderungen)   <- Branch-Push
+[nodemon] restarting due to changes...            <- der Merge-Pull hat server.js geschrieben
+SIGUSR2 (nodemon-Neustart) - flushe DB...
+[nodemon] still waiting for 1 sub-process to finish...   <- DAS ist der laufende git-Prozess
+Deploy-Webhook Fehler für kolonie-kepler7-backend: Command failed: cd /app && git pull -q && (chown -R 1000:1000 .git || true)
+Deploy-Alarm für kolonie-kepler7-backend: Command failed: ...
+Deploy-Alarm: DEPLOY_ALARM_MAIL ist nicht gesetzt - keine Mail verschickt.
+[nodemon] starting `node server.js`
+```
+
+**Der Deploy sabotiert sich über seinen EIGENEN Neustart.** `git pull` schreibt `server.js`,
+nodemon sieht die Änderung sofort, wartet kurz auf den Subprozess (`still waiting for 1
+sub-process to finish`) und beendet ihn – **bevor** git den Ref aktualisiert hat. Zurück bleiben
+`.git/index.lock` und ein `HEAD` auf dem alten Commit; ab da bricht jeder weitere Pull mit
+„local changes would be overwritten" ab.
+
+**Damit ist auch erklärt, warum die Sperrdatei aus #147 nicht half:** Sie serialisiert zwei
+WEBHOOKS gegeneinander. Hier gab es nur einen – der zweite Schreiber war der eigene Prozess-
+neustart. Die Zeitstempel stützen es unabhängig: Sperre 22.08. 20:23, Prozessstart (aus
+`uptimeSec` zurückgerechnet) 20:26.
+
+**Cron ist bei diesem Ausfall nachweislich unschuldig**, alle fünf Ablagen gemessen: Nutzer-crontab
+leer, root-crontab nur die certbot-Erneuerung, `/etc/crontab` Debian-Standard, `/etc/cron.d/` nur
+certbot und e2scrub, Systemtimer nur Standard. `deploy/autodeploy.log` lag mit Zeitstempel
+18.08. 10:50 da, also zehn Tage tot. Die Bereinigung vom 18.08.2026 hält.
+
+**Der zweite Befund erklärt die Dauer: `DEPLOY_ALARM_MAIL` ist am Container nicht gesetzt.** Der
+Alarm aus #166 hat korrekt gefeuert UND seinen eigenen Ausfall benannt (das ist die fail-open-
+Entscheidung, wie gebaut) – nur ging keine Mail raus. Der Ausfall lief deshalb **fünf Tage**
+unbemerkt, obwohl das Werkzeug dagegen längst existiert. Eine Env-Änderung verlangt ein
+Neuerzeugen des Containers; der Webhook-Pull allein reicht dafür nicht.
+
+**Zwei Hebel, und sie sind komplementär:**
+
+1. **Das Fenster verkleinern (Infrastruktur):** `nodemon --delay 5` im Startbefehl. nodemon wartet
+   dann fünf Sekunden nach der letzten Dateiänderung, und der Pull hat nach dem Schreiben von
+   `server.js` nur noch Index und Ref zu setzen. Das verkleinert das Fenster, schließt es nicht.
+2. **Selbstheilung (Code):** Der Webhook erkennt beim NÄCHSTEN Anlauf eine verwaiste Sperre (älter
+   als `DEPLOY_TIMEOUT_MS`, kein lebender git-Prozess) und räumt sie weg, bevor er pullt – dazu
+   ein `git checkout HEAD -- .`, wenn der Arbeitsbaum-Blob nachweislich einem der eingehenden
+   Commits entspricht. Erst das macht den Deploy wieder selbstständig, statt dass er bis zum
+   nächsten SSH-Zugang steht.
+
+Der Fingerabdruck ist bei allen sechs Ausfällen derselbe gewesen – die Selbstheilung würde also
+rückwirkend jeden davon abgefangen haben. **Wer sie baut, prüft die Zombie-Falle mit:** Der
+Container sammelt `[git] <defunct>`, und `pgrep -x git` findet einen Zombie über den Prozessnamen,
+während `ps … | awk '$4=="git"'` ihn nicht findet. Ein „lebt noch ein git?" muss den Zustand
+mitlesen (`$2 !~ /Z/`), sonst hält die Selbstheilung eine Leiche für einen laufenden Pull und
+räumt nie auf.
+
 ### AUSFALL NR. 11 (22.08.2026) – der Blob hat ihn WÄHREND des Ausfalls gezeigt
 
 Der Merge von #165 lief an, und `/api/health` meldete über 14 Minuten unverändert:

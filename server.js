@@ -3518,6 +3518,11 @@ const SHIP_MODULE_COMBAT_BASE = {
   ev_kometenschild: { klasse: 'jagdgeschwader', effect: 'shield', base: 0.12 },
   ev_enterhaken: { klasse: 'eventflotte', effect: 'hull', base: 0.12 },
   ev_risskern: { klasse: 'eventflotte', effect: 'shield', base: 0.12 },
+  // Wrackkonvoi-Beute (A2, quelle:'konvoi'). Basis 0.12 = die Exklusiv-Stufe der Event-Module
+  // daneben, NICHT erhoeht - der Exklusiv-Reiz liegt an der episch-Seltenheit des Fundes, nicht an
+  // einer hoeheren Basis. Diese Zeile ist die PvP-Paritaet (Regel 60, Backend-zuerst); das Frontend
+  // fuehrt kv_bergungspanzer in SHIP_MODULE_DEFS, test_schiffsmodul_paritaet.js haelt beide zusammen.
+  kv_bergungspanzer: { klasse: 'schwerelinie', effect: 'hull', base: 0.12 },
 };
 /* ===== Schiffsklassen-Module in der VERTEIDIGUNG (21.08.2026, Auftrag Sascha) ===============
    Bis hierher war die serverseitige Flottenverteidigung eine VEREINFACHUNG des Frontends, und
@@ -4914,6 +4919,11 @@ function loadOrInitGalaxy() {
   // sie entstehen erst, wenn NEST_SPAWN_AKTIV an ist.
   if (!Array.isArray(db.galaxy.alienNester)) db.galaxy.alienNester = [];
   if (!db.galaxy.alienPause || typeof db.galaxy.alienPause !== 'object') db.galaxy.alienPause = {};
+  // Die wandernden Beute-Ziele (A2, Wrackkonvois). Wie die Nester: leerer Normalfall, entsteht erst
+  // mit A2_SPAWN_AKTIV. Liegt in db.galaxy, weil das ueber PUT /api/storage gar nicht schreibbar ist
+  // (kein offener Shared-Storage) und galaxyFuerClient() alles aus db.galaxy automatisch lesend
+  // an den Client schickt.
+  if (!Array.isArray(db.galaxy.wrackKonvois)) db.galaxy.wrackKonvois = [];
   if (db.galaxy.activeWar === undefined) db.galaxy.activeWar = null;
   if (!db.galaxy.collapsedSystems) db.galaxy.collapsedSystems = {};
   if (db.galaxy.activeWormhole === undefined) db.galaxy.activeWormhole = null;
@@ -5802,6 +5812,11 @@ function galaxyTick() {
   // sich dessen Zielwert aus der Stufensumme der Nester ab, und die soll dann die des aktuellen
   // Takts sein, nicht die des vorigen.
   nestTick(g);
+
+  // Die wandernden Beute-Ziele (A2). Steht A2_SPAWN_AKTIV aus, kehrt A2Tick sofort zurueck - genau
+  // wie nestTick. Bewusst NACH nestTick, damit die Freiheitspruefung der A2-Platzierung die Nester
+  // dieses Takts kennt (ein A2-Ziel darf nicht auf einem gerade entstandenen Nest landen).
+  A2Tick(g);
 
   /* Die galaktische Gegnerstaerke. Mit aktiven Nestern ein TAUZIEHEN gegen ihren Bestand
      (Phase 4, Begruendung und Messung bei NPC_STAERKE_BASIS); ohne sie das alte monotone
@@ -9416,10 +9431,14 @@ function festungSpawn(felder) {
   const aktive = Object.values(felder).filter(x => x && x.festung).length;
   if (aktive >= FESTUNG_MAX_AKTIV) return null;
   const now = Date.now();
+  // Kein Festung-Spawn auf einem wandernden A2-Ziel: zwei angreifbare Objekte auf einem
+  // Kartenknoten waeren nicht auseinanderzuhalten (Gegenrichtung zu a2SystemFrei).
+  const a2Systeme = new Set(a2Liste(loadOrInitGalaxy()).map(z => z.sys));
   const kandidaten = Object.keys(felder).filter(sysId => {
     const feld = felder[sysId];
     if (!feld || feld.festung) return false;
     if ((feld.geraeumtBis || 0) > now) return false;       // 24 h Ruhe nach einem Fall
+    if (a2Systeme.has(sysId)) return false;
     return astFreiePlaetze(feld).length > 0;
   });
   if (!kandidaten.length) return null;
@@ -10176,6 +10195,7 @@ function nestSystemFrei(g, sysId) {
   if (occupiedSystems().has(sysId)) return false;
   if (g.collapsedSystems && g.collapsedSystems[sysId]) return false;
   if (nestListe(g).some(n => n.sys === sysId)) return false;
+  if (a2Liste(g).some(z => z.sys === sysId)) return false;   // kein Nest auf einem A2-Ziel (Gegenrichtung zu a2SystemFrei)
   const feld = db.shared[astFeldKey(sysId)];
   if (feld && feld.festung) return false;
   return true;
@@ -10307,6 +10327,345 @@ function nestTick(g) {
 
   nestOrteNachfuehren(g);
 }
+
+/* ===== A2: die wandernden Beute-Ziele (Wrackkonvois) ==========================================
+   Konzept: docs/wandernde-beute-ziele-konzept.md im FRONTEND-Repo. Hier steht nur, was man kennen
+   muss, bevor man etwas aendert.
+
+   A2 ist NICHT ein dritter Nomaden-Klon (Konzept Abschnitt 0). Es hebt sich vom Vex-Nest ueber
+   ZWEI Achsen ab, die dem Nest gemessen fehlen:
+     1. EXKLUSIVE BEUTE ueber das Herkunfts-Schloss (quelle:'konvoi') - Task 2, hier noch nicht.
+     2. DAS ENTKOMMEN - der Kern-Reiz. Das Nest kann durchs Ignorieren NICHT verschwinden
+        ('weitergezogen' heisst dort 'ins Nachbarsystem, weiter angreifbar'). Ein A2-Ziel dagegen
+        wird bei erreichter Lebensdauer GANZ aus db.galaxy.wrackKonvois entfernt (Zweig 1 des Ticks).
+        Der Endpunkt braucht dafuer einen DRITTEN verpasst-Grund 'entkommen' - Task 2.
+
+   Ablageort ist db.galaxy.wrackKonvois (Feld-Init in loadOrInitGalaxy): ueber PUT /api/storage gar
+   nicht schreibbar, und galaxyFuerClient() schickt alles aus db.galaxy automatisch lesend an den
+   Client. Damit ist die ganze Fehlerklasse 'offener Shared-Storage' umgangen (kein
+   checkKeyPermission noetig), und die Abklingzeit liegt AN DAS ZIEL (ziel.schlaege[uid]), nie im
+   Spielstand - genau wie bei Nest und Festung.
+
+   DIE ZAHLEN SIND GEGEN DIE BEREITS KALIBRIERTEN NEST-/FESTUNGS-LP GERECHNET (Regel 41), nicht
+   gegen ein Gefuehl. Massstab sind die gemessenen Schlagkraefte je Schlag: 7.500 (Einsteiger) /
+   44.000 (Mittelfeld) / 240.000 (Endspiel).
+     - A2_LP = 40.000 ist die Groessenordnung des Sporenherds (dem Einsteiger-Nest): rund
+       5,3 / 0,9 / 0,2 Schlaege. Solo-tauglich, das ist der Auftrag.
+     - A2_ABKLING_MS = 2 h. In der Lebensdauer von 18 h bekommt ein Solo-Konto damit 9 Schlaege
+       (t = 0, 2, ..., 16 h) - deutlich mehr als die noetigen ~5,3, plus Luft fuer Hin- und
+       Rueckflug. Das ist die Bedingung aus Konzept Abschnitt 4: das Ziel darf nicht entkommen,
+       bevor seine Zielgruppe es realistisch stellen kann.
+     - A2_WANDER_MS = 6 h: driftet in der Lebensdauer bis zu zweimal (Beitraege und schlaege reisen
+       mit), bleibt also verfolgbar, ohne zu kleben.
+     - A2_LEBENSDAUER_MS = 18 h ist die Frist, nach der es ENTKOMMT. Gegen Abklingzeit und
+       Schlagbedarf gerechnet (siehe oben), nicht geraten.
+     - A2_WURF_MS = 3 h, A2_WURF_CHANCE = 0,5, A2_MAX = 2: im Schnitt ein neues Ziel je ~6 h,
+       galaxieweit hoechstens zwei gleichzeitig. Selten genug, dass die Karte abzusuchen ein Grund
+       ist ('findbar'), praesent genug, dass es sich lohnt.
+     - A2_VERLUST = 0,08: Grundverlust des Angreifers je Schlag, wie beim Nest.
+
+   A2_SPAWN_AKTIV STEHT AUF false - NOTAUSSCHALTER und Auslieferungs-Riegel (Regel 60): A2 wirft
+   ein Kampf-Modul-Set ab (Beute-Variante 3, PvP-relevant), also muss das Backend vor dem Frontend
+   live sein und der Schalter im Frontend-PR umgelegt werden. Solange er aus ist, kehrt A2Tick in
+   Zeile 1 zurueck und der ganze Abschnitt tut nichts. */
+const A2_SPAWN_AKTIV = false;
+const A2_ART = 'wrackkonvoi';
+const A2_ART_NAME = 'Wrackkonvoi';
+const A2_LP = 40000;
+const A2_ABKLING_MS = 2 * 3600 * 1000;   // je Ziel und Spieler
+const A2_WANDER_MS = 6 * 3600 * 1000;    // Drift in ein freies Nachbarsystem
+const A2_LEBENSDAUER_MS = 18 * 3600 * 1000; // danach ENTKOMMT das Ziel (ganz entfernt)
+const A2_WURF_MS = 3 * 3600 * 1000;      // Entstehungs-Versuch je Intervall
+const A2_WURF_CHANCE = 0.5;
+const A2_MAX = 2;                        // galaxieweit gleichzeitig
+const A2_VERLUST = 0.08;                 // Grundverlust des Angreifers je Schlag
+
+function a2Liste(g) {
+  // Client-Feldname bewusst als Spielbegriff (wrackKonvois), nicht als Etappencode: galaxyFuerClient
+  // schickt db.galaxy roh an den Client, das Feld IST damit Teil des Client-Vertrags (wie alienNester).
+  // Die internen Helfer (A2Tick, a2Neu, a2Liste, A2_*) behalten den Etappen-Prefix - sie sind intern.
+  if (!Array.isArray(g.wrackKonvois)) g.wrackKonvois = [];
+  return g.wrackKonvois;
+}
+/* Eine kurze Spur der zuletzt verschwundenen Ziele (id -> grund), gedeckelt. Sie hat EINEN Zweck:
+   Ist das Ziel bei der Ankunft weg, unterscheidet der Endpunkt damit "gefallen" von "entkommen" -
+   beides kostet nichts, aber die Antwort soll den WAHREN Grund nennen (die Kernwahrheit dieses
+   Projekts: eine Anzeigestelle luegt nicht). Ein Miss faellt auf "gefallen" zurueck - harmlos, weil
+   beide Ausgaenge folgenlos sind. */
+function a2VerlaufVermerken(g, id, grund) {
+  if (!Array.isArray(g.a2Verlauf)) g.a2Verlauf = [];
+  g.a2Verlauf.push({ id: id, grund: grund, zeit: Date.now() });
+  if (g.a2Verlauf.length > 40) g.a2Verlauf = g.a2Verlauf.slice(-40);
+}
+function a2VerlaufGrund(g, id) {
+  const arr = Array.isArray(g.a2Verlauf) ? g.a2Verlauf : [];
+  for (let i = arr.length - 1; i >= 0; i--) if (arr[i].id === id) return arr[i].grund;
+  return 'gefallen';
+}
+/* Wo darf ein A2-Ziel entstehen oder hindriften? Nach DERSELBEN Regel wie Nest und Festung: kein
+   bewohntes System, kein kollabiertes, und kein zweites angreifbares Objekt auf demselben
+   Kartenknoten (anderes A2-Ziel, Nest, Festung) - sonst stapeln sich Abzeichen und Marker. Die
+   Gegenrichtung steht bei nestSystemFrei (kein Nest auf A2) und festungSpawn (keine Festung auf
+   A2), damit die Sperre in beide Richtungen greift. */
+function a2SystemFrei(g, sysId) {
+  if (!sysId || !SYSTEMS.includes(sysId)) return false;
+  if (occupiedSystems().has(sysId)) return false;
+  if (g.collapsedSystems && g.collapsedSystems[sysId]) return false;
+  if (a2Liste(g).some(z => z.sys === sysId)) return false;
+  if (nestListe(g).some(n => n.sys === sysId)) return false;
+  const feld = db.shared[astFeldKey(sysId)];
+  if (feld && feld.festung) return false;
+  return true;
+}
+/* Ein freies System aus der ganzen Galaxie ziehen. Bewusst NICHT pickRandomFreeSystem(): das faellt
+   bei erschoepfter Auswahl auf IRGENDEIN System zurueck und traefe dann ein Nest oder eine Festung.
+   Hier ist null der richtige Ausgang - der Entstehungs-Versuch dieses Takts verfaellt einfach. */
+function a2FreiesSystem(g) {
+  const frei = SYSTEMS.filter(s => a2SystemFrei(g, s));
+  return frei.length ? frei[Math.floor(Math.random() * frei.length)] : null;
+}
+function a2Neu(g, sysId, now) {
+  const ziel = {
+    id: crypto.randomUUID(),
+    sys: sysId,
+    lp: A2_LP, lpMax: A2_LP,
+    seit: now,
+    naechsteWanderung: now + A2_WANDER_MS,
+    beitraege: {}, schlaege: {},
+    // Die BEUTE reist im Objekt mit (Konzept Abschnitt 10): das Frontend zeigt die Vorschau daraus,
+    // statt eine zweite, driftende Kopie der Zahlen zu fuehren. A2 ist einstufig - deshalb genuegt
+    // EIN flacher Deskriptor je Konvoi (keine Stufentabelle wie beim Nest, keine Paritaetspflicht).
+    // Die Werte sind der VOLLE Konvoi; jeder Angreifer bekommt seinen Schadensanteil davon.
+    beute: { essenz: A2_ESSENZ, kampfpunkte: A2_KAMPFPUNKTE, xp: A2_XP, credits: A2_CREDITS, modulChance: A2_MODUL_CHANCE }
+  };
+  a2Liste(g).push(ziel);
+  return ziel;
+}
+/* DER TAKT. Laeuft im galaxyTick (alle 15 Minuten), wie nestTick - ein A2-Ziel VERAENDERT die
+   Galaxie (es entsteht, driftet, entkommt), und diese Ereignisse gehoeren in den Weltentakt.
+   Drei Zweige; der Endpunkt (Angriff, Fall) ist Task 2 und lebt woanders. */
+function A2Tick(g) {
+  if (!A2_SPAWN_AKTIV) return;
+  const now = Date.now();
+  const liste = a2Liste(g);
+
+  // 1) ENTKOMMEN. Lebensdauer erreicht, ohne gefallen zu sein -> GANZ entfernen (nicht verschieben).
+  //    Das ist die eine Mechanik, die A2 vom Nest strukturell unterscheidet. Rueckwaerts iteriert,
+  //    weil gespleisst wird.
+  for (let i = liste.length - 1; i >= 0; i--) {
+    const z = liste[i];
+    if (now >= (z.seit || now) + A2_LEBENSDAUER_MS) {
+      liste.splice(i, 1);
+      a2VerlaufVermerken(g, z.id, 'entkommen');
+      pushGalaxyNews('ti-recycle', 'Der ' + A2_ART_NAME + ' bei ' + z.sys +
+        ' ist aus der Sektorkarte verschwunden - niemand hat ihn rechtzeitig aufgebracht.');
+    }
+  }
+
+  // 2) DRIFTEN. Alle A2_WANDER_MS in ein freies Nachbarsystem. Beitraege und schlaege reisen MIT
+  //    (sie haengen am Ziel, nicht am Ort) - dieselbe Freiheitspruefung wie bei der Entstehung.
+  for (const z of liste) {
+    if (now < (z.naechsteWanderung || 0)) continue;
+    z.naechsteWanderung = now + A2_WANDER_MS;
+    const frei = (SYSTEM_NEIGHBORS[z.sys] || []).filter(s => a2SystemFrei(g, s));
+    if (!frei.length) continue;
+    const alt = z.sys;
+    z.sys = frei[Math.floor(Math.random() * frei.length)];
+    pushGalaxyNews('ti-recycle', 'Der ' + A2_ART_NAME + ' ist von ' + alt + ' nach ' + z.sys +
+      ' weitergedriftet.');
+  }
+
+  // 3) ENTSTEHEN. Alle A2_WURF_MS ein Versuch, galaxieweit gedeckelt auf A2_MAX. Ein galaxie-weiter
+  //    Zaehler (g.a2NaechsterWurf) statt der volk-gebundenen Nest-Zeiten - A2 hat keine Kopplung.
+  //    Findet a2FreiesSystem nichts, verfaellt der Versuch (null), statt auf ein belegtes System
+  //    auszuweichen.
+  if (now >= (g.a2NaechsterWurf || 0)) {
+    g.a2NaechsterWurf = now + A2_WURF_MS;
+    if (liste.length < A2_MAX && Math.random() < A2_WURF_CHANCE) {
+      const sysId = a2FreiesSystem(g);
+      if (sysId) {
+        a2Neu(g, sysId, now);
+        pushGalaxyNews('ti-recycle', 'Ein ' + A2_ART_NAME + ' ist bei ' + sysId +
+          ' auf der Sektorkarte aufgetaucht. Er treibt weiter oder entkommt - wer die Bergung will, muss ihn stellen.');
+      }
+    }
+  }
+}
+
+/* ===== A2: Angriff und Belohnung (Task 2) ===================================================
+   Der Endpunkt und der Belohnungsweg. Gebaut nach dem Muster von /api/alien/nest-angriff - die
+   drei Entscheidungen von dort (Abklingzeit AM ZIEL, angekommener Schaden statt Wurf, der Server
+   schreibt keinen fremden Spielstand) gelten hier genauso. Zwei Dinge sind ANDERS als beim Nest:
+
+   1. DIE BEUTE ("alle 3", Entscheidung Sascha). Anteilig an ALLE Beitragenden ueber
+      pushPendingReward, mit EIGENEM type:'wrackkonvoi' (sonst faellt sie in den "+500 Kredite
+      Bug-Report"-Rueckfall des Clients, bei fehlendem credits "+NaN Kredite"):
+        - GARANTIERT anteilig: essenz (Sternenessenz) + kampfpunkte + xp + credits. Sternenessenz
+          ist der eigentliche Reiz - die einzige Waehrung, die Prestige UND Aufstieg uebersteht;
+          bewusst KLEIN gehalten (4 fuer einen ganzen Konvoi), weil sie sonst als wiederkehrende
+          Quelle das Aufstiegs-Gefuege flutet (gemessen: eine Abgrund-Tiefe-180 zahlt 58, ein
+          ganzer Aufstieg "ueber 100" - ein A2-Kill darf davon nur einen Bruchteil geben).
+        - CHANCE JE ANTEIL: ein exklusives Standort-Modul (kv_bergungslogik) und ein exklusives
+          Kampf-Modul (kv_bergungspanzer), quelle:'konvoi'. Der Server WUERFELT die Chance
+          (Math.random() < anteil * A2_MODUL_CHANCE) - so ist das Modul nicht F5-druckbar, und die
+          Exklusivitaet bleibt knapp (ein Modul je ~3 Kills solo). Der Server GRANTET das Modul
+          nicht - die Grant-Funktionen liegen im Frontend; er reiht nur die SPEZIFIKATION ein, und
+          der A2-Zweig in claimPendingRewards materialisiert sie und ruft save() (Regel 73).
+      Weil das Kampf-Modul atk/hull/shield traegt, ist es PvP-relevant: SHIP_MODULE_COMBAT_BASE
+      fuehrt kv_bergungspanzer (Paritaet, Task 3), und die Auslieferung ist Backend-zuerst (Regel 60).
+
+   2. DER DRITTE verpasst-GRUND 'entkommen'. Ist das Ziel bei der Ankunft weg, unterscheidet
+      a2VerlaufGrund zwischen 'gefallen' (jemand hat es gestellt) und 'entkommen' (Lebensdauer
+      abgelaufen, GANZ verschwunden) - der Zug, den A2 vom Nest strukturell unterscheidet. Ein
+      driftendes Ziel steht dagegen noch und wird wie beim Nest ueber ziel.sys erkannt. */
+const A2_ESSENZ = 4;         // Sternenessenz je ganzem Konvoi, anteilig - klein gegen die Essenz-Wirtschaft
+const A2_KAMPFPUNKTE = 20;
+const A2_XP = 150;
+const A2_CREDITS = 600;
+const A2_MODUL_CHANCE = 0.3; // Basis-Fallchance je Modul, multipliziert mit dem Schadensanteil
+const A2_MODUL_DEF = { defKey: 'kv_bergungslogik', seltenheit: 'episch', quelle: 'konvoi', art: 'standort' };
+const A2_KAMPFMODUL_DEF = { defKey: 'kv_bergungspanzer', seltenheit: 'episch', quelle: 'konvoi', art: 'schiff' };
+
+function A2FindeMission(save, missionId, zielId) {
+  const flotten = [];
+  if (save && save.fleet) flotten.push(save.fleet);
+  if (save && save.colonies) for (const c of Object.values(save.colonies)) if (c && c.fleet) flotten.push(c.fleet);
+  for (const f of flotten) {
+    for (const m of (f.missions || [])) {
+      if (String(m.id) === String(missionId) && m.type === 'konvoi-angriff' && String(m.zielId) === String(zielId)) return m;
+    }
+  }
+  return null;
+}
+/* Der GEMEINSAME KERN eines A2-Schlags. Heute nur der Einzelangriff (unten); der Verbandsangriff
+   koennte spaeter denselben Kern nutzen (wie nestSchlagAusfuehren). `beteiligte` ist
+   [{ userId, name, gewicht }] - beim Einzelangriff ein Eintrag mit Gewicht 1. Ein Wrackkonvoi hat
+   KEINE Schwaeche (anders als das Alien-Nest): flacher Wurf, kein Konterschiff. */
+function A2SchlagAusfuehren(g, ziel, kraft, composition, beteiligte, jetzt) {
+  const liste = a2Liste(g);
+  const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4));
+
+  const lpVorher = ziel.lp || 0;
+  ziel.lp = Math.max(0, lpVorher - wurf);
+  const schaden = lpVorher - ziel.lp;          // was ANGEKOMMEN ist, nicht der Wurf
+
+  ziel.beitraege = ziel.beitraege || {};
+  ziel.schlaege = ziel.schlaege || {};
+  const gewichtSumme = beteiligte.reduce((a, b) => a + (b.gewicht > 0 ? b.gewicht : 0), 0) || 1;
+  for (const t of beteiligte) {
+    const anteil = (t.gewicht > 0 ? t.gewicht : 0) / gewichtSumme;
+    const b = ziel.beitraege[t.userId] || { name: t.name || 'Kommandant', schaden: 0 };
+    b.schaden = (b.schaden || 0) + schaden * anteil;
+    b.name = t.name || b.name;
+    ziel.beitraege[t.userId] = b;
+    ziel.schlaege[t.userId] = jetzt;
+  }
+
+  // Der Konvoi wehrt sich - als QUOTE, nicht als Stueckzahl (der Server schreibt keinen fremden
+  // Spielstand; jeder Client wendet die Quote auf SEINEN Beitrag an).
+  const quote = Math.min(0.5, A2_VERLUST + Math.random() * 0.06);
+
+  const gefallen = ziel.lp <= 0;
+  const anteile = {};
+  let teilnehmer = 0;
+  if (gefallen) {
+    const summe = Object.values(ziel.beitraege).reduce((a, b) => a + (b.schaden || 0), 0) || 1;
+    for (const [uid, b] of Object.entries(ziel.beitraege)) {
+      const anteil = (b.schaden || 0) / summe;
+      if (!(anteil > 0)) continue;
+      teilnehmer++;
+      anteile[uid] = anteil;
+      const reward = {
+        type: A2_ART,               // 'wrackkonvoi' - eigener Typ, sonst Bug-Report-Rueckfall im Client
+        system: ziel.sys,
+        anteil: Math.round(anteil * 1000) / 1000,
+        essenz: Math.max(1, Math.round(A2_ESSENZ * anteil)),
+        kampfpunkte: Math.max(1, Math.round(A2_KAMPFPUNKTE * anteil)),
+        xp: Math.max(1, Math.round(A2_XP * anteil)),
+        credits: Math.max(1, Math.round(A2_CREDITS * anteil)),
+        zeit: jetzt
+      };
+      // Chance je Anteil - der Server wuerfelt, das Modul ist damit nicht F5-druckbar.
+      if (Math.random() < anteil * A2_MODUL_CHANCE) reward.modul = Object.assign({}, A2_MODUL_DEF);
+      if (Math.random() < anteil * A2_MODUL_CHANCE) reward.kampfmodul = Object.assign({}, A2_KAMPFMODUL_DEF);
+      pushPendingReward(uid, reward);
+    }
+    const idx = liste.indexOf(ziel);
+    if (idx >= 0) liste.splice(idx, 1);
+    a2VerlaufVermerken(g, ziel.id, 'gefallen');
+    pushGalaxyNews('ti-recycle', 'Der ' + A2_ART_NAME + ' bei ' + ziel.sys + ' ist aufgebracht - ' +
+      teilnehmer + ' Kommandant' + (teilnehmer === 1 ? '' : 'en') + ' teilen sich die Bergung.');
+  }
+
+  return { wurf, schaden, quote, gefallen, anteile, teilnehmer,
+           lp: gefallen ? 0 : ziel.lp, lpMax: ziel.lpMax };
+}
+app.post('/api/konvoi/angriff', authMiddleware, async (req, res) => {
+  const zielId = String((req.body && req.body.zielId) || '');
+  const missionId = String((req.body && req.body.missionId) || '');
+  if (!zielId || !missionId) return res.status(400).json({ error: 'zielId und missionId erforderlich.' });
+
+  const g = loadOrInitGalaxy();
+  const liste = a2Liste(g);
+  const ziel = liste.find(z => z.id === zielId);
+  const save = astLeseSave(req.userId);
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern, dann angreifen.' });
+  const mission = A2FindeMission(save, missionId, zielId);
+  if (!mission || !mission.composition) {
+    return res.status(403).json({ error: 'Zu diesem Angriff ist keine Flotte im gespeicherten Spielstand unterwegs.' });
+  }
+  if (mission.endTime && mission.endTime > Date.now()) {
+    return res.status(400).json({ error: 'Deine Flotte ist noch unterwegs.', unterwegs: true });
+  }
+
+  /* Das Ziel ist weg. Beides ist KEIN Fehler des Spielers, kostet also nichts - aber die Antwort
+     nennt den WAHREN Grund: aufgebracht (gefallen) oder entkommen (Lebensdauer abgelaufen). */
+  if (!ziel) {
+    const grund = a2VerlaufGrund(g, zielId);
+    const text = grund === 'entkommen'
+      ? 'Der ' + A2_ART_NAME + ' ist entkommen, bevor dein Verband ihn stellen konnte - er kehrt vollzählig zurück.'
+      : 'Der ' + A2_ART_NAME + ' war bei der Ankunft bereits aufgebracht - dein Verband kehrt vollzählig zurück.';
+    return res.status(200).json({ ok: true, verpasst: true, grund: grund, text: text });
+  }
+  if (mission.system && ziel.sys !== mission.system) {
+    return res.status(200).json({ ok: true, verpasst: true, grund: 'weitergezogen', neuesSystem: ziel.sys,
+      text: 'Der ' + A2_ART_NAME + ' ist weitergedriftet - dein Verband findet bei ' + mission.system + ' nichts mehr vor und kehrt zurück.' });
+  }
+
+  const jetzt = Date.now();
+  ziel.schlaege = ziel.schlaege || {};
+  const letzter = ziel.schlaege[req.userId] || 0;
+  if (letzter && jetzt - letzter < A2_ABKLING_MS) {
+    return res.status(403).json({ error: 'Deine Verbände haben diesen Konvoi erst vor Kurzem beschossen - der nächste Schlag ist in ' +
+      Math.ceil((letzter + A2_ABKLING_MS - jetzt) / 60000) + ' Minuten möglich.', abklingzeit: true });
+  }
+
+  const kraft = computeAttackPowerFromComposition(save, mission.composition, 0);
+  if (!(kraft > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
+  const erg = A2SchlagAusfuehren(g, ziel, kraft, mission.composition,
+    [{ userId: req.userId, name: req.username || 'Kommandant', gewicht: 1 }], jetzt);
+
+  // Aus der Quote werden hier - und NUR hier - konkrete Verluste (der Einzelangreifer hat genau eine
+  // Zusammensetzung; ein spaeterer Verband bekaeme die Quote selbst).
+  const eigeneVerluste = {};
+  for (const [typ, n] of Object.entries(mission.composition)) {
+    if (typeof n !== 'number' || n <= 0) continue;
+    const weg = Math.min(n, Math.round(n * erg.quote));
+    if (weg > 0) eigeneVerluste[typ] = weg;
+  }
+  const meinAnteil = erg.anteile[req.userId] || 0;
+  console.log('[konvoi-angriff] userId=' + req.userId + ' ziel=' + zielId + ' sys=' + ziel.sys +
+    ' schaden=' + erg.schaden + ' lp=' + (erg.gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax);
+  await saveDb();
+  res.json({
+    ok: true, schaden: erg.schaden, gefallen: erg.gefallen,
+    lp: erg.lp, lpMax: erg.lpMax,
+    eigeneVerluste,
+    anteil: erg.gefallen ? Math.round(meinAnteil * 1000) / 1000 : 0,
+    teilnehmer: erg.gefallen ? erg.teilnehmer : Object.keys(ziel.beitraege).length,
+    naechsterSchlagAb: jetzt + A2_ABKLING_MS
+  });
+});
 
 function festungFindeMission(save, missionId, sysId) {
   const flotten = [];

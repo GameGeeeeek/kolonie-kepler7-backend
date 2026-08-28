@@ -2196,7 +2196,12 @@ git pull origin master                     # Fast-forward, 1 Datei
 curl -s https://gamegeeeeek.de/api/health  # commit/checkout d881b45, uptimeSec 11
 ```
 
-### AUSFALL NR. 12 (22.–28.08.2026) – die Ursache ist ENDLICH belegt: nodemon killt den eigenen Pull
+### AUSFALL NR. 12, DIE URSACHE (28.08.2026) – nodemon killt den eigenen Pull
+
+*Ergänzt den Abschnitt „AUSFALL NR. 12 … der Rest lag im ARBEITSBAUM, nicht im Index" weiter oben:
+Dort steht, WIE der Zustand aussah (die Spalte: Arbeitsbaum geändert, Index unberührt) und wie er
+repariert wurde. Hier steht, WOHER er kommt — und was seither dagegen gebaut ist. Beide Hälften
+entstanden am selben Tag in zwei Sitzungen; die zweite hat die erste beim Rebase vorgefunden.*
 
 Sechs Ausfälle (Nr. 6, 7, 8, 9, 11, 12) zeigten denselben Fingerabdruck – der Arbeitsbaum trug den
 neuen Stand, `.git/HEAD` den alten, eine `*.lock` blieb liegen –, und die Ursache war jedes Mal

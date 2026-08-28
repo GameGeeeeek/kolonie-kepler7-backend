@@ -2529,10 +2529,76 @@ von außen nicht belegbar und steht nur im Container-Log
 aber eine ausgelieferte Funktion weniger, und der Zustand sieht in allen drei Feldern
 unauffällig aus.
 
-**Warum das trotzdem kein Rückschritt gegenüber vorher ist:** Der Arbeitsbaum ist jetzt sauber.
-Beim nächsten Deploy findet `deployAufraeumen` nichts zu räumen, schreibt also keine Datei,
-löst keinen Vor-Neustart aus – und der Pull sollte durchlaufen und `#169` nachziehen. Der
-Zustand heilt sich beim nächsten Push von selbst; vorher hätte jeder Pull dauerhaft abgeprallt.
+**Diese Vorhersage stand hier zuerst und ist gemessen WIDERLEGT:** „Der Arbeitsbaum ist jetzt
+sauber, der nächste Deploy findet nichts zu räumen und der Pull sollte durchlaufen." Ein zweiter
+Push zwei Stunden später bewirkte **gar nichts** – `uptimeSec` wuchs über fünf Messungen lückenlos
+weiter (7643 → 7718), es gab also keinen Neustart und damit keinen Schreibvorgang; `commit`,
+`checkout` und `blob` blieben unverändert.
+
+**Der Grund ist eine LÜCKE in `deployAufraeumen`, und sie ist benennbar:** Der Diff
+`6317576..7835948` besteht aus drei Dateien, und eine davon ist **neu**:
+
+```
+M  CLAUDE.md
+M  server.js
+A  tests/test_neuspieler_push_http.js     <- in 6317576 nicht vorhanden
+```
+
+Nach dem abgeschnittenen ersten Pull liegt diese Datei **untracked** im Verzeichnis. Die
+Selbstheilung räumt aber nur GEÄNDERTE Dateien weg, deren Blob nachweislich im Ursprung steht –
+eine untracked Datei fällt durch beide Wachen, und `git pull` bricht an ihr ab („untracked working
+tree files would be overwritten by merge"). Bezeichnend: Der manuelle Wiederherstellungsweg weiter
+oben kennt den Fall längst und sagt „kollidierende unversionierte Dateien **wegbewegen, nie
+löschen**" – die automatische Heilung tut es nicht. Ein zweiter Kandidat ist von außen nicht davon
+zu unterscheiden: `CLAUDE.md` steht ebenfalls im Diff, und ob der erste Lauf sie mitverworfen hat,
+sagt nur das Log.
+
+**Damit ist der Zustand NICHT selbstheilend.** Er braucht einen Handgriff, und weil die Datei im
+Ziel-Commit existiert, ist ihr Wegbewegen gefahrlos:
+
+```bash
+cd /DATA/kepler7/backend
+docker logs --tail 80 kepler7-backend | grep -i deploy-webhook   # nennt die blockierende Datei
+git status --short                                               # JEDE Zeile versorgen
+mv tests/test_neuspieler_push_http.js /tmp/                      # untracked, im Ziel enthalten
+git checkout HEAD -- CLAUDE.md server.js 2>/dev/null
+git pull --ff-only origin master
+curl -s https://gamegeeeeek.de/api/health                         # commit/checkout/blob muessen einig sein
+```
+
+**GEBAUT: der dritte Zweig.** `deployAufraeumen` behandelt jetzt auch unversionierte Dateien –
+aber nur die, die der eingehende Stand ANLEGT, mit demselben Beweis wie bei den geänderten (der
+Pfad muss in `FETCH_HEAD` vorkommen), und sie werden **weggelegt statt gelöscht**
+(`os.tmpdir()/kepler7-deploy-beiseite/<zeitstempel>/<pfad>`). Ohne ihn half die Heilung
+ausgerechnet bei jedem Commit nicht, der eine Datei ANLEGT – und das ist bei diesem Projekt fast
+jeder, weil zu jeder Etappe ein neuer Wächter gehört.
+
+**Die Gegenrichtung ist die wichtigere Hälfte** (`6c`): Eine unversionierte Datei, die der
+eingehende Stand NICHT kennt, ist eine fremde Datei und bleibt liegen. Ohne diese eine Zeile
+dürfte die Heilung jede beliebige Datei aus dem Verzeichnis räumen – und in `/DATA/kepler7/backend`
+liegen `db.json`, `jwt-secret.txt` und die VAPID-Schlüssel.
+
+`tests/test_deploy_selbstheilung.js` Abschnitt 6 (22 Prüfungen, zwei Gegenproben, jede mit ihrer
+Soll-Liste, 22 identische Prüfnamen in allen drei Läufen). **`6-vorab` misst den Anlassfall
+selbst**: Ohne Heilung scheitert der Pull an dieser Datei wirklich – sonst könnte `6b` auch dann
+grün sein, wenn es nie ein Problem gab.
+
+| Sabotage | fällt |
+|---|---|
+| den ganzen Zweig entfernt (= Stand davor) | `6`, `6b` |
+| den `FETCH_HEAD`-Beweis entfernt | `6c` |
+
+**Ein Werkzeugfehler beim Bau, und er ist die bekannte Bausteinlisten-Falle:** Der Test schneidet
+die Funktion aus `server.js` und führt sie mit `new Function('fs','path','execSync', …)` aus – `os`
+war dort nicht dabei. Der neue Zweig warf zur LAUFZEIT, der innere `catch` von `deployAufraeumen`
+schluckte es in den Bericht, und mein auf `/beiseitegelegt/` gefilterter Beleg versteckte es
+vollends: `{"bericht":[]}` sah aus, als sei der Zweig wirkungslos. Seitdem gibt der Beleg den
+VOLLEN Bericht aus, und `6-bau` prüft ausdrücklich, dass keine „nicht pruefbar"-Zeile darin steht –
+ein verschluckter Laufzeitfehler ist damit eine eigene, benannte Prüfung statt eines Rätsels.
+
+**Was der Zweig NICHT löst:** Das Wegbewegen einer `.js`-Datei ist selbst eine Änderung, die
+nodemon sieht – das Kill-Fenster von oben bleibt also bestehen, und der Deploy braucht weiterhin
+zwei Anläufe. Erst `nodemon --delay 5` im Startbefehl (Infrastruktur, nicht Code) schließt es.
 
 **Die Lehre für den nächsten Ausbau: Die Heilung darf die beobachtete Datei nicht anfassen,
 solange der Beobachter scharf ist.** Zwei Wege, beide außerhalb von `server.js`:

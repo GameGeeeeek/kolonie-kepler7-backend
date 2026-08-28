@@ -15,6 +15,8 @@
 //   1  eine VERWAISTE Sperre wird entfernt   / 1b eine FRISCHE bleibt liegen
 //   2  ein halb angewendeter Pull wird zurueckgesetzt (Blob == FETCH_HEAD)
 //   2b eine FREMDE Aenderung bleibt unangetastet und wird als solche benannt
+//   2c eine unversionierte Datei, die der eingehende Stand ANLEGT, wird beiseitegelegt
+//   2d eine FREMDE unversionierte Datei bleibt liegen (die wichtigere Haelfte)
 //   3  laeuft ein git-Prozess, wird GAR NICHTS angefasst
 //   4  die Funktion ist im Deploy-Weg verdrahtet und steht hinter der Sperre, vor dem Pull
 //
@@ -96,8 +98,12 @@ try {
   const teile = namen.map(schneide);
   if (teile.some(t => !t)) throw new Error('nicht gefunden: ' + namen.filter((n,i) => !teile[i]).join(', '));
   const konstanten = sammleKonstanten(teile.join('\n'), []);
-  heilen = new Function('fs', 'path', 'execSync',
-    konstanten + '\n' + teile.join('\n') + '\nreturn { deployAufraeumen, lebenderGitProzess };')(fs, path, execSync);
+  // os gehoert seit dem 28.08.2026 dazu (die beiseitegelegten Dateien landen unter os.tmpdir()).
+  // Fehlt ein Modul hier, wirft der Zweig zur LAUFZEIT, der innere catch von deployAufraeumen
+  // schluckt es in den Bericht - und ein gefilterter Beleg versteckt es vollends. Deshalb misst
+  // 0-bau2 unten, dass der Arbeitsbaum ueberhaupt pruefbar war.
+  heilen = new Function('fs', 'path', 'os', 'execSync',
+    konstanten + '\n' + teile.join('\n') + '\nreturn { deployAufraeumen, lebenderGitProzess };')(fs, path, os, execSync);
 } catch (e) { baufehler = e.message; }
 check('0-bau: die Selbstheilung laesst sich aus server.js schneiden und ausfuehren', !!heilen, { fehler: baufehler });
 if (!heilen) { console.log('\nFEHLGESCHLAGEN'); process.exit(1); }
@@ -116,7 +122,7 @@ const g = (dir, args) => execSync('git ' + args, { cwd: dir, encoding: 'utf8', s
 // JEDER Abschnitt bekommt sein eigenes Repo-Paar. Ein gemeinsames waere ein Messwerkzeug, dessen
 // erster Lauf den zweiten veraendert - dieselbe Falle wie zwei Messlaeufe mit einem Speicher.
 let repoZaehler = 0;
-function baueRepos() {
+function baueRepos(neueDateien) {
   const raum = path.join(WURZEL, 'r' + (++repoZaehler));
   fs.mkdirSync(raum, { recursive: true });
   const ursprung = path.join(raum, 'ursprung'), pi = path.join(raum, 'pi');
@@ -131,14 +137,22 @@ function baueRepos() {
   // Der Ursprung laeuft weiter - das ist der eingehende Commit.
   fs.writeFileSync(path.join(ursprung, 'server.js'), 'neu\n');
   fs.writeFileSync(path.join(ursprung, 'CLAUDE.md'), 'doku neu\n');
+  for (const d of (neueDateien || [])) {
+    fs.mkdirSync(path.dirname(path.join(ursprung, d)), { recursive: true });
+    fs.writeFileSync(path.join(ursprung, d), 'neue datei\n');
+  }
   g(ursprung, 'add -A'); g(ursprung, 'commit -q -m neu');
   return { ursprung, pi };
 }
 // Der Ausfall-Fingerabdruck: die neuen Dateien liegen im Arbeitsbaum, HEAD steht noch auf alt,
 // eine Sperre ist liegengeblieben.
-function stelleAusfallHer(pi, ursprung, sperrAlterMs) {
+function stelleAusfallHer(pi, ursprung, sperrAlterMs, neueDateien) {
   fs.writeFileSync(path.join(pi, 'server.js'), 'neu\n');
   fs.writeFileSync(path.join(pi, 'CLAUDE.md'), 'doku neu\n');
+  for (const d of (neueDateien || [])) {
+    fs.mkdirSync(path.dirname(path.join(pi, d)), { recursive: true });
+    fs.writeFileSync(path.join(pi, d), 'neue datei\n');
+  }
   const lock = path.join(pi, '.git', 'index.lock');
   fs.writeFileSync(lock, '');
   const t = (Date.now() - sperrAlterMs) / 1000;
@@ -188,6 +202,53 @@ function stelleAusfallHer(pi, ursprung, sperrAlterMs) {
   check('3c: die Datei daneben wird trotzdem zurueckgesetzt (je Datei einzeln geprueft)',
     fs.readFileSync(path.join(pi, 'CLAUDE.md'), 'utf8') === 'doku alt\n',
     { doku: fs.readFileSync(path.join(pi, 'CLAUDE.md'), 'utf8').trim() });
+}
+// ---- 6) Eine unversionierte Datei, die der eingehende Stand ANLEGT ---------------------------
+// Der Anlassfall vom 28.08.2026, am Pi gemessen: Ein abgeschnittener Pull laesst auch Dateien
+// liegen, die es im alten Stand gar nicht GIBT (Status A im Diff). Sie sind unversioniert, fallen
+// durch beide Wachen oben, und git bricht an ihnen ab. Ohne diesen Zweig half die Heilung
+// ausgerechnet bei jedem Commit nicht, der eine Datei hinzufuegt - bei diesem Projekt fast jedem,
+// weil zu jeder Etappe ein neuer Waechter gehoert.
+const NEUE = ['tests/test_neu.js'];
+{
+  // 6-vorab misst den ANLASSFALL selbst: ohne Heilung scheitert der Pull wirklich an dieser
+  // Datei. Ohne diese Zeile koennte 6b auch dann gruen sein, wenn es nie ein Problem gab.
+  const { ursprung, pi } = baueRepos(NEUE);
+  stelleAusfallHer(pi, ursprung, 20 * 60 * 1000, NEUE);
+  fs.writeFileSync(path.join(pi, 'server.js'), 'alt\n');      // getrackte Reste selbst versorgen,
+  fs.writeFileSync(path.join(pi, 'CLAUDE.md'), 'doku alt\n'); // damit ALLEIN die neue Datei stoert
+  let fehler = null;
+  try { g(pi, 'pull -q --ff-only origin master'); }
+  catch (e) { fehler = (e.message.split('\n').find(z => /untracked|overwritten/i.test(z)) || e.message.split('\n')[0]).trim(); }
+  check('6-vorab: ohne Heilung scheitert der Pull an der unversionierten Datei', fehler !== null, { fehler });
+}
+{
+  const { ursprung, pi } = baueRepos(NEUE);
+  stelleAusfallHer(pi, ursprung, 20 * 60 * 1000, NEUE);
+  const bericht = aufraeumen('test', pi);
+  const zeile = bericht.find(z => /beiseitegelegt/.test(z) && z.indexOf(NEUE[0]) >= 0);
+  const ziel = zeile ? zeile.split(' -> ')[1].split(' (')[0] : null;
+  check('6: die unversionierte Datei ist beiseitegelegt - nicht geloescht',
+    !fs.existsSync(path.join(pi, NEUE[0])) && !!ziel && fs.existsSync(ziel),
+    { bericht, zielExistiert: ziel ? fs.existsSync(ziel) : null });
+  check('6-bau: der Arbeitsbaum war ueberhaupt pruefbar (kein verschluckter Laufzeitfehler)',
+    !bericht.some(z => /nicht pruefbar/.test(z)), { bericht: bericht.filter(z => /nicht pruefbar/.test(z)) });
+  let gezogen = null;
+  try { g(pi, 'pull -q --ff-only origin master'); gezogen = fs.readFileSync(path.join(pi, NEUE[0]), 'utf8').trim(); }
+  catch (e) { gezogen = 'FEHLER: ' + e.message.split('\n')[0]; }
+  check('6b: und der Pull laeuft danach durch (das ist der Zweck)', gezogen === 'neue datei', { datei: gezogen });
+}
+{
+  // Gegenrichtung, und sie ist die wichtigere Haelfte: Eine unversionierte Datei, die der
+  // eingehende Stand NICHT kennt, ist eine fremde Datei - sie bleibt, wo sie ist. Ohne diese
+  // Zeile duerfte die Heilung jede beliebige Datei aus dem Verzeichnis raeumen.
+  const { ursprung, pi } = baueRepos(NEUE);
+  stelleAusfallHer(pi, ursprung, 20 * 60 * 1000, NEUE);
+  fs.writeFileSync(path.join(pi, 'notizen-vom-pi.txt'), 'gehoert niemandem\n');
+  const bericht = aufraeumen('test', pi);
+  check('6c: eine FREMDE unversionierte Datei bleibt liegen',
+    fs.existsSync(path.join(pi, 'notizen-vom-pi.txt')) && !bericht.some(z => z.indexOf('notizen-vom-pi') >= 0),
+    { bericht: bericht.filter(z => /beiseitegelegt|notizen/.test(z)) });
 }
 // ---- 4) Laeuft ein git-Prozess, wird gar nichts angefasst -------------------------------------
 {

@@ -2304,6 +2304,38 @@ durch.** Drei Wirkungs-Gegenproben, jede mit ihrer Soll-Liste, alle mit 17 gelau
 traf die eigene Shell (Exit 144) — wörtlich Arbeitsregel 15, die seit dem 06.08.2026 samt Exit-Code
 in diesem Dokument steht. Prozesse werden über `ps` identifiziert und einzeln per PID beendet.
 
+### DIE GRENZE DIESER SELBSTHEILUNG, gemessen am Tag ihrer Auslieferung
+
+**Sie hilft nur, solange der Server LEBT.** `deployAufraeumen` läuft im Webhook-Handler, also im
+Node-Prozess. Ist der abgestürzt, nimmt niemand mehr einen Webhook entgegen — dann kann sich
+nichts heilen, egal wie gut die Funktion ist.
+
+Genau dieser Fall trat unmittelbar nach ihrem eigenen Merge ein: Das Backend antwortete um 04:12
+noch sauber (`uptimeSec 668`), der Merge lief um 04:24:59, und danach lieferte
+`https://gamegeeeeek.de/api/health` **502 Bad Gateway** — nginx erreichte `kepler7-backend:3001`
+nicht mehr. Das statische Frontend blieb bei HTTP 200; Spieler konnten also spielen, aber
+Anmeldung, Speichern, Allianzen, Markt und Bestenliste waren tot.
+
+**Zwei Ursachen sind von außen ausgeschlossen worden, bevor irgendjemand geweckt wurde:**
+Der gemergte Stand startet lokal einwandfrei und meldet `blob 2c3f34a` — exakt
+`git rev-parse origin/master:server.js`. Und `DEPLOY_TARGETS` hat nur eine Leserstelle, die auf
+die neue `{ dir, command }`-Form angepasst ist; eine übersehene zweite Stelle scheidet als
+Absturzursache aus. `node --check`, `tests/test_serverstart.js` und
+`tests/test_deploy_webhook_http.js` waren vor dem Merge grün.
+
+**Die Lehre über den Einzelfall hinaus: Ein Selbstheilungsmechanismus, der IM geheilten System
+läuft, deckt dessen Totalausfall grundsätzlich nicht ab.** Das ist keine Schwäche der Umsetzung,
+sondern ihrer Lage — und es gehört benannt, damit niemand sie für einen vollständigen Schutz hält.
+Was diesen Fall abdecken würde, liegt außerhalb von `server.js`:
+
+- eine **Docker-Restart-Policy** (`--restart unless-stopped`), die den Container nach einem Crash
+  wieder hochfährt — nodemon tut das nach einem Absturz ausdrücklich NICHT, es wartet auf eine
+  Dateiänderung (`[nodemon] app crashed - waiting for file changes`);
+- oder ein **Watchdog von außen**, der `/api/health` prüft und bei 502 neu startet.
+
+Beides ist Infrastruktur, keine Code-Änderung. Wer den nächsten Schritt baut, fängt dort an —
+mehr Logik im Server macht diese Lücke nicht kleiner.
+
 **Was NICHT gebaut ist, und warum es weiterhin lohnt:**
 
 1. **Das Fenster verkleinern (Infrastruktur):** `nodemon --delay 5` im Startbefehl. nodemon wartet

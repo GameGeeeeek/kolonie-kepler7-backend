@@ -7060,15 +7060,77 @@ function allianceRaidRewardFor(level, share, platz, anzahl, destroyed, boss) {
 // den konkreten TYP aus seinen eigenen Tabellen (MODULE_DEFS samt Herkunfts-Filtern); ihn hierher zu
 // spiegeln waere eine zweite Kopie einer Frontend-Tabelle, und genau davor warnt CLAUDE.md. Die
 // balancerelevanten Groessen - ob ueberhaupt etwas faellt und wie selten - liegen jetzt hier.
+// ===== Etappe C1: die Bossstufe entscheidet ueber die SPITZE des Beutetischs (28.08.2026) =====
+// Anlass: Das Beute-Konzept nennt den Raid-Beutetisch "stufenunabhaengig". Gemessen stimmt das
+// nicht - Fallchance (+1 Pp/Stufe) und Seltenheitswurf (+0,4 Pp/Stufe) haengen laengst an der
+// Stufe. Was fehlte, war eine Stufe, die man ueberhaupt noch erreichen kann: Die Fallchance laeuft
+// ab Stufe 15 in ihren Deckel (Math.min(0.75, ...)), und weiter als Stufe ~18 kommt niemand, weil
+// die Boss-HP mit 1,4 je Stufe wachsen (Stufe 20 = 54 Wellen a 2 h > 72-h-Fenster des Raids). Ein
+// staerkerer Auftrieb auf die Fallchance waere damit ein Rabatt auf eine Schranke, die schon
+// bindet - genau die Falle aus der Festungs-Blockade und aus Abgrund C2.
+//
+// Der freie Kanal ist die SELTENHEIT: Sie hat keinen Deckel, endet aber bei 'legendaer'.
+//
+// DIE SCHWELLE 10 IST GELIEHEN, NICHT GEGRIFFEN: Es ist dieselbe Stufe, ab der das Grossprojekt
+// (ALLIANCE_MISSION_CADENCES.monthly, minLevel: 10) mythische Module ausschuetten kann - die eine
+// vergleichbare Quelle, die es im Spiel gibt.
+//
+// KALIBRIERT gegen die Frequenz, nicht gegen die Einzelchance (die Bezugsgroesse zuerst pruefen):
+// Ein Modul faellt nur bei der KILL-Welle (destroyed), also genau einmal je Raid, und ein Raid auf
+// Stufe 15 dauert gemessen 29 h (1 h Sammelphase + 11 Wellen a 2 h + 6 h Restart-Sperre). Fuer den
+// Hauptschaediger ergibt das je Monat:
+//     Stufe 10: 0,14   Stufe 12: 0,33   Stufe 15: 0,37   Stufe 18: 0,24 Stueck
+// Das MAXIMUM liegt bei Stufe 15, nicht oben - die HP wachsen schneller, als die Chance steigt.
+// Wer die Stufe hochtreibt, bekommt bessere Chancen JE KILL, aber nicht mehr Module je Monat; eine
+// Farm-Spitze am oberen Ende entsteht dadurch gar nicht erst.
+//
+// WARUM DAS TROTZ 0,37/MONAT UNBEDENKLICH IST, gemessen statt behauptet: Mythische Module an sich
+// sind fuer ein Endspiel-Konto keine Raritaet - die Mythische Modulschmiede fertigt sie
+// deterministisch fuer 15 Metamaterial-Gewebe + 8 Singularitaetskerne, unbegrenzt oft. Was sie
+// NICHT kann, ist ein Boss-Set-Teil: Die tragen HERKUNFT_BOSS und sind aus jeder Schmiede, aus
+// jedem Fundtopf und aus dem Verschmelzen ausgeschlossen. "Mythisch UND Boss-Set-Teil" gibt es auf
+// keinem anderen Weg im Spiel - und bei 20 Teilen dauert ein einzelnes VOLLSTAENDIGES mythisches
+// Set im Erwartungswert rund 11 Monate.
+//
+// Der SET-Bonus bleibt dabei unberuehrt: setBonusAt im Frontend liest nur den TYP des Moduls
+// (k.split(':')[0]), nicht seine Seltenheit. Mythisch aendert allein den Einzelbonus des Stuecks
+// (MODULE_RARITY_MULT 3,5 -> 5,0, also +43 %) - eine begrenzte und benennbare Balance-Folge.
+const ALLIANCE_RAID_MYTHISCH_AB = 10;
+const ALLIANCE_RAID_MYTHISCH_JE_STUFE = 0.015;
+const ALLIANCE_RAID_MYTHISCH_MAX = 0.12;
+// KOPIE-FAMILIE: Dieselbe Funktion steht im Frontend (Belohnungsvorschau des Raids, seit
+// v8.607.0), und tests/test_raid_belohnung_paritaet.js rechnet beide Fassungen AUSGEFUEHRT
+// gegeneinander. Wer eine der drei Zahlen anfasst, fasst beide Repos an.
+function allianceRaidMythischChance(level) {
+  const lvl = Math.max(1, level | 0);
+  if (lvl < ALLIANCE_RAID_MYTHISCH_AB) return 0;
+  return Math.min(ALLIANCE_RAID_MYTHISCH_MAX, (lvl - ALLIANCE_RAID_MYTHISCH_AB + 1) * ALLIANCE_RAID_MYTHISCH_JE_STUFE);
+}
 function allianceRaidModuleDrop(level, platz, anzahl, destroyed) {
   if (!destroyed) return null;
   const rShare = allianceRaidRankShare(platz, anzahl);
   const chance = Math.min(0.75, 0.15 + 0.45 * rShare + Math.max(1, level | 0) * 0.01);
   if (Math.random() >= chance) return null;
-  // Auftrieb der Seltenheit durch Rang und Bossstufe. 'mythisch' faellt hier bewusst NIE - die
-  // Stufe ist im ganzen Spiel kein Fundgegenstand (siehe MODULE_RARITY im Frontend).
+  // Auftrieb der Seltenheit durch Rang und Bossstufe.
   const roll = Math.random() + rShare * 0.18 + Math.max(1, level | 0) * 0.004;
-  if (roll > 1.02) return 'legendaer';
+  if (roll > 1.02) {
+    // Ab ALLIANCE_RAID_MYTHISCH_AB steigt ein legendaeres Teil mit wachsender Chance zu MYTHISCH auf
+    // (Etappe C1). Hier stand vorher, 'mythisch' sei "im ganzen Spiel kein Fundgegenstand" - das war
+    // gemessen falsch und haette diese Etappe beinahe blockiert: MODULE_RARITY im Frontend sagt
+    // "bewusst NICHT im normalen Fundpool", nennt aber die hochstufigen Allianzmissionen
+    // ausdruecklich als Weg (grantAllianceMissionBonusModule wertet legendaer mit 8% auf mythisch
+    // auf). Aus "nicht im normalen Fundpool" war im Kommentar ein "gibt es nirgends" geworden.
+    //
+    // WARUM DIE SPITZE UND NICHT DIE BREITE: Aufgewertet wird nur der LEGENDAERE Ast. Ein
+    // gewoehnlicher Wurf soll durch die Bossstufe nicht ploetzlich mythisch werden - die Stufe
+    // verbessert, was oben herauskommt, nicht den Durchschnitt. Dasselbe Muster wie beim
+    // Praezedenzfall, wo die 8% ebenfalls nur auf 'legendaer' greifen.
+    // Der Wurf wird nur gezogen, wenn die Stufe ihn ueberhaupt zulaesst - sonst verschoebe ein
+    // Aufruf unterhalb der Schwelle die Zufallsfolge, ohne je etwas zu entscheiden.
+    const pMyth = allianceRaidMythischChance(level);
+    if (pMyth > 0 && Math.random() < pMyth) return 'mythisch';
+    return 'legendaer';
+  }
   if (roll > 0.86) return 'episch';
   if (roll > 0.55) return 'selten';
   return 'gewoehnlich';

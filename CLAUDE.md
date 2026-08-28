@@ -3218,3 +3218,121 @@ Gegenprobe beidseitig gefahren: **25 von 28 rot** am alten Stand bei identischer
 **Die Auslieferungsreihenfolge ist dieses Repo ZUERST** (Regel 60): Die drei Empfangsstellen im
 Frontend lesen ein Feld, das nur der neue Server schickt. Umgekehrt schriebe der Server ein Feld,
 das niemand liest — folgenlos.
+
+## Etappe C1: die Bossstufe entscheidet über die SPITZE des Beutetischs (28.08.2026)
+
+**Auftrag Sascha, über `AskUserQuestion` gewählt: „Mythisch ab Stufenschwelle".** Ab Bossstufe 10
+fällt ein erbeutetes Boss-Set-Teil mit stufenabhängiger Chance **mythisch** statt legendär. Umfang
+bewusst klein gehalten: eine Backend-Funktion, im Frontend nur Anzeige, dazu der Paritätstest.
+
+Damit ist die dritte der vier gemessenen Lücken aus `docs/beute-und-instanzen-konzept.md` erledigt
+(„keine gestufte Schwierigkeit mit eigenem Beutetisch").
+
+### Der Befund: „stufenunabhängig" war falsch, und die naheliegende Stellschraube ist gedeckelt
+
+Das Konzept nennt den Raid-Beutetisch stufenunabhängig. **Gemessen stimmt das nicht** — Fallchance
+(+1 Prozentpunkt je Stufe) und Seltenheitswurf (+0,4 Pp) hängen längst an der Stufe. Was fehlte,
+war eine Stufe, die man überhaupt noch erreichen kann:
+
+| Größe | Verhalten |
+|---|---|
+| Fallchance `Math.min(0.75, …)` | läuft **ab Stufe 15** in ihren Deckel |
+| Boss-HP | wachsen mit **1,4 je Stufe** |
+| erreichbare Stufe | rund **18** (Stufe 20 wären 54 Wellen à 2 h > das 72-h-Fenster des Raids) |
+
+**Ein stärkerer Auftrieb auf die Fallchance wäre damit ein Rabatt auf eine Schranke, die schon
+bindet** — genau die Falle aus der Festungs-Blockade („wer einen Faktor an eine Schranke hängt, muss
+zuerst messen, ob diese Schranke überhaupt bindet") und aus Abgrund C2. Der freie Kanal ist die
+**Seltenheit**: Sie hat keinen Deckel, endete aber bei `legendaer`.
+
+### Die Schwelle 10 ist GELIEHEN, nicht gegriffen
+
+Es ist dieselbe Stufe, ab der das Großprojekt (`ALLIANCE_MISSION_CADENCES.monthly`, `minLevel: 10`)
+mythische Module ausschütten kann — die eine vergleichbare Quelle, die es im Spiel gibt. Eine frei
+gewählte Zahl daneben wäre eine zweite Schwelle für dieselbe Sache.
+
+### Kalibriert gegen die FREQUENZ, nicht gegen die Einzelchance
+
+Ein Modul fällt nur bei der Kill-Welle, also genau **einmal je Raid**, und ein Raid auf Stufe 15
+dauert gemessen 29 h (1 h Sammelphase + 11 Wellen à 2 h + 6 h Restart-Sperre). Für den
+Hauptschädiger ergibt das je Monat:
+
+| Bossstufe | 10 | 12 | **15** | 18 |
+|---|---|---|---|---|
+| mythische Set-Teile / Monat | 0,14 | 0,33 | **0,37** | 0,24 |
+
+**Das Maximum liegt bei Stufe 15, nicht oben** — die HP wachsen schneller, als die Chance steigt.
+Wer die Stufe hochtreibt, bekommt bessere Chancen JE KILL, aber nicht mehr Module je Monat; eine
+Farm-Spitze am oberen Ende entsteht dadurch gar nicht erst.
+
+**Die erste Fassung dieser Rechnung war zweimal falsch, und beide Male an der BEZUGSGRÖSSE** (die
+Frontend-Regel 21 an einer Balance-Zahl): Zuerst je *Welle* statt je *Kill* gerechnet — der Wurf
+läuft aber nur bei `destroyed`, also einmal je Raid statt elfmal. Danach je *Gelegenheit* statt je
+*Monat* — und erst die Umrechnung auf die Zeitachse zeigt, dass das Maximum in der MITTE liegt.
+
+### Warum 0,37/Monat unbedenklich ist — gemessen statt behauptet
+
+Mythische Module an sich sind für ein Endspiel-Konto keine Rarität: Die Mythische Modulschmiede
+fertigt sie **deterministisch** für 15 Metamaterial-Gewebe + 8 Singularitätskerne, unbegrenzt oft.
+Was sie NICHT kann, ist ein Boss-Set-Teil — die tragen `HERKUNFT_BOSS` und sind aus jeder Schmiede,
+aus jedem Fundtopf und aus dem Verschmelzen ausgeschlossen. **„Mythisch UND Boss-Set-Teil" gibt es
+auf keinem anderen Weg im Spiel**, und bei 20 Teilen dauert ein einzelnes VOLLSTÄNDIGES mythisches
+Set im Erwartungswert rund 11 Monate.
+
+**Der SET-Bonus bleibt unberührt:** `setBonusAt` im Frontend liest nur den TYP des Moduls
+(`k.split(':')[0]`), nicht seine Seltenheit. Mythisch ändert allein den Einzelbonus des Stücks
+(`MODULE_RARITY_MULT` 3,5 → 5,0, also +43 %) — eine begrenzte und benennbare Balance-Folge.
+
+### Drei Entscheidungen im Code
+
+- **Aufgewertet wird nur der LEGENDÄRE Ast** (`roll > 1.02`). Ein gewöhnlicher Wurf soll durch die
+  Bossstufe nicht plötzlich mythisch werden: Die Stufe verbessert, was oben herauskommt, nicht den
+  Durchschnitt. Dasselbe Muster wie beim Präzedenzfall, wo die 8 % des Großprojekts ebenfalls nur
+  auf `legendaer` greifen.
+- **Der Wurf wird nur gezogen, wenn die Stufe ihn zulässt** (`pMyth > 0 &&`). Ein `Math.random()`
+  unterhalb der Schwelle verschöbe die Zufallsfolge, ohne je etwas zu entscheiden.
+- **`Math.max(1, level | 0)` in der Chance-Funktion**, damit `undefined`/`null`/`NaN`/negativ
+  denselben Boden treffen wie in `allianceRaidModuleDrop` daneben — der Paritätstest fährt genau
+  diese Randfälle über beide Repos.
+
+### Der Kommentar, der die Etappe beinahe blockiert hätte
+
+An der Stelle stand: „`mythisch` fällt hier bewusst NIE — die Stufe ist im ganzen Spiel kein
+Fundgegenstand (siehe `MODULE_RARITY` im Frontend)." **Gemessen ist das falsch.** `MODULE_RARITY`
+sagt „bewusst NICHT im normalen Fundpool" und nennt die hochstufigen Allianzmissionen ausdrücklich
+als Weg — `grantAllianceMissionBonusModule` wertet dort seit jeher legendär mit 8 % auf mythisch
+auf. **Aus „nicht im normalen Fundpool" war im Kommentar ein „gibt es nirgends" geworden**, und wer
+ihm glaubt, hält die Etappe für ausgeschlossen, ohne nachzusehen.
+
+Das ist die KB-20i-Familie aus der Frontend-CLAUDE.md, nur in ihrer teuersten Ausprägung: Ein
+Kommentar mit einer ungemessenen Begründung wird beim nächsten Lesen als REGEL gelesen — und diese
+hier hätte eine Entscheidung verhindert statt nur eine falsche Zahl zu tragen. **Vor jedem „das
+geht nicht, steht so im Kommentar" wird die genannte Quelle aufgeschlagen.**
+
+### Der Wächter
+
+`tests/test_raid_belohnung_paritaet.js` im **FRONTEND**-Repo, Abschnitt 5 (14 Prüfungen insgesamt).
+Er schneidet `allianceRaidMythischChance` samt ihren drei Konstanten aus BEIDEN Repos und führt sie
+über ein Stufenraster plus die Randfälle `undefined/null/NaN/-5/'12'` aus.
+
+**5a ist die Parität, 5b–5d messen die WIRKUNG** — und das ist keine Fleißarbeit, sondern belegt:
+
+| Gegenprobe | fällt | Beleg |
+|---|---|---|
+| Backend `JE_STUFE = 0.02` | `5a` | `[{"lvl":10,"front":0.015,"back":0.02}]` |
+| Frontend `AB = 1` | `5a`, `5b` | `{"geprueft":1,"werte":[0.015]}` |
+| **BEIDE** Seiten `JE_STUFE = 0` | `5c`, `5d` — **`5a` bleibt grün** | `{"werte":[0,0,0,0,0,0,0,0,0]}` |
+
+**Die dritte Zeile ist der Grund, warum 5c/5d existieren:** Ein Paritätsvergleich über einer
+konstanten Größe kann nicht fehlschlagen (Frontend-Regel 28/62). Alle drei beidseitig gefahren, je
+14 Prüfungen, identische Prüfnamen per `diff` verglichen.
+
+**Die Auslieferungsreihenfolge ist dieses Repo ZUERST** (Regel 60): Die Frontend-Zeile nennt eine
+Chance, die nur der neue Server einlöst. Umgekehrt würfelte der Server eine Seltenheit, die das
+Frontend nicht ankündigt — folgenlos, aber unsichtbar.
+
+**Und ein Werkzeugfehler im eigenen Mess-Skript, wörtlich Regel 60 und der Nachtrag zu Regel 19:**
+Der Gegenproben-Vergleich las die Prüfzeilen **samt ihrem Beleg** (`5a: … | {…}`) und zählte die
+Schlusszeile `FAIL - es gab rote Pruefungen.` als 15. Prüfung mit. Beide korrekten Sabotagen
+meldeten dadurch „PRUEFLISTE ABWEICHEND" und „15 statt 14". Verglichen wird der reine Prüf-NAME
+(`sed -E 's/^(OK|FAIL) +- //; s/ \|.*$//'`), und die Schlusszeile wird ausdrücklich herausgefiltert.

@@ -2304,6 +2304,77 @@ durch.** Drei Wirkungs-Gegenproben, jede mit ihrer Soll-Liste, alle mit 17 gelau
 traf die eigene Shell (Exit 144) — wörtlich Arbeitsregel 15, die seit dem 06.08.2026 samt Exit-Code
 in diesem Dokument steht. Prozesse werden über `ps` identifiziert und einzeln per PID beendet.
 
+### DIE GRENZE DIESER SELBSTHEILUNG, gemessen am Tag ihrer Auslieferung
+
+**Sie hilft nur, solange der Server LEBT.** `deployAufraeumen` läuft im Webhook-Handler, also im
+Node-Prozess. Ist der abgestürzt, nimmt niemand mehr einen Webhook entgegen — dann kann sich
+nichts heilen, egal wie gut die Funktion ist.
+
+Genau dieser Fall trat unmittelbar nach ihrem eigenen Merge ein: Das Backend antwortete um 04:12
+noch sauber (`uptimeSec 668`), der Merge lief um 04:24:59, und danach lieferte
+`https://gamegeeeeek.de/api/health` **502 Bad Gateway** — nginx erreichte `kepler7-backend:3001`
+nicht mehr. Das statische Frontend blieb bei HTTP 200; Spieler konnten also spielen, aber
+Anmeldung, Speichern, Allianzen, Markt und Bestenliste waren tot.
+
+**Zwei Ursachen sind von außen ausgeschlossen worden, bevor irgendjemand geweckt wurde:**
+Der gemergte Stand startet lokal einwandfrei und meldet `blob 2c3f34a` — exakt
+`git rev-parse origin/master:server.js`. Und `DEPLOY_TARGETS` hat nur eine Leserstelle, die auf
+die neue `{ dir, command }`-Form angepasst ist; eine übersehene zweite Stelle scheidet als
+Absturzursache aus. `node --check`, `tests/test_serverstart.js` und
+`tests/test_deploy_webhook_http.js` waren vor dem Merge grün.
+
+**AM LOG BELEGT (05:15 UTC), und es ist die SCHLIMMERE Ausprägung desselben Mechanismus:**
+
+```
+[nodemon] still waiting for 1 sub-process to finish...   <- der laufende git-Prozess
+Deploy-Webhook Fehler: Command failed: cd /app && git pull -q && (chown -R 1000:1000 .git || true)
+/app/server.js:9986  SyntaxError: Unexpected end of input   <- HALBE Datei
+[nodemon] app crashed - waiting for file changes before starting...
+```
+
+Bei Ausfall Nr. 12 war die Datei **vollständig** geschrieben und nur der Ref blieb alt — der
+Server lief weiter, nur git war verklemmt. Hier hat der Kill den Pull **mitten in der Datei**
+erwischt: `git hash-object server.js` meldete `dc9a1ff` statt `2c3f34a`, node starb am
+Syntaxfehler, und nodemon wartet nach einem Absturz ausdrücklich auf eine Dateiänderung, statt
+neu zu starten. **Derselbe Mechanismus, zwei Schweregrade — und welcher eintritt, entscheidet
+allein, wie weit der Pull beim Kill gekommen war.**
+
+**Drei Dinge für die nächste Reparatur, alle in diesem Lauf gemessen:**
+- **`docker restart` allein genügt NICHT.** Der Container startet, `node` liest dieselbe halbe
+  Datei und stirbt erneut. Erst `git checkout HEAD -- server.js` macht ihn startfähig.
+- **`node` gibt es auf dem Host nicht** (`-bash: node: Kommando nicht gefunden`). Eine
+  Syntaxprüfung von Hand läuft dort ins Leere; der verlässliche Test ist der Blob-Vergleich
+  (`git hash-object server.js` gegen `git rev-parse origin/master:server.js`).
+- **Die Sperre entsteht bei genau diesem Pull neu.** Sie muss vor dem Checkout weg
+  (`sudo rm -f .git/index.lock`), sonst prallt auch die Reparatur ab — genau so ist der erste
+  Versuch gescheitert.
+
+Der Ablauf, der es behoben hat, in dieser Reihenfolge:
+
+```bash
+cd /DATA/kepler7/backend
+sudo rm -f .git/index.lock
+git checkout HEAD -- server.js CLAUDE.md
+git pull --ff-only origin master
+git hash-object server.js | cut -c1-7      # muss dem Soll-Blob entsprechen
+docker restart kepler7-backend
+```
+
+Danach von außen belegt: `{"commit":"9246f02","checkout":"9246f02","blob":"2c3f34a","uptimeSec":31}`.
+
+**Die Lehre über den Einzelfall hinaus: Ein Selbstheilungsmechanismus, der IM geheilten System
+läuft, deckt dessen Totalausfall grundsätzlich nicht ab.** Das ist keine Schwäche der Umsetzung,
+sondern ihrer Lage — und es gehört benannt, damit niemand sie für einen vollständigen Schutz hält.
+Was diesen Fall abdecken würde, liegt außerhalb von `server.js`:
+
+- eine **Docker-Restart-Policy** (`--restart unless-stopped`), die den Container nach einem Crash
+  wieder hochfährt — nodemon tut das nach einem Absturz ausdrücklich NICHT, es wartet auf eine
+  Dateiänderung (`[nodemon] app crashed - waiting for file changes`);
+- oder ein **Watchdog von außen**, der `/api/health` prüft und bei 502 neu startet.
+
+Beides ist Infrastruktur, keine Code-Änderung. Wer den nächsten Schritt baut, fängt dort an —
+mehr Logik im Server macht diese Lücke nicht kleiner.
+
 **Was NICHT gebaut ist, und warum es weiterhin lohnt:**
 
 1. **Das Fenster verkleinern (Infrastruktur):** `nodemon --delay 5` im Startbefehl. nodemon wartet

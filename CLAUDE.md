@@ -2979,3 +2979,75 @@ Frontend der Etappe B baut einen **Rückfall auf den alten Weg** ein (bei 404/ni
 ein alter Server, und das Panel liest wie bisher je Schlüssel) — „der Server darf hinterherhinken,
 das Frontend nicht". Ein Schalter ist deshalb nicht nötig. Die Retention 300 allein ist ebenfalls
 harmlos: Der alte Client liest ohnehin nur die neuesten 50.
+
+## Boss-Set-Teile fallen jetzt auch ohne Allianz (Etappe B, 28.08.2026)
+
+**Auftrag Sascha, über `AskUserQuestion` beantwortet mit „alle 4 optionen":** Die zwanzig
+Boss-Set-Teile sollen nicht mehr ausschließlich nach einer Allianz-Raid-Welle fallen. Gewürfelt
+wird jetzt an **drei** PvE-Zielen — Asteroidenfestung, Alien-Nest und Weltboss —, der Raid bleibt
+unverändert der vierte und ergiebigste Weg.
+
+**Der Befund, der die Etappe ausgelöst hat, steht im Beute-Konzept als gemessene Lücke 2:** Alle
+20 Teile hingen an `grantBossSetModule()`, und die einzige Aufrufstelle lag im Raid-Claim. Wer
+solo spielt, kam an **keines** davon heran — die größte inhaltliche Sperre im Modulsystem.
+
+### Die Naht: der SERVER würfelt, der Client zieht nur noch
+
+`bosssetPveWurf(basis, anteil, stufe)` liefert bei einem Treffer `{ bossKey, seltenheit }` und
+sonst `null`. Das ist bewusst dieselbe Arbeitsteilung wie beim Raid: Der Server entscheidet **ob**
+und **welches**, der Client legt das Teil über `grantBossSetModule` ins Inventar. Eine
+Client-Ziehung wäre in fünf Sekunden gefälscht — und ein Boss-Set-Teil ist genau die Beute, die das
+Herkunfts-Schloss aus jedem regulären Fundtopf heraushält.
+
+**Der Wurf reist auf einer VORHANDENEN Belohnung mit** (`bossset` als Feld an
+`pushPendingReward`), nicht als eigener Eintrag. Der Grund ist gemessen: Die Warteschlange hält
+`list.slice(-20)`, und der Client holt je Start höchstens zehn. Ein zweiter Eintrag je Fall
+verdrängte im Grenzfall einen Hort — also ausgerechnet die größere Belohnung.
+
+### Die Kalibrierung — und der Kommentar, der zuerst das Gegenteil behauptete
+
+| Quelle | Grundchance |
+|---|---|
+| Festung | 0,08 / 0,16 / 0,30 (Schanze / Kastell / Sternenfeste) |
+| Nest | 0,05 / 0,09 / 0,15 / 0,24 / 0,45 (Sporenherd … Königin) |
+| Weltboss | **0,07** |
+
+**Der Weltboss hat die KLEINSTE Grundchance, und die erste Fassung des Kommentars daneben
+begründete genau das Gegenteil** („die größte, weil er eine endliche Quelle ist"). Das war auf die
+Annahme „je KILL" gerechnet; gewürfelt wird aber je SCHLAG. Damit ist er die einzige der drei
+Quellen mit einer **garantierten täglichen Gelegenheit** — der 24-Stunden-Riegel des
+Weltboss-Angriffs —, während Festungen und Nester erst entstehen müssen. Nachgerechnet gegen die
+zwei anderen (zusammen 0,333 Teile/Tag): 0,07 gibt +0,070/Tag, also **+21 %**; die ursprünglich
+gedachten 0,22 hätten +66 % ergeben und die beiden anderen Quellen dominiert.
+
+**Der Anteilsfaktor läuft von 0,4 bis 1,0** (`bosssetAnteilFaktor`), wie `rShare` im Raid: Wer ein
+Zehntel des Schadens getragen hat, soll nicht dieselbe Chance haben wie der Hauptschädiger — der
+Sockel 0,4 ist trotzdem Absicht, sonst flögen kleine Konten gar nicht erst mit.
+
+**Die Seltenheit hängt an der Härte des Ziels** (`roll + (stufe−1)·0,06`), nicht an einer eigenen
+Tabelle. Eine Sternenfeste liefert damit messbar häufiger legendär als eine Schanze.
+
+### Zwei Fehler am Weltboss-Zweig, beide vom eigenen Wächter gefangen
+
+1. **`boss.contributions[uid]` ist ein OBJEKT `{ name, dmg }`, keine Zahl.** Der erste Entwurf
+   las `Number(b2)` und bekam damit `NaN` → Summe 0 → Anteil **immer 0**. Der Anteilsfaktor wäre
+   still auf seinem Sockel 0,4 eingefroren gewesen, ohne dass irgendetwas fehlgeschlagen wäre —
+   genau die Sorte Größe, die nur der Kommentar behauptet. `test_bossset_pve` 2b prüft seither die
+   REGEL („wer den Anteil bildet, liest `.dmg`"), nicht die Schreibweise.
+2. **Gewürfelt wird je SCHLAG mit Schaden, nicht nur beim Kill.** Der erste Entwurf hing an
+   `killed &&` — damit hätte allein der letzte Schlag belohnt, und das ist exakt die Kritik, die
+   beim Hort der Festung zum anteiligen Modell geführt hat. Der `resolve`-Weg erreicht
+   bauartbedingt nur den Anfragenden; „an alle Beitragenden" bräuchte die Warteschlange, und die
+   ist der Engpass von oben. `2c` hält beides fest.
+
+### Der Wächter
+
+`tests/test_bossset_pve.js` liegt im **FRONTEND**-Repo (dort liegen die Tests, die beide Seiten
+lesen) und misst 28 Prüfungen über beide Repos: den Wurf **ausgeführt** statt gelesen, die drei
+Aufrufstellen, die NAHT (jede Quelle in `BOSSSET_PVE_CHANCE` braucht eine Frontend-Empfangsstelle,
+datengetrieben abgeleitet — eine vierte Quelle fällt damit auf) und die Anzeigestellen.
+Gegenprobe beidseitig gefahren: **25 von 28 rot** am alten Stand bei identischer Prüfliste.
+
+**Die Auslieferungsreihenfolge ist dieses Repo ZUERST** (Regel 60): Die drei Empfangsstellen im
+Frontend lesen ein Feld, das nur der neue Server schickt. Umgekehrt schriebe der Server ein Feld,
+das niemand liest — folgenlos.

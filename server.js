@@ -6768,9 +6768,30 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
   await saveDb();
 
+  // Etappe B: das Boss-Set-Teil am Weltboss. Der Anteil kommt aus den SERVERSEITIG gefuehrten
+  // Beitraegen, nicht aus einer gemeldeten Zahl - dieselbe Quelle, aus der auch der Unikat-Wurf im
+  // Client seinen `share` bezieht. Gewuerfelt wird hier, damit der Client nur noch den Typ zieht
+  // (Raid-Muster).
+  //
+  // Je SCHLAG, nicht je Kill - zwei Gruende, beide gemessen. (a) Der letzte Schlag ist Zufall; ihn
+  // allein zu belohnen ist genau die Kritik, die beim Hort der Festung zum anteiligen Modell
+  // gefuehrt hat. (b) Der `resolve`-Weg erreicht bauartbedingt nur den Anfragenden - "an alle
+  // Beitragenden" braeuchte die Warteschlange, und die haelt nur 20 Eintraege (`slice(-20)`), ein
+  // zweiter Eintrag je Fall verdraengte dort im Grenzfall einen Hort.
+  //
+  // `contributions[uid]` ist ein OBJEKT { name, dmg } - der erste Entwurf las `Number(b2)` und
+  // bekam damit NaN, also Summe 0 und Anteil IMMER 0: der Anteilsfaktor waere still auf seinem
+  // Sockel 0,4 eingefroren gewesen, ohne dass irgendetwas fehlgeschlagen waere.
+  let bosssetWb = null;
+  if (dmg > 0 && !arrivedTooLate && boss && boss.contributions) {
+    const summe = Object.values(boss.contributions).reduce((a, c) => a + (Number(c && c.dmg) || 0), 0);
+    const meinAnteilWb = summe > 0 ? (Number((boss.contributions[req.userId] || {}).dmg) || 0) / summe : 0;
+    bosssetWb = bosssetPveWurf(BOSSSET_PVE_CHANCE.weltboss, meinAnteilWb, bLevel);
+  }
+
   res.json({
     ok: true, arrivedTooLate, killed, damage: dmg,
-    bossHp: bossHpAfter, bossMaxHp, lostShips,
+    bossHp: bossHpAfter, bossMaxHp, lostShips, bossset: bosssetWb,
     hasWeakness: bossHasWeakness, weaknessType: bossWeakness,
     saveVersion: mySaveVersion,
     newCredits: save.credits, newBattlePoints: save.battlePoints
@@ -6849,6 +6870,67 @@ const ALLIANCE_RAID_BOSSES = [
   { key: 'gluthorn',       name: 'Gluthorn',       schwaeche: 'schlachtschiff', ohneMult: 0.80, verlustMult: 1.20, beuteMult: 1.15, schwerpunkt: 'antimaterie' }
 ];
 function allianceRaidBossOf(level) { return ALLIANCE_RAID_BOSSES[(Math.max(1, level | 0) - 1) % ALLIANCE_RAID_BOSSES.length]; }
+
+// ===== Etappe B: die Boss-Set-Teile fallen auch ausserhalb der Allianz (28.08.2026) =====
+// Auftrag Sascha, aus vier vorgelegten Quellen gewaehlt: ALLE VIER. Bis hierher fielen die 20
+// Teile ausschliesslich nach einer Allianz-Raid-Welle (gemessen: `grantBossSetModule` hatte genau
+// EINEN Aufrufer). Wer keine grosse Allianz hat, konnte sie also nie erreichen - die groesste
+// inhaltliche Sperre des ganzen Modulsystems.
+//
+// Die Vorgabe des Konzepts lautet "langsamer und muehsamer, aber erreichbar" UND "der Raid soll
+// der schnelle Weg bleiben, nicht der einzige". Beides ist GERECHNET, nicht geschaetzt:
+//
+//   Coupon-Collector ueber die 20 Teile, 20.000 Laeufe simuliert:
+//     bis zum ERSTEN vollstaendigen Set : 19,3 erfolgreiche Wuerfe
+//     bis ALLE 20 Teile                 : 71,9
+//   Gelegenheiten eines Solo-Spielers je Tag (Abklingzeiten 6 h bzw. 4 h, 5 bzw. 4 Schlaege
+//   je gefallenem Ziel): Festung 0,80 + Nest 1,50 = 2,30
+//   Mit der Staffelung unten (gewichtet 0,130): erstes Set nach 65 Tagen, alle 20 nach 241 -
+//   der Raid bleibt bei einer Welle je Tag 2,6-mal schneller, bei zweien 5,2-mal.
+//
+// Die erste Rechnung hatte 0,30 vorgesehen; gemessen waere der Raid damit nur 1,1-mal schneller
+// gewesen, die Vorgabe also faktisch verletzt. Wer diese Zahlen anfasst, rechnet sie nach.
+//
+// GESTAFFELT nach Aufwand, nicht eine Zahl fuer alles: Wer eine Sternenfeste schleift, hat mehr
+// verdient als wer eine Schanze knackt.
+const BOSSSET_PVE_CHANCE = {
+  festung: { 1: 0.08, 2: 0.16, 3: 0.30 },                    // Schanze / Kastell / Sternenfeste
+  nest:    { 1: 0.05, 2: 0.09, 3: 0.15, 4: 0.24, 5: 0.45 },  // Sporenherd .. Koenigin
+  // Der Weltboss bekommt die KLEINSTE Grundchance - und die erste Fassung dieses Kommentars
+  // behauptete genau das Gegenteil ("die GROESSTE, weil er eine endliche Quelle ist"). Das war auf
+  // die Annahme "je KILL" gerechnet; gewuerfelt wird aber je SCHLAG (Begruendung an der
+  // Aufrufstelle). Damit ist er die einzige der drei Quellen mit einer GARANTIERTEN taeglichen
+  // Gelegenheit - der 24-Stunden-Riegel des Weltboss-Angriffs -, waehrend Festungen und Nester
+  // erst entstehen muessen. Nachgerechnet gegen die zwei anderen (0,333 Teile/Tag zusammen):
+  // 0,07 gibt solo +0,070/Tag, also +21 %; 0,22 haette +66 % ergeben und die anderen beiden
+  // Quellen dominiert.
+  weltboss: 0.07
+};
+// Der Anteil staffelt wie im Raid (dort ueber `rShare`): Wer ein Zehntel des Schadens getragen
+// hat, soll nicht dieselbe Chance haben wie der Hauptschaediger. Der Sockel von 0,4 ist Absicht -
+// auch ein kleiner Beitrag soll sich lohnen, sonst floegen kleine Konten gar nicht erst mit.
+function bosssetAnteilFaktor(anteil) {
+  const a = Math.max(0, Math.min(1, Number(anteil) || 0));
+  return 0.4 + 0.6 * a;
+}
+// DIE eine Stelle, an der ein PvE-Ziel ueber ein Boss-Set-Teil wuerfelt. Drei Aufrufer (Festung,
+// Nest, Weltboss) - eine zweite Kopie waere die uebliche zweite Wahrheit, und bei einer Groesse,
+// die PvP entscheidet, waere sie besonders teuer.
+//
+// Rueckgabe: null (nichts gefallen) oder { bossKey, seltenheit } - GENAU die zwei Felder, die
+// `grantBossSetModule(bossKey, seltenheit)` im Frontend braucht. Der Server waehlt den Boss, weil
+// die PvE-Ziele keinem zugeordnet sind; im Raid tut das der bekaempfte Boss selbst.
+function bosssetPveWurf(basis, anteil, stufe) {
+  const b = Number(basis) || 0;
+  if (b <= 0) return null;
+  if (Math.random() >= b * bosssetAnteilFaktor(anteil)) return null;
+  const boss = ALLIANCE_RAID_BOSSES[Math.floor(Math.random() * ALLIANCE_RAID_BOSSES.length)];
+  // Seltenheit nach Haerte des Ziels. 'mythisch' faellt hier so wenig wie im Raid - die Stufe ist
+  // im ganzen Spiel kein Fundgegenstand.
+  const roll = Math.random() + Math.max(0, (Number(stufe) || 1) - 1) * 0.06;
+  const seltenheit = roll > 1.05 ? 'legendaer' : roll > 0.80 ? 'episch' : roll > 0.45 ? 'selten' : 'gewoehnlich';
+  return { bossKey: boss.key, seltenheit };
+}
 // Der Boss EINES Dokuments. Die gewaehlte Sorte steht in doc.bossKey - das ist seit dem 19.07.2026
 // gefahrlos, weil `alliance:<TAG>:raid` fuer Clients SCHREIBGESCHUETZT ist (siehe
 // checkAllianceKeyPermission: "Allianz-Raid-Daten werden nur ueber die dedizierten Endpunkte
@@ -10284,7 +10366,10 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
       teilnehmer++;
       if (uid === req.userId) meinAnteil = anteil;
       pveKillZaehlen(uid, 'festungen');          // Meilenstein-Emblem, Phase 6
-      pushPendingReward(uid, {
+      // Etappe B: ein Boss-Set-Teil kann hier fallen. Der Wurf liegt beim SERVER (wie im Raid),
+      // der Client zieht daraus nur den Typ - das Herkunfts-Schloss bleibt damit unberuehrt.
+      const bsFest = bosssetPveWurf(BOSSSET_PVE_CHANCE.festung[fest.stufe], anteil, fest.stufe);
+      pushPendingReward(uid, Object.assign(bsFest ? { bossset: bsFest } : {}, {
         type: 'festung',
         system: sysId, stufe: fest.stufe, stufeName: st.name,
         sorte: fest.sorte, anteil: Math.round(anteil * 1000) / 1000,
@@ -10292,7 +10377,7 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
         protomaterie: Math.round((fest.hortProto || 0) * anteil * 10) / 10,
         kampfpunkte: Math.max(1, Math.round(st.kampfpunkte * anteil)),
         zeit: jetzt
-      });
+      }));
     }
     delete feld.festung;
     feld.geraeumtBis = jetzt + FESTUNG_GERAEUMT_MS;
@@ -10411,7 +10496,8 @@ function nestSchlagAusfuehren(g, nest, kraft, composition, beteiligte, jetzt) {
       // Nur die KOENIGIN zaehlt - ein Sporenherd ist kein Meilenstein. Gezaehlt wird vor dem
       // Loeschen des Nestes, solange `nest.stufe` noch dasteht.
       if (nest.stufe === 5) pveKillZaehlen(uid, 'koeniginnen');
-      pushPendingReward(uid, {
+      const bsNest = bosssetPveWurf(BOSSSET_PVE_CHANCE.nest[nest.stufe], anteil, nest.stufe);
+      pushPendingReward(uid, Object.assign(bsNest ? { bossset: bsNest } : {}, {
         type: 'alien-nest',
         system: nest.sys, volk: nest.volk, volkName: volk.name,
         stufe: nest.stufe, stufeName: st.name,
@@ -10421,7 +10507,7 @@ function nestSchlagAusfuehren(g, nest, kraft, composition, beteiligte, jetzt) {
         credits: Math.max(1, Math.round(st.credits * anteil)),
         koenigin: nest.stufe === 5,
         zeit: jetzt
-      });
+      }));
     }
     const idx = liste.indexOf(nest);
     if (idx >= 0) liste.splice(idx, 1);

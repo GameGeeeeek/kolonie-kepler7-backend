@@ -2375,6 +2375,26 @@ Was diesen Fall abdecken würde, liegt außerhalb von `server.js`:
 Beides ist Infrastruktur, keine Code-Änderung. Wer den nächsten Schritt baut, fängt dort an —
 mehr Logik im Server macht diese Lücke nicht kleiner.
 
+**Sascha hat die Infrastruktur-Seite am 28.08.2026 gesetzt** (auf die Vorlage der zwei Befehle:
+„Erledigt"). Nachprüfbar von der Kommandozeile des Pi, und weil es hier um genau die Zusage geht,
+gehört der Befehl daneben statt der bloßen Behauptung:
+
+```bash
+docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' kepler7-backend   # erwartet: unless-stopped
+docker inspect -f '{{.Config.Cmd}}' kepler7-backend                      # steht dort --delay?
+```
+
+**Was die Restart-Policy leistet — und was nicht.** Sie fängt einen Container ab, der beendet
+wurde. Sie hilft NICHT gegen eine halb geschriebene `server.js`: Dann startet der Container, node
+stirbt am Syntaxfehler, und die Policy startet ihn erneut — eine Schleife statt eines Ausfalls.
+Der Zustand ist von außen dann dasselbe 502, nur mit ständig kleiner `uptimeSec` statt gar keiner
+Antwort. **Wer das nächste Mal 502 misst, holt deshalb ZUERST `uptimeSec` mit** (`curl` in einer
+Schleife): springt sie immer wieder auf kleine Werte, ist es die halbe Datei und nicht ein toter
+Container, und die Reparatur beginnt mit dem `git checkout`, nicht mit einem Neustart.
+
+Gegen die halbe Datei hilft nur die zweite Hälfte, `nodemon --delay 5` im Startbefehl — die ist
+eine Änderung an der Container-Definition und per `docker update` nicht setzbar.
+
 **Was NICHT gebaut ist, und warum es weiterhin lohnt:**
 
 1. **Das Fenster verkleinern (Infrastruktur):** `nodemon --delay 5` im Startbefehl. nodemon wartet

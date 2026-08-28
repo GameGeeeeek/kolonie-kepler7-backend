@@ -2323,6 +2323,45 @@ die neue `{ dir, command }`-Form angepasst ist; eine übersehene zweite Stelle s
 Absturzursache aus. `node --check`, `tests/test_serverstart.js` und
 `tests/test_deploy_webhook_http.js` waren vor dem Merge grün.
 
+**AM LOG BELEGT (05:15 UTC), und es ist die SCHLIMMERE Ausprägung desselben Mechanismus:**
+
+```
+[nodemon] still waiting for 1 sub-process to finish...   <- der laufende git-Prozess
+Deploy-Webhook Fehler: Command failed: cd /app && git pull -q && (chown -R 1000:1000 .git || true)
+/app/server.js:9986  SyntaxError: Unexpected end of input   <- HALBE Datei
+[nodemon] app crashed - waiting for file changes before starting...
+```
+
+Bei Ausfall Nr. 12 war die Datei **vollständig** geschrieben und nur der Ref blieb alt — der
+Server lief weiter, nur git war verklemmt. Hier hat der Kill den Pull **mitten in der Datei**
+erwischt: `git hash-object server.js` meldete `dc9a1ff` statt `2c3f34a`, node starb am
+Syntaxfehler, und nodemon wartet nach einem Absturz ausdrücklich auf eine Dateiänderung, statt
+neu zu starten. **Derselbe Mechanismus, zwei Schweregrade — und welcher eintritt, entscheidet
+allein, wie weit der Pull beim Kill gekommen war.**
+
+**Drei Dinge für die nächste Reparatur, alle in diesem Lauf gemessen:**
+- **`docker restart` allein genügt NICHT.** Der Container startet, `node` liest dieselbe halbe
+  Datei und stirbt erneut. Erst `git checkout HEAD -- server.js` macht ihn startfähig.
+- **`node` gibt es auf dem Host nicht** (`-bash: node: Kommando nicht gefunden`). Eine
+  Syntaxprüfung von Hand läuft dort ins Leere; der verlässliche Test ist der Blob-Vergleich
+  (`git hash-object server.js` gegen `git rev-parse origin/master:server.js`).
+- **Die Sperre entsteht bei genau diesem Pull neu.** Sie muss vor dem Checkout weg
+  (`sudo rm -f .git/index.lock`), sonst prallt auch die Reparatur ab — genau so ist der erste
+  Versuch gescheitert.
+
+Der Ablauf, der es behoben hat, in dieser Reihenfolge:
+
+```bash
+cd /DATA/kepler7/backend
+sudo rm -f .git/index.lock
+git checkout HEAD -- server.js CLAUDE.md
+git pull --ff-only origin master
+git hash-object server.js | cut -c1-7      # muss dem Soll-Blob entsprechen
+docker restart kepler7-backend
+```
+
+Danach von außen belegt: `{"commit":"9246f02","checkout":"9246f02","blob":"2c3f34a","uptimeSec":31}`.
+
 **Die Lehre über den Einzelfall hinaus: Ein Selbstheilungsmechanismus, der IM geheilten System
 läuft, deckt dessen Totalausfall grundsätzlich nicht ab.** Das ist keine Schwäche der Umsetzung,
 sondern ihrer Lage — und es gehört benannt, damit niemand sie für einen vollständigen Schutz hält.

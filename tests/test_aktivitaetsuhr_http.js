@@ -237,9 +237,21 @@ function bitsAusDb(uid) {
   });
   const blattB2 = await s.j('/admin/konto?name=ben', { headers: kopf(tokAdmin) });
   const kB2 = ((blattB2.body || {}).konten || []).find(x => x.username === 'ben') || {};
-  check('2c: ein lueckenloses Konto hat Pause 0', (kB2.aktiv || {}).laengstePause === 0 &&
-    (kB2.aktiv || {}).aktiv === 14 * 24,
-    { laengstePause: (kB2.aktiv || {}).laengstePause, aktiv: (kB2.aktiv || {}).aktiv });
+  /* Geprueft wird die REGEL, nicht die Zahl: JEDE beobachtete Stunde ist aktiv. Der erste Anlauf
+     verlangte 14*24 und fiel mit 333 durch - voellig richtig, denn die Reihe deckt volle
+     Kalendertage ab, und die Stunden des heutigen Tages nach der aktuellen sind noch gar nicht
+     beobachtet ('-'). Eine feste Zahl haette hier je nach Uhrzeit ein anderes Ergebnis (Regel 3). */
+  check('2c: ein lueckenloses Konto hat Pause 0 und keine ruhige Stunde',
+    (kB2.aktiv || {}).laengstePause === 0 && (kB2.aktiv || {}).aktiv === (kB2.aktiv || {}).beobachtet &&
+    (kB2.aktiv || {}).beobachtet > 300,
+    { laengstePause: (kB2.aktiv || {}).laengstePause, aktiv: (kB2.aktiv || {}).aktiv,
+      beobachtet: (kB2.aktiv || {}).beobachtet });
+  // Die dritte Zeichenart ist der Grund, warum 2c ueberhaupt so formuliert ist - ohne sie zaehlte
+  // die Zukunft als Pause, und ein lueckenloses Konto saehe nachts wie ein schlafender Mensch aus.
+  check('2c2: die noch nicht beobachteten Stunden sind als solche markiert',
+    ((kB2.aktiv || {}).reihe || '').indexOf('-') > 0 &&
+    ((kB2.aktiv || {}).reihe || '').replace(/-/g, '').indexOf('0') < 0,
+    { schluss: ((kB2.aktiv || {}).reihe || '').slice(-30) });
 
   // ---- 3) Reaktionszeit an einer echten Festung ----------------------------------------------
   const f0 = await s.j('/asteroid/field', { headers: kopf(tokA) });

@@ -1859,6 +1859,19 @@ nächsten ohnehin anfallenden `saveDb()` mitgenommen; die zählenden Routen spei
 harter Absturz kann die letzte Stunde kosten — verschmerzbar, und es steht im Code, damit niemand
 die Uhr für lückenlos hält.
 
+### Die Reihe ist an KALENDERTAGEN ausgerichtet, nicht an „vor N Stunden"
+
+Das ist der Unterschied zwischen einem lesbaren Bild und einem unlesbaren, und er fiel erst beim
+Zeichnen auf: Eine Reihe, die bei der aktuellen Stunde endet, ist gegen die Stundenachse
+verschoben — im Raster läge die Nacht jeden Tag in einer anderen Spalte, und ein Schlafmuster wäre
+keine senkrechte Bahn mehr, sondern eine Diagonale. Spalte 0 ist deshalb immer 00:00 UTC.
+
+**Drei Zeichen statt zweier:** `1` aktiv, `0` beobachtet und ruhig, `-` **nicht beobachtet** (vor
+der ersten Aufzeichnung oder noch in der Zukunft). Ohne das dritte zählten die Stunden des heutigen
+Tages, die noch gar nicht stattgefunden haben, als Pause — ein lückenloser Dauerläufer sähe am
+Abend wie ein schlafender Mensch aus. `test_aktivitaetsuhr_http.js` 2c2 hält das fest; die
+Gegenprobe ohne das dritte Zeichen reißt `2b2` und `2c2`.
+
 ### Die Auswertung beginnt bei der ERSTEN aufgezeichneten Stunde
 
 `aktivAuswerten()` ist die eine Stelle, die „wie lange war Ruhe" beantwortet — im Frontend noch
@@ -1888,7 +1901,7 @@ den beide Wege benutzen.
 
 ### Der Wächter und die vier Fehler beim Bau
 
-`tests/test_aktivitaetsuhr_http.js` (Port 3236, 25 Prüfungen, **fünf Gegenproben** — jede mit
+`tests/test_aktivitaetsuhr_http.js` (Port 3236, 26 Prüfungen, **sechs Gegenproben** — jede mit
 ihrer Soll-Liste, identische Prüflisten in allen sechs Läufen). **Belegte Testports sind jetzt
 3195–3200 und 3210–3236** — ein neuer Test nimmt 3237.
 
@@ -1903,6 +1916,7 @@ tickt.
 | Uhr zählt nichts | `1a`, `5a` |
 | Auswertung beginnt bei Index 0 | `2b`, `2b2` |
 | Reaktionszeit ohne `!letzter` | `3b`, `4a` |
+| Zukunftsstunden zählen als Pause | `2b2`, `2c2` |
 | Aufräumen entfernt | `5a` |
 
 **Drei Fehler steckten im Test, nicht im Code**, und alle drei sind lehrreich:
@@ -1920,7 +1934,13 @@ tickt.
    hat es allein die Soll-Liste (Regel 71) — der Kommentar im Test sagt seither ausdrücklich, dass
    die Kopie ins Repo-Verzeichnis gehört.
 
-**Und ein vierter im Mess-Skript, zum wiederholten Mal derselbe:** Der Prüfnamen-Vergleich zählte
+**Ein vierter Fehler steckte in einer PFLICHTLISTE, nicht im Test:** Für die Sabotage
+„Zukunftsstunden zählen als Pause" hatte ich `2c` als fallend vorhergesagt. Gemessen fällt es
+nicht — das Konto in `2c` ist auch in den Zukunftsstunden lückenlos, `aktiv === beobachtet` bleibt
+also wahr. **Eine Pflichtliste ist selbst eine Behauptung, bis die Gegenprobe sie gemessen hat**
+(dieselbe Lehre wie bei `test_urmaterie_boden_http` und `test_chat_buendel_http`).
+
+**Und ein fünfter im Mess-Skript, zum wiederholten Mal derselbe:** Der Prüfnamen-Vergleich zählte
 die Schlusszeile `FAIL - es gab rote Pruefungen.` als Prüfung „es" mit und meldete fünf
 Werkzeugfehler, wo keiner war (Frontend-Regel 60). Prüfnamen tragen einen Doppelpunkt, die
 Schlusszeile nicht — daran trennt der Vergleich sie jetzt.

@@ -364,20 +364,34 @@ const REAKTION_MERKEN = 10;
 function aktivAuswerten(user, jetzt) {
   const t = jetzt || Date.now();
   const karte = (user && user.aktiv) || {};
-  const stunden = [];
-  for (let i = AKTIV_TAGE * 24 - 1; i >= 0; i--) {
-    const z = t - i * 3600000;
+  /* AUSGERICHTET AN KALENDERTAGEN, nicht an "vor N Stunden" - und das ist der Unterschied
+     zwischen einem lesbaren Bild und einem unlesbaren. Eine Reihe, die bei der AKTUELLEN Stunde
+     endet, ist gegen die Stundenachse verschoben; im Raster liegt die Nacht dann jeden Tag in
+     einer anderen Spalte, und ein Schlafmuster - die eigentliche Aussage - waere kein senkrechter
+     Streifen mehr, sondern eine Diagonale. So ist Spalte 0 immer 00:00 UTC.
+     Drei Zeichen statt zweier: '1' aktiv, '0' beobachtet und ruhig, '-' NICHT BEOBACHTET (vor der
+     ersten Aufzeichnung oder noch in der Zukunft). Ohne das dritte zaehlten die Stunden des
+     heutigen Tages, die noch gar nicht stattgefunden haben, als Pause. */
+  const jetztStunde = Math.floor(t / 3600000) * 3600000;
+  const startTag = new Date(t - (AKTIV_TAGE - 1) * 86400000);
+  const start = Date.UTC(startTag.getUTCFullYear(), startTag.getUTCMonth(), startTag.getUTCDate());
+  const roh = [];
+  for (let i = 0; i < AKTIV_TAGE * 24; i++) {
+    const z = start + i * 3600000;
     const maske = karte[aktivTagesschluessel(z)] || 0;
-    stunden.push((maske >> new Date(z).getUTCHours()) & 1 ? 1 : 0);
+    roh.push({ zeit: z, an: ((maske >> new Date(z).getUTCHours()) & 1) ? 1 : 0 });
   }
-  const ersteAktive = stunden.indexOf(1);
-  if (ersteAktive < 0) return { stunden, aktiv: 0, beobachtet: 0, laengstePause: null, belastbar: false };
-  const beobachtet = stunden.length - ersteAktive;
-  let pause = 0, max = 0, aktiv = 0;
-  for (let i = ersteAktive; i < stunden.length; i++) {
-    if (stunden[i]) { aktiv++; pause = 0; } else { pause++; if (pause > max) max = pause; }
+  const ersteAktive = roh.findIndex(x => x.an === 1);
+  const reihe = roh.map((x, i) =>
+    (ersteAktive < 0 || i < ersteAktive || x.zeit > jetztStunde) ? '-' : String(x.an)).join('');
+  if (ersteAktive < 0) return { reihe, aktiv: 0, beobachtet: 0, laengstePause: null, belastbar: false };
+  let pause = 0, max = 0, aktiv = 0, beobachtet = 0;
+  for (let i = ersteAktive; i < roh.length; i++) {
+    if (roh[i].zeit > jetztStunde) break;
+    beobachtet++;
+    if (roh[i].an) { aktiv++; pause = 0; } else { pause++; if (pause > max) max = pause; }
   }
-  return { stunden, aktiv, beobachtet, laengstePause: max, belastbar: beobachtet >= 24 };
+  return { reihe, aktiv, beobachtet, laengstePause: max, belastbar: beobachtet >= 24 };
 }
 function reaktionVermerken(user, art, sekunden) {
   if (!user || !(sekunden >= 0)) return;
@@ -12348,10 +12362,10 @@ app.get('/api/admin/konto', authMiddleware, (req, res) => {
       tokenVersion: u.tokenVersion || 0,
       angemeldet: !!(u.activeSessionId && (jetzt - (u.activeSessionAt || 0)) < 86400000),
       // Aktivitaets-Uhr und Reaktionszeiten (siehe den Block bei aktivVermerken). Die
-      // Stundenreihe kommt als Zeichenkette aus 0/1 - ein Array aus 336 Zahlen waere in JSON
+      // Stundenreihe kommt als Zeichenkette aus 0/1/- - ein Array aus 336 Werten waere in JSON
       // rund fuenfmal so gross, und gezeichnet wird sie ohnehin Zeichen fuer Zeichen.
       aktiv: (() => { const a = aktivAuswerten(u, jetzt);
-        return { reihe: a.stunden.join(''), aktiv: a.aktiv, beobachtet: a.beobachtet,
+        return { reihe: a.reihe, aktiv: a.aktiv, beobachtet: a.beobachtet,
                  laengstePause: a.laengstePause, belastbar: a.belastbar, tage: AKTIV_TAGE }; })(),
       reaktionen: (u.reaktionen || []).slice(-REAKTION_MERKEN)
     };

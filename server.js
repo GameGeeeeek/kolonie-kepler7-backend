@@ -380,10 +380,13 @@ const MAX_SHARED_KEYS = 200000;             // harte Notbremse, blockiert nur ne
 
 // Chat-Nachrichten legen JE NACHRICHT einen eigenen geteilten Schlüssel an (globalchat:msg:<id>,
 // alliance:<TAG>:msg:<id>) und wurden nirgends aufgeräumt - der eigentliche Wachstumstreiber im
-// NORMALEN Betrieb, ganz ohne Angreifer. Der Client liest ohnehin nur die neuesten 50 Schlüssel je
-// Kanal und zeigt davon 30 an; alles Ältere ist reine Last, die bei jeder Abfrage mit übertragen
-// wird. 100 behaltene Nachrichten je Kanal liegen also klar über allem, was jemand sehen kann.
-const CHAT_KEEP_PER_CHANNEL = 100;
+// NORMALEN Betrieb, ganz ohne Angreifer. 300 statt 100 seit dem 28.08.2026 (Chat-Großetappe):
+// Bis dahin las der Client ohnehin nur die neuesten 50 Schlüssel je Kanal, und die 100 lagen klar
+// über allem Sichtbaren. Seit dem Bündel-Abruf (GET /api/chat/:kanal, siehe dort) kann das Panel
+// über „Ältere anzeigen" bis zur vollen Tiefe lesen - und zwar in EINER Antwort statt je Schlüssel
+// einzeln, das alte Größenargument (jede Abfrage überträgt alles mit) gilt also nicht mehr. Die
+// Obergrenze des Bündel-Abrufs hängt an DIESER Konstante; wer sie ändert, ändert beides zugleich.
+const CHAT_KEEP_PER_CHANNEL = 300;
 // Sortiert nach dem Zeitstempel AUS DEM SCHLÜSSEL (Format "<Date.now()>-<zufall>"), nicht
 // lexikografisch - sonst stünde "9..." vor "10...", sobald die Millisekunden eine Stelle zulegen.
 function chatKeyTimestamp(key) {
@@ -2456,6 +2459,49 @@ app.get('/api/storage-list', authMiddleware, (req, res) => {
   }
   const keys = Object.keys(db.shared).filter(k => k.startsWith(prefix));
   res.json({ keys });
+});
+
+// --- Chat: Bündel-Abruf (28.08.2026, Chat-Großetappe A) ---
+// Bis hierher las das Frontend einen Chat-Kanal in ~1+50 Anfragen: storage-list für die Schlüssel,
+// dann storageGet je Nachricht - gegen das globale Rate-Limit von 240/min je Verbindung (ein
+// Panel-Öffnen mit beiden Kanälen verbrauchte davon ~100). Diese Route liefert denselben Inhalt in
+// EINER Antwort und ist die Grundlage der Live-Aktualisierung im Frontend (Poll bei offenem Panel).
+// Leserechte exakt wie der alte Weg: authMiddleware, mehr nicht - das Lesen von Chat-Schlüsseln war
+// im generischen Storage schon immer für jedes angemeldete Konto offen (checkChatKeyPermission
+// prüft nur das SCHREIBEN, authorId === req.userId). Diese Route öffnet also nichts, sie bündelt.
+// Der Allianz-Tag wird nur FORMAL geprüft (kein Doppelpunkt, Länge <= 16): Er landet als Präfix in
+// einer In-Memory-Suche über Object.keys, nie in einem Pfad oder Befehl - ein erfundener Tag
+// liefert schlicht eine leere Liste, genau wie beim alten storage-list-Weg.
+// Sortiert wird über chatKeyTimestamp (numerisch nach dem Zeitstempel im Schlüssel, wie
+// pruneChatKeys) - eine String-Sortierung wäre bei zehnstelligen gegen dreizehnstellige
+// Zeitstempel falsch. `neuesteTs` erlaubt dem Poll die billige Frage "gibt es Neues?", ohne die
+// Antwort selbst zu vergleichen.
+app.get('/api/chat/:kanal', authMiddleware, (req, res) => {
+  const kanal = req.params.kanal;
+  let prefix = null;
+  if (kanal === 'global') {
+    prefix = 'globalchat:msg:';
+  } else if (kanal === 'allianz') {
+    const tag = String(req.query.tag || '').trim();
+    if (!tag || tag.length > 16 || tag.includes(':')) return res.status(400).json({ error: 'Ungültiger Allianz-Tag.' });
+    prefix = 'alliance:' + tag + ':msg:';
+  } else {
+    return res.status(400).json({ error: 'Unbekannter Kanal.' });
+  }
+  // Der Deckel hängt an CHAT_KEEP_PER_CHANNEL: mehr als die Aufbewahrung hält, kann es nicht geben,
+  // und eine eigene zweite Obergrenze daneben liefe beim nächsten Umbau auseinander.
+  let limit = parseInt(req.query.limit, 10);
+  if (!Number.isFinite(limit) || limit < 1) limit = 50;
+  if (limit > CHAT_KEEP_PER_CHANNEL) limit = CHAT_KEEP_PER_CHANNEL;
+  const keys = Object.keys(db.shared).filter(k => k.startsWith(prefix));
+  keys.sort((a, b) => chatKeyTimestamp(a) - chatKeyTimestamp(b));
+  const nachrichten = [];
+  for (const k of keys.slice(-limit)) {
+    // Ein einzelner kaputter Eintrag (kein JSON) darf nicht den ganzen Kanal unlesbar machen -
+    // er wird übersprungen, genau wie ihn das Frontend beim Einzel-Lesen verworfen hätte.
+    try { const m = JSON.parse(db.shared[k]); if (m && typeof m === 'object') nachrichten.push(m); } catch (e) {}
+  }
+  res.json({ ok: true, nachrichten, neuesteTs: keys.length ? chatKeyTimestamp(keys[keys.length - 1]) : 0 });
 });
 
 // --- Berichte (Angriffs-/Überfall-Protokolle) ---

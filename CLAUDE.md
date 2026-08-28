@@ -1376,6 +1376,54 @@ wird seither vom Eintragsanfang bis zum nächsten Eintragsanfang, und `5-vorab` 
 Paktkorvette, dass die mehrzeilige Lesung wirklich greift – sonst wäre der ganze Abschnitt still
 blind für jedes mehrzeilig definierte Schiff.
 
+### AUSFALL NR. 12 (22.–28.08.2026) – der Rest lag im ARBEITSBAUM, nicht im Index
+
+Der Merge von #168 kam nicht an. Gemessen unmittelbar danach und über sechs Tage hinweg unverändert:
+
+```
+{"commit":"c96defa","checkout":"c96defa","blob":"76c6e4e","uptimeSec":…}
+```
+
+Derselbe Flickenteppich wie Nr. 9 und Nr. 11: `blob` ist der **neue** (`0f1454b:server.js`), der
+Prozess führte die angeglichene Fassung also bereits aus, während `.git/HEAD` auf dem alten Commit
+stand. Die Kausalitätsbrecher-Angleichung war damit **live und korrekt** — nur git war verklemmt,
+und jeder weitere Pull wäre abgeprallt.
+
+**Der Ausfall lief sechs Tage und hat trotzdem keinen weiteren Schaden angerichtet**, weil in dieser
+Zeit nichts ins Backend gemergt wurde. Das ist Glück, keine Eigenschaft: `origin/master` stand die
+ganze Zeit auf demselben Commit. Ein einziger Merge hätte den Stau sofort sichtbar gemacht.
+
+**Neu an diesem Fall ist die SPALTE.** Saschas Messung:
+
+| | Blob | zugeordnet |
+|---|---|---|
+| `server.js` Arbeitsbaum (`git hash-object`) | `76c6e4e` | **neu** (0f1454b) |
+| `CLAUDE.md` Arbeitsbaum | `5881aa0` | **neu** (0f1454b) |
+| `server.js` **Index** (`git rev-parse :server.js`) | `0a31941` | **alt** (c96defa) |
+
+`git status --short` zeigte ` M` mit dem M in der **zweiten** Spalte — Arbeitsbaum geändert, Index
+unberührt. Bei Nr. 9 war es genau andersherum (vorgemerkt, `M ` in der ersten Spalte). **Davon hängt
+ab, ob `git checkout HEAD -- <datei>` überhaupt greift**, und deshalb werden seither beide gemessen,
+bevor irgendetwas verworfen wird. Hier griff es.
+
+**Und ein Fehler in meiner eigenen Reparaturanleitung, der eine Runde gekostet hat** (Regel 54, zum
+zweiten Mal in derselben Familie): Ich hatte nur `server.js` versorgt, obwohl mein Commit **drei**
+Dateien anfasste — Saschas `git pull` brach danach an `CLAUDE.md` ab. Die Regel steht seit dem
+17.08. im Frontend-Dokument, dort für eine Sicherung vor einem Rebase; sie gilt genauso für eine
+Reparaturanleitung: **nicht überlegen, was zu versorgen ist, sondern `git status --short` lesen und
+JEDE Zeile versorgen** — und noch billiger wäre `git show --stat <hash>` gewesen, das die Dateien
+nennt, die der halb angewendete Pull auf dem Pi hinterlassen haben MUSS.
+
+Behoben mit Rückschreiben und Vorspulen in einer Kette, damit der Server nicht unnötig lange auf dem
+alten Code neu startet:
+
+```bash
+git checkout HEAD -- server.js CLAUDE.md && git merge --ff-only origin/master
+```
+
+Danach von außen belegt: `{"commit":"0f1454b","checkout":"0f1454b","blob":"76c6e4e","uptimeSec":53}`
+— alle drei Felder einig, nodemon hat neu gestartet.
+
 ## Deploy-Alarm: ein gescheiterter Deploy meldet sich selbst (22.08.2026)
 
 Auftrag Sascha (AI-Hub-Runde). Anlass: die **Serie** von Deploy-Ausfällen seit dem 14.08. wurde

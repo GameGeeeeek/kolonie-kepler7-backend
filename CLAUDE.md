@@ -2656,33 +2656,55 @@ der **eigene Prozessneustart**.
   die Vormerkung aus #147 schließen soll: Der `.pending`-Marker ist eine Datei, sie überlebt den
   Prozess, gelesen wurde sie bisher aber nur im laufenden Deploy.
 
-### Was Sascha am Container ändern muss
+### Der Container-Umbau, vollzogen am 28.08.2026
 
-Der Code ist ohne diesen Schritt wirkungslos – und das ist Absicht.
+**Der Stack wird von Portainer verwaltet**, nicht per `docker run` – das war vorher nirgends
+notiert und kostet sonst einen Anlauf. Die Compose-Datei liegt **im Portainer-Container**
+(`big-bear-portainer:/data/compose/6/docker-compose.yml`, Projekt `kepler7`); auf dem Host gibt
+es sie nicht. Lesen geht per `docker exec`, **geändert wird sie über die Portainer-Oberfläche**
+(Stacks → kepler7 → Editor → „Update the stack") – wer die Datei im Container von Hand ändert,
+bekommt sie beim nächsten Stack-Update aus Portainers eigener Ansicht überschrieben.
 
-```
-alt:  npm install && npx nodemon --watch . --ext js,json server.js
-neu:  npm install && node server.js
-dazu: Umgebungsvariable  DEPLOY_SELBST_NEUSTART=1
-```
-
-Die Restart-Policy `unless-stopped` steht bereits. Prüfen lässt sich beides von der Kommandozeile
-des Pi:
+Auslesen, welche Datei gerade gilt:
 
 ```bash
-docker inspect -f '{{.Config.Cmd}}' kepler7-backend
-docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' kepler7-backend
-docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' kepler7-backend | grep DEPLOY_SELBST
+P=$(docker ps --format '{{.Names}}' | grep -i portainer | head -1)
+docker exec "$P" cat /data/compose/6/docker-compose.yml
 ```
 
-Danach ist der nächste Merge der Beleg: `/api/health` muss `commit`, `checkout` und `blob` einig
-melden, und `uptimeSec` muss klein sein (der Neustart hat stattgefunden).
+**ACHTUNG: Diese Datei enthält Geheimnisse im Klartext** (Resend-Schlüssel, Deploy-Webhook-Secret,
+Ko-fi-Token). Sie gehört nirgendwo hin, wo sie mitgeschnitten wird – nicht in ein Repo, nicht in
+einen Fehlerbericht, nicht in einen Chat-Verlauf. Wer sie doch einmal irgendwo abgelegt hat,
+rotiert die drei Werte.
 
-**Was der Umbau kostet, ehrlich benannt:** Ohne nodemon startet ein Codewechsel den ganzen
-Prozess neu statt nur den Watcher – gemessen sind das dieselben zwei bis drei Sekunden, die
-nodemon auch braucht. Und wer auf dem Pi von Hand an `server.js` etwas ausprobiert, bekommt
-seinen Neustart nicht mehr geschenkt: `docker restart kepler7-backend`. Das ist der Preis dafür,
-dass niemand mehr in einen laufenden Pull hineingreift.
+**Der echte Startbefehl war länger als hier dokumentiert**, und das zweite Glied muss bleiben:
+
+```
+vorher:  sh -c "git config --global --add safe.directory '*' && npm install --no-audit --no-fund && npx nodemon --watch . --ext js,json server.js"
+nachher: sh -c "git config --global --add safe.directory '*' && npm install --no-audit --no-fund && node server.js"
+```
+
+Dazu `- DEPLOY_SELBST_NEUSTART=1` im `environment`-Block. `restart: unless-stopped` stand bereits.
+
+**Gemessen unmittelbar nach dem Update:**
+
+```
+docker inspect -f '{{.Config.Cmd}}' kepler7-backend   -> [sh -c ... && node server.js]
+DEPLOY_SELBST_NEUSTART=1
+/api/health   commit 74d4600  checkout 74d4600  blob a596512  uptimeSec 21
+```
+
+**Was der Umbau kostet, ehrlich benannt:** Ohne nodemon startet bei einem Codewechsel der ganze
+CONTAINER neu, und damit läuft `npm install --no-audit --no-fund` jedes Mal mit – auf dem Pi
+spürbar länger als nodemons zwei bis drei Sekunden. Das Backend ist in dieser Zeit auf 502, das
+Spiel selbst (statisch über nginx) bleibt erreichbar. Wenn das je stört, ist die Antwort, den
+`npm install` zu überspringen, solange `package-lock.json` nicht neuer ist als `node_modules` –
+gebaut ist das bewusst NICHT, weil die Zahl noch nicht gemessen ist und eine Optimierung ohne
+Messwert genau die Sorte Änderung ist, die dieses Projekt sonst zurückweist.
+
+**Und wer auf dem Pi von Hand an `server.js` etwas ausprobiert, bekommt seinen Neustart nicht mehr
+geschenkt:** `docker restart kepler7-backend`. Das ist der Preis dafür, dass niemand mehr in einen
+laufenden Pull hineingreift.
 
 ### Was das NICHT löst
 

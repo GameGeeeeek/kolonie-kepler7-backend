@@ -266,6 +266,126 @@ function loescheSitzungsCookie(req, res) {
   res.setHeader('Set-Cookie', behalten.concat(cookieTeile(req, '', 0)));
 }
 
+/* ===== Aktivitaets-Uhr je Konto (28.08.2026, Auftrag Sascha: "da ist ein Spieler, der ist
+   wirklich Tag und Nacht online - kann man nachvollziehen, ob da ein Bot dahintersteckt?") =====
+
+   WAS SIE MISST - und was ausdruecklich NICHT.
+
+   Das Spiel hat ein Offline-Fenster von 8 Stunden (mit vollem Autonomiekern hoechstens 14). Wer
+   den Tab schliesst und 24 h wegbleibt, verliert zehn Stunden Produktion; wer ihn offen laesst,
+   verliert nichts, und der Autosave schreibt dabei alle 10 Sekunden. "Immer online" ist in diesem
+   Spiel also das rational richtige Verhalten und beweist gar nichts - es misst nur, ob jemand
+   einen Browser-Tab schliesst.
+
+   Die Uhr zaehlt deshalb NICHT die Anwesenheit, sondern die HANDLUNG: in welchen Stunden dieses
+   Konto etwas getan hat, das eine Bedienung erfordert. Ein Mensch schlaeft; eine Pause von fuenf
+   bis neun Stunden am Stueck ist der Normalfall. Erst eine Pause nahe null ueber viele Tage ist
+   nicht mehr menschlich erklaerbar - und selbst dann bleiben zwei harmlose Erklaerungen, die man
+   kennen muss: ein geteiltes Konto (zwei Personen, ein Login) und ein Konto, das auf zwei Geraeten
+   in verschiedenen Zeitzonen laeuft. Die Uhr ist ein Hinweis, kein Beweis.
+
+   WARUM SIE IN authMiddleware HAENGT und nicht an einer Liste von Routen: Eine Positivliste findet
+   nur, woran man beim Schreiben gedacht hat (Frontend-Arbeitsregel 40) - eine neue Angriffsroute
+   waere still nicht dabei. Hier ist die Regel umgedreht: Gezaehlt wird JEDE Nicht-GET-Anfrage eines
+   angemeldeten Kontos, ausser den wenigen, die der Client von selbst feuert.
+
+   DIE AUSNAHMELISTE IST GEMESSEN, nicht aus dem Quelltext geraten: Das Spiel lief im Browser
+   90 und 240 Sekunden ohne eine einzige Bedienung, mit Handelsrouten und Allianz im Spielstand.
+   Von selbst feuern genau drei Dinge - und das mittlere haette ich nie erraten:
+     PUT  /api/storage/*            27x in 240 s  (Autosave, alle ~9 s)
+     POST /api/pending-rewards/claim 17x in 240 s  (alle ~14 s - NICHT nur beim Start)
+     POST /api/reminders              1x           (beim Boot)
+   Alles andere unter Nicht-GET ist eine Bedienhandlung. Wer hier eine Automatik ergaenzt, misst
+   sie genauso nach, statt sie zu vermuten - `tests/test_aktivitaetsuhr_http.js` 1c haelt die Form
+   der Liste fest.
+
+   /api/analytics/event steht bewusst NICHT in der Uhr, obwohl es nur bei Bedienung feuert: Es ist
+   klientengemeldet und damit faelschbar. Ein Bot, der es unterschlaegt, saehe untaetig aus; einer,
+   der es schickt, saehe menschlich aus - es traegt in keiner Richtung etwas bei. Die Uhr zeigt nur,
+   was der Server SELBST ausgefuehrt hat (dieselbe Grenze wie beim Sternenstaub).
+
+   ABLAGE: am Nutzerobjekt, nicht im Spielstand - der ist klientenautoritativ und in fuenf Sekunden
+   gefaelscht. Je Tag eine 24-Bit-Zahl (Bit n = Stunde n UTC), 14 Tage; das sind rund 30 Byte je
+   Konto. GESPEICHERT WIRD NICHT EIGENS: wie die Analytics laeuft die Uhr im Speicher mit und wird
+   vom naechsten ohnehin anfallenden saveDb() mitgenommen. Die zaehlenden Routen (Angriff, Schlag,
+   Handel) speichern ohnehin; ein eigener Schreibzugriff je Anfrage waere der teuerste Weg zum
+   selben Ergebnis. Ein harter Absturz kann die letzte Stunde kosten - das ist verschmerzbar,
+   und es steht hier, damit niemand die Uhr fuer lueckenlos haelt. */
+const AKTIV_TAGE = 14;
+const AKTIV_AUSNAHMEN = [
+  { start: '/api/storage/',            grund: 'Autosave, alle ~9 s ohne jede Bedienung' },
+  { pfad:  '/api/pending-rewards/claim', grund: 'laeuft im Takt, gemessen alle ~14 s' },
+  { pfad:  '/api/reminders',           grund: 'einmal beim Boot' },
+  { pfad:  '/api/analytics/event',     grund: 'klientengemeldet und damit faelschbar' }
+];
+function aktivTagesschluessel(zeit) { return new Date(zeit || Date.now()).toISOString().slice(0, 10); }
+function aktivGezaehlt(methode, pfad) {
+  if (!methode || methode === 'GET' || methode === 'HEAD' || methode === 'OPTIONS') return false;
+  for (const a of AKTIV_AUSNAHMEN) {
+    if (a.pfad && pfad === a.pfad) return false;
+    if (a.start && pfad.startsWith(a.start)) return false;
+  }
+  return true;
+}
+function aktivVermerken(user, zeit) {
+  if (!user) return;
+  const t = zeit || Date.now();
+  const k = aktivTagesschluessel(t);
+  if (!user.aktiv || typeof user.aktiv !== 'object') user.aktiv = {};
+  const stunde = new Date(t).getUTCHours();
+  user.aktiv[k] = (user.aktiv[k] || 0) | (1 << stunde);
+  // Aufraeumen an derselben Stelle, an der geschrieben wird - kein Cron, dasselbe Muster wie bei
+  // user.marktTag und user.staub. Verglichen wird als Zeichenkette; ISO-Datumsschluessel sind
+  // dafuer sortierbar, ein Date-Parse je Eintrag waere hier nur teurer.
+  const aeltester = aktivTagesschluessel(t - AKTIV_TAGE * 86400000);
+  for (const alt of Object.keys(user.aktiv)) if (alt < aeltester) delete user.aktiv[alt];
+}
+/* Reaktionszeit auf ein Ereignis, das der SERVER erzeugt hat.
+
+   Eine Festung und ein Nest entstehen im galaxyTick und tragen ihren Entstehungszeitpunkt (`seit`).
+   Wie lange es danach dauert, bis ein bestimmtes Konto zum ERSTEN Mal zuschlaegt, ist die zweite
+   Kennzahl - und sie misst etwas, das die Uhr nicht kann: Ein Mensch muss das Ereignis erst
+   bemerken, also die Karte oeffnen; wer regelmaessig binnen Sekunden da ist, fragt den Server im
+   Takt ab. Aussagekraft liegt in der WIEDERHOLUNG, nicht im Einzelwert - ein Spieler, der zufaellig
+   gerade die Karte offen hat, ist auch mal in zwei Minuten da. Deshalb ein Ringpuffer.
+
+   NUR beim ERSTEN Schlag dieses Kontos auf dieses Ziel (`letzter` ist dann 0), und NUR beim
+   Einzelangriff: Beim Verbandsangriff steht die Flotte seit dem Beitritt fest, der Zeitpunkt des
+   Ausloesens sagt ueber den Ausloeser nichts. */
+const REAKTION_MERKEN = 10;
+/* Wertet die Uhr aus. Gibt die Stundenreihe zurueck UND die eine Zahl, auf die es ankommt:
+   die laengste zusammenhaengende Pause.
+
+   Gerechnet wird ausdruecklich ERST AB DER ERSTEN aufgezeichneten Stunde. Die Uhr faengt mit ihrer
+   Auslieferung an zu schreiben; ohne diesen Anfang zaehlten die Jahre davor als eine gewaltige
+   Pause, und jedes Konto saehe menschlich aus - eine Pruefung, die aus dem falschen Grund gruen
+   ist (Frontend-Arbeitsregel 28). Solange weniger als 24 Stunden beobachtet sind, traegt die
+   Aussage nicht, und `belastbar` sagt das. */
+function aktivAuswerten(user, jetzt) {
+  const t = jetzt || Date.now();
+  const karte = (user && user.aktiv) || {};
+  const stunden = [];
+  for (let i = AKTIV_TAGE * 24 - 1; i >= 0; i--) {
+    const z = t - i * 3600000;
+    const maske = karte[aktivTagesschluessel(z)] || 0;
+    stunden.push((maske >> new Date(z).getUTCHours()) & 1 ? 1 : 0);
+  }
+  const ersteAktive = stunden.indexOf(1);
+  if (ersteAktive < 0) return { stunden, aktiv: 0, beobachtet: 0, laengstePause: null, belastbar: false };
+  const beobachtet = stunden.length - ersteAktive;
+  let pause = 0, max = 0, aktiv = 0;
+  for (let i = ersteAktive; i < stunden.length; i++) {
+    if (stunden[i]) { aktiv++; pause = 0; } else { pause++; if (pause > max) max = pause; }
+  }
+  return { stunden, aktiv, beobachtet, laengstePause: max, belastbar: beobachtet >= 24 };
+}
+function reaktionVermerken(user, art, sekunden) {
+  if (!user || !(sekunden >= 0)) return;
+  if (!Array.isArray(user.reaktionen)) user.reaktionen = [];
+  user.reaktionen.push({ zeit: Date.now(), art, sek: Math.round(sekunden) });
+  if (user.reaktionen.length > REAKTION_MERKEN) user.reaktionen = user.reaktionen.slice(-REAKTION_MERKEN);
+}
+
 function authMiddleware(req, res, next) {
   // Der Bearer-Header hat VORRANG vor dem Cookie, nicht umgekehrt. Grund: Solange Etappe a und b
   // auseinander liegen, traegt ein Browser beides - und massgeblich muss das sein, was das
@@ -318,6 +438,9 @@ function authMiddleware(req, res, next) {
     }
     req.userId = payload.userId;
     req.username = payload.username;
+    // Aktivitaets-Uhr (siehe den Block ueber dieser Funktion). Steht HINTER der
+    // vollstaendigen Pruefung: Ein abgewiesener Aufruf ist keine Handlung dieses Kontos.
+    if (user && aktivGezaehlt(req.method, req.path)) aktivVermerken(user);
     next();
   } catch (e) {
     return res.status(401).json({ error: 'Sitzung abgelaufen oder ungültig.' });
@@ -10763,6 +10886,9 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
   mein.schaden = (mein.schaden || 0) + schaden + Math.round(teilSchaden * FESTUNG_BAUTEIL_BEITRAG);
   mein.name = req.username || mein.name;
   fest.beitraege[req.userId] = mein;
+  // Reaktionszeit: nur beim ERSTEN Schlag dieses Kontos auf diese Festung (`letzter` ist dann
+  // 0). Danach misst die Differenz nur noch die Abklingzeit, nicht die Aufmerksamkeit.
+  if (!letzter && fest.seit) reaktionVermerken(findUserById(req.userId), 'festung', (jetzt - fest.seit) / 1000);
   fest.schlaege[req.userId] = jetzt;
   fest.abgerechnet[missionId] = jetzt;
 
@@ -11014,6 +11140,10 @@ app.post('/api/alien/nest-angriff', authMiddleware, async (req, res) => {
   if (!(kraft > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
   const erg = nestSchlagAusfuehren(g, nest, kraft, mission.composition,
     [{ userId: req.userId, name: req.username || 'Kommandant', gewicht: 1 }], jetzt);
+  // Dieselbe Messung wie bei der Festung. Sie steht hier und nicht im gemeinsamen Kern:
+  // Der Kern bedient auch den VERBAND, und dort sagt der Ausloesezeitpunkt ueber den
+  // Ausloeser nichts - die Flotte steht seit dem Beitritt fest.
+  if (!letzter && nest.seit) reaktionVermerken(findUserById(req.userId), 'nest', (jetzt - nest.seit) / 1000);
 
   /* Aus der Quote werden hier - und NUR hier - konkrete Verluste: Der Einzelangreifer hat genau
      eine Zusammensetzung, der Verband hat viele und bekommt deshalb die Quote selbst. */
@@ -12216,7 +12346,14 @@ app.get('/api/admin/konto', authMiddleware, (req, res) => {
       // Die Zahl sagt, ob "alle Sitzungen beenden" hier schon einmal gelaufen ist; sie ist die
       // einzige Spur, die ein Passwort-Reset im Konto hinterlaesst.
       tokenVersion: u.tokenVersion || 0,
-      angemeldet: !!(u.activeSessionId && (jetzt - (u.activeSessionAt || 0)) < 86400000)
+      angemeldet: !!(u.activeSessionId && (jetzt - (u.activeSessionAt || 0)) < 86400000),
+      // Aktivitaets-Uhr und Reaktionszeiten (siehe den Block bei aktivVermerken). Die
+      // Stundenreihe kommt als Zeichenkette aus 0/1 - ein Array aus 336 Zahlen waere in JSON
+      // rund fuenfmal so gross, und gezeichnet wird sie ohnehin Zeichen fuer Zeichen.
+      aktiv: (() => { const a = aktivAuswerten(u, jetzt);
+        return { reihe: a.stunden.join(''), aktiv: a.aktiv, beobachtet: a.beobachtet,
+                 laengstePause: a.laengstePause, belastbar: a.belastbar, tage: AKTIV_TAGE }; })(),
+      reaktionen: (u.reaktionen || []).slice(-REAKTION_MERKEN)
     };
   });
   res.json({ konten, gefunden: Object.keys(db.users).filter(k => k.includes(suche)).length });

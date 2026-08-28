@@ -1804,6 +1804,136 @@ gemessen: `test_festung_http` (35), `test_festung_bauteile_http` (28), `test_ali
 eine **Kopie** von `server.js` mit umgelegtem Schalter starten, greifen weiterhin, weil die
 Konstanten unverändert dastehen.
 
+## Aktivitäts-Uhr und Reaktionszeit (28.08.2026, Auftrag Sascha)
+
+**Wortlaut:** „Da ist ein Spieler, der ist wirklich Tag und Nacht online. Kann man das irgendwie
+nachvollziehen, ob das wirklich ein Spieler ist oder irgendwie Bot oder KI oder whatever
+dahintersteckt?" Vorgelegt wurden vier Wege, gewählt hat Sascha **beide Messungen zusammen**.
+
+### Der Befund, der zuerst gehört: „immer online" ist hier KEIN Verdacht
+
+Das Offline-Fenster ist im Frontend **8 Stunden Basis** (`OFFLINE_BASE_SEC`), mit vollem
+Autonomiekern höchstens **14**. Wer den Tab schließt und 24 h wegbleibt, verliert zehn Stunden
+Produktion ersatzlos; wer ihn offen lässt, verliert nichts — und der Autosave schreibt dabei alle
+10 Sekunden (`setInterval(save, 10000)`). **Den Tab durchlaufen zu lassen ist damit das rational
+richtige Verhalten, das das Spiel selbst belohnt.** Ein `lastSeen` rund um die Uhr misst nur, ob
+jemand einen Browser-Tab schließt.
+
+Dazu kommt die Projektgrenze: Der Spielstand ist klientenautoritativ. Wer sich bereichern will,
+braucht **keinen Bot** — er schreibt sich die Zahlen hin. Ein Bot lohnt sich nur dort, wo der
+Server rechnet: Angriffe, Festungs- und Nest-Schläge, Anfechtungen, Markt. Also genau dort, wo er
+**anderen** etwas wegnimmt.
+
+### Die Uhr zählt HANDLUNGEN, nicht Anwesenheit
+
+`user.aktiv` ist je Tag eine 24-Bit-Zahl (Bit n = Stunde n UTC), 14 Tage, rund 30 Byte je Konto.
+Gefüllt wird sie in **`authMiddleware`**, unmittelbar vor `next()` — dort ist die Sitzung
+vollständig geprüft und `user` ohnehin geladen. Ein abgewiesener Aufruf ist keine Handlung.
+
+**Warum dort und nicht an einer Liste von Routen:** Eine Positivliste findet nur, woran man beim
+Schreiben gedacht hat (Frontend-Regel 40) — eine neue Angriffsroute wäre still nicht dabei. Die
+Regel ist deshalb umgedreht: Gezählt wird **jede Nicht-GET-Anfrage**, außer den wenigen, die der
+Client von selbst feuert.
+
+**`AKTIV_AUSNAHMEN` ist GEMESSEN, nicht aus dem Quelltext geraten.** Das Spiel lief im Browser 90
+und 240 Sekunden ohne eine einzige Bedienung, mit Handelsrouten und Allianz im Spielstand. Von
+selbst feuern genau drei Dinge:
+
+| | in 240 s | |
+|---|---|---|
+| `PUT /api/storage/*` | 27× | Autosave, alle ~9 s |
+| `POST /api/pending-rewards/claim` | **17×** | alle ~14 s — **nicht** nur beim Start, wie die Doku sagte |
+| `POST /api/reminders` | 1× | beim Boot |
+
+Die mittlere Zeile hätte ich nie erraten. **Wer hier eine Automatik ergänzt, misst sie genauso
+nach** — der Messlauf steht als Muster in der Sitzung, und `test_aktivitaetsuhr_http.js` 1c hält
+die Form der Liste fest.
+
+**`/api/analytics/event` steht bewusst NICHT in der Uhr**, obwohl es nur bei Bedienung feuert: Es
+ist klientengemeldet und damit fälschbar. Ein Bot, der es unterschlägt, sähe untätig aus; einer,
+der es schickt, menschlich — es trägt in keiner Richtung etwas bei. Die Uhr zeigt nur, was der
+Server SELBST ausgeführt hat (dieselbe Grenze wie beim Sternenstaub).
+
+**Gespeichert wird nicht eigens.** Wie die Analytics läuft die Uhr im Speicher mit und wird vom
+nächsten ohnehin anfallenden `saveDb()` mitgenommen; die zählenden Routen speichern ohnehin. Ein
+harter Absturz kann die letzte Stunde kosten — verschmerzbar, und es steht im Code, damit niemand
+die Uhr für lückenlos hält.
+
+### Die Auswertung beginnt bei der ERSTEN aufgezeichneten Stunde
+
+`aktivAuswerten()` ist die eine Stelle, die „wie lange war Ruhe" beantwortet — im Frontend noch
+einmal zu rechnen wäre die übliche zweite Wahrheit. Sie rechnet ausdrücklich erst ab der ersten
+aktiven Stunde: Die Uhr fängt mit ihrer Auslieferung an zu schreiben, ohne diesen Anfang zählten
+die Jahre davor als eine gewaltige Pause und **jedes** Konto sähe menschlich aus (Frontend-Regel
+28). Unter 24 beobachteten Stunden meldet `belastbar: false`.
+
+**Die aussagekräftige Zahl ist die längste Pause, nicht die Gesamtzahl.** An vier nachgebauten
+Konten gemessen: Bot 72/72 mit **0 h**, ein Spieler mit nächtlichem Aufwachen 3 h, ein Vielspieler
+5 h, ein Gelegenheitsspieler 14 h. Erst eine Pause nahe null über viele Tage ist nicht mehr
+menschlich erklärbar — und selbst dann bleiben zwei harmlose Erklärungen, die in den Text gehören:
+ein **geteiltes Konto** und ein Konto auf **zwei Geräten in verschiedenen Zeitzonen**. Die Uhr ist
+ein Hinweis, kein Beweis.
+
+### Die Reaktionszeit misst, was die Uhr nicht kann
+
+Festung und Nest tragen ihren Entstehungszeitpunkt (`seit`) längst. Wie lange es danach dauert,
+bis ein Konto zum **ersten** Mal zuschlägt, ist die zweite Kennzahl: Ein Mensch muss das Ereignis
+erst bemerken, also die Karte öffnen; wer regelmäßig binnen Sekunden da ist, fragt im Takt ab.
+Aussagekraft liegt in der **Wiederholung**, deshalb ein Ringpuffer über zehn Werte.
+
+Vermerkt wird **nur beim ersten Schlag** (`letzter === 0`) und **nur beim Einzelangriff** — beim
+Verband steht die Flotte seit dem Beitritt fest, der Auslösezeitpunkt sagt über den Auslöser
+nichts. Deshalb steht die Zeile im Endpunkt und nicht im gemeinsamen Kern `nestSchlagAusfuehren`,
+den beide Wege benutzen.
+
+### Der Wächter und die vier Fehler beim Bau
+
+`tests/test_aktivitaetsuhr_http.js` (Port 3236, 25 Prüfungen, **fünf Gegenproben** — jede mit
+ihrer Soll-Liste, identische Prüflisten in allen sechs Läufen). **Belegte Testports sind jetzt
+3195–3200 und 3210–3236** — ein neuer Test nimmt 3237.
+
+**Die Kernmessung ist 1a/1b als PAAR:** Eine Bedienhandlung muss ein Bit setzen UND der Autosave
+darf keines setzen. Jede Hälfte allein ist wertlos — `1a` wäre auch bei einer Uhr grün, die bei
+jeder Anfrage tickt (also 24/7 anzeigt und nichts unterscheidet), `1b` auch bei einer, die nie
+tickt.
+
+| Sabotage | fällt |
+|---|---|
+| Ausnahmeliste ignoriert (Uhr zählt alles) | `1b` |
+| Uhr zählt nichts | `1a`, `5a` |
+| Auswertung beginnt bei Index 0 | `2b`, `2b2` |
+| Reaktionszeit ohne `!letzter` | `3b`, `4a` |
+| Aufräumen entfernt | `5a` |
+
+**Drei Fehler steckten im Test, nicht im Code**, und alle drei sind lehrreich:
+
+1. **Die Fixture deckte 14 KALENDERTAGE ab, die Reihe braucht 15.** 14×24 Stunden zurück beginnt
+   mitten im fünfzehnten Tag; gemessen kamen 333 statt 336 aktive Stunden heraus — ein
+   Fixture-Fehler, der wie ein Rechenfehler in der Auswertung aussah.
+2. **`3b` hat seine eigene Bedingung zerstört.** Um die Abklingzeit zu umgehen, leerte der erste
+   Anlauf `festung.schlaege` — damit ist `letzter` wieder 0, und es war aus Sicht des Servers
+   völlig korrekt ein *erster* Schlag. Der Test fiel auf richtigem Code durch. Der Stempel wird
+   seither **zurückdatiert** statt entfernt: Abklingzeit abgelaufen, `letzter` trotzdem gesetzt —
+   genau die Lage, die im Spiel entsteht.
+3. **Die sabotierte Kopie lag in `tests/`.** Dort löst `require('./mailer')` nicht auf; alle fünf
+   Gegenproben liefen mit **0 Prüfungen** und sahen wie bestandene Proben aus (Regel 34). Gefangen
+   hat es allein die Soll-Liste (Regel 71) — der Kommentar im Test sagt seither ausdrücklich, dass
+   die Kopie ins Repo-Verzeichnis gehört.
+
+**Und ein vierter im Mess-Skript, zum wiederholten Mal derselbe:** Der Prüfnamen-Vergleich zählte
+die Schlusszeile `FAIL - es gab rote Pruefungen.` als Prüfung „es" mit und meldete fünf
+Werkzeugfehler, wo keiner war (Frontend-Regel 60). Prüfnamen tragen einen Doppelpunkt, die
+Schlusszeile nicht — daran trennt der Vergleich sie jetzt.
+
+**`KEPLER_SERVER_JS` leitet den Test auf eine Kopie um** (Start UND Quelltext-Lesung, sonst wäre er
+halb umgeleitet und sagte trotzdem nichts). Dass die Umleitung greift, ist belegt: gegen eine leere
+Datei bricht der Lauf ab, statt still das Original zu messen.
+
+### Auslieferungsreihenfolge: dieses Repo ZUERST
+
+Das Konto-Blatt im Frontend liest `aktiv` und `reaktionen` — Felder, die nur der neue Server
+schickt. Umgekehrt schreibt dieses Backend Felder, die noch niemand liest: folgenlos.
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score, seit v8.565.0 auch `WORLDBOSS_ARCHETYPES_PLAYABLE`/`WORLDBOSS_ARCHETYPE_FOLGE` gegen die gleichnamigen Frontend-Tabellen – die FOLGE muss deckungsgleich sein, sonst zeigt die Boss-Karte andere Kampffaktoren an, als `/api/worldboss`-Kämpfe benutzen; Wächter ist `test_inhalt_v8373.js` im Frontend-Repo, 60 Stufen). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

@@ -2498,6 +2498,50 @@ während `ps … | awk '$4=="git"'` ihn nicht findet. Ein „lebt noch ein git?"
 mitlesen (`$2 !~ /Z/`), sonst hält die Selbstheilung eine Leiche für einen laufenden Pull und
 räumt nie auf.
 
+### Die Selbstheilung hat gegriffen – und den Pull dabei selbst gekillt (28.08.2026)
+
+Der erste Anwendungsfall von #170, und er ist nur zur Hälfte gutgegangen. Ausgelöst von einem
+Push auf einen Feature-Branch (der Webhook feuert bei jedem Push), gemessen ausschließlich über
+`/api/health`:
+
+| | vor dem Deploy | 10 s danach | 166 s danach |
+|---|---|---|---|
+| `commit`/`checkout` | `6317576` | `6317576` | `6317576` |
+| `blob` | `dfcef52` | **`2c3f34a`** | `2c3f34a` |
+| `uptimeSec` | 2017 | **10** | 166 |
+
+Zugeordnet: `dfcef52` = `7835948:server.js` (die Spitze von `master`), `2c3f34a` =
+`6317576:server.js` (der Stand des Refs). Der Pi lief also mit dem NEUEN Code bei altem Ref –
+der Flickenteppich aus Ausfall Nr. 12 –, und `deployAufraeumen` hat den Arbeitsbaum-Rest
+verworfen, genau wie gebaut. **Der Pull danach ist nicht durchgelaufen**: Das Ref steht
+unverändert, und der Blob bleibt auf dem alten Stand.
+
+**Der Mechanismus ist benennbar, und es ist der eigene.** `git checkout HEAD -- server.js`
+SCHREIBT die Datei. nodemon sieht die Änderung, meldet `still waiting for 1 sub-process to
+finish` und beendet den laufenden git-Prozess – also den Pull, der unmittelbar danach startet.
+Das ist wörtlich der Mechanismus von Ausfall Nr. 12, nur ausgelöst von der Funktion, die ihn
+beheben soll. Der Neustart ist am `uptimeSec`-Sprung belegt; dass der Kill den Pull traf, ist
+von außen nicht belegbar und steht nur im Container-Log
+(`docker logs --tail 80 kepler7-backend | grep -i deploy-webhook`).
+
+**Netto ist der Pi von „neuer Code, altes Ref" auf „alter Code, konsistentes Ref" gefallen** –
+`#169` (der Neuspieler-Push an den Betreiber) ist damit nicht mehr live. Kein Spielerschaden,
+aber eine ausgelieferte Funktion weniger, und der Zustand sieht in allen drei Feldern
+unauffällig aus.
+
+**Warum das trotzdem kein Rückschritt gegenüber vorher ist:** Der Arbeitsbaum ist jetzt sauber.
+Beim nächsten Deploy findet `deployAufraeumen` nichts zu räumen, schreibt also keine Datei,
+löst keinen Vor-Neustart aus – und der Pull sollte durchlaufen und `#169` nachziehen. Der
+Zustand heilt sich beim nächsten Push von selbst; vorher hätte jeder Pull dauerhaft abgeprallt.
+
+**Die Lehre für den nächsten Ausbau: Die Heilung darf die beobachtete Datei nicht anfassen,
+solange der Beobachter scharf ist.** Zwei Wege, beide außerhalb von `server.js`:
+`nodemon --delay 5` im Startbefehl (das Fenster wird kleiner, nicht zu), oder die beobachteten
+Dateien beim Aufräumen gar nicht erst schreiben – etwa `git stash` statt `checkout`, oder das
+Aufräumen und den Pull in EINEN git-Aufruf legen, damit zwischen Schreiben und Ref-Update kein
+zweiter Prozessstart liegt. Solange das nicht gebaut ist, gilt: **Ein Deploy, dem eine Heilung
+vorausgeht, braucht zwei Anläufe** – der erste räumt, der zweite pullt.
+
 ### AUSFALL NR. 11 (22.08.2026) – der Blob hat ihn WÄHREND des Ausfalls gezeigt
 
 Der Merge von #165 lief an, und `/api/health` meldete über 14 Minuten unverändert:

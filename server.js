@@ -5806,6 +5806,10 @@ function galaxyTick() {
   /* Die galaktische Gegnerstaerke. Mit aktiven Nestern ein TAUZIEHEN gegen ihren Bestand
      (Phase 4, Begruendung und Messung bei NPC_STAERKE_BASIS); ohne sie das alte monotone
      Wachstum - sonst baute diese Phase die Galaxie um, obwohl Phase 3 noch schlaeft. */
+  // BEWUSST die Konstante und NICHT spawnAktiv('nester'): Die Drift wertet den BESTAND aus, und
+  // der bleibt bei einer Notabschaltung unveraendert stehen (sie stoppt nur den Nachschub). Sie
+  // hier mitzustoppen liesse `g.npcStaerkeZiel` auf einem Wert einfrieren, den niemand mehr
+  // anstrebt - das Frontend zeigte dann eine Weltlage an, die nicht mehr gilt.
   if (NEST_SPAWN_AKTIV) {
     const ziel = npcStaerkeZiel(g);
     g.npcEmpireStrength += (ziel - g.npcEmpireStrength) * NPC_STAERKE_DRIFT;
@@ -7779,6 +7783,10 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
   if (istNest) {
     /* Der Schalter gilt hier mit: Ohne aktive Nester gibt es kein Ziel, der ganze Zweig ist dann
        unerreichbar - deshalb braucht Phase 5 keinen EIGENEN Schalter. */
+    // BEWUSST die Konstante und NICHT spawnAktiv('nester'): Eine Notabschaltung stoppt den
+    // Nachschub, sie enteignet niemanden. Haenge dieser 404 am Schalter, staenden nach dem
+    // Abschalten unangreifbare Nester auf der Karte - und die Meldung "es gibt derzeit keine"
+    // waere eine Falschaussage gegenueber einem Spieler, der eines vor sich sieht.
     if (!NEST_SPAWN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Alien-Nester in der Galaxie.' });
     const nestId = String((req.body && req.body.nestId) || '');
     const g0 = loadOrInitGalaxy();
@@ -9340,7 +9348,9 @@ function festungReifen(feld, now) {
 }
 // Entstehen: im galaxyTick, in ein Gürtelsystem OHNE Festung und MIT einem freien Platz.
 function festungSpawn(felder) {
-  if (!FESTUNG_SPAWN_AKTIV) return null;   // siehe die Begründung bei der Konstante
+  // Konstante UND Notabschaltung (siehe /api/admin/schalter); die Konstante bleibt die
+  // Grundstellung, der Schalter kann nur ABschalten. Vorhandene Festungen bleiben stehen.
+  if (!spawnAktiv('festung')) return null;   // siehe die Begründung bei der Konstante
   const aktive = Object.values(felder).filter(x => x && x.festung).length;
   if (aktive >= FESTUNG_MAX_AKTIV) return null;
   const now = Date.now();
@@ -9376,7 +9386,7 @@ function festungSpawn(felder) {
     // FESTUNG_BAUTEILE_AKTIV aus ist - verhaelt sich weiterhin genau wie vorher: festungTeilSteht()
     // liefert false, und jeder Zweig darunter faellt auf das Verhalten ohne Bauteile zurueck.
     // Damit braucht es keine Wanderung des Bestands, und ein halb ausgerollter Stand tut niemandem weh.
-    bauteile: !FESTUNG_BAUTEILE_AKTIV ? undefined : {
+    bauteile: !spawnAktiv('bauteile') ? undefined : {
       schild: { lp: Math.round(st.kern * FESTUNG_BAUTEILE.schild.anteilKern),
                 lpMax: Math.round(st.kern * FESTUNG_BAUTEILE.schild.anteilKern), letzteReifung: now },
       tuerme: { lp: Math.round(st.kern * FESTUNG_BAUTEILE.tuerme.anteilKern),
@@ -10143,7 +10153,10 @@ function nestOrteNachfuehren(g) {
    Koenigin hervor), und diese Ereignisse gehoeren in den Weltentakt, nicht in einen
    Kartenaufruf. Sonst haengt die Weltlage daran, wer wie oft die Karte oeffnet. */
 function nestTick(g) {
-  if (!NEST_SPAWN_AKTIV) return;
+  // spawnAktiv() statt der blanken Konstante: Damit greift zusaetzlich die Notabschaltung ueber
+  // /api/admin/schalter (siehe dort). Sie stoppt bewusst nur den NACHSCHUB - vorhandene Nester
+  // bleiben stehen und angreifbar, sonst staenden nach dem Abschalten unerreichbare Ziele herum.
+  if (!spawnAktiv('nester')) return;
   const now = Date.now();
   const liste = nestListe(g);
   g.alienPause = g.alienPause || {};
@@ -11548,6 +11561,309 @@ app.post('/api/admin/bonuscode/aktiv', authMiddleware, async (req, res) => {
   else { katalog[schluessel].aktiv = !!aktiv; }
   await saveDb();
   res.json({ ok: true });
+});
+
+/* ===== Vier Admin-Faehigkeiten (28.08.2026, Auftrag Sascha "mehr adminfaehigkeiten in admin
+   bereich hinzu") =================================================================================
+
+   GEMESSEN VORHER, damit klar ist, was hier NICHT das Problem war: Der Admin-Bereich hatte 13
+   Routen, und ALLE 13 waren im Frontend verdrahtet. Es fehlte keine Anzeigestelle zu einer
+   vorhandenen Route - es fehlten Faehigkeiten. Die vier hier decken die vier gemessenen Luecken:
+
+   1. FEEDBACK        - `db.feedback` haelt die letzten 500 Einsendungen und hatte NULL Leser
+                        (gemessen: nur Schreibstellen). Der einzige Weg dorthin war die Resend-Mail
+                        plus eine Push-Meldung; wer die Mail loescht, kommt nie wieder dran. Die
+                        Daten liegen laengst da - das hier ist keine neue Erfassung, nur eine neue
+                        Sicht (dieselbe Entscheidung wie bei /api/admin/retention).
+   2. NOTABSCHALTUNG  - FESTUNG_SPAWN_AKTIV, FESTUNG_BAUTEILE_AKTIV und NEST_SPAWN_AKTIV sind in
+                        ihren eigenen Kommentaren dreimal als "Notausschalter" beschrieben. Sie
+                        umzulegen brauchte bis hierher einen MERGE samt Deploy - also genau den
+                        Weg, der in dieser Datei dreizehnmal dokumentiert ausgefallen ist, zuletzt
+                        fuenf Tage lang unbemerkt. Ein Notausschalter, der einen funktionierenden
+                        Deploy voraussetzt, ist im Ernstfall keiner.
+   3. KONTO-BLATT     - Sperren ging ausschliesslich ueber eine vorhandene MELDUNG (der Knopf
+                        haengt an der Meldungszeile), obwohl /api/admin/set-banned einen Namen
+                        entgegennimmt. Ohne Meldung war ein Konto gar nicht erreichbar - weder zum
+                        Sperren noch zum blossen Nachsehen.
+   4. SYSTEMSTAND     - commit/checkout/blob stehen in /api/health, die Pruefung brauchte aber ein
+                        curl von aussen. Und `DEPLOY_ALARM_MAIL` war am Container nicht gesetzt:
+                        der Alarm aus #166 ist gebaut und still, ohne dass das irgendwo auffaellt.
+
+   ALLE VIER liegen hinter isAdmin() - also hinter genau EINEM Konto (db.users['gamegeeeeek']).  */
+
+// --- 1. Feedback ------------------------------------------------------------------------------
+// `erledigt` ist eine MARKE, kein Loeschen: Die Liste ist ohnehin auf 500 gedeckelt und rollt von
+// selbst weiter. Ein Eintrag, den man abgehakt hat, soll nachlesbar bleiben - eine Idee von vor
+// zwei Monaten ist beim naechsten Konzept wieder interessant.
+app.get('/api/admin/feedback', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const alle = db.feedback || [];
+  const nurOffen = req.query.offen === '1';
+  const nurTyp = (req.query.typ === 'bug' || req.query.typ === 'idee') ? req.query.typ : null;
+  const gefiltert = alle.filter(f => (!nurOffen || !f.erledigt) && (!nurTyp || f.type === nurTyp));
+  res.json({
+    feedback: gefiltert.slice(0, 200).map(f => ({
+      id: f.id, time: f.time, username: f.username, type: f.type,
+      text: f.text, version: f.version || null,
+      // NICHT der Dateiname, sondern nur ob es eins gibt - abgeholt wird ueber die ID (siehe
+      // unten). Damit kann die Route strukturell nicht zum Pfad-Ausbruch missbraucht werden.
+      hatBild: !!f.imageFile,
+      erledigt: !!f.erledigt, erledigtAm: f.erledigtAm || 0
+    })),
+    gesamt: alle.length,
+    offen: alle.filter(f => !f.erledigt).length,
+    angezeigt: Math.min(gefiltert.length, 200)
+  });
+});
+
+app.post('/api/admin/feedback/erledigt', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const { id, erledigt } = req.body || {};
+  const eintrag = (db.feedback || []).find(f => f.id === id);
+  if (!eintrag) return res.status(404).json({ error: 'Diese Einsendung gibt es nicht (mehr).' });
+  if (erledigt === false) { delete eintrag.erledigt; delete eintrag.erledigtAm; }
+  else { eintrag.erledigt = true; eintrag.erledigtAm = Date.now(); }
+  await saveDb();
+  res.json({ ok: true, offen: (db.feedback || []).filter(f => !f.erledigt).length });
+});
+
+/* Der angehaengte Screenshot. Er ging bisher NUR als Mail-Anhang raus - eine Feedback-Ansicht ohne
+   ihn waere die halbe Auskunft, und gerade bei einem Fehlerbericht ist das Bild der Inhalt.
+
+   DIE ROUTE NIMMT DIE FEEDBACK-ID, NICHT DEN DATEINAMEN, und das ist die eigentliche Entscheidung:
+   Der Server schlaegt `imageFile` selbst im eigenen Bestand nach. Ein Pfad-Ausbruch ("../../")
+   ist damit strukturell unmoeglich statt durch eine Pruefung abgefangen, die man beim naechsten
+   Umbau vergessen kann. `path.basename` steht trotzdem davor - doppelt, weil der Wert einmal aus
+   einer alten db.json stammen koennte. */
+app.get('/api/admin/feedback/bild/:id', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const eintrag = (db.feedback || []).find(f => f.id === req.params.id);
+  if (!eintrag || !eintrag.imageFile) return res.status(404).json({ error: 'Zu dieser Einsendung gibt es kein Bild.' });
+  const datei = path.join(FEEDBACK_IMG_DIR, path.basename(String(eintrag.imageFile)));
+  if (!fs.existsSync(datei)) return res.status(404).json({ error: 'Die Bilddatei liegt nicht mehr auf der Platte.' });
+  res.type(datei.endsWith('.png') ? 'image/png' : 'image/jpeg');
+  res.sendFile(datei);
+});
+
+
+// --- 2. Notabschaltung der PvE-Spawns ---------------------------------------------------------
+/* ==================================
+
+   Die drei Konstanten darueber (FESTUNG_SPAWN_AKTIV, FESTUNG_BAUTEILE_AKTIV, NEST_SPAWN_AKTIV)
+   nennen sich in ihren eigenen Kommentaren dreimal "Notausschalter" - und brauchten bis hierher
+   einen MERGE samt Deploy, um umgelegt zu werden. Das ist genau der Weg, der in der CLAUDE.md
+   dieses Repos dreizehnmal als ausgefallen dokumentiert ist; der letzte Ausfall lief fuenf Tage
+   unbemerkt. Ein Notausschalter, der einen funktionierenden Deploy voraussetzt, ist im Ernstfall
+   keiner. Deshalb liegt der Zustand zusaetzlich in der DB und ist ueber /api/admin/schalter
+   erreichbar.
+
+   DIE RICHTUNG IST EINSEITIG, UND DAS IST DIE EIGENTLICHE ENTSCHEIDUNG: Der Admin kann nur
+   ABSCHALTEN, nie einschalten. Die Konstante bleibt die Grundstellung - steht sie auf false, ist
+   die Mechanik aus und kein Knopf holt sie zurueck. Der Grund ist derselbe, aus dem es die
+   Konstanten ueberhaupt gibt: Sie schuetzen davor, dass eine Backend-Mechanik ohne ihr Frontend
+   live geht und dem Spieler still eine Zahl verschiebt (Frontend-Regel 60). Ein DB-Schalter, der
+   etwas EINschalten koennte, haette genau dieses Tor wieder geoeffnet - und zwar an einer Stelle,
+   an der kein Merge und kein Test mehr dazwischensteht.
+
+   WO DER ZUSTAND LIEGT: in `db.notAus`, einem eigenen Feld auf oberster Ebene - ausdruecklich
+   NICHT in `db.shared` (dort schreibt jeder eingeloggte Nutzer, solange keine Sonderregel greift)
+   und auch nicht in `db.galaxy`: `galaxyFuerClient()` reicht dessen Inhalt an JEDEN Client weiter,
+   der Schalterzustand ginge also ungefragt an alle. `db.bonusCodes` ist das Vorbild.
+
+   KEIN NEUSTART NOETIG, und das ist der Zweck: `spawnAktiv()` liest bei jedem Aufruf frisch. Die
+   Funktionen sind bewusst `function`-Deklarationen (hochgezogen) und lesen die Konstanten erst im
+   RUMPF - ein Objektliteral mit direkten Verweisen waere hier die temporale Todeszone, die den
+   Serverstart in diesem Repo schon einmal gekostet hat. */
+const NOTAUS_NAMEN = {
+  festung:  'Asteroidenfestungen entstehen',
+  bauteile: 'Neue Festungen bekommen Schild und Tuerme',
+  nester:   'Alien-Nester entstehen, reifen und wandern'
+};
+function notAusGesetzt(name) {
+  return !!(db.notAus && db.notAus[name] && db.notAus[name].aus === true);
+}
+function spawnAktiv(name) {
+  // EINE Kette, nicht zwei: `spawnAktivImCode` ist die Grundstellung, hier kommt nur die
+  // Notabschaltung davor. Zwei Kopien liefen beim naechsten Schalter auseinander.
+  return spawnAktivImCode(name) && !notAusGesetzt(name);
+}
+
+app.get('/api/admin/schalter', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  res.json({
+    schalter: Object.keys(NOTAUS_NAMEN).map(name => {
+      const eintrag = (db.notAus && db.notAus[name]) || null;
+      return {
+        name, beschreibung: NOTAUS_NAMEN[name],
+        // Die drei Felder beantworten drei verschiedene Fragen, und genau ihr Unterschied ist die
+        // Auskunft: `imCode` = was ausgeliefert ist, `notAus` = was der Admin gesetzt hat,
+        // `wirksam` = was der Server JETZT tut. Ein einzelnes "an/aus" koennte nicht sagen, ob
+        // etwas abgeschaltet oder nie ausgeliefert wurde.
+        imCode: spawnAktivImCode(name),
+        notAus: notAusGesetzt(name),
+        wirksam: spawnAktiv(name),
+        seit: eintrag ? (eintrag.seit || 0) : 0,
+        grund: eintrag ? (eintrag.grund || null) : null
+      };
+    })
+  });
+});
+function spawnAktivImCode(name) {
+  if (name === 'festung') return FESTUNG_SPAWN_AKTIV;
+  if (name === 'bauteile') return FESTUNG_BAUTEILE_AKTIV;
+  if (name === 'nester') return NEST_SPAWN_AKTIV;
+  return false;
+}
+
+/* Der GRUND ist Pflicht beim Abschalten und steht spaeter in der Antwort. Eine Notabschaltung ohne
+   Begruendung ist in zwei Wochen nicht mehr von einem Versehen zu unterscheiden - und dieses Repo
+   dokumentiert bei allen drei Schaltern ausdruecklich, dass ihr Grund "dann hierher gehoert". */
+app.post('/api/admin/schalter', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const { name, aus, grund } = req.body || {};
+  if (!Object.prototype.hasOwnProperty.call(NOTAUS_NAMEN, name)) {
+    return res.status(400).json({ error: 'Diesen Schalter gibt es nicht: ' + String(name).slice(0, 40) });
+  }
+  if (aus === true && !spawnAktivImCode(name)) {
+    return res.status(400).json({ error: 'Das ist im ausgelieferten Stand ohnehin aus - hier gibt es nichts abzuschalten.' });
+  }
+  if (!db.notAus) db.notAus = {};
+  if (aus === true) {
+    const text = String(grund || '').trim().slice(0, 200);
+    if (text.length < 3) return res.status(400).json({ error: 'Bitte kurz begruenden, warum abgeschaltet wird.' });
+    db.notAus[name] = { aus: true, seit: Date.now(), grund: text };
+  } else {
+    delete db.notAus[name];
+  }
+  console.warn('[notaus] ' + name + ' -> ' + (aus === true ? 'ABGESCHALTET (' + (db.notAus[name].grund) + ')' : 'wieder frei'));
+  await saveDb();
+  res.json({ ok: true, name, notAus: notAusGesetzt(name), wirksam: spawnAktiv(name) });
+});
+
+// --- 3. Konto-Blatt ---------------------------------------------------------------------------
+/* Was hier NICHT drinsteht: `passwordHash`, `email` im Klartext und der Spielstand selbst. Der
+   Hash gehoert nirgendwo hin, wo er mitgeschnitten werden kann; die Adresse wird auf ihre Form
+   reduziert (erstes Zeichen + Domain), weil die Frage im Betrieb "hat er ueberhaupt eine und ist
+   sie bestaetigt" lautet und nicht "wie lautet sie". Wer sie wirklich braucht, kommt an die
+   db.json ohnehin heran - aber sie faellt dann nicht nebenbei in einem Screenshot an. */
+function emailForm(adresse) {
+  const s = String(adresse || '');
+  const at = s.indexOf('@');
+  if (at < 1) return null;
+  return s[0] + '***' + s.slice(at);
+}
+app.get('/api/admin/konto', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const suche = String(req.query.name || '').trim().toLowerCase();
+  if (suche.length < 2) return res.status(400).json({ error: 'Bitte mindestens zwei Zeichen suchen.' });
+  // Teiltreffer, damit man einen Namen nicht exakt kennen muss. Bei einem Volltreffer steht der
+  // vorn - sonst waere ausgerechnet der gesuchte Name irgendwo in der Liste.
+  const treffer = Object.keys(db.users).filter(k => k.includes(suche)).sort((a, b) => {
+    if (a === suche) return -1;
+    if (b === suche) return 1;
+    return a.localeCompare(b);
+  }).slice(0, 20);
+  const jetzt = Date.now();
+  const konten = treffer.map(k => {
+    const u = db.users[k];
+    const rang = supporterStatusCombined(u.userId);
+    const priv = db.private[u.userId] || {};
+    const save = priv[SAVE_KEY];
+    const staub = u.staub || {};
+    return {
+      username: u.username,
+      gesperrt: !!u.banned,
+      registriert: u.createdAt || 0,
+      emailForm: emailForm(u.email),
+      emailBestaetigt: !!u.emailVerified,
+      letzteSitzung: u.activeSessionAt || 0,
+      hatSpielstand: save !== undefined,
+      heimatsystem: u.homeSystem || null,
+      unterstuetzer: rang && rang.active ? (rang.tier || 'aktiv') : null,
+      // `granted` unterscheidet manuell vergeben von echt gespendet - die Trennung, auf der das
+      // ganze Unterstuetzer-Programm beruht (Rang != Funktionsfreigabe).
+      unterstuetzerVergeben: !!(rang && rang.active && rang.granted),
+      testphaseGenutzt: !!u.supporterTrialAt,
+      stufeJeMax: u.supporterStufeJeMax || null,
+      sternenstaub: staub.menge || 0,
+      abgewehrteAngriffe: staub.abwehrGesamt || 0,
+      pveKills: u.pveKills || null,
+      bonusCodes: Object.keys(u.bonusCodes || {}).length,
+      bonusFehlversuche: (u.bonusVersuche && u.bonusVersuche.n) || 0,
+      marktErloesHeute: (u.marktTag && u.marktTag.stempel === staubTagesschluessel()) ? (u.marktTag.erloes || 0) : 0,
+      offeneBelohnungen: (priv.__pendingRewards || []).length,
+      // Die Zahl sagt, ob "alle Sitzungen beenden" hier schon einmal gelaufen ist; sie ist die
+      // einzige Spur, die ein Passwort-Reset im Konto hinterlaesst.
+      tokenVersion: u.tokenVersion || 0,
+      angemeldet: !!(u.activeSessionId && (jetzt - (u.activeSessionAt || 0)) < 86400000)
+    };
+  });
+  res.json({ konten, gefunden: Object.keys(db.users).filter(k => k.includes(suche)).length });
+});
+
+/* Alle Sitzungen eines FREMDEN Kontos beenden. Der Weg dorthin ist derselbe wie beim Spieler
+   selbst (/api/logout-all): tokenVersion hochzaehlen entwertet JEDES ausgestellte Token, auch die
+   alten sid-losen. Der Unterschied ist die Begruendung, warum es hier KEINE Passwort-Abfrage gibt:
+   Der Admin kennt das fremde Passwort per Konstruktion nicht. Die Sperre ist isAdmin() selbst.
+
+   WOFUER: Ein uebernommenes Konto (der Spieler meldet "da war jemand dran") laesst sich damit
+   sofort aus allen Geraeten werfen, ohne dass der rechtmaessige Besitzer erst sein Passwort
+   zuruecksetzen muss - und ohne dass jemand in die db.json greifen muss. */
+app.post('/api/admin/konto/sitzungen-beenden', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const key = String((req.body && req.body.targetUsername) || '').trim().toLowerCase();
+  const ziel = db.users[key];
+  if (!ziel) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  ziel.tokenVersion = (ziel.tokenVersion || 0) + 1;
+  delete ziel.activeSessionId;
+  delete ziel.activeSessionAt;
+  await saveDb();
+  res.json({ ok: true, username: ziel.username, tokenVersion: ziel.tokenVersion });
+});
+
+// --- 4. Systemstand ----------------------------------------------------------------------------
+/* Die vier Deploy-Felder aus /api/health plus die Frage, die bisher nur ein SSH-Zugang beantworten
+   konnte: welche Konfiguration fehlt.
+
+   ES WERDEN NIE WERTE AUSGEGEBEN, nur Ja/Nein. Der Grund steht in der Doku dieses Repos: Der
+   Compose-Stack fuehrt Resend-Schluessel, Deploy-Secret und Ko-fi-Token im Klartext, und die
+   gehoeren in keinen Screenshot und keinen Fehlerbericht. Ein Ja/Nein beantwortet die Frage
+   "warum kommt keine Alarm-Mail" vollstaendig, ohne irgendetwas preiszugeben. */
+app.get('/api/admin/systemstand', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const gesetzt = (name) => !!(process.env[name] && String(process.env[name]).trim());
+  const spielstaende = Object.keys(db.private).filter(uid => db.private[uid] && db.private[uid][SAVE_KEY] !== undefined).length;
+  res.json({
+    deploy: {
+      commit: LAUFENDER_COMMIT,
+      checkout: gitKopfJetzt(),
+      blob: LAUFENDE_DATEI,
+      selbstNeustart: DEPLOY_SELBST_NEUSTART,
+      uptimeSec: Math.round(process.uptime())
+    },
+    bestand: {
+      konten: Object.keys(db.users).length,
+      spielstaende,
+      offenesFeedback: (db.feedback || []).filter(f => !f.erledigt).length,
+      offeneMeldungen: (db.playerReports || []).length,
+      offeneKofiZuordnungen: (db.kofiUnlinked || []).length
+    },
+    konfiguration: [
+      { name: 'RESEND_API_KEY', gesetzt: gesetzt('RESEND_API_KEY'), zweck: 'Bestaetigungs- und Reset-Mails, Deploy-Alarm' },
+      { name: 'DEPLOY_ALARM_MAIL', gesetzt: gesetzt('DEPLOY_ALARM_MAIL'), zweck: 'Empfaenger der Alarm-Mail bei gescheitertem Deploy' },
+      { name: 'DEPLOY_WEBHOOK_SECRET', gesetzt: gesetzt('DEPLOY_WEBHOOK_SECRET'), zweck: 'Ohne ihn weist der Deploy-Webhook JEDEN Aufruf ab' },
+      { name: 'KOFI_VERIFICATION_TOKEN', gesetzt: gesetzt('KOFI_VERIFICATION_TOKEN'), zweck: 'Ohne ihn wird jede Ko-fi-Spende verworfen' },
+      { name: 'FEEDBACK_EMAIL', gesetzt: gesetzt('FEEDBACK_EMAIL'), zweck: 'Feedback zusaetzlich per Mail (die Ansicht hier ist davon unabhaengig)' },
+      { name: 'PUBLIC_URL', gesetzt: gesetzt('PUBLIC_URL'), zweck: 'Adresse in Mail-Links und VAPID-Subject' }
+    ],
+    // Abgeleitete Betriebszustaende - sie beantworten dieselbe Art Frage wie die Liste darueber,
+    // haengen aber nicht an einer Env-Variablen, sondern daran, ob etwas WIRKLICH geladen ist.
+    laufzeit: {
+      passwortlisteEintraege: BEKANNTE_PASSWOERTER.size,
+      pushSchluesselDa: !!(VAPID_KEYS && VAPID_KEYS.publicKey),
+      selbstheilungDa: typeof deployAufraeumen === 'function'
+    }
+  });
 });
 
 /* Einloesen. Die Sperre gegen das Durchprobieren ist der FEHLVERSUCHS-Zaehler am Konto darunter -

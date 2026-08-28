@@ -1567,6 +1567,173 @@ freien Ports gilt: `grep -hoE "3[12][0-9][0-9]" tests/*.js | sort -un`, nicht ei
 `PORT = <zahl>` — das übersieht die Form `Number(process.env.TEST_PORT || 3230)` und meldete
 3230 fälschlich als frei.
 
+## Vier neue Admin-Fähigkeiten (28.08.2026, Auftrag Sascha)
+
+**Wortlaut:** „mehr adminfähigkeiten in admin bereich hinzu mache vorschläge." Vorgelegt wurden
+sieben gemessene Lücken, gewählt hat Sascha vier: Feedback-Ansicht, Notabschaltung der PvE-Spawns,
+Konto-Blatt mit Spielersuche, Deploy- und Konfig-Kachel.
+
+**Was VORHER gemessen wurde, damit klar ist, was hier nicht das Problem war:** Der Admin-Bereich
+hatte 13 Routen, und **alle 13 waren im Frontend verdrahtet**. Es fehlte keine Anzeigestelle zu
+einer vorhandenen Route — es fehlten Fähigkeiten. Der erste `grep` sah das anders (`api/admin/`
+fand nur 3 von 13) und war schlicht zu eng: `backendFetch` setzt das `/api`-Präfix selbst. Regel 32
+in Reinform, hier an der eigenen Bestandsaufnahme.
+
+### 1. Feedback: 500 Einträge, die niemand lesen konnte
+
+`db.feedback` hält die letzten 500 Einsendungen und hatte **null Leser** — gemessen gab es nur
+Schreibstellen. Der einzige Weg dorthin war die Resend-Mail plus eine Push-Meldung; wer die Mail
+löscht oder `FEEDBACK_EMAIL` nicht gesetzt hat, kam nie wieder daran. Das ist dieselbe Sorte
+Änderung wie `/api/admin/retention`: **keine neue Erfassung, nur eine neue Sicht.**
+
+**`erledigt` ist eine MARKE, kein Löschen.** Die Liste rollt bei 500 ohnehin von selbst weiter; ein
+abgehakter Eintrag bleibt nachlesbar, weil eine Idee von vor zwei Monaten beim nächsten Konzept
+wieder interessant ist. `2c3` misst genau das — ohne diese Zeile wäre `2c` auch bei einer Route
+grün, die den Eintrag entfernt.
+
+**Der angehängte Screenshot ging bisher NUR als Mail-Anhang raus.** Eine Feedback-Ansicht ohne ihn
+wäre die halbe Auskunft, gerade bei einem Fehlerbericht. **Die Route nimmt die Feedback-ID, nicht
+den Dateinamen** — der Server schlägt `imageFile` im eigenen Bestand nach, ein Pfad-Ausbruch ist
+damit *strukturell* unmöglich statt durch eine Prüfung abgefangen, die man beim nächsten Umbau
+vergessen kann.
+
+### 2. Die Notabschaltung, und warum sie nur in EINE Richtung geht
+
+`FESTUNG_SPAWN_AKTIV`, `FESTUNG_BAUTEILE_AKTIV` und `NEST_SPAWN_AKTIV` nennen sich in ihren eigenen
+Kommentaren dreimal „Notausschalter" — und brauchten bis hierher einen **Merge samt Deploy**, um
+umgelegt zu werden. Das ist genau der Weg, der in diesem Dokument dreizehnmal als ausgefallen
+dokumentiert ist; der letzte Ausfall lief fünf Tage unbemerkt. **Ein Notausschalter, der einen
+funktionierenden Deploy voraussetzt, ist im Ernstfall keiner.**
+
+**Der Admin kann nur ABSCHALTEN, nie einschalten.** Die Konstante bleibt die Grundstellung; steht
+sie auf `false`, holt kein Knopf sie zurück (`POST /api/admin/schalter` lehnt das mit 400 ab). Der
+Grund ist derselbe, aus dem es die Konstanten überhaupt gibt: Sie schützen davor, dass eine
+Backend-Mechanik ohne ihr Frontend live geht und dem Spieler still eine Zahl verschiebt
+(Frontend-Regel 60). Ein DB-Schalter, der etwas EINschalten könnte, hätte dieses Tor wieder
+geöffnet — an einer Stelle, an der weder Merge noch Test dazwischenstehen.
+
+**Der Zustand liegt in `db.notAus`** — einem eigenen Feld auf oberster Ebene, ausdrücklich **nicht**
+in `db.shared` (dort schreibt jeder eingeloggte Nutzer, solange keine Sonderregel greift) und auch
+nicht in `db.galaxy`: `galaxyFuerClient()` macht `Object.assign({}, g, …)` und reichte den
+Schalterzustand damit ungefragt an **jeden** Client weiter. `db.bonusCodes` ist das Vorbild.
+
+**Kein Neustart nötig, und das ist der Zweck:** `spawnAktiv()` liest bei jedem Aufruf frisch. Die
+Funktionen sind bewusst `function`-Deklarationen (hochgezogen) und lesen die Konstanten erst im
+RUMPF — ein Objektliteral mit direkten Verweisen wäre hier die temporale Todeszone, die den
+Serverstart in diesem Repo schon einmal gekostet hat.
+
+**Der Notaus stoppt den NACHSCHUB, er enteignet niemanden.** Drei Stellen laufen über
+`spawnAktiv()` (`nestTick`, `festungSpawn`, das Anlegen der Bauteile), **zwei bewusst nicht**:
+
+| Stelle | bleibt an der Konstante, weil |
+|---|---|
+| `/api/musterattack/create`, Nest-Zweig | Hinge der 404 am Schalter, stünden nach dem Abschalten **unangreifbare** Nester auf der Karte — und „es gibt derzeit keine Alien-Nester" wäre eine Falschaussage gegenüber einem Spieler, der eines vor sich sieht. |
+| Die NPC-Stärke-Drift im `galaxyTick` | Sie wertet den **Bestand** aus, und der bleibt beim Notaus unverändert stehen. Sie mitzustoppen ließe `g.npcStaerkeZiel` auf einem Wert einfrieren, den niemand mehr anstrebt — das Frontend zeigte dann eine Weltlage an, die nicht mehr gilt. |
+
+Beide tragen ihre Begründung im Code, sonst hält der Nächste sie für ein Versehen; `3d2`/`3d3`
+prüfen die Richtung, `3d` die Gegenrichtung (Regel 33).
+
+**Der Grund ist beim Abschalten Pflicht** und steht später in der Antwort. Eine Notabschaltung ohne
+Begründung ist in zwei Wochen nicht mehr von einem Versehen zu unterscheiden — und dieses Dokument
+sagt bei allen drei Schaltern ausdrücklich, dass ihr Grund „dann hierher gehört".
+
+**Drei Felder statt eines an/aus**, und genau ihr Unterschied ist die Auskunft: `imCode` = was
+ausgeliefert ist, `notAus` = was der Admin gesetzt hat, `wirksam` = was der Server jetzt tut. Ein
+einzelnes Ja/Nein könnte nicht sagen, ob etwas abgeschaltet oder nie ausgeliefert wurde.
+
+### 3. Konto-Blatt: Sperren ging nur über eine Meldung
+
+`/api/admin/set-banned` nimmt seit jeher einen Namen entgegen — der Knopf dafür hing im Frontend
+aber ausschließlich an einer **Meldungszeile**. Ohne vorliegende Meldung war ein Konto gar nicht
+erreichbar, weder zum Sperren noch zum bloßen Nachsehen. Das Blatt zeigt jetzt, was der Server je
+Konto ohnehin führt (Registrierung, E-Mail bestätigt, letzte Sitzung, Rang und Quelle, Sternenstaub,
+Marktkontingent, eingelöste Codes, Fehlversuche, offene Belohnungen).
+
+**Was NICHT drinsteht:** `passwordHash`, die E-Mail im Klartext und der Spielstand. Die Adresse wird
+auf ihre Form reduziert (`a***@example.org`), weil die Frage im Betrieb „hat er eine und ist sie
+bestätigt" lautet und nicht „wie lautet sie" — wer sie wirklich braucht, kommt an die `db.json`
+ohnehin heran, aber sie fällt dann nicht nebenbei in einem Screenshot an. `4a3`/`4a4` messen das.
+
+**„Alle Sitzungen beenden" für ein FREMDES Konto** hat bewusst keine Passwort-Abfrage: Der Admin
+kennt das fremde Passwort per Konstruktion nicht, die Sperre ist `isAdmin()` selbst. Der Weg ist
+sonst derselbe wie beim Spieler (`tokenVersion` hochzählen entwertet jedes ausgestellte Token).
+Gemessen wird die **Wirkung** — das laufende Token des Ziels antwortet danach mit 401, das des
+Admins weiterhin mit 200.
+
+### 4. Systemstand: nie Werte, nur Ja/Nein
+
+Die vier Deploy-Felder aus `/api/health` plus die Frage, die bisher nur ein SSH-Zugang beantworten
+konnte: welche Konfiguration fehlt. **Es wird kein einziger Wert ausgegeben.** Der Compose-Stack
+führt Resend-Schlüssel, Deploy-Secret und Ko-fi-Token im Klartext; ein Ja/Nein beantwortet „warum
+kommt keine Alarm-Mail" vollständig, ohne etwas preiszugeben. `5b` misst das an einem Geheimnis, das
+ausschließlich über die Umgebung in den Prozess kommt und in der ganzen Antwort nicht vorkommen darf.
+
+Dazu drei abgeleitete Betriebszustände, die an keiner Env-Variablen hängen, sondern daran, ob etwas
+WIRKLICH geladen ist: `BEKANNTE_PASSWOERTER.size` (die Doku sagt ausdrücklich, der Ausfall der Liste
+dürfe „nicht wie Normalbetrieb aussehen" — als Zahl ist er sichtbar), die VAPID-Schlüssel und die
+Deploy-Selbstheilung.
+
+### Der Wächter und die vier Werkzeugfehler beim Bau
+
+`tests/test_admin_funktionen_http.js` (Port 3234, **48 Prüfungen, sechs Gegenproben** — jede mit
+ihrer „was fallen MUSS"-Liste, identische Prüflisten in allen sieben Läufen, per `diff` über die
+reinen Prüfnamen verglichen statt gezählt). **Belegte Testports sind jetzt 3195–3234** — ein neuer
+Test nimmt 3235.
+
+| Sabotage | fällt |
+|---|---|
+| Notaus-Wache raus (`spawnAktiv` ignoriert `db.notAus`) | `3c-vorab`, `3c2`, `3e2` |
+| E-Mail roh statt in Form | `4a3` |
+| Systemstand gibt Werte statt Ja/Nein | `5b`, `5b2` |
+| Erledigt-Marke nur im RAM (kein `saveDb`) | `2d`, `5d2` |
+| Konto-Route ohne `isAdmin`-Wache | `1a` |
+| Bild-Route nimmt den Dateinamen statt der ID | `2e`, `2e3` |
+
+**Die Kernmessung ist `3c`/`3c2` als PAAR:** Der Notaus wird nicht am gemeldeten Feld `wirksam`
+gemessen (das wäre das Etikett, Regel 61), sondern an der Wirkung — ein fälliges Nest reift beim
+Serverstart, und mit gesetztem Notaus reift dasselbe Nest nicht. Ohne die erste Hälfte wäre auch ein
+Schalter grün, der gar nichts tut.
+
+**Vier Werkzeugfehler, jeder eine im Repo dokumentierte Familie:**
+
+1. **`2d` stoppte mit SIGTERM — und konnte damit einen fehlenden `saveDb()` prinzipiell nicht
+   fangen.** Der Graceful Shutdown flusht die im Speicher gehaltene `db` und schreibt genau den
+   Eintrag mit, dessen Verlust gemessen werden soll. Gemeldet hat es allein die Pflichtliste der
+   Gegenprobe: 48 von 48 grün bei sabotiertem Code. Das ist wörtlich die Lehre aus
+   `test_neuspieler_push_http` vom 22.08.2026, sechs Tage alt und beim Bauen trotzdem verletzt.
+   Seit dem Umbau auf SIGKILL fällt `2d`; `2d2` ist die Gegenkontrolle (der Bestand selbst muss den
+   harten Stopp ebenfalls überleben — sonst wäre `2d` auch grün, wenn gar nichts gespeichert wurde).
+2. **`2e3` prüfte einen Pfad-Ausbruch gegen eine Datei, die es nicht gab** (`../../server.js` lag
+   außerhalb des Testverzeichnisses). Die Prüfung hätte auch bei einer völlig ungeschützten Route
+   404 gemeldet. Sie zielt jetzt auf `../jwt.txt` — eine Datei, die der Test selbst anlegt und
+   deren Existenz `2e3-vorab` belegt; mit der Sabotage kommt dort 200 samt Inhalt.
+3. **Zwei Pflichtlisten waren zu eng**, und die Messung hat sie korrigiert: Die `saveDb`-Sabotage
+   reißt auch `5d2` (der Bestandszähler liest denselben Wert), und `2e2` *kann* von der Bild-Sabotage
+   gar nicht fallen. **Eine Pflichtliste ist selbst eine Behauptung, bis die Gegenprobe sie gemessen
+   hat** — dieselbe Lehre wie bei `test_urmaterie_boden_http` und `test_chat_buendel_http`.
+4. **Mein Zähler zählte die Schlusszeile mit** (`FAIL - es gab rote Pruefungen.` passt auf
+   `^(OK|FAIL) +- `) und verglich Kürzel gegen Volltext — Regel 60, hier zum dritten Mal. Verglichen
+   werden jetzt die reinen Prüf-NAMEN.
+
+**Und ein fünfter, der nicht den Test betraf:** Ein `pkill -f "test_admin_funktionen"` traf die
+eigene Shell (Exit 144) — wörtlich Arbeitsregel 15, die seit dem 06.08.2026 samt Exit-Code in diesem
+Projekt steht. Prozesse werden über `ps` identifiziert und einzeln per PID beendet.
+
+**Zwei geratene Feldnamen hat der erste Entwurf getragen** und der Abgleich gegen die Datei gefangen:
+`staub.stand` heißt `staub.menge`, `bonusVersuche.anzahl` heißt `.n`, und `supporterStatusCombined`
+liefert `granted`, kein `source`. `node --check` hätte keinen davon gemeldet — die Anzeige hätte
+still Nullen gezeigt.
+
+### Auslieferungsreihenfolge: dieses Repo ZUERST
+
+Das Frontend braucht die sechs neuen Routen; ein Reiter, dessen Route mit 404 antwortet, wäre genau
+die tote Fläche, gegen die Frontend-Regel 35 geschrieben ist. Umgekehrt stellt dieses Backend
+Routen bereit, die noch niemand aufruft — folgenlos. Die Betroffenheit der Bestandstests ist
+gemessen: `test_festung_http` (35), `test_festung_bauteile_http` (28), `test_alien_nester_http` (40),
+`test_npc_staerke_http` (14) und `test_muster_nest_http` (22) laufen unverändert grün; die drei, die
+eine **Kopie** von `server.js` mit umgelegtem Schalter starten, greifen weiterhin, weil die
+Konstanten unverändert dastehen.
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score, seit v8.565.0 auch `WORLDBOSS_ARCHETYPES_PLAYABLE`/`WORLDBOSS_ARCHETYPE_FOLGE` gegen die gleichnamigen Frontend-Tabellen – die FOLGE muss deckungsgleich sein, sonst zeigt die Boss-Karte andere Kampffaktoren an, als `/api/worldboss`-Kämpfe benutzen; Wächter ist `test_inhalt_v8373.js` im Frontend-Repo, 60 Stufen). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

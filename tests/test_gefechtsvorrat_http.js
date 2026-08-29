@@ -236,9 +236,17 @@ const stand = async (token) => {
   check('6a: ein im Request mitgeschickter Vorrat wirkt NICHT auf die Angriffskraft',
     gefaelscht.body && gefaelscht.body.attackPower === A0,
     { ohne: A0, mitFaelschung: gefaelscht.body && gefaelscht.body.attackPower });
+  // 6b rechnet eine eventuelle BEUTE heraus (29.08.2026): Der PvP-Boden laesst ~jeden zehnten
+  // Angriff auch gegen 185-fache Uebermacht durchgehen, und das Opfer traegt selbst 200
+  // Nanolegierungen - ein zufaelliger Sieg hob den Bestand des Angreifers auf 232 und riss die
+  // starre Erwartung 200 (gemessen: 200 + 32 gestohlene = 232). Die geprueft Eigenschaft ist
+  // "der gefaelschte Vorrat bucht NICHTS ab" - eine Abbuchung waere -40 und faellt weiterhin auf,
+  // denn die Erwartung addiert nur die vom Server GEMELDETE Beute (eine andere Quelle als die
+  // Abbuchung; beide koennen sich nicht maskieren).
+  const beuteNano = (gefaelscht.body && gefaelscht.body.success === true && gefaelscht.body.stolen && gefaelscht.body.stolen[ANG.res]) || 0;
   check('6b: und er bucht auch nichts ab',
-    angNachFaelschung && angNachFaelschung.resources[ANG.res] === ANG.menge * 5,
-    { bestand: angNachFaelschung && angNachFaelschung.resources[ANG.res] });
+    angNachFaelschung && angNachFaelschung.resources[ANG.res] === ANG.menge * 5 + beuteNano,
+    { bestand: angNachFaelschung && angNachFaelschung.resources[ANG.res], beuteHerausgerechnet: beuteNano });
 
   console.log(fehl ? '\nFAIL' : '\nPASS');
   process.exit(fehl);

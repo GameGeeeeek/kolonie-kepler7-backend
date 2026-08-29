@@ -3541,36 +3541,43 @@ function computeAttackPower(save, enemyFleetForCounter) {
   power *= t2OffenseAuraMult(fleetSummary(save)); // Tier-2 Offensiv-Aura (Nanoklinge/Vernichter), gedeckelt
   return Math.round(power);
 }
-function computeDefensePower(save) {
-  const research = save.research || {};
-  let power = 0;
-  // Heimatbasis (save.buildings/save.fleet) bekommt +20% ggü. Kolonien - getrennt behandeln.
-  const homeBuildings = save.buildings || {};
-  let homeBuildingSub = 0;
+/* PvP auf alle Standorte (Etappe 1, 29.08.2026): computeDefensePower ist in Standort-Summanden
+   und die kontoweite Faktorkette ZERLEGT - standortVerteidigung(save, key) liefert die
+   Verteidigung EINES Standorts durch dieselbe Kette. Die Zerlegung erhaelt die EXAKTE
+   Operationsreihenfolge des alten Rumpfes (IEEE-754-Addition ist nicht assoziativ; `x*1` und
+   `x+0` sind dagegen exakt): fuer jeden Spielstand ist computeDefensePower byte-gleich zum
+   Stand davor, und fuer Konten OHNE Kolonien gilt exakt
+   standortVerteidigung(save,'home') === computeDefensePower(save) - der HTTP-Test misst beides. */
+function standortDefGebaeude(save, key) {
+  const b = key === 'home' ? (save.buildings || {}) : (((save.colonies || {})[key] || {}).buildings);
+  if (!b) return 0;
+  let sub = 0;
   // Bastionsmarke je Anlagenklasse - identisch zum Frontend (defensePower), wo derselbe Faktor an
-  // der Summierstelle steht. Sie gilt fuer ALLE Standorte, deshalb dieselbe Zeile in beiden
-  // Schleifen; der Schildanteil (BUILDING_SHIELD_FACTOR) laeuft mit, weil er ein Faktor auf
-  // dieselbe Summe ist.
-  for (const [k, v] of Object.entries(DEFENSE_VALUES)) homeBuildingSub += (homeBuildings[k] || 0) * v * bastionMarkMultServer(save, k);
-  power += homeBuildingSub * BUILDING_SHIELD_FACTOR * HOME_DEFENSE_BONUS; // Gebäude + Schildanteil
-  for (const c of Object.values(save.colonies || {})) {
-    if (!c || !c.buildings) continue;
-    let sub = 0;
-    for (const [k, v] of Object.entries(DEFENSE_VALUES)) sub += (c.buildings[k] || 0) * v * bastionMarkMultServer(save, k);
-    power += sub * BUILDING_SHIELD_FACTOR;
-  }
+  // der Summierstelle steht. Sie gilt fuer ALLE Standorte; der Schildanteil (BUILDING_SHIELD_FACTOR)
+  // laeuft mit, weil er ein Faktor auf dieselbe Summe ist.
+  for (const [k, v] of Object.entries(DEFENSE_VALUES)) sub += (b[k] || 0) * v * bastionMarkMultServer(save, k);
+  // Heimatbasis (save.buildings/save.fleet) bekommt +20% ggü. Kolonien.
+  return sub * BUILDING_SHIELD_FACTOR * (key === 'home' ? HOME_DEFENSE_BONUS : 1);
+}
+function standortDefFlotte(save, key) {
+  const f = key === 'home' ? save.fleet : (((save.colonies || {})[key] || {}).fleet);
+  // Byte-neutraler Wächter: Ohne Flotte lieferte der alte Rumpf (Math.round(0*0,4)+0)*1 = 0 -
+  // alle drei Helfer darunter haben eigene Null-Wachen (gemessen, nicht angenommen).
+  if (!f) return 0;
   // Flotten-Verteidigung = Angriffs-abgeleiteter Anteil (×0,4) + Schildsumme, wie im Frontend.
   /* Rundung wie im Frontend: dort steht `Math.round(atkDerivedSum * 0.4) + shieldSum` INNERHALB von
      shipDefenseContribution, der Vielfalts-Faktor wirkt danach auf die fertige Summe. Vorher rundete
      der Server erst nach dem Faktor - ein Unterschied von unter einer Einheit, aber eine
      Paritaetspruefung muesste ihn sonst mit Spielraum umgehen statt die Regel zu messen. */
-  power += (Math.round(weightedFleetDefensePower(save.fleet, save.shipMarks, save) * 0.4)
-            + fleetShieldSum(save.fleet, save.shipMarks, save)) * fleetDiversityMult(save.fleet) * HOME_DEFENSE_BONUS;
-  for (const c of Object.values(save.colonies || {})) {
-    if (!c || !c.fleet) continue;
-    power += (Math.round(weightedFleetDefensePower(c.fleet, save.shipMarks, save) * 0.4)
-              + fleetShieldSum(c.fleet, save.shipMarks, save)) * fleetDiversityMult(c.fleet);
-  }
+  return (Math.round(weightedFleetDefensePower(f, save.shipMarks, save) * 0.4)
+          + fleetShieldSum(f, save.shipMarks, save)) * fleetDiversityMult(f) * (key === 'home' ? HOME_DEFENSE_BONUS : 1);
+}
+/* Die kontoweite Faktorkette existiert GENAU EINMAL - computeDefensePower und standortVerteidigung
+   sind ihre beiden einzigen Aufrufer. Eine zweite Kopie koennte beim naechsten Balance-Schritt
+   auseinanderlaufen, und der Standort-Kampf rechnete dann mit anderen Faktoren als der Konto-Kampf. */
+function kontoDefenseFaktoren(save, basis) {
+  const research = save.research || {};
+  let power = basis;
   const p = research.rpanzer || 0, s = research.rschildmatrix || 0;
   if (p) power *= (1 + p * 0.02);
   if (s) power *= (1 + s * 0.02);
@@ -3591,7 +3598,24 @@ function computeDefensePower(save) {
     power *= (1 - Math.max(0, Math.min(0.9, save.defenseSabotage.pct)));
   }
   power *= t2DefenseAuraMult(fleetSummary(save)); // Tier-2 Defensiv-Aura (Quantenkreuzer/Titan), gedeckelt
-  return Math.round(power);
+  return power;
+}
+function computeDefensePower(save) {
+  let power = 0;
+  // Heimatbasis (save.buildings/save.fleet) bekommt +20% ggü. Kolonien - getrennt behandeln;
+  // die Reihenfolge der Summanden ist die des alten Rumpfes (Gebaeude Heimat, Gebaeude Kolonien,
+  // Flotte Heimat, Flotte Kolonien) und darf wegen der Float-Paritaet nicht umsortiert werden.
+  power += standortDefGebaeude(save, 'home');
+  for (const key of Object.keys(save.colonies || {})) power += standortDefGebaeude(save, key);
+  power += standortDefFlotte(save, 'home');
+  for (const key of Object.keys(save.colonies || {})) power += standortDefFlotte(save, key);
+  return Math.round(kontoDefenseFaktoren(save, power));
+}
+// Die Verteidigung EINES Standorts durch dieselbe kontoweite Faktorkette. Fuer Konten ohne
+// Kolonien exakt === computeDefensePower - der HTTP-Test misst diese Gleichheit als dauerhaften
+// Paritaetsanker ((0 + geb) + flotte ist in IEEE 754 identisch zu geb + flotte).
+function standortVerteidigung(save, key) {
+  return Math.round(kontoDefenseFaktoren(save, standortDefGebaeude(save, key) + standortDefFlotte(save, key)));
 }
 // Anti-Farming: Punktestand aus der Bestenliste lesen, für die Beute-Reduktion bei großem Gefälle.
 function scoreOf(userId) {
@@ -3865,6 +3889,40 @@ function fleetSummary(save) {
   }
   return totals;
 }
+// --- Standort-Sichten fuer den PvP-Standort-Kampf (Etappe 1) ---
+// Dieselben Filterregeln wie fleetSummary/defenseBreakdown, nur auf EINEN Standort gescopt.
+function standortFleetSummary(save, key) {
+  const f = key === 'home' ? save.fleet : (((save.colonies || {})[key] || {}).fleet);
+  const totals = {};
+  for (const [k, v] of Object.entries(f || {})) {
+    if (k === 'missions' || typeof v !== 'number') continue;
+    totals[k] = (totals[k] || 0) + v;
+  }
+  return totals;
+}
+// LIVE-Referenz auf die Gebaeude des Standorts - die Gebaeudezerstoerung im Sieg-Zweig schreibt
+// hinein, deshalb keine Kopie.
+function standortBuildingsRef(save, key) {
+  if (key === 'home') return save.buildings || null;
+  const c = (save.colonies || {})[key];
+  return (c && c.buildings) || null;
+}
+function standortDefenseBreakdown(save, key) {
+  const b = standortBuildingsRef(save, key);
+  const totals = {};
+  if (b) for (const k of Object.keys(DEFENSE_VALUES)) { if (b[k]) totals[k] = b[k]; }
+  return totals;
+}
+// Ein Mond traegt seinen Schluessel als `moon_<planet>` in save.colonies - dieselbe Ablage wie
+// jede Kolonie, nur der Beutefaktor unterscheidet sich.
+function standortArtVon(key) {
+  if (!key || key === 'home') return 'heimat';
+  return String(key).startsWith('moon_') ? 'mond' : 'kolonie';
+}
+/* Beutefaktor je Standortart: Die RESSOURCEN sind kontoweit (target.resources ist EIN Pool),
+   der Standort-Angriff greift also denselben Topf - der Faktor bildet ab, dass an einer Kolonie
+   weniger zu holen ist als an der Heimat. Heimat 1,0 haelt den Altpfad byte-gleich (`* 1`). */
+const STANDORT_BEUTE_FAKTOR = { heimat: 1.0, kolonie: 0.5, mond: 0.35 };
 
 // --- Angriffs-Schutzschild (Anti-Ganking) ---
 // Wer erfolgreich überfallen (Beute) ODER sabotiert wird, bekommt einen zeitlich begrenzten Schild:
@@ -3896,9 +3954,11 @@ function grantNewbieShield(userId) {
 }
 
 app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
-  const { targetUserId } = req.body || {};
+  const { targetUserId, targetPlanet } = req.body || {};
   if (!targetUserId || targetUserId === req.userId) return res.status(400).json({ error: 'Ungültiges Ziel.' });
   // Ziel unter Schutzschild? -> Angriff prallt ab (kein Kampf, keine Beute, kein Punktgewinn).
+  // Der Schild ist KONTOWEIT und gilt deshalb auch fuer jeden Standort-Angriff - sonst liesse
+  // sich das Anti-Ganking ueber die Kolonien desselben Kontos umgehen.
   const shieldLeft = attackShieldRemaining(targetUserId);
   if (shieldLeft > 0) return res.status(403).json({ error: 'Ziel steht unter Angriffs-Schutzschild.', shieldMs: shieldLeft });
   // Selbst offensiv werden verwirkt den eigenen Schild.
@@ -3912,9 +3972,33 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   try { attacker = JSON.parse(attackerRaw); target = JSON.parse(targetRaw); }
   catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
 
+  /* PvP auf alle Standorte (Etappe 1): `targetPlanet` ist OPTIONAL. Fehlt das Feld (alter
+     Client), laeuft exakt der heutige Konto-Kampf - jede Standort-Weiche unten ist ein bedingter
+     Zweig, dessen Alt-Seite byte-gleich bleibt. Mit Feld kaempft der Angreifer gegen die
+     Verteidigung EINES Standorts (Gebaeude + Flotte dort, kontoweite Faktoren), die Beute kommt
+     aus demselben kontoweiten Ressourcen-Pool, nur mit Standort-Faktor. */
+  let standortKey = null;
+  if (targetPlanet !== undefined && targetPlanet !== null) {
+    if (typeof targetPlanet !== 'string' || targetPlanet.length > 64) return res.status(400).json({ error: 'Ungültiger Standort.' });
+    if (targetPlanet !== 'home' && !((target.colonies || {})[targetPlanet])) {
+      // Eigener Grund statt eines nackten 404: Eine Kolonie kann zwischen Aufklaerung und Anflug
+      // aufgegeben worden sein - der Angreifer soll wissen, WARUM sein Ziel weg ist.
+      return res.status(404).json({ error: 'Standort nicht gefunden - vielleicht wurde die Kolonie inzwischen aufgegeben.' });
+    }
+    standortKey = targetPlanet;
+  }
+  // Die drei Zusatzfelder der Antwort/Berichte im Standort-Fall - im Altpfad ein leerer Spread,
+  // damit kein Bestands-Client ein Feld sieht, das er nicht kennt.
+  const standortFelder = standortKey
+    ? { targetPlanet: standortKey, standortArt: standortArtVon(standortKey), beuteFaktor: STANDORT_BEUTE_FAKTOR[standortArtVon(standortKey)] || 1 }
+    : {};
+
   const targetUser = findUserById(targetUserId);
   const attackerFleetSummary = fleetSummary(attacker);
-  const targetFleetSummary = fleetSummary(target);
+  // Im Standort-Fall ist die GEGNERFLOTTE die des Standorts: Sie bestimmt Konter, Formation und
+  // den defenderFleet-Bericht - genau die Flotte, die dort wirklich steht. Eine leere
+  // Kolonieflotte ergibt counterMultiplier 1 (gemessen: enemyTotal 0 -> neutral).
+  const targetFleetSummary = standortKey ? standortFleetSummary(target, standortKey) : fleetSummary(target);
   // Kontersystem: die Zusammensetzung der Angreifer-Flotte gegen die des Ziels bestimmt einen
   // Bonus/Malus. Bei echtem PvP sind (anders als bei NPC-Kämpfen) beide Flotten bekannt.
   // Aufklärungsvorteil: frische, unentdeckte Spionage gegen genau dieses Ziel. Wird auf BEIDE
@@ -3948,12 +4032,16 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
      kann keine davon veralten - genau der Fehlertyp, an dem dieses Projekt wiederholt haengengeblieben
      ist (Hausregel 6). Das Konterverhaeltnis darueber ist schon berechnet und bleibt unberuehrt. */
   const attackPower = Math.round(attackPowerMitKonter * vorratAngriff.mult);
-  const defensePower = Math.round(computeDefensePower(target) * formationMult * vorratVerteidigung.mult);
+  // Standort-Fall: die Verteidigung des EINEN Standorts (Gebaeude + Flotte dort, kontoweite
+  // Faktorkette) statt der Konto-Summe. standortVerteidigung('home') === computeDefensePower fuer
+  // Konten ohne Kolonien - der HTTP-Test misst diese Gleichheit als Paritaetsanker.
+  const defensePower = Math.round((standortKey ? standortVerteidigung(target, standortKey) : computeDefensePower(target)) * formationMult * vorratVerteidigung.mult);
   const phasenErgebnis = resolveBattlePhases(attackPowerMitVorrat, defensePower, effektiverKonter, PVP_PHASE_MIN, PVP_PHASE_MAX);
   const chance = battleWinChance(attackPowerMitVorrat, defensePower, effektiverKonter, PVP_PHASE_MIN, PVP_PHASE_MAX);
   const success = phasenErgebnis.success;
 
-  const defenseBefore = defenseBreakdown(target);
+  // Standort-Fall: Gezeigt (und unten zerstoert) wird nur, was am angegriffenen Standort steht.
+  const defenseBefore = standortKey ? standortDefenseBreakdown(target, standortKey) : defenseBreakdown(target);
 
   // Kampf-Einzelheiten für den Bericht des Angreifers (02.08.2026).
   //
@@ -4011,7 +4099,11 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     defenderFleet: targetFleetSummary,
     // Nur im Sieg-Zweig belegt; im Niederlage-Zweig bleibt es undefiniert, weil ein
     // abgewehrter Angriff der Verteidigerflotte nichts kostet.
-    defenderLossPct: defenderLossPct === null ? undefined : defenderLossPct
+    defenderLossPct: defenderLossPct === null ? undefined : defenderLossPct,
+    // Standort-Fall: targetPlanet/standortArt/beuteFaktor - hier fuer die beiden ANTWORTEN
+    // (beide spreaden kampfDetails); die vier addReport-Aufrufe spreaden standortFelder selbst.
+    // Im Altpfad ist das ein leerer Spread und aendert kein Byte.
+    ...standortFelder
   });
 
   if (success) {
@@ -4025,9 +4117,13 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     const farmPenalty = farmingPenaltyFor(req.userId, targetUserId);
     // Schildmodule des Ziels senken die Beute (siehe raidlossProtectionMult - vorher wirkungslos im PvP).
     const lootProtection = raidlossProtectionMult(target);
+    // Standort-Fall: Beutefaktor der Standortart (Heimat 1,0 / Kolonie 0,5 / Mond 0,35). Die
+    // Ressourcen sind KONTOWEIT (ein Pool) - der Faktor bildet ab, dass an einer Kolonie weniger
+    // zu holen ist. Im Altpfad ist er 1 und der Term byte-neutral (x*1 ist in IEEE 754 exakt).
+    const beuteFaktor = standortKey ? (STANDORT_BEUTE_FAKTOR[standortArtVon(standortKey)] || 1) : 1;
     const stolen = {};
     for (const [r, amt] of Object.entries(target.resources || {})) {
-      const take = Math.floor((amt || 0) * lootPct * farmPenalty * lootProtection);
+      const take = Math.floor((amt || 0) * lootPct * farmPenalty * lootProtection * beuteFaktor);
       if (take > 0) {
         stolen[r] = take;
         target.resources[r] = Math.max(0, (target.resources[r] || 0) - take);
@@ -4041,7 +4137,9 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     const hbCount = attackerFleetSummary.hyperbomber || 0;
     const buildingHits = 1 + Math.min(2, Math.floor(hbCount / 4));
     for (let hbi = 0; hbi < buildingHits; hbi++) {
-      const buildingSets = allBuildingsOf(target);
+      // Standort-Fall: Zerstoert wird nur, was am ANGEGRIFFENEN Standort steht - ein Angriff auf
+      // eine Kolonie darf keine Anlage der Heimat treffen.
+      const buildingSets = standortKey ? [standortBuildingsRef(target, standortKey)].filter(Boolean) : allBuildingsOf(target);
       const candidates = [];
       for (const b of buildingSets) for (const k of Object.keys(DEFENSE_VALUES)) if ((b[k] || 0) > 0) candidates.push([b, k]);
       if (!candidates.length) break;
@@ -4062,7 +4160,10 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
         type: 'pvp-fleet-loss',
         pct: defenderLossPct,
         attackerName: req.username,
-        at: Date.now()
+        // Standort-Fall: Der Client des Ziels wendet den Verlust auf die Flotte DIESES Standorts
+        // an statt auf die Heimatflotte. Ohne das Feld (Altpfad) bleibt alles wie bisher - ein
+        // alter Client ignoriert es schlicht.
+        at: Date.now(), ...(standortKey ? { planetKey: standortKey } : {})
       });
     }
     // Opfer wurde beraubt ODER hat Schiffe verloren -> Schutzschild gewähren.
@@ -4084,12 +4185,12 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     addReport(req.userId, {
       type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt',
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
-      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder
     });
     addReport(targetUserId, {
       type: 'attack-received', result: 'loss', attackerName: req.username,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
-      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder
     });
     // Verteidiger benachrichtigen (Retention-Trigger 21.07.2026): angegriffen zu werden ist einer der
     // stärksten Rückkehr-Anlässe. Server hat den Kampf ohnehin aufgelöst - hier nur der Push obendrauf.
@@ -4134,19 +4235,45 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     addReport(req.userId, {
       type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt',
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
-      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder
     });
     addReport(targetUserId, {
       // staubReward steht im Bericht, damit die Gutschrift nicht unsichtbar bleibt: Der Verteidiger
       // war beim Kampf per Definition nicht dabei, der Bericht ist seine einzige Quelle.
       type: 'attack-received', result: 'win', attackerName: req.username, defendReward: abwehrCp, staubReward: staubAbwehr,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
-      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder
     });
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: true, looted: false }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     await saveDb();
     return res.json({ success: false, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
   }
+});
+
+// Standort-Liste fuer die Angriffs-Zielwahl (PvP-Standort-Kampf Etappe 1, 29.08.2026): nennt je
+// Standort des Ziels die Art, die Verteidigung und den Beutefaktor. Die Verteidigung kommt aus
+// DERSELBEN Funktion wie der Kampf (standortVerteidigung) - eine zweite Rechnung hier waere die
+// klassische zweite Zahl neben der echten, die beim naechsten Balance-Schritt auseinanderlaeuft.
+// BEWUSST KEIN Honeypot-Gate: Der Spionage-Honeypot ist eine REIN CLIENTSEITIGE Mechanik
+// (resolveSpyMission verfaelscht bei entdeckter Spionage die Anzeige, state.spyIntel ist
+// klientenautoritativ) - der Server kann "hat der Anfragende dieses Ziel unentdeckt ausgespaeht?"
+// gar nicht pruefen. Eine Sperre hier waere eine Attrappe, die Sicherheit verspricht, die sie
+// nicht einloest; das Frontend gate-t die Zielwahl als SPIELREGEL (nur mit frischer Aufklaerung),
+// nicht als Sicherheitsgrenze. Preisgegeben wird nichts, was der Angriff selbst nicht ohnehin
+// verraet - defensePower steht in jeder Kampfantwort.
+app.get('/api/spieler-standorte', authMiddleware, (req, res) => {
+  const targetUserId = req.query.target;
+  if (!targetUserId || typeof targetUserId !== 'string') return res.status(400).json({ error: 'Ungültiges Ziel.' });
+  const raw = getSaveValue(targetUserId);
+  if (!raw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
+  let save;
+  try { save = JSON.parse(raw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+  const standorte = [];
+  for (const key of ['home', ...Object.keys(save.colonies || {})]) {
+    const art = standortArtVon(key);
+    standorte.push({ key, art, verteidigung: standortVerteidigung(save, key), beuteFaktor: STANDORT_BEUTE_FAKTOR[art] || 1 });
+  }
+  return res.json({ standorte });
 });
 
 // Störmanöver (Sabotage, Spionage-Vertiefung 20.07.2026): ein Spionagekreuzer stiehlt VERDECKT eine

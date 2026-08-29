@@ -3613,14 +3613,22 @@ Ohne das neue Frontend sendet niemand `targetPlanet`, und der Altpfad ist byte-g
 des Konzepts, per Test-Abschnitt 1/2 gemessen statt behauptet). Backend darf beliebig lange allein
 live sein.
 
-**Ein benanntes Übergangsfenster gibt es trotzdem – im NACHBAR-Repo:** `test_bastionsmarken.js`
-(Frontend) prüfte 10c als Wortform-Zähler „`bastionMarkMultServer(save, k)` steht GENAU ZWEIMAL im
-Rumpf" – nach der Zerlegung steht er genau einmal (in `standortDefGebaeude`, für beide Wege). Der
-Test ist im Frontend-Arbeitsbaum bereits GESTÄRKT statt gelockert (Regel 43: eine markentragende
-Stelle + Delegationsprüfung beider Summierwege + die NEUE Eigenschaft, dass die Zielwahl-Route die
-Marke erbt; Gegenprobe am alten server.js: genau 10c/10c2/10c3 fallen). Bis dieser Frontend-Fix
-gemerged ist, fällt `test_bastionsmarken` 10c auf jedem aktuellen Frontend-Checkout gegen dieses
-Backend – das ist DIESE Etappe, kein Spielfehler.
+**Das Übergangsfenster im NACHBAR-Repo ist seit dem 29.08.2026 geschlossen** (Frontend #518).
+`test_bastionsmarken.js` prüfte 10c als Wortform-Zähler „`bastionMarkMultServer(save, k)` steht
+GENAU ZWEIMAL im Rumpf" – nach der Zerlegung steht er genau einmal (in `standortDefGebaeude`, für
+beide Wege), und der Test fiel damit auf völlig korrektem Code durch. Er ist GESTÄRKT statt
+gelockert (Regel 43): eine markentragende Stelle, Delegationsprüfung beider Summierwege, und die
+NEUE Eigenschaft, dass die Zielwahl-Route `standortVerteidigung` die Marke erbt – eine Anzeigestelle
+ohne Marke kann so gar nicht mehr entstehen. Gemessen: 50 Prüfungen grün, am Eltern-Stand fallen
+genau 10c/10c2/10c3, und gegen eine `server.js`-Kopie mit `forEach`- statt `for-of`-Schleife bleibt
+die neue Fassung grün, während die alte Zeile daran fällt.
+
+**Die übertragbare Lehre steht als Frontend-Arbeitsregel 80 und betrifft dieses Repo unmittelbar:**
+Wer hier eine Funktion zusammenführt, die ein Frontend-Test liest, kann das nicht bemerken – der
+eigene Prüflauf kennt die Datei nicht. Ein solcher Refactor gehört deshalb im PR-Text benannt,
+damit der rote Test drüben als Etappe erkennbar ist und nicht als Spielfehler gesucht wird. Genau
+so ist es hier gelaufen, und deshalb hat die Suche zwei Minuten statt eines halben Prüflaufs
+gekostet.
 
 ### Der Test: `tests/test_pvp_standorte_http.js` (Port 3237, 33 Prüfungen, Gegenprobe mit Pflichtlisten)
 

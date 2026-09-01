@@ -12906,3 +12906,379 @@ app.post('/api/claim-supporter', authMiddleware, authRateLimit, async (req, res)
   const status = supporterStatusFor(req.userId);
   res.json({ ok: true, active: status.active, tier: status.tier || null, daysLeft: status.active ? Math.max(0, Math.ceil(SUPPORTER_BADGE_DAYS - (Date.now() - status.lastDonationAt) / 86400000)) : 0 });
 });
+
+// ============================================================================================
+// KI-Kampfberichte, Etappe E1a (Backend) - 28.08.2026
+//
+// Konzept: kolonie-kepler7/docs/ki-kampfberichte-konzept.md. Der Client schickt die Kampf-FELDER,
+// dieser Server baut daraus einen Prompt, laesst AI Core auf dem M715q einen Erzaehltext
+// schreiben, prueft ihn und legt ihn zum Abholen bereit. Der Text ist reiner Schmuck: Der Bericht
+// daneben rechnet, der Text erzaehlt. Ein fehlender Text ist kein Fehler, die Sektion bleibt weg.
+//
+// SIEBEN Entscheidungen, die man kennen muss, bevor man hier etwas aendert:
+//
+// 1. KAMPFTEXT_AKTIV steht auf false (Auslieferungsschutz wie FESTUNG_SPAWN_AKTIV). Ohne das
+//    Frontend ruft niemand den Endpunkt auf - aber er wuerde M715q-Zeit verbrauchen, sobald ihn
+//    jemand findet, und der M715q bedient auch Social Hub. Umgelegt wird im Frontend-PR der
+//    Etappe E1b, nicht vorher.
+//
+// 2. KEIN neues Paket. Der Aufruf laeuft ueber den Kern (`http`/`https`), nicht ueber fetch oder
+//    axios. Zwei Gruende, beide gemessen: Eine Aenderung an package.json verlangt auf dem Pi ein
+//    `docker restart` VON HAND (nodemon installiert nichts nach) - das darf ein Feature hinter
+//    einem ausgeschalteten Schalter nicht erzwingen. Und globales `fetch` gibt es erst ab Node 18;
+//    welche Node-Version im Container laeuft, ist von aussen nicht messbar.
+//
+// 3. Der Prompt entsteht AUSSCHLIESSLICH hier aus einer festen Schablone. Der Client schickt
+//    Felder, niemals Text und niemals einen Prompt - sonst waere der Endpunkt ein freier
+//    LLM-Zugang fuer jeden, der ein Konto hat.
+//
+// 4. Der GEGNERNAME ist die einzige vom Client kontrollierte Zeichenkette im Prompt. Er wird auf
+//    40 Zeichen und eine Zeichen-Whitelist gekuerzt: keine Steuerzeichen, keine Zeilenumbrueche,
+//    keine Klammern und keine Anfuehrungszeichen. Damit laesst sich weder die JSON-Struktur
+//    faelschen noch eine zweite Anweisungssektion vortaeuschen. Dass darin trotzdem 40 Zeichen
+//    Prosa Platz haben, ist bekannt und BEWUSST in Kauf genommen: Bei 10 Texten je Konto und Tag
+//    ist das als freier LLM-Zugang unbrauchbar, und der erzeugte Text sieht ohnehin nur der
+//    Spieler, der ihn ausgeloest hat.
+//
+// 5. SCHIFFE reisen als SCHLUESSEL, nicht als Namen. Der Server uebersetzt ueber seine eigene
+//    Tabelle; ein unbekannter Schluessel faellt weg. Damit erreicht ausser dem Gegnernamen keine
+//    einzige Client-Zeichenkette den Prompt.
+//
+// 6. Die Sperren sind eine KOPIE-FAMILIE mit gamegeeeeek-ai-core/tools/kampftext_messlauf.py.
+//    Dort sind sie am echten Modell gemessen worden, hier entscheiden sie. Laufen die beiden
+//    auseinander, misst das Werkzeug etwas anderes, als der Server durchlaesst - Paritaetstest
+//    tests/test_kampftext_paritaet.js im Frontend-Repo.
+//
+// 7. Die Warteschlange lebt NUR im Speicher und ist nach einem Neustart weg. Das ist Absicht:
+//    Ein Auftrag ist Sekunden bis Minuten alt, der Client hoert bei unbekannter Auftrags-ID auf
+//    zu fragen, und die Sektion bleibt dann eben weg. Ein persistenter Auftragsspeicher waere
+//    Aufwand fuer einen Fall, der nichts kostet.
+// ============================================================================================
+
+const KAMPFTEXT_AKTIV = false;
+const KAMPFTEXT_AI_CORE_URL = (process.env.AI_CORE_URL || 'http://192.168.178.45:8000').replace(/\/+$/, '');
+const KAMPFTEXT_AI_CORE_KEY = process.env.AI_CORE_API_KEY || '';
+// Modellwahl aus E0 (28.08.2026): qwen3.5:4b. 2b war unbrauchbar - erfundene Schiffsnamen, ein
+// umgedrehter Ausgang, 1374 statt 500 Zeichen; sein Geschwindigkeitsvorteil lag bei 55 gegen 70 s.
+const KAMPFTEXT_MODELL = process.env.KAMPFTEXT_MODELL || 'qwen3.5:4b';
+// Gemessen 69,7 s je Text (kalter Lauf) - 180 s Deckel laesst reichlich Luft und bleibt unter den
+// 900 s, die AI Core selbst Ollama gibt.
+const KAMPFTEXT_TIMEOUT_MS = 180000;
+// 10 je Konto und Tag: die Zahl aus dem Konzept. Sie ist bewusst klein - der M715q schafft
+// gemessen rund 52 Texte je Stunde, und er bedient auch Social Hub.
+const KAMPFTEXT_PRO_TAG = 10;
+// Notbremse fuer alle zusammen: 300 Texte sind rund 5,8 Stunden M715q am Tag.
+const KAMPFTEXT_GESAMT_PRO_TAG = 300;
+// Laengendeckel aus dem Konzept. Der Text ist Serverdaten im Client und darf die Berichtskarte
+// nicht sprengen - derselbe Grund wie escapeHtml.
+const KAMPFTEXT_MAX_ZEICHEN = 600;
+// Wie lange ein fertiger Auftrag zum Abholen bereitliegt. Der Client fragt im 30-s-Takt; eine
+// Stunde ist grosszuegig und haelt db.kampftexte klein.
+const KAMPFTEXT_AUFBEWAHRUNG_MS = 3600 * 1000;
+
+// Schluessel -> deutscher Anzeigename. ABGELEITET aus SHIP_DEFS des Frontends, nicht getippt
+// (Regel: Namen ablesen, nie raten). Die Tabelle ist eine Kopie-Familie, aber eine harmlose: Ein
+// fehlender Schluessel laesst das Schiff aus dem Prompt fallen, mehr nicht - nichts PvP-Relevantes
+// haengt daran. Der Paritaetstest im Frontend-Repo haelt sie trotzdem zusammen, damit ein neues
+// Schiff im Erzaehltext nicht stillschweigend fehlt.
+const KAMPFTEXT_SCHIFFSNAMEN = {
+  ships: 'Erkundungsschiffe',
+  jaeger: 'Jäger',
+  kometenjaeger: 'Kometenjäger',
+  enterschiff: 'Enterschiff',
+  phantomschiff: 'Phantomschiff',
+  riftwaechter: 'Riftwächter',
+  gesandtenschiff: 'Gesandtenschiff',
+  schuerfschiff: 'Schürfschiff',
+  recycler: 'Recycler',
+  carrier: 'Trägerschiff',
+  cruisers: 'Kreuzer',
+  waechter: 'Wächter',
+  destroyers: 'Zerstörer',
+  bomber: 'Bomber',
+  schlachtschiff: 'Schlachtschiff',
+  lotsenboot: 'Lotsenboot',
+  kessel: 'Kessel',
+  bergungskran: 'Bergungskran',
+  presslufthai: 'Presslufthai',
+  ankerwerfer: 'Ankerwerfer',
+  echoschnitter: 'Echoschnitter',
+  bannschiff: 'Bannschiff',
+  nullkiel: 'Nullkiel',
+  grundgaenger: 'Der Grundgänger',
+  leerenjaeger: 'Leerenjäger',
+  paktkorvette: 'Paktkorvette',
+  bundeskreuzer: 'Bundeskreuzer',
+  sternenbanner: 'Sternenbanner',
+  nanoklinge: 'Nanoklinge',
+  quantenkreuzer: 'Quantenkreuzer',
+  fusionsdreadnought: 'Fusionsdreadnought',
+  hyperjaeger: 'Hyperjäger',
+  hyperbomber: 'Hyperbomber',
+  metamaterialtitan: 'Metamaterial-Titan',
+  urmateriekoloss: 'Urmaterie-Koloss',
+  singularitaetsvernichter: 'Singularitäts-Vernichter',
+  kausalitaetsbrecher: 'Kausalitätsbrecher',
+  mondzerstoerer: 'Mondzerstörer',
+  frachter: 'Kleiner Frachter',
+  frachtergross: 'Großer Frachter',
+  bergungsfrachter: 'Bergungsfrachter',
+  spaeher: 'Spähschiff',
+  spionageschiff: 'Spionagekreuzer',
+  forscher: 'Forschungsschiff',
+  superschlachtschiff: 'Superschlachtschiff',
+};
+
+// --- Prompt-Bau: dieselben fuenf Felder wie in AI Cores prompt_daten() ---------------------
+//
+// Der Zuschnitt ist am 28.08.2026 am echten Modell gemessen worden (Entscheidung Sascha:
+// "Ausgang, Gegner, Verluste - sonst nichts"). Vorher bekam das Modell den ganzen Bericht und
+// gab dabei jede Groesse falsch wieder, ohne dass die Zahlen-Sperre es sah: "1260 Minuten" statt
+// Sekunden, "vierzig Quantenkreuzer" statt 45 (als Zahlwort unsichtbar), eine genutzte Schwaeche
+// ohne das passende Schiff, und die gekappte Beute verschwiegen. Was hier nicht drinsteht, kann
+// nicht falsch wiedergegeben werden.
+//
+// Der Nebeneffekt ist der eigentliche Gewinn: Die STUFE ist die einzige Zahl in den Daten, jede
+// andere Ziffernfolge im Text ist damit zwangslaeufig eine Erfindung.
+function kampftextGegnerName(roh) {
+  // Die einzige vom Client kontrollierte Zeichenkette im Prompt (siehe Punkt 4 oben).
+  // Erlaubt sind Buchstaben, Ziffern, Leerzeichen, Bindestrich und Apostroph - keine
+  // Zeilenumbrueche, keine Klammern, keine Anfuehrungszeichen, kein Doppelpunkt.
+  return String(roh == null ? '' : roh)
+    .replace(/[^A-Za-z0-9ÄÖÜäöüß \-']/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 40);
+}
+
+function kampftextSchiffsliste(roh) {
+  // Der Client schickt SCHLUESSEL; unbekannte fallen weg. Sortiert, damit derselbe Kampf
+  // denselben Prompt ergibt - sonst haengt der Text an der Reihenfolge eines Objekts.
+  if (!roh || typeof roh !== 'object') return [];
+  const namen = [];
+  for (const key of Object.keys(roh)) {
+    const anzahl = Number(roh[key]);
+    if (!(anzahl > 0)) continue;
+    const name = KAMPFTEXT_SCHIFFSNAMEN[key];
+    if (name && namen.indexOf(name) < 0) namen.push(name);
+  }
+  return namen.sort();
+}
+
+function kampftextDaten(roh) {
+  return {
+    gegner: kampftextGegnerName(roh && roh.npcName),
+    stufe: Math.max(1, Math.min(999, Math.floor(Number(roh && roh.npcLevel) || 1))),
+    ausgang: (roh && roh.result) === 'win' ? 'Sieg' : 'Niederlage',
+    eigene_schiffe: kampftextSchiffsliste(roh && roh.fleet),
+    verlorene_schiffe: kampftextSchiffsliste(roh && roh.ownLostShips),
+  };
+}
+
+function kampftextDatenText(daten) {
+  // Die EINE Quelle fuer beide Leser: der Prompt haengt sie an den Anweisungstext, die
+  // Zahlen-Sperre liest sie als Liste der erlaubten Zahlen. Zwei getrennte Fassungen koennten
+  // auseinanderlaufen - dann erlaubte die Sperre etwas, das im Prompt gar nicht steht.
+  return JSON.stringify(daten, null, 1);
+}
+
+function kampftextPrompt(daten) {
+  return 'Du bist der Bordschreiber eines Raumschiff-Verbands im Browsergame Kolonie Kepler-7. ' +
+    'Verfasse einen kurzen, atmosphaerischen Logbucheintrag (hoechstens 500 Zeichen, Deutsch) ' +
+    'ueber den folgenden Kampf. STRIKTE REGELN: Nutze ausschliesslich die untenstehenden ' +
+    'Daten. Nenne KEINE Zahlen und KEINE Zeitangaben - die genauen Werte stehen im Bericht ' +
+    'daneben, dein Text erzaehlt nur. Erfinde keine Schiffsnamen, keine Orte, keine ' +
+    'Mechaniken. Du entscheidest nichts - du beschreibst nur, was geschehen ist.\n\n' +
+    'KAMPFDATEN:\n' + kampftextDatenText(daten);
+}
+
+// --- Die drei Sperren -----------------------------------------------------------------------
+//
+// Sie sind die WAHRHEIT, der Prompt ist nur die Bitte (AI-Core-Lektion 10). Am 28.08.2026 am
+// echten Modell gemessen: Von acht Texten verwarf die Sperre zwei - nachgelesen trugen alle acht
+// eine Falschaussage. Deshalb steht die erste Verteidigungslinie oben im Zuschnitt und nicht hier.
+function kampftextZahlen(text) {
+  // Tausendertrenner vorher entfernen: '184.500' und '184500' sind dieselbe Zahl.
+  const treffer = String(text || '').match(/\d(?:[\d.,]*\d)?/g) || [];
+  const raus = new Set();
+  for (const t of treffer) raus.add(t.replace(/[.,]/g, ''));
+  return raus;
+}
+
+function kampftextErfundeneZahlen(text, daten) {
+  // Verglichen wird gegen den DATENBLOCK, nicht gegen den ganzen Prompt. Gemessen erlaubte der
+  // ganze Prompt drei Zahlen statt einer - die 500 aus "hoechstens 500 Zeichen" und die 7 aus
+  // "Kolonie Kepler-7". Ein Text mit "500 Jaeger fielen in 7 Wellen" kam damit sauber durch.
+  const erlaubt = kampftextZahlen(kampftextDatenText(daten));
+  const raus = [];
+  for (const z of kampftextZahlen(text)) if (!erlaubt.has(z)) raus.push(z);
+  return raus.sort((a, b) => a.length - b.length || a.localeCompare(b));
+}
+
+function kampftextFremdeSchiffe(text, daten) {
+  // EXAKTER Vergleich, kein Teilstring: Sonst gilt der Mondzerstoerer als erlaubt, sobald
+  // Zerstoerer im Verband stehen - genau der Anlassfall dieser Pruefung.
+  const norm = (n) => n.replace(/ae/g, 'ä').replace(/oe/g, 'ö').replace(/ue/g, 'ü').toLowerCase();
+  const erlaubt = new Set(daten.eigene_schiffe.concat(daten.verlorene_schiffe).map(norm));
+  const raus = [];
+  for (const name of Object.values(KAMPFTEXT_SCHIFFSNAMEN)) {
+    if (String(text || '').indexOf(name) >= 0 && !erlaubt.has(norm(name)) && raus.indexOf(name) < 0) raus.push(name);
+  }
+  return raus.sort();
+}
+
+function kampftextMaengel(text, daten) {
+  const t = String(text || '');
+  if (!t.trim()) return ['leerer Text'];
+  const raus = [];
+  if (t.length > KAMPFTEXT_MAX_ZEICHEN) raus.push('zu lang: ' + t.length + ' Zeichen (Deckel ' + KAMPFTEXT_MAX_ZEICHEN + ')');
+  for (const z of kampftextErfundeneZahlen(t, daten)) raus.push('erfundene Zahl ' + z);
+  for (const s of kampftextFremdeSchiffe(t, daten)) raus.push('fremdes Schiff ' + s);
+  return raus;
+}
+
+// --- Der Aufruf bei AI Core ------------------------------------------------------------------
+// Ueber den Kern, nicht ueber fetch (siehe Punkt 2 im Kopf). `require` steht bewusst hier drin
+// und nicht oben: ein Kernmodul kostet nichts, und der Kopf der Datei bleibt unberuehrt.
+function kampftextAnfrage(prompt) {
+  return new Promise((resolve, reject) => {
+    let ziel;
+    try { ziel = new URL(KAMPFTEXT_AI_CORE_URL + '/ai/chat'); }
+    catch (e) { return reject(new Error('AI_CORE_URL ist keine gueltige Adresse: ' + KAMPFTEXT_AI_CORE_URL)); }
+    const mod = require(ziel.protocol === 'https:' ? 'https' : 'http');
+    const koerper = JSON.stringify({ prompt, model: KAMPFTEXT_MODELL, temperature: 0.7, num_predict: 400 });
+    const kopf = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(koerper) };
+    if (KAMPFTEXT_AI_CORE_KEY) kopf['Authorization'] = 'Bearer ' + KAMPFTEXT_AI_CORE_KEY;
+    const anfrage = mod.request({
+      hostname: ziel.hostname,
+      port: ziel.port || (ziel.protocol === 'https:' ? 443 : 80),
+      path: ziel.pathname,
+      method: 'POST',
+      headers: kopf,
+      timeout: KAMPFTEXT_TIMEOUT_MS,
+    }, (antwort) => {
+      let roh = '';
+      antwort.setEncoding('utf8');
+      antwort.on('data', (d) => {
+        roh += d;
+        // Ein Deckel auf die Antwort: Wir reden mit einem Dienst im eigenen Netz, aber eine
+        // unbegrenzt wachsende Zeichenkette im Speicher ist nie eine gute Idee.
+        if (roh.length > 200000) anfrage.destroy(new Error('AI Core lieferte eine unplausibel grosse Antwort'));
+      });
+      antwort.on('end', () => {
+        if (antwort.statusCode !== 200) {
+          return reject(new Error('AI Core antwortete HTTP ' + antwort.statusCode + ': ' + roh.slice(0, 200)));
+        }
+        let text;
+        try { text = String(JSON.parse(roh).response || '').trim(); }
+        catch (e) { return reject(new Error('AI Core lieferte kein JSON: ' + roh.slice(0, 200))); }
+        resolve(text);
+      });
+    });
+    anfrage.on('timeout', () => anfrage.destroy(new Error('AI Core antwortete nicht in ' + Math.round(KAMPFTEXT_TIMEOUT_MS / 1000) + 's')));
+    anfrage.on('error', reject);
+    anfrage.write(koerper);
+    anfrage.end();
+  });
+}
+
+// --- Warteschlange: EIN Auftrag gleichzeitig Richtung M715q ----------------------------------
+// AI Cores Drossel zaehlt je Herkunft (20 Aufrufe je 5 Minuten, 2 gleichzeitig) - aus seiner
+// Sicht ist dieser Pi EINE Herkunft, alle Spieler teilen sich also dieses Budget. Deshalb liegt
+// die Warteschlange hier und nicht je Client.
+let kampftextLaeuft = false;
+const kampftextWarteschlange = [];
+
+function kampftextAufraeumen() {
+  if (!db.kampftexte) db.kampftexte = {};
+  const jetzt = Date.now();
+  for (const id of Object.keys(db.kampftexte)) {
+    if (jetzt - (db.kampftexte[id].zeit || 0) > KAMPFTEXT_AUFBEWAHRUNG_MS) delete db.kampftexte[id];
+  }
+}
+
+async function kampftextArbeite() {
+  if (kampftextLaeuft) return;
+  const auftrag = kampftextWarteschlange.shift();
+  if (!auftrag) return;
+  kampftextLaeuft = true;
+  const eintrag = (db.kampftexte || {})[auftrag.id];
+  if (eintrag) eintrag.status = 'laeuft';
+  try {
+    const text = await kampftextAnfrage(kampftextPrompt(auftrag.daten));
+    const maengel = kampftextMaengel(text, auftrag.daten);
+    if (maengel.length) {
+      // Kein zweiter Versuch: Ein Retry kostet weitere 70 s M715q fuer denselben Text, und ein
+      // fehlender Text ist per Konzept kein Fehler - die Sektion bleibt einfach weg.
+      console.warn('[kampftext] verworfen ' + auftrag.id + ': ' + maengel.join('; '));
+      if (eintrag) { eintrag.status = 'verworfen'; eintrag.grund = maengel.join('; '); }
+    } else if (eintrag) {
+      eintrag.status = 'fertig';
+      eintrag.text = text;
+    }
+  } catch (e) {
+    console.error('[kampftext] Fehler ' + auftrag.id + ': ' + e.message);
+    if (eintrag) { eintrag.status = 'fehlgeschlagen'; eintrag.grund = e.message; }
+  }
+  kampftextLaeuft = false;
+  try { await saveDb(); } catch (e) { console.error('[kampftext] saveDb: ' + e.message); }
+  if (kampftextWarteschlange.length) kampftextArbeite();
+}
+
+function kampftextTagesZaehler(traeger, feld) {
+  // Dasselbe Muster wie user.marktTag und user.staub: Stempel gegen den UTC-Tag halten, bei
+  // Abweichung zuruecksetzen. Kein Cron, kein Aufraeumlauf.
+  const heute = staubTagesschluessel();
+  if (!traeger[feld] || traeger[feld].stempel !== heute) traeger[feld] = { stempel: heute, anzahl: 0 };
+  return traeger[feld];
+}
+
+app.post('/api/kampfbericht/text', authMiddleware, async (req, res) => {
+  if (!KAMPFTEXT_AKTIV) return res.status(503).json({ error: 'KI-Kampfberichte sind derzeit abgeschaltet.' });
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+
+  const daten = kampftextDaten(req.body);
+  // Ohne Gegnernamen und ohne ein einziges eigenes Schiff gibt es nichts zu erzaehlen - das ist
+  // kein Fehler des Spielers, aber auch kein Auftrag wert.
+  if (!daten.gegner || !daten.eigene_schiffe.length) {
+    return res.status(400).json({ error: 'Kampfdaten unvollstaendig (Gegner und mindestens ein eigenes Schiff noetig).' });
+  }
+
+  kampftextAufraeumen();
+  const jeKonto = kampftextTagesZaehler(user, 'kampftextTag');
+  if (jeKonto.anzahl >= KAMPFTEXT_PRO_TAG) {
+    return res.status(429).json({ error: 'Tagesgrenze erreicht: ' + KAMPFTEXT_PRO_TAG + ' KI-Kampfberichte pro Tag.', proTag: KAMPFTEXT_PRO_TAG });
+  }
+  const gesamt = kampftextTagesZaehler(db, 'kampftextTag');
+  if (gesamt.anzahl >= KAMPFTEXT_GESAMT_PRO_TAG) {
+    return res.status(429).json({ error: 'Heute sind alle KI-Kampfberichte vergeben - morgen wieder.' });
+  }
+
+  // Erst zaehlen, dann einreihen: Zwei gleichzeitige Anfragen duerfen die Grenze nicht gemeinsam
+  // durchbrechen. Beide Zaehler wachsen im selben synchronen Block vor dem ersten await.
+  jeKonto.anzahl++;
+  gesamt.anzahl++;
+  const id = crypto.randomUUID();
+  db.kampftexte[id] = { status: 'wartet', userId: req.userId, zeit: Date.now(), text: '', grund: '' };
+  kampftextWarteschlange.push({ id, daten });
+  await saveDb();
+  res.status(202).json({ auftragId: id, wartend: kampftextWarteschlange.length });
+  kampftextArbeite();
+});
+
+app.get('/api/kampfbericht/text/:id', authMiddleware, (req, res) => {
+  const eintrag = (db.kampftexte || {})[String(req.params.id || '')];
+  // Unbekannt und fremd sehen fuer den Client gleich aus - er soll in beiden Faellen aufhoeren
+  // zu fragen, und ein Fremder erfaehrt so nicht einmal, ob es die Auftrags-ID gibt.
+  if (!eintrag || eintrag.userId !== req.userId) return res.status(404).json({ status: 'unbekannt' });
+  // Ein Auftrag, der die Zeit ueberschritten hat und trotzdem noch "wartet", gehoert zu einem
+  // Serverneustart: Die Warteschlange lebt nur im Speicher (Punkt 7 im Kopf). Statt ihn ewig
+  // haengen zu lassen, wird er hier als gescheitert gemeldet.
+  if ((eintrag.status === 'wartet' || eintrag.status === 'laeuft') &&
+      Date.now() - (eintrag.zeit || 0) > KAMPFTEXT_TIMEOUT_MS + 60000) {
+    return res.json({ status: 'fehlgeschlagen', grund: 'Auftrag ging bei einem Serverneustart verloren.' });
+  }
+  if (eintrag.status === 'fertig') return res.json({ status: 'fertig', text: eintrag.text });
+  res.json({ status: eintrag.status, grund: eintrag.grund || '' });
+});

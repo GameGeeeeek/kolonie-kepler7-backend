@@ -1954,6 +1954,112 @@ Datei bricht der Lauf ab, statt still das Original zu messen.
 Das Konto-Blatt im Frontend liest `aktiv` und `reaktionen` — Felder, die nur der neue Server
 schickt. Umgekehrt schreibt dieses Backend Felder, die noch niemand liest: folgenlos.
 
+## Vier Erweiterungen der Uhr: Übersicht, Rate-Limit, Geschenk, abgelehnte Spielstände (01.09.2026, Auftrag Sascha)
+
+**Wortlaut:** „Funktionen weiter ausbauen mache virschläge." Vorgelegt wurden sieben gemessene
+Lücken, gewählt hat Sascha **alle vier** vorgeschlagenen: Übersicht aller Konten nach
+Auffälligkeit, Rate-Limit-Treffer je Konto, Geschenk an alle Spieler, abgelehnte Spielstände im
+Admin-Bereich. Die Verdachts-Push an den Betreiber ist Teil der Übersicht – sie macht aus einer
+Fläche, die man aufrufen muss, eine Meldung, die kommt.
+
+### Abgelehnte Spielstände: die EINE Stelle, an der der abgelehnte Spieler nie speichert
+
+Eine Ablehnung ist für den Spieler faktisch kompletter Speicherverlust (Vorfall 21.07.2026,
+stundenlange Fehlersuche) und stand bis hierher **ausschließlich im Container-Log** – das niemand
+liest und das mit jedem Neustart weg ist. `saveAblehnungVermerken()` schreibt `user.saveAblehnungen`
+(Zähler, letzter Grund, die fünf letzten Gründe mit Zeit) am Nutzerobjekt, nicht im Spielstand: Der
+ist ja gerade der, den der Server nicht annimmt.
+
+**Die Ablehnungsstelle ruft ausdrücklich `await saveDb()`**, anders als die Uhr und der
+Rate-Limit-Zähler. Es ist der eine Fall, in dem der betroffene Spieler selbst **nie** ein saveDb
+auslöst – jeder seiner Saves wird ja abgelehnt –, der Vermerk hinge sonst an fremden
+Schreibvorgängen. `test_admin_uhr_erweiterungen_http` 1c misst das mit **SIGKILL** (Regel 78: ein
+SIGTERM schriebe den Eintrag selbst mit); die Gegenprobe ohne saveDb reißt 1c, 1d und 1e.
+
+### Rate-Limit-Treffer je Konto: das Token wird im 429-Fall eigens geprüft
+
+`app.use('/api', globalApiRateLimit)` läuft **vor** `authMiddleware` – an der Stelle, an der der
+429 entsteht, gibt es kein `req.userId`. `rateLimitTrefferVermerken(req)` prüft das Token deshalb
+selbst (Bearer oder Cookie, `jwt.verify` in try/catch) und **nur im 429-Fall**: Ein Treffer ist
+selten, und ein jwt.verify je Treffer kostet nichts, was der Flooder nicht ohnehin verursacht. Ein
+ungültiges oder fehlendes Token wird still übergangen – der 429 gilt der Verbindung, nicht dem
+Konto (2c misst: eine Flut ohne Sitzung landet an keinem Konto). Tageszähler am UTC-Tag wie
+`user.marktTag`, dazu Gesamtzähler, Zeit und Pfad des letzten Treffers.
+
+### Die Verdachtsregel liegt an EINER Stelle – und die Push kennt eine Meldepause
+
+`verdachtBewerten(auswertung)` ist die eine Definition von „auffällig": belastbar, **mindestens
+168 beobachtete Stunden** und längste Pause ≤ 2 h. Die Zahlen kommen aus der Kalibrierung der Uhr
+(Bot 0 h, nächtlich aufwachender Spieler 3 h, Vielspieler 5 h) – zwei Stunden liegen unter dem
+menschlichsten Dauerspieler der Messung, und die Woche verhindert, dass ein einzelner Marathon-Tag
+auslöst. `3b2` hält die Wochenregel fest: **drei** Tage lückenlos sind kein Verdacht; die Gegenprobe
+ohne sie reißt 3b2, 4a, 4a2 und 4e.
+
+`verdachtTick()` läuft im `galaxyTick` (alle 15 Minuten, und beim Start über `setImmediate`) und
+meldet an das Betreiberkonto über die **abschaltbare** Kategorie `verdacht` (Ereignistyp
+`konto-verdacht`, an allen fünf Stellen wie `neuspieler`: getNotifPrefs, POST notification-prefs,
+pushNotificationText, notificationTarget, Sender). **Eine Meldung je Konto und Woche**
+(`user.verdachtGemeldet`, vor dem saveDb des Takts gesetzt) – ohne die Pause käme jeden Takt
+dieselbe Meldung. Der Push-Text nennt die zwei harmlosen Erklärungen mit (geteiltes Konto, zwei
+Geräte in verschiedenen Zeitzonen): Eine Push, die nur „Bot?" sagt, macht aus einem Hinweis einen
+Beweis.
+
+`GET /api/admin/aktivitaet` liefert alle Konten mit Spielstand, sortiert nach längster Pause
+aufsteigend, belastbare zuerst, mit der 336-Zeichen-Stundenreihe je Zeile (bei hundert Konten
+34 kB – auf einer Fläche, die genau ein Konto sieht), Deckel 200.
+
+### Geschenk an alle: dieselben Deckel wie der Bonuscode, eigener `type`
+
+`POST /api/admin/geschenk` legt jedem Konto **mit Spielstand** (ohne gesperrte) eine Belohnung
+`{ type:'geschenk', text, zeit, …gaben }` über `pushPendingReward` ins Fach – die Gaben flach wie
+beim Bonuscode, damit der Frontend-Zweig dieselben Felder lesen kann. Geprüft über
+**`bonuscodeGabenPruefen`**, also `BONUSCODE_GABEN`: Ein Tippfehler (1000000 statt 1000) wäre hier
+ein Wirtschaftsereignis für jedes Konto auf einmal, und ein zu großer Wert risse beim Beschenkten
+`SAVE_SANITY_LIMITS`. `nurAktiveTage` (0 = alle) grenzt auf Konten ein, die sich binnen N Tagen
+angemeldet haben – das Belohnungsfach hält zwanzig Einträge, ein Geschenk an ein seit Monaten
+stilles Konto verdrängte dort im Grenzfall etwas Wertvolleres. **Ein nie angemeldetes Konto ist
+dabei nicht aktiv** (5f/5f2: carl nach 40 Tagen und dora ohne jede Anmeldung fallen heraus –
+die erste Fassung der Prüfung hatte dora vergessen und war rot). Der Verlauf liegt in
+`db.geschenke` (letzte 20), `GET /api/admin/geschenke` nennt ihn samt Deckel-Tabelle.
+
+**Der eigene `type` ist Pflicht, nicht Kosmetik** – dieselbe Lehre wie beim Bonuscode: Ohne ihn
+fällt die Belohnung im Client in den Rückfall-Zweig „+500 Kredite für deinen Bug-Report".
+
+### Der Wächter
+
+`tests/test_admin_uhr_erweiterungen_http.js` (**Port 3238**, 38 Prüfungen, sieben Gegenproben mit
+Pflichtlisten, alle mit 38 Prüfungen in beide Richtungen und identischer Prüfliste per `diff`).
+**Belegte Testports sind jetzt 3195–3200 und 3210–3238** – ein neuer Test nimmt 3239.
+
+Die vier Kernmessungen sind Paare (Regel 61): Ablehnung vermerkt UND gültiger Save geht durch
+(1a/1e), Flooder gezählt UND Nicht-Flooder nicht (2a/2b), acht Tage lückenlos ist Verdacht UND
+drei Tage sind keiner (3b/3b2), Push nennt anna UND nicht ben (4a/4a2).
+
+| Sabotage | fällt |
+|---|---|
+| Save-Reject ohne saveDb | `1c`, `1d`, `1e` |
+| 429 nicht vermerkt | `2a`, `2c`, `2d` |
+| verdachtTick nicht im galaxyTick | `4a`, `4b`, `4c2`, `4d` |
+| Wochenregel entfernt | `3b2`, `4a`, `4a2`, `4e` |
+| Meldepause entfernt | `4a`, `4b` |
+| Geschenk-Deckel entfernt | `5c`, `5d`, `5e`, `5g` |
+| Geschenk ohne saveDb vor der Antwort | `5b`, `5f2`, `5g`, `5j` |
+
+**Vier der sieben Pflichtlisten waren beim ersten Entwurf zu eng** (1d/1e, 4a, 5g, 5f2/5g/5j fielen
+zusätzlich) – eine Pflichtliste ist selbst eine Behauptung, bis die Gegenprobe sie gemessen hat
+(dieselbe Lehre wie bei `test_urmaterie_boden_http` und `test_aktivitaetsuhr_http`). Und eine
+Erwartung war falsch, nicht der Code: 5f rechnete mit einem Empfänger zu viel, weil das im Test
+nachträglich angelegte Konto sich nie angemeldet hatte – der Filter hatte recht.
+
+### Auslieferungsreihenfolge: dieses Repo ZUERST
+
+Das Frontend liest `rateLimitTreffer`, `spielstandAbgelehnt`, `aktiv.verdacht` und ruft die drei
+neuen Routen; ein Reiter, dessen Route mit 404 antwortet, wäre die tote Fläche aus Frontend-Regel 35.
+Umgekehrt stellt dieses Backend Routen bereit, die niemand aufruft – folgenlos. Die Betroffenheit der
+Bestandstests ist gemessen: 14 Backend-Tests, die Rate-Limit, Save-Ablehnung, Benachrichtigungen,
+galaxyTick oder den Admin-Bereich berühren, laufen unverändert grün (`test_pvp_standorte_http` ist
+ein von Hand zu startender Test und zählt hier nicht).
+
 ## Bekannte Fallstricke
 
 - **Backend hat teils eigene Kopien von Frontend-Formeln** zur serverseitigen Validierung (z.B. `ALLIANCE_STRUCTURE_COSTS`/`ALLIANCE_EXPANSION_BONUSES` gegen echte Allianz-Beiträge, `SHIP_SCORE_WEIGHTS`/`computeScoreServer()` gegen `computeScore()` im Frontend für den Bestenlisten-Score, seit v8.565.0 auch `WORLDBOSS_ARCHETYPES_PLAYABLE`/`WORLDBOSS_ARCHETYPE_FOLGE` gegen die gleichnamigen Frontend-Tabellen – die FOLGE muss deckungsgleich sein, sonst zeigt die Boss-Karte andere Kampffaktoren an, als `/api/worldboss`-Kämpfe benutzen; Wächter ist `test_inhalt_v8373.js` im Frontend-Repo, 60 Stufen). Bei Änderungen an der jeweiligen Frontend-Formel **immer** die Backend-Kopie mitpflegen, sonst lehnt der Server legitime Aktionen ab, lässt zu wenig durch, oder validiert gegen einen veralteten Score.

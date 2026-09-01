@@ -145,6 +145,7 @@ function rateLimit(windowMs, max, message) {
     }
     bucket.count++;
     if (bucket.count > max) {
+      rateLimitTrefferVermerken(req, now);   // am Konto sichtbar machen (28.08.2026), siehe dort
       const retryAfterSec = Math.ceil((bucket.resetAt - now) / 1000);
       res.set('Retry-After', String(retryAfterSec));
       return res.status(429).json({ error: message || 'Zu viele Anfragen - bitte kurz warten.' });
@@ -398,6 +399,106 @@ function reaktionVermerken(user, art, sekunden) {
   if (!Array.isArray(user.reaktionen)) user.reaktionen = [];
   user.reaktionen.push({ zeit: Date.now(), art, sek: Math.round(sekunden) });
   if (user.reaktionen.length > REAKTION_MERKEN) user.reaktionen = user.reaktionen.slice(-REAKTION_MERKEN);
+}
+
+/* ===== Vier Erweiterungen der Uhr (28.08.2026, Auftrag Sascha "Funktionen weiter ausbauen") =====
+   Vorgelegt wurden sieben gemessene Luecken, gewaehlt hat Sascha vier: Uebersicht aller Konten
+   nach Auffaelligkeit, Rate-Limit-Treffer je Konto, Geschenk an alle Spieler, abgelehnte
+   Spielstaende im Admin-Bereich. Hier stehen die Zaehler und die Verdachtsregel; die Routen
+   stehen im Admin-Block (Suchbegriff: /api/admin/aktivitaet).
+
+   --- Abgelehnte Spielstaende ---
+   Eine Ablehnung ist fuer den Spieler faktisch kompletter Speicherverlust (Vorfall 21.07.2026:
+   "immer 8 Std. offline, Bauqueue wie zurueckgesetzt", stundenlange Fehlersuche). Bis hierher
+   stand sie AUSSCHLIESSLICH im Container-Log - das niemand liest und das mit jedem Neustart weg
+   ist. Vermerkt wird am Nutzerobjekt, nicht im Spielstand: Der ist ja gerade der, den der Server
+   nicht annimmt. Und an der Ablehnungsstelle wird AUSDRUECKLICH gespeichert (saveDb): Es ist der
+   eine Fall, in dem der Spieler selbst nie ein saveDb ausloest - jeder seiner Saves wird ja
+   abgelehnt -, der Vermerk hinge sonst an fremden Schreibvorgaengen. */
+const SAVE_ABLEHNUNG_GRUENDE_MERKEN = 5;
+function saveAblehnungVermerken(user, grund, jetzt) {
+  if (!user) return;
+  const t = jetzt || Date.now();
+  const a = (user.saveAblehnungen && typeof user.saveAblehnungen === 'object')
+    ? user.saveAblehnungen : (user.saveAblehnungen = { n: 0, letzte: [] });
+  a.n = (a.n || 0) + 1;
+  a.letzteZeit = t;
+  a.letzterGrund = String(grund || '').slice(0, 160);
+  if (!Array.isArray(a.letzte)) a.letzte = [];
+  a.letzte.push({ zeit: t, grund: a.letzterGrund });
+  if (a.letzte.length > SAVE_ABLEHNUNG_GRUENDE_MERKEN) a.letzte = a.letzte.slice(-SAVE_ABLEHNUNG_GRUENDE_MERKEN);
+}
+
+/* --- Rate-Limit-Treffer je Konto ---
+   Das Rate-Limit laeuft VOR authMiddleware (app.use('/api', globalApiRateLimit)); an der Stelle,
+   an der der 429 entsteht, gibt es also kein req.userId. Das Token wird deshalb hier eigens
+   geprueft - und NUR im 429-Fall: Ein Treffer ist selten, und ein jwt.verify je Treffer kostet
+   nichts, was der Flooder nicht ohnehin verursacht. Ein ungueltiges Token wird still uebergangen;
+   der 429 gilt der VERBINDUNG, nicht dem Konto, und "kein Vermerk" ist fuer einen Aufrufer ohne
+   gueltige Sitzung das ehrliche Ergebnis.
+   Kein eigenes saveDb: Wer ins Limit laeuft, hat 240 Anfragen in einer Minute geschickt -
+   darunter Speicherungen -, und der naechste Schreibvorgang nimmt den Zaehler mit (dasselbe
+   Muster wie die Uhr). Der Tageszaehler haengt am UTC-Tag wie user.marktTag. */
+function rateLimitTrefferVermerken(req, jetzt) {
+  try {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : leseCookie(req, SESSION_COOKIE);
+    if (!token) return;
+    const payload = jwt.verify(token, JWT_SECRET);
+    const user = findUserById(payload.userId);
+    if (!user) return;
+    const t = jetzt || Date.now();
+    const tag = aktivTagesschluessel(t);
+    const r = (user.rateLimit && typeof user.rateLimit === 'object') ? user.rateLimit : (user.rateLimit = {});
+    if (r.stempel !== tag) { r.stempel = tag; r.heute = 0; }
+    r.heute = (r.heute || 0) + 1;
+    r.gesamt = (r.gesamt || 0) + 1;
+    r.letzteZeit = t;
+    r.letzterPfad = String(req.originalUrl || req.path || '').split('?')[0].slice(0, 80);
+  } catch (e) { /* ungueltiges oder abgelaufenes Token: kein Konto, kein Vermerk */ }
+}
+
+/* --- Die Verdachtsregel ---
+   EINE Stelle, die "auffaellig" definiert; die Uebersicht, das Konto-Blatt, der Systemstand und
+   die Betreiber-Push lesen alle hier. Die Zahlen sind an den vier nachgebauten Konten aus der
+   Kalibrierung der Uhr gemessen: Bot 0 h, Spieler mit naechtlichem Aufwachen 3 h, Vielspieler
+   5 h, Gelegenheitsspieler 14 h. Zwei Stunden liegen unter dem, was der menschlichste
+   Dauerspieler der Messung erreicht hat - und erst ueber eine ganze Woche beobachtet, damit ein
+   einzelner Marathon-Tag nichts ausloest.
+   Die Regel macht die Uhr nicht zum Beweis: Ein Hinweis bleibt ein Hinweis (geteiltes Konto,
+   zwei Geraete in verschiedenen Zeitzonen), und jede Anzeigestelle sagt das mit. */
+const VERDACHT_PAUSE_MAX_STD = 2;
+const VERDACHT_MIN_STUNDEN = 7 * 24;
+const VERDACHT_MELDEPAUSE_MS = 7 * 86400000;   // eine Meldung je Konto und Woche - sonst jeden Takt dieselbe
+function verdachtBewerten(auswertung) {
+  const a = auswertung || {};
+  return !!(a.belastbar && a.beobachtet >= VERDACHT_MIN_STUNDEN &&
+            a.laengstePause !== null && a.laengstePause <= VERDACHT_PAUSE_MAX_STD);
+}
+/* Laeuft im galaxyTick (alle 15 Minuten, und einmal beim Start ueber setImmediate). Dreizehn
+   Konten mal 336 Stunden sind nichts; bei tausend waere es noch ein Bruchteil dessen, was der
+   Takt ohnehin rechnet. Die Meldung geht an das Betreiberkonto ueber die Kategorie 'verdacht' -
+   abschaltbar wie 'neuspieler' und aus demselben Grund: Das Postfach haelt 30 Eintraege ohne
+   Bevorzugung. Gesperrte Konten und der Betreiber selbst werden uebergangen; ein gesperrtes
+   Konto kommt an authMiddleware nicht vorbei und kann die Uhr nicht mehr fuellen. */
+function verdachtTick(jetzt) {
+  const t = jetzt || Date.now();
+  const devUser = db.users['gamegeeeeek'];
+  if (!devUser) return 0;
+  const prefs = getNotifPrefs(devUser);
+  if (!(prefs.enabled && prefs.verdacht)) return 0;
+  let gemeldet = 0;
+  for (const u of Object.values(db.users)) {
+    if (!u || u.banned || u.userId === devUser.userId) continue;
+    const a = aktivAuswerten(u, t);
+    if (!verdachtBewerten(a)) continue;
+    if ((t - (u.verdachtGemeldet || 0)) < VERDACHT_MELDEPAUSE_MS) continue;
+    u.verdachtGemeldet = t;
+    pushNotificationEvent(devUser.userId, 'konto-verdacht',
+      { username: u.username, laengstePause: a.laengstePause, beobachtet: a.beobachtet, tage: Math.round(a.beobachtet / 24) });
+    gemeldet++;
+  }
+  return gemeldet;
 }
 
 function authMiddleware(req, res, next) {
@@ -1219,7 +1320,10 @@ function getNotifPrefs(user) {
     // und player-reported, also den einzigen Meldungskanal, den der Betreiber im Spiel hat. Der
     // Schalter ist die Notbremse fuer genau diesen Fall - er ersetzt keine Drosselung, er macht
     // den Schaden abstellbar.
-    neuspieler: p.neuspieler !== false
+    neuspieler: p.neuspieler !== false,
+    // 'verdacht' = ein Konto ist nach der Verdachtsregel der Aktivitaets-Uhr auffaellig
+    // (28.08.2026, siehe verdachtTick). Betreiberkategorie wie 'neuspieler'.
+    verdacht: p.verdacht !== false
   };
 }
 function pushNotificationEvent(userId, type, payload, opts) {
@@ -1332,6 +1436,15 @@ function pushNotificationText(type, payload) {
     const wieVielte = payload.gesamt ? ' (' + payload.gesamt + '. Kommandant insgesamt)' : '';
     return { title: 'Neuer Spieler hat angefangen', body: (payload.username || 'Ein Kommandant') + ' hat die Kolonie zum ersten Mal geoeffnet' + wieVielte + '.' };
   }
+  if (type === 'konto-verdacht') {
+    // Betreiber-Meldung der Verdachtsregel (28.08.2026, siehe verdachtTick). Der Text nennt die
+    // zwei harmlosen Erklaerungen MIT - eine Push, die nur "Bot?" sagt, macht aus einem Hinweis
+    // einen Beweis, und am Ende stuende eine Sperre auf einer Zahl.
+    const tage = payload.tage || Math.round((payload.beobachtet || 0) / 24) || 7;
+    return { title: 'Auffaelliges Konto: ' + (payload.username || '?'),
+      body: (payload.username || 'Ein Konto') + ' hatte in ' + tage + ' Tagen keine Pause ueber ' + (payload.laengstePause || 0)
+        + ' Stunden. Das kann ein Bot sein - oder ein geteiltes Konto bzw. zwei Geraete in verschiedenen Zeitzonen. Details im Admin-Bereich unter Konto.' };
+  }
   return { title: 'Kolonie Kepler-7', body: 'Es gibt Neuigkeiten.' };
 }
 // Wohin führt ein Ereignis? (02.08.2026, Wunsch: "wenn man auf die Push klickt, das entsprechende
@@ -1361,6 +1474,9 @@ function notificationTarget(type, payload) {
     // der man ihn wirklich ANSEHEN kann. Ein Ziel 'berichte' waere nur das Postfach selbst, aus
     // dem der Klick ohnehin kommt.
     case 'neuer-spieler': return 'galaxie:rang';
+    // Der Admin-Bereich ist kein Reiter, sondern ein Einschub - das naechstliegende Ziel ist die
+    // Bestenliste, auf der das Konto steht (dieselbe Wahl wie bei 'neuer-spieler').
+    case 'konto-verdacht': return 'galaxie:rang';
     case 'raid-incoming': return 'verteidigung';
     case 'spy-detected': return 'verteidigung';
     case 'attack-received': return 'berichte';
@@ -2519,6 +2635,11 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
         // WELCHEM Konto anschlägt (falls trotz angehobener Grenzen noch etwas rejected wird, z.B. ein
         // NaN/negativer Wert aus einem Client-Bug).
         console.warn('[save-reject] userId=' + req.userId + ' reason=' + violation);
+        // Und am Konto vermerkt (28.08.2026), damit die Ablehnung nicht nur im Container-Log steht -
+        // MIT saveDb, weil dieser Spieler selbst nie eines ausloest (Begruendung bei
+        // saveAblehnungVermerken).
+        saveAblehnungVermerken(findUserById(req.userId), violation);
+        await saveDb();
         return res.status(400).json({ error: 'Spielstand abgelehnt (unplausibler Wert): ' + violation });
       }
     } catch (e) { return res.status(400).json({ error: 'Spielstand ist kein gültiges JSON.' }); }
@@ -4922,7 +5043,8 @@ app.post('/api/notification-prefs', authMiddleware, async (req, res) => {
     attack: b.attack !== false,
     leaderboard: b.leaderboard !== false,
     completion: b.completion !== false,
-    neuspieler: b.neuspieler !== false
+    neuspieler: b.neuspieler !== false,
+    verdacht: b.verdacht !== false
   };
   await saveDb();
   res.json(getNotifPrefs(user));
@@ -6329,6 +6451,9 @@ function galaxyTick() {
   }
 
   checkLeaderboardOvertakes();
+  // Verdachtsmeldung an den Betreiber (28.08.2026, siehe verdachtTick) - vor dem saveDb des
+  // Takts, damit die Meldepause (u.verdachtGemeldet) den Neustart uebersteht.
+  verdachtTick();
 
   saveDb();
 }
@@ -12493,8 +12618,17 @@ app.get('/api/admin/konto', authMiddleware, (req, res) => {
       // rund fuenfmal so gross, und gezeichnet wird sie ohnehin Zeichen fuer Zeichen.
       aktiv: (() => { const a = aktivAuswerten(u, jetzt);
         return { reihe: a.reihe, aktiv: a.aktiv, beobachtet: a.beobachtet,
-                 laengstePause: a.laengstePause, belastbar: a.belastbar, tage: AKTIV_TAGE }; })(),
-      reaktionen: (u.reaktionen || []).slice(-REAKTION_MERKEN)
+                 laengstePause: a.laengstePause, belastbar: a.belastbar, tage: AKTIV_TAGE,
+                 verdacht: verdachtBewerten(a), verdachtGemeldet: u.verdachtGemeldet || 0 }; })(),
+      reaktionen: (u.reaktionen || []).slice(-REAKTION_MERKEN),
+      // Rate-Limit-Treffer und abgelehnte Spielstaende (28.08.2026, siehe rateLimitTrefferVermerken
+      // und saveAblehnungVermerken): Beides stand bis dahin nur im Container-Log.
+      rateLimitTreffer: (() => { const r = u.rateLimit || {};
+        return { heute: r.stempel === aktivTagesschluessel(jetzt) ? (r.heute || 0) : 0, gesamt: r.gesamt || 0,
+                 letzteZeit: r.letzteZeit || 0, letzterPfad: r.letzterPfad || null }; })(),
+      spielstandAbgelehnt: (() => { const a = u.saveAblehnungen || {};
+        return { n: a.n || 0, letzteZeit: a.letzteZeit || 0, letzterGrund: a.letzterGrund || null,
+                 letzte: (a.letzte || []).slice(-SAVE_ABLEHNUNG_GRUENDE_MERKEN) }; })()
     };
   });
   res.json({ konten, gefunden: Object.keys(db.users).filter(k => k.includes(suche)).length });
@@ -12518,6 +12652,109 @@ app.post('/api/admin/konto/sitzungen-beenden', authMiddleware, async (req, res) 
   delete ziel.activeSessionAt;
   await saveDb();
   res.json({ ok: true, username: ziel.username, tokenVersion: ziel.tokenVersion });
+});
+
+// --- Uebersicht aller Konten nach Auffaelligkeit (28.08.2026) ----------------------------------
+/* Die Uhr im Konto-Blatt beantwortet die Frage fuer EIN Konto - wer wissen will, ob ueberhaupt
+   jemand auffaellig ist, musste bis hierher jeden Namen einzeln suchen. Sortiert wird nach der
+   Zahl, auf die es ankommt (laengste Pause, aufsteigend - die kuerzeste zuerst), belastbare
+   Konten vor unbelastbaren. Die Stundenreihe reist mit, damit die Uebersicht je Zeile ein
+   Miniraster zeichnen kann, ohne je Konto eine zweite Anfrage zu stellen: 336 Zeichen je Konto,
+   bei hundert Konten 34 kB - auf einer Flaeche, die genau ein Konto sieht. */
+const AKTIVITAET_MAX_KONTEN = 200;
+app.get('/api/admin/aktivitaet', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const jetzt = Date.now();
+  const heute = aktivTagesschluessel(jetzt);
+  const konten = [];
+  for (const u of Object.values(db.users)) {
+    if (!u) continue;
+    const priv = db.private[u.userId] || {};
+    if (priv[SAVE_KEY] === undefined) continue;   // ohne Spielstand hat nie jemand gespielt
+    const a = aktivAuswerten(u, jetzt);
+    const r = u.rateLimit || {};
+    const sa = u.saveAblehnungen || {};
+    konten.push({
+      username: u.username,
+      gesperrt: !!u.banned,
+      letzteSitzung: u.activeSessionAt || 0,
+      reihe: a.reihe, aktiv: a.aktiv, beobachtet: a.beobachtet,
+      laengstePause: a.laengstePause, belastbar: a.belastbar,
+      verdacht: verdachtBewerten(a),
+      verdachtGemeldet: u.verdachtGemeldet || 0,
+      reaktionen: (u.reaktionen || []).length,
+      schnelleReaktionen: (u.reaktionen || []).filter(x => x && x.sek < 120).length,
+      rateLimitHeute: r.stempel === heute ? (r.heute || 0) : 0,
+      rateLimitGesamt: r.gesamt || 0,
+      spielstandAbgelehnt: sa.n || 0
+    });
+  }
+  konten.sort((x, y) => {
+    if (x.belastbar !== y.belastbar) return x.belastbar ? -1 : 1;
+    const px = x.laengstePause === null ? Infinity : x.laengstePause;
+    const py = y.laengstePause === null ? Infinity : y.laengstePause;
+    if (px !== py) return px - py;
+    return x.username.localeCompare(y.username);
+  });
+  res.json({ konten: konten.slice(0, AKTIVITAET_MAX_KONTEN), gesamt: konten.length, tage: AKTIV_TAGE,
+    regel: { pauseMaxStd: VERDACHT_PAUSE_MAX_STD, minStunden: VERDACHT_MIN_STUNDEN } });
+});
+
+// --- Geschenk an alle Spieler (28.08.2026) ---------------------------------------------------
+/* Ein Bonuscode verlangt, dass der Spieler ihn findet und eintippt. Eine Entschaedigung nach
+   einem Ausfall (der Backend-Deploy hing in diesem Projekt dreizehnmal) soll niemanden
+   voraussetzen, der den Discord liest - sie liegt beim naechsten Start im Belohnungsfach.
+   DIESELBEN Deckel wie beim Bonuscode (BONUSCODE_GABEN ueber bonuscodeGabenPruefen): Ein
+   Tippfehler beim Anlegen (1000000 statt 1000) waere hier ein Wirtschaftsereignis fuer JEDES
+   Konto auf einmal, und ein zu grosser Wert riesse beim Beschenkten SAVE_SANITY_LIMITS.
+   Empfaenger sind alle Konten MIT Spielstand: Ein Konto ohne hat nie gespielt, und
+   pushPendingReward legte ihm sonst ein db.private-Objekt an, das nie jemand liest. Gesperrte
+   Konten bleiben aussen vor. `nurAktiveTage` (0 = alle) grenzt auf Konten ein, die sich binnen
+   N Tagen angemeldet haben: Das Belohnungsfach haelt zwanzig Eintraege, ein Geschenk an ein seit
+   Monaten stilles Konto verdraengte dort im Grenzfall etwas Wertvolleres.
+   Die Belohnung traegt EINEN EIGENEN type ('geschenk'), sonst faellt sie im Client in den
+   Rueckfall-Zweig und meldet woertlich "+500 Kredite fuer deinen Bug-Report" (dieselbe Lehre
+   wie beim Bonuscode). Die Gaben liegen flach im Eintrag wie dort - der Frontend-Zweig kann
+   dieselben Felder lesen. */
+const GESCHENK_TEXT_MAX = 200;
+const GESCHENKE_MERKEN = 20;
+app.post('/api/admin/geschenk', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const { gaben, text, nurAktiveTage } = req.body || {};
+  const geprueft = bonuscodeGabenPruefen(gaben);
+  if (geprueft.fehler) return res.status(400).json({ error: geprueft.fehler });
+  const nachricht = String(text || '').trim().slice(0, GESCHENK_TEXT_MAX);
+  const tage = Math.max(0, Math.floor(Number(nurAktiveTage) || 0));
+  const jetzt = Date.now();
+  const empfaenger = [];
+  for (const u of Object.values(db.users)) {
+    if (!u || u.banned) continue;
+    const priv = db.private[u.userId];
+    if (!priv || priv[SAVE_KEY] === undefined) continue;
+    if (tage > 0 && (jetzt - (u.activeSessionAt || 0)) > tage * 86400000) continue;
+    empfaenger.push(u.userId);
+  }
+  if (!empfaenger.length) return res.status(400).json({ error: 'Kein Konto erfuellt die Bedingung - nichts verschenkt.' });
+  for (const uid of empfaenger) {
+    pushPendingReward(uid, Object.assign({ type: 'geschenk', text: nachricht, zeit: jetzt }, geprueft.gaben));
+  }
+  const eintrag = { zeit: jetzt, gaben: geprueft.gaben, text: nachricht, empfaenger: empfaenger.length, nurAktiveTage: tage };
+  db.geschenke = (db.geschenke || []).concat([eintrag]).slice(-GESCHENKE_MERKEN);
+  console.log('[geschenk] an ' + empfaenger.length + ' Konten: ' + JSON.stringify(geprueft.gaben));
+  await saveDb();
+  res.json({ ok: true, empfaenger: empfaenger.length, gaben: geprueft.gaben });
+});
+// Verlauf und Tabellen - damit der Admin-Bereich keine zweite Kopie der Deckel fuehrt.
+app.get('/api/admin/geschenke', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const jetzt = Date.now();
+  const konten = Object.values(db.users).filter(u => u && !u.banned && db.private[u.userId] && db.private[u.userId][SAVE_KEY] !== undefined);
+  res.json({
+    geschenke: (db.geschenke || []).slice().reverse(),
+    gaben: BONUSCODE_GABEN, textMax: GESCHENK_TEXT_MAX,
+    empfaengerGesamt: konten.length,
+    empfaenger30Tage: konten.filter(u => (jetzt - (u.activeSessionAt || 0)) <= 30 * 86400000).length
+  });
 });
 
 // --- 4. Systemstand ----------------------------------------------------------------------------
@@ -12545,7 +12782,13 @@ app.get('/api/admin/systemstand', authMiddleware, (req, res) => {
       spielstaende,
       offenesFeedback: (db.feedback || []).filter(f => !f.erledigt).length,
       offeneMeldungen: (db.playerReports || []).length,
-      offeneKofiZuordnungen: (db.kofiUnlinked || []).length
+      offeneKofiZuordnungen: (db.kofiUnlinked || []).length,
+      // 28.08.2026: Konten, deren Spielstand in den letzten sieben Tagen abgelehnt wurde, und
+      // Konten, die nach der Verdachtsregel der Uhr auffaellig sind - beides stand bis dahin
+      // nirgends, wo der Betreiber es ohne SSH sehen konnte.
+      abgelehnteSpielstaende7Tage: Object.values(db.users).filter(u => u && u.saveAblehnungen &&
+        (Date.now() - (u.saveAblehnungen.letzteZeit || 0)) < 7 * 86400000).length,
+      verdachtKonten: Object.values(db.users).filter(u => u && !u.banned && verdachtBewerten(aktivAuswerten(u, Date.now()))).length
     },
     konfiguration: [
       { name: 'RESEND_API_KEY', gesetzt: gesetzt('RESEND_API_KEY'), zweck: 'Bestaetigungs- und Reset-Mails, Deploy-Alarm' },

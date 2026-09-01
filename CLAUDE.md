@@ -112,7 +112,7 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/kampfrechnung-paritaet.md` | Flottenverteidigung, Klassen-Sets, Raid-Vorschau, sechs Schiffstabellen, Kausalitätsbrecher |
 | `docs/pvp-standorte.md` | `targetPlanet` an `/api/attack`, Standort-Verteidigung |
 | `docs/sicherheit-auth.md` | Passwort-Regeln, Sitzungs-Cookie (Etappen a und b) |
-| `docs/admin.md` | Bonuscodes, Betreiber-Push, Admin-Fähigkeiten, Notaus, Aktivitäts-Uhr |
+| `docs/admin.md` | Bonuscodes, Betreiber-Push, Admin-Fähigkeiten, Notaus, Aktivitäts-Uhr und ihre Erweiterungen (Verdacht, Geschenk, abgelehnte Spielstände) |
 | `docs/chat.md` | Bündel-Abruf, Retention |
 
 Der vollständige frühere Text dieser Datei liegt in der Git-Historie vor dem 01.09.2026.

@@ -114,6 +114,7 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/sicherheit-auth.md` | Passwort-Regeln, Sitzungs-Cookie (Etappen a und b) |
 | `docs/admin.md` | Bonuscodes, Betreiber-Push, Admin-Fähigkeiten, Notaus, Aktivitäts-Uhr und ihre Erweiterungen (Verdacht, Geschenk, abgelehnte Spielstände) |
 | `docs/chat.md` | Bündel-Abruf, Retention |
+| `docs/ki-kampfberichte.md` | Etappe E1a: Prompt-Zuschnitt, Wahrheits-Sperren, Warteschlange, `KAMPFTEXT_AKTIV` |
 
 Der vollständige frühere Text dieser Datei liegt in der Git-Historie vor dem 01.09.2026.
 

@@ -786,3 +786,68 @@ an zwei Stellen ausgenommen (Route und Aufräumlauf), weil `isAdmin()` an seinem
 **Wächter** `tests/test_admin_konto2_http.js` (Port 3247, 36 Prüfungen) mit den Paaren 1c/1d,
 2a/2b, 2d/2e, 3c/3d, 4g/4h und 5a/5a2. Sechs Gegenproben an sabotierten Kopien; die Zuordnung
 Sabotage → fallende Prüfung steht im Kopf der Testdatei.
+
+## Alarm, Geschenk je Konto, Galaxie-Eingriff, Chat-Moderation (02.09.2026)
+
+Sechste Runde (Auftrag „Weitere Ideen für Admin Funktionen", alle vier gewählt). Vorher gemessen:
+46 Admin-Routen, aber Geschenke gingen nur an **alle** (Schleife über `db.users`), `db.galaxy` war
+für den Betreiber ebenso unerreichbar wie für Clients, es gab keine Chat-Moderation
+(`admin/chat` = 0 Treffer) — und die Zähler der Runden 4 und 5 las niemand.
+
+**Alarm an den Betreiber.** `pruefeAlarme()` läuft alle fünf Minuten und beim Start (`setImmediate`)
+über vier Schwellen: 15 Angriffe je Stunde (aus `user.kampfVerlauf`), 10 Fehlanmeldungen
+(`loginFehlversuche`), 5 abgelehnte Spielstände (`saveAblehnungen.n`) und 3 Neustarts je Stunde
+(`db.neustarts`, beim Start fortgeschrieben). Jeder Fund geht als Postfach-Meldung `admin-alarm`
+an das Betreiberkonto und nennt Konto, Messwert und Schwelle — „irgendwas ist auffällig" zwingt zum
+Nachsehen und ist damit kein Alarm.
+
+Drei Entscheidungen, die man beim Anfassen kennen muss:
+- Die **Ruhefrist von sechs Stunden liegt je Alarmschlüssel** (Art + Konto), nicht global. Sonst
+  verdeckt der erste Alarm alle anderen, und der zweite ist meistens der interessantere.
+- Der Alarm fährt über die **vorhandene** Push-Kategorie `messages`. Eine neue Kategorie bräuchte
+  denselben Namen im Frontend; bis dessen PR live wäre, bliebe der Alarm still. Additiv heißt: Er
+  funktioniert ab dem Backend-Merge.
+- `GET /api/admin/alarm` nennt **auch die aktuellen Messwerte und den Zeitpunkt des letzten Laufs**.
+  Ein Wächter, dessen Schweigen sich nicht von „läuft gar nicht" unterscheiden lässt, ist keiner.
+
+Der Neustart-Alarm ist der einzige ohne Konto. `uptimeSec` in `/api/health` beantwortet die Frage
+nicht: Es fängt je Prozess bei null an und kennt den vorigen Start nicht.
+
+**Geschenk an ein Konto.** `POST /api/admin/geschenk-konto` mit derselben Gabentabelle und
+derselben Prüfung wie der Bonuscode, ein Empfänger, Begründung Pflicht. Der Grund reist mit: Er
+steht in der Belohnung **und** in einer Postfach-Meldung, damit der Spieler weiß, wofür er etwas
+bekommt. Ohne Spielstand wird abgelehnt — die Gabe hätte nichts, worin sie landen könnte, und
+bliebe für immer im Fach liegen.
+
+**Galaxie-Eingriff.** `GET /api/admin/galaxie` liefert Weltboss, Nester, Konvois, Marktereignis,
+Kopfgeld, die Völker und die Systemliste; `POST` mit `bereich` und `aktion` verändert:
+Weltboss entfernen oder Lebenspunkte setzen (auf 0 gilt er als besiegt — ohne `defeatedAt` bliebe
+ein Nuller angreifbar stehen), Nest und Konvoi setzen und entfernen, Marktereignis beenden,
+Kopfgeld auf ein Konto setzen. Zwei Grenzen, bewusst gezogen:
+- Gesetzt wird über die **vorhandenen Erzeuger** (`nestNeu`, `a2Neu`). Ein von Hand gebautes Objekt
+  hätte fehlende Felder, und der Fehler fände sich Stunden später im Tick wieder, nicht hier.
+- Der Weltboss wird nur entfernt oder in den Lebenspunkten gesetzt, **nicht erschaffen**: Er
+  entsteht klientenseitig mit einer `bossId`, an der die Missionen hängen.
+
+Beim Kopfgeld wird der **Wochenschlüssel mitgeschrieben** — ohne ihn setzt `resolveBountyServer`
+beim nächsten Takt wieder den Bestenlisten-Ersten daneben, und der Eingriff wäre nach fünfzehn
+Minuten spurlos weg.
+
+**Chat-Moderation.** `GET /api/admin/chat` (optional nach Konto gefiltert) liefert beide Kanäle,
+neueste zuerst; `POST /api/admin/chat/loeschen` entfernt eine Nachricht und schaltet den Verfasser
+auf Wunsch **im selben Schritt** stumm — zwei Handgriffe daraus zu machen heißt, dass der zweite
+vergessen wird. Die wichtige Sperre: Gelöscht wird nur, was auch ein Chat-Schlüssel **ist**
+(`globalchat:msg:` oder `alliance:<tag>:msg:`). Ohne sie wäre das ein Löschknopf für jeden
+geteilten Schlüssel, Allianz-Infos und Bestenliste inbegriffen.
+
+**Wächter** `tests/test_admin_runde6_http.js` (Port 3250, 40 Prüfungen) mit den Paaren 1a/1b,
+1e/1f, 2a/2b, 3c/3d und 4a/4b. Sechs Gegenproben an sabotierten Kopien; die Zuordnung steht im Kopf
+der Testdatei.
+
+**Nebenbefund zur Port-Regel.** Drei Tests beanspruchten Port 3247: `test_admin_konto2_http`
+(17:30), `test_muster_vorposten_http` (17:57) und `test_pvp_mindesteinsatz_http` (18:24) — alle drei
+mit derselben, korrekt ausgeführten Messung, jede gegen einen Stand ohne die anderen beiden.
+**Die Regel „freien Port messen statt raten" schützt nicht gegen parallele Zweige.** Wer einen
+neuen Test anlegt, misst deshalb ein zweites Mal unmittelbar vor dem Push, gegen frisch geholtes
+`origin/master`. Ausgewichen ist hier der älteste der drei (auf 3249), weil das die einzige
+Änderung war, die keine fremde Datei anfasst.

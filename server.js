@@ -1600,6 +1600,13 @@ function pushNotificationText(type, payload) {
      Warteschlange bekommt erst der Verlust. Das Konzept sagt ihm aber ausdruecklich zu, er koenne
      mit einer Garnison gegenhalten - dafuer muss er den ERSTEN Schlag mitbekommen, nicht den
      letzten. Der Kernstand steht im Text, weil er die Dringlichkeit traegt. */
+  /* Alarm an den Betreiber (02.09.2026). Der Text nennt Konto, Messwert und Schwelle - ein
+     "irgendwas ist auffaellig" zwingt zum Nachsehen und ist damit kein Alarm, sondern ein Hinweis
+     auf einen Hinweis. */
+  if (type === 'geschenk-konto') return { title: 'Ein Geschenk vom Betreiber',
+    body: (payload.grund || 'Ohne Angabe') + ' - hol es dir im Spiel ab.' };
+  if (type === 'admin-alarm') return { title: 'Alarm: ' + (payload.titel || 'Auffaelligkeit'),
+    body: (payload.text || '') + ' (gemessen ' + (payload.wert !== undefined ? payload.wert : '?') + ', Schwelle ' + (payload.schwelle !== undefined ? payload.schwelle : '?') + ')' };
   if (type === 'vorposten-angegriffen') return payload.gefallen
     ? { title: 'Vorposten geschleift!', body: (payload.angreiferName || 'Ein Kommandant') + ' hat deinen ' + (payload.name || 'Vorposten') + ' bei ' + (payload.system || '?') + ' geschleift - die Garnison ist mit ihm verloren.' }
     : { title: 'Vorposten angegriffen!', body: (payload.angreiferName || 'Ein Kommandant') + ' beschiesst deinen ' + (payload.name || 'Vorposten') + ' bei ' + (payload.system || '?') + ' - Kern noch ' + (payload.kernProzent || 0) + '%. Verstärke die Garnison, solange er steht.' };
@@ -1708,6 +1715,10 @@ function notificationTarget(type, payload) {
     // Bestenliste, auf der das Konto steht (dieselbe Wahl wie bei 'neuer-spieler').
     case 'konto-verdacht': return 'galaxie:rang';
     case 'feedback-antwort': return 'berichte';
+    // Der Alarm zeigt auf die Bestenliste, wenn er ein Konto meint - dieselbe Wahl wie bei
+    // 'konto-verdacht'; ohne Konto (Neustarts) bleibt es das Postfach selbst.
+    case 'admin-alarm': return p.konto ? 'galaxie:rang' : 'berichte';
+    case 'geschenk-konto': return 'berichte';
     case 'raid-incoming': return 'verteidigung';
     case 'spy-detected': return 'verteidigung';
     case 'attack-received': return 'berichte';
@@ -5636,6 +5647,14 @@ app.get('/health', (req, res) => {
 
 const httpServer = app.listen(PORT, () => {
   console.log('Kepler-7 Server läuft auf Port ' + PORT);
+  /* Neustarts mitschreiben (02.09.2026). Ein Deploy startet den Prozess absichtlich neu - drei
+     Starts in einer Stunde sind trotzdem keiner: Das ist entweder eine Schleife im Deploy oder ein
+     Absturz kurz nach dem Start. `uptimeSec` in /api/health beantwortet das NICHT, weil es je
+     Prozess neu bei null anfaengt und den vorigen Start gar nicht kennt. */
+  try {
+    db.neustarts = (Array.isArray(db.neustarts) ? db.neustarts : []).concat([Date.now()]).slice(-NEUSTARTE_MERKEN);
+    saveDb().catch(() => {});
+  } catch (e) { console.error('[neustart] nicht vermerkt:', e.message); }
   // Läuft bei jedem Start, tut aber nur beim ersten Mal etwas (siehe `braucht`-Prüfung darin) -
   // eine Migration, die man von Hand anstoßen muss, wird auf einem Pi ohne Wartungsfenster nie
   // angestoßen.
@@ -14712,6 +14731,324 @@ app.post('/api/admin/mail-alle', authMiddleware, async (req, res) => {
   const status = (gesendet === 0 && fehlgeschlagen > 0) ? 502 : 200;
   res.status(status).json({ ok: status === 200, gesendet, abgemeldet, ohneAdresse, fehlgeschlagen, uebrig, deckel: MAIL_ALLE_MAX,
     error: status === 502 ? 'Keine einzige Mail ging raus - der Mail-Dienst nimmt nichts an.' : undefined });
+});
+
+/* --- Galaxie-Eingriff (02.09.2026) ---
+   `db.galaxy` ist fuer Clients bauartbedingt unerreichbar (kein Storage-Schluessel fuehrt hinein) -
+   und war es damit bisher auch fuer den Betreiber. Der Lage-Reiter zeigt Weltboss, Nester, Konvois
+   und Marktereignis; anfassen liess sich nichts, ohne die db.json auf dem Pi von Hand zu editieren.
+   ZWEI GRENZEN, bewusst gezogen:
+   - Gesetzt wird ueber die VORHANDENEN Erzeuger (`nestNeu`, `a2Neu`). Ein von Hand gebautes Objekt
+     haette beim naechsten Tick gefehlte Felder, und der Fehler faende sich Stunden spaeter im
+     Tick wieder, nicht hier.
+   - Der Weltboss wird nur ENTFERNT oder in den Lebenspunkten gesetzt, nicht erschaffen: Er entsteht
+     klientenseitig mit einer Kennung, an der die Missionen haengen (`bossId`), und ein hier
+     erfundener Boss haette keine. */
+app.get('/api/admin/galaxie', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const g = loadOrInitGalaxy();
+  let weltboss = null;
+  try { const b = JSON.parse(db.shared[WORLDBOSS_KEY] || 'null');
+    if (b && typeof b === 'object') weltboss = { bossId: b.bossId || null, level: b.level || 0, hp: b.hp || 0, maxHp: b.maxHp || 0,
+      besiegt: !!b.defeatedAt, beteiligte: Object.keys(b.contributions || {}).length }; } catch (e) {}
+  res.json({
+    weltboss,
+    nester: nestListe(g).map(n => ({ id: n.id, volk: n.volk, sys: n.sys, stufe: n.stufe, lp: n.lp, lpMax: n.lpMax, seit: n.seit })),
+    konvois: a2Liste(g).map(k => ({ id: k.id, sys: k.sys, lp: k.lp, lpMax: k.lpMax, seit: k.seit })),
+    marktEreignis: g.marketEvent || null,
+    kopfgeld: g.bounty || null,
+    voelker: Object.entries(ALIEN_VOELKER).map(([k, v]) => ({ schluessel: k, name: v.name })),
+    // Die Systemliste, damit das Frontend eine Auswahl anbieten kann, ohne seine eigene Tabelle
+    // dafuer zu lesen - die beiden driften sonst genau an der Stelle auseinander, an der ein
+    // gesetztes Nest im Nichts landet. Die Notaus-Schalter stehen bewusst NICHT hier: Die gibt es
+    // schon unter /admin/schalter, und eine zweite Kopie waere eine Kopie-Familie mehr.
+    systeme: SYSTEMS.slice()
+  });
+});
+app.post('/api/admin/galaxie', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const { bereich, aktion } = req.body || {};
+  const g = loadOrInitGalaxy();
+  const jetzt = Date.now();
+  // SYSTEMS ist eine Liste von KENNUNGEN (SYSTEMS.push(s.id)), nicht von Objekten - hier stand
+  // zuerst ein geratenes `x.id`, und jedes Setzen scheiterte an "Dieses System gibt es nicht".
+  const sysDa = id => SYSTEMS.includes(id);
+
+  if (bereich === 'weltboss') {
+    let boss = null;
+    try { boss = JSON.parse(db.shared[WORLDBOSS_KEY] || 'null'); } catch (e) {}
+    if (!boss) return res.status(404).json({ error: 'Gerade steht kein Weltboss.' });
+    if (aktion === 'entfernen') {
+      delete db.shared[WORLDBOSS_KEY];
+      await saveDb();
+      return res.json({ ok: true, bereich, aktion, entfernt: boss.bossId || null });
+    }
+    if (aktion === 'hp') {
+      const hp = Math.floor(Number(req.body.hp));
+      if (!Number.isFinite(hp) || hp < 0 || hp > (boss.maxHp || 0)) return res.status(400).json({ error: 'Lebenspunkte zwischen 0 und ' + (boss.maxHp || 0) + ' angeben.' });
+      boss.hp = hp;
+      // Auf 0 gesetzt heisst besiegt - ohne defeatedAt bliebe ein Boss mit 0 LP angreifbar stehen.
+      if (hp === 0 && !boss.defeatedAt) boss.defeatedAt = jetzt;
+      db.shared[WORLDBOSS_KEY] = JSON.stringify(boss);
+      await saveDb();
+      return res.json({ ok: true, bereich, aktion, hp, besiegt: !!boss.defeatedAt });
+    }
+    return res.status(400).json({ error: 'Unbekannte Aktion am Weltboss.' });
+  }
+
+  if (bereich === 'nest') {
+    if (aktion === 'setzen') {
+      const volk = String(req.body.volk || '');
+      const sys = String(req.body.sys || '');
+      if (!ALIEN_VOELKER[volk]) return res.status(400).json({ error: 'Unbekanntes Volk.' });
+      if (!sysDa(sys)) return res.status(400).json({ error: 'Dieses System gibt es nicht.' });
+      const nest = nestNeu(g, volk, sys, jetzt);
+      await saveDb();
+      return res.json({ ok: true, bereich, aktion, id: nest.id, volk, sys, stufe: nest.stufe });
+    }
+    if (aktion === 'entfernen') {
+      const liste = nestListe(g);
+      const i = liste.findIndex(n => n && n.id === String(req.body.id || ''));
+      if (i < 0) return res.status(404).json({ error: 'Dieses Nest gibt es nicht (mehr).' });
+      const weg = liste.splice(i, 1)[0];
+      await saveDb();
+      return res.json({ ok: true, bereich, aktion, id: weg.id, sys: weg.sys });
+    }
+    return res.status(400).json({ error: 'Unbekannte Aktion am Nest.' });
+  }
+
+  if (bereich === 'konvoi') {
+    if (aktion === 'setzen') {
+      const sys = String(req.body.sys || '');
+      if (!sysDa(sys)) return res.status(400).json({ error: 'Dieses System gibt es nicht.' });
+      const k = a2Neu(g, sys, jetzt);
+      await saveDb();
+      return res.json({ ok: true, bereich, aktion, id: k.id, sys });
+    }
+    if (aktion === 'entfernen') {
+      const liste = a2Liste(g);
+      const i = liste.findIndex(k => k && k.id === String(req.body.id || ''));
+      if (i < 0) return res.status(404).json({ error: 'Diesen Konvoi gibt es nicht (mehr).' });
+      const weg = liste.splice(i, 1)[0];
+      await saveDb();
+      return res.json({ ok: true, bereich, aktion, id: weg.id, sys: weg.sys });
+    }
+    return res.status(400).json({ error: 'Unbekannte Aktion am Konvoi.' });
+  }
+
+  if (bereich === 'marktereignis') {
+    if (aktion !== 'beenden') return res.status(400).json({ error: 'Am Marktereignis gibt es nur "beenden".' });
+    const lief = !!g.marketEvent;
+    g.marketEvent = null;
+    await saveDb();
+    return res.json({ ok: true, bereich, aktion, lief });
+  }
+
+  if (bereich === 'kopfgeld') {
+    if (aktion !== 'setzen') return res.status(400).json({ error: 'Beim Kopfgeld gibt es nur "setzen".' });
+    const ziel = kontoNachName(req, 'targetUsername');
+    if (!ziel) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+    // Den Wochenschluessel MITSCHREIBEN: Ohne ihn setzt resolveBountyServer beim naechsten Takt
+    // sofort wieder das Kopfgeld des Bestenlisten-Ersten daneben, und der Eingriff waere nach
+    // fuenfzehn Minuten spurlos weg.
+    g.bounty = { targetUserId: ziel.userId, targetName: ziel.username, reward: BOUNTY_REWARD,
+                 weekKey: serverWeekKey(jetzt), claimed: false, claimedBy: null, durchAdmin: true };
+    await saveDb();
+    return res.json({ ok: true, bereich, aktion, ziel: ziel.username, praemie: BOUNTY_REWARD });
+  }
+
+  return res.status(400).json({ error: 'Unbekannter Bereich - erlaubt sind weltboss, nest, konvoi, marktereignis, kopfgeld.' });
+});
+
+/* --- Chat-Moderation (02.09.2026) ---
+   Bis hierher gab es nur die Stummschaltung: Der Verfasser schwieg danach, seine Zeile stand aber
+   weiter fuer alle da. Beide Kanaele legen JE NACHRICHT einen eigenen geteilten Schluessel an
+   (`globalchat:msg:<id>`, `alliance:<tag>:msg:<id>`), eine einzelne laesst sich also sauber
+   entfernen.
+   DIE WICHTIGE SPERRE: Geloescht wird nur, was auch ein Chat-Schluessel IST (`:msg:` im Namen und
+   ein Praefix aus der erlaubten Familie). Ohne sie waere das hier ein Loeschknopf fuer jeden
+   beliebigen geteilten Schluessel - Allianz-Infos, Bestenliste, Vorposten inbegriffen. */
+function chatSchluesselGueltig(key) {
+  const k = String(key || '');
+  if (k.indexOf(':msg:') < 0) return false;
+  return k.startsWith('globalchat:msg:') || /^alliance:[^:]+:msg:/.test(k);
+}
+app.get('/api/admin/chat', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const name = String((req.query && req.query.name) || '').trim().toLowerCase();
+  const ziel = name ? db.users[name] : null;
+  if (name && !ziel) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const grenze = Math.min(200, Math.max(1, Math.floor(Number((req.query && req.query.limit) || 50))));
+  const out = [];
+  for (const k of Object.keys(db.shared)) {
+    if (!chatSchluesselGueltig(k)) continue;
+    let m = null;
+    try { m = JSON.parse(db.shared[k]); } catch (e) { continue; }
+    if (!m || typeof m !== 'object') continue;
+    if (ziel && m.authorId !== ziel.userId) continue;
+    out.push({ key: k, kanal: k.startsWith('globalchat:') ? 'global' : k.split(':')[1],
+      autor: m.authorName || null, autorId: m.authorId || null, text: String(m.text || '').slice(0, 400), zeit: m.time || chatKeyTimestamp(k) });
+  }
+  out.sort((a, b) => (b.zeit || 0) - (a.zeit || 0));
+  res.json({ nachrichten: out.slice(0, grenze), gesamt: out.length, konto: ziel ? ziel.username : null });
+});
+app.post('/api/admin/chat/loeschen', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const key = String((req.body && req.body.key) || '');
+  if (!chatSchluesselGueltig(key)) return res.status(400).json({ error: 'Das ist kein Chat-Schluessel.' });
+  if (db.shared[key] === undefined) return res.status(404).json({ error: 'Diese Nachricht gibt es nicht (mehr).' });
+  let autorId = null, autorName = null;
+  try { const m = JSON.parse(db.shared[key]); autorId = m && m.authorId; autorName = m && m.authorName; } catch (e) {}
+  delete db.shared[key];
+  // Stummschalten im selben Schritt, wenn gewuenscht: Wer eine Zeile entfernt, will den Verfasser
+  // meistens auch bremsen - zwei Handgriffe daraus zu machen heisst, dass der zweite vergessen wird.
+  const stunden = Math.max(0, Math.min(720, Math.floor(Number((req.body && req.body.stummStunden) || 0))));
+  let stummBis = 0, stummKonto = null;
+  if (stunden > 0 && autorId) {
+    const u = findUserById(autorId);
+    if (u) {
+      u.stummBis = Date.now() + stunden * 3600000;
+      u.stummGrund = String((req.body && req.body.grund) || '').trim().slice(0, 200) || 'Entfernte Chat-Nachricht';
+      u.stummSeit = Date.now();
+      stummBis = u.stummBis; stummKonto = u.username;
+    }
+  }
+  await saveDb();
+  res.json({ ok: true, key, autor: autorName || null, stummKonto, stummBis });
+});
+
+/* --- Alarm an den Betreiber (02.09.2026) ---
+   Die Zaehler dieser und der vorigen Runde (Kampfverlauf, Fehlanmeldungen, abgelehnte Spielstaende)
+   messen laengst - gelesen hat sie bisher nur, wer von sich aus nachgesehen hat. Dieser Waechter
+   dreht das um: Er prueft alle fuenf Minuten und meldet sich beim Betreiber, wenn eine Schwelle
+   ueberschritten ist.
+   DREI ENTSCHEIDUNGEN, die man beim Anfassen kennen muss:
+   1. Die Ruhefrist liegt je ALARMSCHLUESSEL (Art + Konto), nicht global. Sonst verdeckt der erste
+      Alarm alle anderen fuer sechs Stunden - und der zweite ist meistens der interessantere.
+   2. Der Alarm faehrt ueber die vorhandene Kategorie `messages` und nicht ueber eine neue. Eine
+      neue Push-Kategorie braucht denselben Namen im Frontend; bis der Frontend-PR live ist, waere
+      der Alarm sonst still. Additiv heisst: Er funktioniert ab dem Backend-Merge.
+   3. `GET /api/admin/alarm` nennt AUCH die aktuellen Messwerte und den Zeitpunkt der letzten
+      Pruefung. Ein Waechter, dessen Schweigen sich nicht von "laeuft gar nicht" unterscheiden
+      laesst, ist keiner - dieselbe Prueffrage wie bei jeder Sicherung dieses Projekts. */
+const NEUSTARTE_MERKEN = 20;
+const ALARM_SCHWELLEN = {
+  angriffe:        { schwelle: 15, name: 'Angriffe in einer Stunde', einheit: 'Angriffe' },
+  fehlanmeldungen: { schwelle: 10, name: 'Fehlanmeldungen seit der letzten Anmeldung', einheit: 'Versuche' },
+  spielstaende:    { schwelle: 5,  name: 'abgelehnte Spielstaende', einheit: 'Ablehnungen' },
+  neustarts:       { schwelle: 3,  name: 'Neustarts in einer Stunde', einheit: 'Starts' }
+};
+const ALARM_RUHE_MS = 6 * 60 * 60 * 1000;
+const ALARM_VERLAUF_MERKEN = 50;
+function alarmStand() {
+  if (!db.alarme || typeof db.alarme !== 'object') db.alarme = { letzterLauf: 0, gesendet: {}, verlauf: [] };
+  if (!db.alarme.gesendet) db.alarme.gesendet = {};
+  if (!Array.isArray(db.alarme.verlauf)) db.alarme.verlauf = [];
+  return db.alarme;
+}
+// Die reine Messung, ohne Nebenwirkung - so ist sie direkt pruefbar und dieselbe Quelle speist
+// sowohl den Alarm als auch die Anzeige in GET /admin/alarm ("warum hat nichts ausgeloest?").
+function alarmMessen(jetzt) {
+  const funde = [];
+  const eineStunde = jetzt - 3600000;
+  for (const u of Object.values(db.users)) {
+    if (!u || !u.userId) continue;
+    const angriffe = (u.kampfVerlauf || []).filter(e => e && e.rolle === 'angriff' && (e.zeit || 0) > eineStunde).length;
+    if (angriffe >= ALARM_SCHWELLEN.angriffe.schwelle)
+      funde.push({ art: 'angriffe', konto: u.username, wert: angriffe, schwelle: ALARM_SCHWELLEN.angriffe.schwelle,
+        text: u.username + ' hat in der letzten Stunde ' + angriffe + ' Angriffe geflogen.' });
+    const fehl = u.loginFehlversuche || 0;
+    if (fehl >= ALARM_SCHWELLEN.fehlanmeldungen.schwelle)
+      funde.push({ art: 'fehlanmeldungen', konto: u.username, wert: fehl, schwelle: ALARM_SCHWELLEN.fehlanmeldungen.schwelle,
+        text: 'Auf das Konto ' + u.username + ' laufen ' + fehl + ' fehlgeschlagene Anmeldungen.' });
+    const abgelehnt = (u.saveAblehnungen && u.saveAblehnungen.n) || 0;
+    if (abgelehnt >= ALARM_SCHWELLEN.spielstaende.schwelle)
+      funde.push({ art: 'spielstaende', konto: u.username, wert: abgelehnt, schwelle: ALARM_SCHWELLEN.spielstaende.schwelle,
+        text: 'Vom Konto ' + u.username + ' wurden ' + abgelehnt + ' Spielstaende abgelehnt - moeglicherweise ein kaputter oder manipulierter Stand.' });
+  }
+  const starts = (db.neustarts || []).filter(t => t > eineStunde).length;
+  if (starts >= ALARM_SCHWELLEN.neustarts.schwelle)
+    funde.push({ art: 'neustarts', konto: null, wert: starts, schwelle: ALARM_SCHWELLEN.neustarts.schwelle,
+      text: 'Das Backend ist in der letzten Stunde ' + starts + ' mal neu gestartet.' });
+  return funde;
+}
+async function pruefeAlarme() {
+  try {
+    const jetzt = Date.now();
+    const st = alarmStand();
+    st.letzterLauf = jetzt;
+    const admin = db.users['gamegeeeeek'];
+    const funde = alarmMessen(jetzt);
+    let neu = 0;
+    for (const f of funde) {
+      const schluessel = f.art + ':' + (f.konto || '-');
+      if (st.gesendet[schluessel] && (jetzt - st.gesendet[schluessel]) < ALARM_RUHE_MS) continue;   // Ruhefrist
+      st.gesendet[schluessel] = jetzt;
+      st.verlauf.unshift({ zeit: jetzt, art: f.art, konto: f.konto, wert: f.wert, schwelle: f.schwelle });
+      neu++;
+      if (admin) {
+        const prefs = getNotifPrefs(admin);
+        pushNotificationEvent(admin.userId, 'admin-alarm',
+          { titel: ALARM_SCHWELLEN[f.art].name, text: f.text, wert: f.wert, schwelle: f.schwelle, art: f.art, konto: f.konto },
+          { skipWebPush: !(prefs.enabled && prefs.messages) });
+      }
+    }
+    if (st.verlauf.length > ALARM_VERLAUF_MERKEN) st.verlauf.length = ALARM_VERLAUF_MERKEN;
+    await saveDb();
+    if (neu) console.log('[alarm] ' + neu + ' neue Meldung(en) an den Betreiber');
+  } catch (e) { console.error('pruefeAlarme fehlgeschlagen:', e.message); }
+}
+setInterval(pruefeAlarme, 5 * 60 * 1000);
+// setImmediate wie bei pruefeLoeschungen - der erste Lauf saehe sonst jede const weiter unten nicht.
+setImmediate(() => { pruefeAlarme(); });
+
+app.get('/api/admin/alarm', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const jetzt = Date.now();
+  const st = alarmStand();
+  // Die aktuellen Hoechstwerte gehoeren in die Antwort, nicht nur die ausgeloesten Alarme: Sie
+  // beantworten "der Waechter schweigt - laeuft er ueberhaupt, und wie nah ist es dran?".
+  let maxAngriffe = 0, maxFehl = 0, maxAbgelehnt = 0;
+  for (const u of Object.values(db.users)) {
+    if (!u) continue;
+    maxAngriffe = Math.max(maxAngriffe, (u.kampfVerlauf || []).filter(e => e && e.rolle === 'angriff' && (e.zeit || 0) > jetzt - 3600000).length);
+    maxFehl = Math.max(maxFehl, u.loginFehlversuche || 0);
+    maxAbgelehnt = Math.max(maxAbgelehnt, (u.saveAblehnungen && u.saveAblehnungen.n) || 0);
+  }
+  res.json({
+    schwellen: ALARM_SCHWELLEN, ruheStunden: Math.round(ALARM_RUHE_MS / 3600000),
+    letzterLauf: st.letzterLauf || 0, jetzt,
+    stand: { angriffe: maxAngriffe, fehlanmeldungen: maxFehl, spielstaende: maxAbgelehnt,
+             neustarts: (db.neustarts || []).filter(t => t > jetzt - 3600000).length },
+    offen: alarmMessen(jetzt), verlauf: st.verlauf.slice(0, ALARM_VERLAUF_MERKEN)
+  });
+});
+
+/* --- Geschenk an EIN Konto (02.09.2026) ---
+   Die vorhandene Route verschenkt an alle (Schleife ueber db.users) - fuer die Entschaedigung nach
+   einem Fehler gab es damit gar nichts. Dieselbe Pruefung derselben Gabentabelle, ein Empfaenger,
+   und der Grund reist mit: Er steht in der Belohnung UND im Postfach, damit der Spieler weiss,
+   wofuer er etwas bekommt. */
+app.post('/api/admin/geschenk-konto', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const ziel = kontoNachName(req, 'targetUsername');
+  if (!ziel) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const geprueft = bonuscodeGabenPruefen(req.body && req.body.gaben);
+  if (geprueft.fehler) return res.status(400).json({ error: geprueft.fehler });
+  const grund = String((req.body && req.body.grund) || '').trim().slice(0, GESCHENK_TEXT_MAX);
+  if (grund.length < 3) return res.status(400).json({ error: 'Bitte kurz begruenden, wofuer das Geschenk ist - der Spieler liest den Grund.' });
+  const priv = db.private[ziel.userId];
+  // Ohne Spielstand gibt es nichts, worin die Gabe landen koennte - die Belohnung bliebe fuer immer
+  // im Fach liegen. Das ist ein Fehler des Bedieners, kein stiller Sonderfall.
+  if (!priv || priv[SAVE_KEY] === undefined) return res.status(400).json({ error: 'Dieses Konto hat noch keinen Spielstand - eine Gabe haette nichts, worin sie landen koennte.' });
+  const jetzt = Date.now();
+  pushPendingReward(ziel.userId, Object.assign({ type: 'geschenk', text: grund, zeit: jetzt }, geprueft.gaben));
+  const prefs = getNotifPrefs(ziel);
+  pushNotificationEvent(ziel.userId, 'geschenk-konto', { grund, gaben: geprueft.gaben },
+    { skipWebPush: !(prefs.enabled && prefs.messages) });
+  db.geschenke = (db.geschenke || []).concat([{ zeit: jetzt, gaben: geprueft.gaben, text: grund, empfaenger: 1, konto: ziel.username }]).slice(-GESCHENKE_MERKEN);
+  await saveDb();
+  res.json({ ok: true, username: ziel.username, gaben: geprueft.gaben });
 });
 
 // --- Lage: Wirtschaft und Galaxie (02.09.2026) -------------------------------------------------

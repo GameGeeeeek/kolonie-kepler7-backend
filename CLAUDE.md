@@ -116,6 +116,7 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/admin.md` | Bonuscodes, Betreiber-Push, Admin-Fähigkeiten, Notaus, Aktivitäts-Uhr und ihre Erweiterungen (Verdacht, Geschenk, abgelehnte Spielstände), Protokoll-Middleware, Sperre mit Frist und Stummschaltung, Spielstand-Rücksicherung aus dem Backup, Allianz-Verwaltung, Feedback-Antwort, Wartungsankündigung, Notaus `angriffe`, Support-Werkzeuge (E-Mail, Umbenennen, Reset-Link), Lage, Kampfverlauf als Beweis, Anmelde-Forensik, E-Mail an Spieler, Konto-Löschung mit Frist |
 | `docs/chat.md` | Bündel-Abruf, Retention |
 | `docs/offsite-sicherung.md` | Abholung der Datenbank durch den M715q, Abhol-Token, Wächter über die letzte Abholung |
+| `docs/betriebsnetz.md` | `takt()`, Absturz-Handler mit Notfall-Flush, `taktFehler` in `/api/health` |
 | `docs/ki-kampfberichte.md` | Etappe E1a: Prompt-Zuschnitt, Wahrheits-Sperren, Warteschlange, `KAMPFTEXT_AKTIV` |
 
 Der vollständige frühere Text dieser Datei liegt in der Git-Historie vor dem 01.09.2026.

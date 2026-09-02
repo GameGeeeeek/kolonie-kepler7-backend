@@ -42,3 +42,30 @@ still auf einen acht Tage alten Schnappschuss zurück). **Ein fertiger Änderung
 committet und gepusht**, auch wenn Tests/Doku noch ausstehen – ein zweiter Commit ist billig, ein
 verlorener Änderungssatz nicht. Und nach jeder längeren Pause: `git log --oneline -1` gegen die
 
+
+
+### Ein Handler an einem Signal deckt den Absturz nicht ab (02.09.2026)
+
+`handleTerminate` flushte die DB bei `SIGTERM`/`SIGINT` und stand seit Monaten unbeanstandet in der
+Datei — die Sache sah erledigt aus. **Ein Absturz schickt aber kein Signal.** Bis zum 02.09.2026
+gab es keinen Handler für `uncaughtException`, und ein Wurf in irgendeinem der elf Takte beendete
+den Prozess damit ohne jeden Flush: bis zu fünf Minuten Spielstand weg, weil genau in diesem Takt
+das periodische `saveDb` läuft.
+
+**Die übertragbare Frage: Deckt die Sicherung den Weg ab, auf dem der Schaden wirklich eintritt —
+oder nur den, an den man beim Schreiben gedacht hat?** Dieselbe Familie wie die Prüffrage aus dem
+AI-Core-Audit („Was passiert, wenn die Konfiguration fehlt?"). Hier lautete die Antwort: Die
+Sicherung war da, sie hing nur am falschen Ereignis.
+
+Zwei Punkte, die sich beim Bauen als tragend erwiesen haben:
+
+- **Ein Netz, das nur auffängt, ist schlechter als der laute Absturz, den es ersetzt.** Aus einem
+  sichtbaren Ausfall würde ein stiller Dauerschaden. Jeder aufgefangene Fehler wird deshalb
+  gezählt und ist in `/api/health` sichtbar — dieselbe Antwort wie bei den neun Deploy-Ausfällen,
+  die alle nur zufällig bemerkt wurden.
+- **Im Absturz-Handler wird synchron geschrieben und nicht gemailt.** Nach einem
+  `uncaughtException` kann ein Promise ausbleiben; und eine Mail erreicht diesen Prozess ohnehin
+  nicht mehr. Der Absturz wandert stattdessen IN die Datenbank und wird beim nächsten Start
+  verschickt — der Weg über die Platte überlebt den Neustart, ein offener Versand nicht.
+
+Einzelheiten: `docs/betriebsnetz.md`.

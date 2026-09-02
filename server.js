@@ -12205,6 +12205,10 @@ function vorpostenFuerClient(doc, userId, jetzt) {
     kern: { lp: Math.max(0, Math.round((doc.kern && doc.kern.lp) || 0)), lpMax: Math.round((doc.kern && doc.kern.lpMax) || st.kernLp) },
     verteidigung: vorpostenVerteidigung(doc),
     garnisonAnzahl: vorpostenGarnisonAnzahl(doc),
+    /* garnisonMax gehoert HIERHER und nicht in die Stufentabelle des Clients: Die Tabelle ist die
+       Leiter OHNE Zweig-Multiplikatoren - ein Festungsring haette dort eine um 45 % zu kleine
+       Grenze angezeigt, und der Spieler haette Schiffe geschickt, die der Server ablehnt. */
+    garnisonMax: st.garnisonMax,
     schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
     nutzen: { flug: st.flug, prod: st.prod, scan: st.scan },

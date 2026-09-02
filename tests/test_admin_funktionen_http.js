@@ -305,11 +305,19 @@ function faelligesNest(jetzt) {
   // A2Tick die blanke Konstante, und der Admin konnte die Konvois nicht anhalten.
   // Fuenf seit dem 02.09.2026 (B2): `vorposten` stoppt den BAU neuer Vorposten - im ausgelieferten Stand
   // (VORPOSTEN_AKTIV=false) meldet er imCode:false, bis der Frontend-PR ihn umlegt.
-  // Sechs seit dem 02.09.2026 (Wartungsankuendigung): `angriffe` pausiert alle Angriffsrouten mit 503;
-  // er hat keine Code-Konstante und meldet imCode:true (test_admin_support_http prueft die Wirkung).
-  check('3a: die sechs Schalter werden gemeldet (festung, bauteile, nester, konvois, vorposten, angriffe)',
-    (st0.body.schalter || []).length === 6 && (st0.body.schalter || []).some(x => x.name === 'angriffe'),
-    { namen: (st0.body.schalter || []).map(x => x.name) });
+  // `angriffe` seit dem 02.09.2026 (Wartungsankuendigung): pausiert alle Angriffsrouten mit 503; er
+  // hat keine Code-Konstante und meldet imCode:true (test_admin_support_http prueft die Wirkung).
+  //
+  // Gezaehlt wird hier NICHT MEHR. Diese Pruefung stand zweimal auf einer festen Zahl (fuenf, dann
+  // sechs) und fiel beide Male, als eine parallele Sitzung einen Schalter ergaenzte - zuletzt
+  // `mindesteinsatz` am 02.09.2026. Eine Zahl ist eine Momentaufnahme, kein Verhalten: Die REGEL
+  // lautet, dass jeder in NOTAUS_NAMEN gefuehrte Schalter auch gemeldet wird, und die haelt auch
+  // beim siebten. Wer einen neuen anlegt, muss diesen Test seither nicht mehr anfassen.
+  const gemeldet = (st0.body.schalter || []).map(x => x.name);
+  const pflicht = ['festung', 'bauteile', 'nester', 'konvois', 'vorposten', 'angriffe'];
+  check('3a: jeder bekannte Schalter wird gemeldet, jeder mit Namen und Beschreibung',
+    pflicht.every(n => gemeldet.includes(n)) && (st0.body.schalter || []).every(x => x.name && x.beschreibung),
+    { gemeldet, fehlend: pflicht.filter(n => !gemeldet.includes(n)) });
   check('3a2: im Ausgangszustand ist nichts abgeschaltet',
     nester0.notAus === false && nester0.wirksam === true && nester0.imCode === true,
     { notAus: nester0.notAus, wirksam: nester0.wirksam, imCode: nester0.imCode });

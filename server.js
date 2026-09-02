@@ -191,6 +191,62 @@ function backupDb() {
 }
 backupDb();
 setInterval(backupDb, 30 * 60 * 1000);
+/* --- Off-Site-Sicherung: die Abholung durch den M715q (02.09.2026, Strukturpruefung C1) ---
+   BEFUND: db.json UND alle 48 Sicherungen liegen im SELBEN Volume auf dem Pi. Ein Ausfall der
+   Karte, ein verlorenes Volume oder ein versehentliches Loeschen nimmt Original und Sicherungen
+   in einem Zug mit - es gibt bis heute keine Kopie auf einer zweiten Maschine. Der Kommentar
+   ueber backupDb() nennt genau den Fall, gegen den die Sicherungen helfen (Beschaedigung), und
+   genau den nicht, gegen den sie nicht helfen.
+
+   ENTSCHEIDUNG: HOLEN statt SCHICKEN. Der M715q fragt die Datei beim Pi ab; der Pi bekommt
+   keinerlei Zugang zum M715q. Das ist der Unterschied, der im Ernstfall zaehlt: Wer den Pi
+   uebernimmt oder sein Dateisystem zerlegt, erreicht damit die Kopien NICHT. Ein Push-Weg haette
+   dem Pi Schreibrechte auf dem Sicherungsziel gegeben - dann faellt die Sicherung mit derselben
+   Maschine, gegen deren Ausfall sie da ist.
+
+   FAIL-CLOSED: Ohne BACKUP_PULL_TOKEN gibt es die Abholung schlicht nicht (503, kein Datenweg).
+   Die db.json enthaelt Passwort-Hashes, E-Mail-Adressen und Push-Anmeldungen; ein Endpunkt, der
+   sie im Fehlerfall ungeschuetzt herausgibt, waere schlimmer als gar keine Off-Site-Sicherung.
+   Der Token ist bewusst NICHT der Admin-JWT: Die Abholung laeuft unbeaufsichtigt aus einer
+   Cron-Zeile, und ein dort hinterlegtes Admin-Token koennte alles, was der Admin kann. */
+const BACKUP_PULL_TOKEN = process.env.BACKUP_PULL_TOKEN || '';
+// Die Abholung laeuft einmal je halbe Stunde. 20 Aufrufe je 10 Minuten sind reichlich Luft fuer
+// Wiederholungen und trotzdem eine Bremse gegen das Durchprobieren des Tokens.
+const offsiteRateLimit = rateLimit(10 * 60 * 1000, 20, 'Zu viele Abhol-Versuche - bitte kurz warten.');
+// Drei Faelle, drei Meldungen. Die Zusammenfassung "ungueltig ODER fehlend" hat im AI-Core-Repo
+// am 17.08.2026 eine ganze Fehlersuche gekostet: Sie beschreibt zwei Ursachen mit einem Satz und
+// ist damit im Fehlerfall keine Diagnose. Genannt wird die LAENGE des Empfangenen, nie der Wert -
+// 0 heisst fehlend, eine Zahl heisst falsch.
+function offsiteTokenPruefen(req) {
+  if (!BACKUP_PULL_TOKEN) {
+    return { status: 503, error: 'Off-Site-Abholung ist auf diesem Server nicht eingerichtet (BACKUP_PULL_TOKEN fehlt).' };
+  }
+  const kopf = String(req.get('authorization') || '');
+  const wert = kopf.startsWith('Bearer ') ? kopf.slice(7).trim() : '';
+  if (!wert) return { status: 401, error: 'Kein Abhol-Token mitgeschickt (Header "Authorization: Bearer <token>").' };
+  // timingSafeEqual verlangt gleiche Laenge und wirft sonst - die Laenge wird deshalb vorher
+  // verglichen. Auf BUFFERN, nicht auf Zeichenketten: ein Nicht-ASCII-Zeichen im Header haette
+  // sonst einen 500er statt einer sauberen 401 ergeben (derselbe Fehler steckte im ersten
+  // Entwurf der AI-Core-Auth und ist dort als Test verankert).
+  const a = Buffer.from(wert, 'utf8');
+  const b = Buffer.from(BACKUP_PULL_TOKEN, 'utf8');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return { status: 401, error: 'Abhol-Token stimmt nicht (' + a.length + ' Zeichen empfangen).' };
+  }
+  return null;
+}
+// Der Pi merkt sich SELBST, wann zuletzt abgeholt wurde - er beobachtet die Abholung, statt sich
+// vom M715q melden zu lassen. Das ist der Unterschied zwischen einer Sicherung und dem Anschein
+// einer: Stirbt der Timer auf dem M715q, meldet niemand etwas; ein Zaehler, der auf dem Pi steht,
+// wird trotzdem alt und faellt in /api/health und in der Lage auf.
+function offsiteVermerken(datei, groesse) {
+  db.offsite = { letzteAbholung: Date.now(), datei, groesse };
+  saveDb();
+}
+function offsiteAlterMs() {
+  const letzte = (db.offsite && db.offsite.letzteAbholung) || 0;
+  return letzte ? Date.now() - letzte : null;
+}
 setInterval(() => { saveDb(); }, 5 * 60 * 1000);
 // verify-Callback speichert den ROHEN Body zusätzlich (req.rawBody) - wird für die
 // GitHub-Webhook-Signaturprüfung gebraucht, da express.json() den Body normalerweise nur geparst
@@ -5015,6 +5071,11 @@ app.get('/api/health', (req, res) => res.json({
   checkout: gitKopfJetzt(),
   blob: LAUFENDE_DATEI,
   uptimeSec: Math.round(process.uptime()),
+  // Alter der letzten Off-Site-Abholung in Minuten, null wenn noch nie abgeholt wurde
+  // (02.09.2026). Gehoert hierher und nicht nur in die Admin-Lage, weil genau das die Frage ist,
+  // die man von aussen beantworten koennen muss, OHNE sich anzumelden: Laeuft die Sicherung auf
+  // der zweiten Maschine noch? Der Wert nennt weder Dateinamen noch Groesse noch Abholer.
+  offsiteAlterMin: (() => { const a = offsiteAlterMs(); return a === null ? null : Math.round(a / 60000); })(),
   // Ob der Container umgebaut ist (nodemon raus, Selbst-Neustart an), war von aussen bisher gar
   // nicht erkennbar - man musste `docker inspect` fahren, also einen SSH-Zugang haben. Genau
   // diese Luecke hatten `commit` und `blob` vorher auch. Der Wert ist ein blankes Ja/Nein und
@@ -9940,6 +10001,50 @@ function deployAlarm(repoName, betreff, detail) {
     .then(() => console.log('Deploy-Alarm-Mail für ' + repoName + ' verschickt.'))
     .catch((e) => console.error('Deploy-Alarm-Mail für ' + repoName + ' fehlgeschlagen:', e.message));
 }
+// ---- Waechter ueber die Off-Site-Sicherung (02.09.2026, Strukturpruefung C1) ----
+// "Eine Sicherung, deren Ausfall wie Normalbetrieb aussieht, ist keine" - die Regel steht in
+// CLAUDE.md und trifft hier doppelt zu: Holt der M715q nicht mehr ab (Timer aus, Maschine aus,
+// Token gedreht, Netz weg), aendert sich am Pi NICHTS. Der Spielbetrieb laeuft weiter, /api/health
+// meldet ok, und die Off-Site-Sicherung ist trotzdem tot. Genau derselbe Fingerabdruck wie bei den
+// neun Deploy-Ausfaellen, die alle nur zufaellig bemerkt wurden - deshalb dieselbe Antwort: eine
+// Mail. Bewusst FAIL-OPEN wie der Deploy-Alarm; er ist eine Benachrichtigung, keine Sicherung.
+const OFFSITE_WARNUNG_AB_MS = 26 * 60 * 60 * 1000;  // Takt ist stuendlich - 26h laesst einen
+                                                    // ausgefallenen Lauf und einen Neustart durch
+let offsiteAlarmGestellt = false;
+function offsiteMail(betreff, text) {
+  console.error('Off-Site-Sicherung: ' + betreff);
+  if (!DEPLOY_ALARM_MAIL) { console.error('Off-Site-Alarm: DEPLOY_ALARM_MAIL ist nicht gesetzt - keine Mail verschickt.'); return; }
+  sendEmail(DEPLOY_ALARM_MAIL, '[Kepler-7] ' + betreff,
+    '<pre style="font-family:monospace;white-space:pre-wrap">' + text.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre>', text)
+    .then(() => console.log('Off-Site-Alarm-Mail verschickt.'))
+    .catch((e) => console.error('Off-Site-Alarm-Mail fehlgeschlagen:', e.message));
+}
+function offsiteWaechter() {
+  // Kein Token = die Abholung ist gar nicht eingerichtet. Dann gibt es nichts zu ueberwachen,
+  // und eine Mail waere reines Rauschen auf jedem Testcontainer.
+  if (!BACKUP_PULL_TOKEN) return;
+  const alter = offsiteAlterMs();
+  // "Noch nie abgeholt" ist ein echter Befund, aber erst nach 26h Laufzeit: Waehrend der
+  // Einrichtung ist der Token schon gesetzt und der Cron-Eintrag auf dem M715q noch nicht - eine
+  // Mail eine Stunde spaeter waere ein Fehlalarm ueber einen Zustand, an dem gerade gearbeitet wird.
+  const zuAlt = alter === null ? process.uptime() * 1000 > OFFSITE_WARNUNG_AB_MS : alter > OFFSITE_WARNUNG_AB_MS;
+  if (zuAlt && !offsiteAlarmGestellt) {
+    offsiteAlarmGestellt = true;
+    offsiteMail('Off-Site-Sicherung haengt',
+      'Der M715q hat seit ' + (alter === null ? 'noch nie' : Math.round(alter / 3600000) + ' Stunden') +
+      ' keine Sicherung mehr abgeholt.\n\nDamit liegen db.json und alle Sicherungen wieder NUR auf dem Pi.\n\n' +
+      'Naechste Schritte auf dem M715q:\n' +
+      '- systemctl --user status kepler-offsite.timer   (bzw. crontab -l)\n' +
+      '- cd ~/gamegeeeeek-ai-core && .venv/bin/python tools/kepler_offsite_backup.py --nur-pruefen\n' +
+      '- Von aussen ohne Anmeldung: curl -s https://gamegeeeeek.de/api/health | grep offsite');
+  } else if (!zuAlt && offsiteAlarmGestellt) {
+    offsiteAlarmGestellt = false;
+    offsiteMail('Off-Site-Sicherung laeuft wieder',
+      'Die letzte Abholung liegt ' + Math.round(alter / 60000) + ' Minuten zurueck.');
+  }
+}
+setInterval(offsiteWaechter, 60 * 60 * 1000);
+
 // ===== Selbstheilung vor dem Pull (28.08.2026, Auftrag Sascha) ===============================
 // ZWOELF Deploy-Ausfaelle, und sechs davon (Nr. 6, 7, 8, 9, 11, 12) hatten denselben
 // Fingerabdruck: Arbeitsbaum neu, .git/HEAD alt, eine *.lock liegengeblieben. Ab da bricht JEDER
@@ -14259,6 +14364,61 @@ app.get('/api/admin/spielstand', authMiddleware, (req, res) => {
     schatten: schatten ? { zeit: schatten.zeit, quelle: schatten.quelle, zusammenfassung: spielstandZusammenfassung(schatten.value) } : null
   });
 });
+/* --- Off-Site-Abholung durch den M715q (02.09.2026, Strukturpruefung C1) ---
+   Zwei Routen, weil sie zwei verschiedene Fragen beantworten und verschieden teuer sind:
+   /api/offsite/stand kostet ein readdir und beantwortet "gibt es etwas Neues und wie alt ist die
+   letzte Abholung?" - das darf oft laufen. /api/offsite/backup liefert die Datei selbst.
+   Beide liegen NICHT unter /api/admin und NICHT hinter authMiddleware: Sie haengen an einem
+   eigenen Token (siehe offsiteTokenPruefen), damit die Cron-Zeile auf dem M715q kein
+   Admin-Token braucht. Ohne diesen Token gibt es sie faktisch nicht. */
+app.get('/api/offsite/stand', offsiteRateLimit, (req, res) => {
+  const fehler = offsiteTokenPruefen(req);
+  if (fehler) return res.status(fehler.status).json({ error: fehler.error });
+  const liste = backupListe();
+  res.json({
+    neuestes: liste[0] || null,
+    anzahl: liste.length,
+    behalt: BACKUP_RETENTION,
+    taktMinuten: 30,
+    letzteAbholung: (db.offsite && db.offsite.letzteAbholung) || null,
+    // Die Kontenzahl ist der Massstab, an dem die Gegenseite eine geschrumpfte Sicherung
+    // erkennt - eine Datei, die sich sauber liest und trotzdem die Haelfte der Konten verloren
+    // hat, ist der Fall, den ein blosses "heruntergeladen, Groesse > 0" nicht sieht.
+    konten: Object.keys(db.users).length
+  });
+});
+app.get('/api/offsite/backup', offsiteRateLimit, (req, res) => {
+  const fehler = offsiteTokenPruefen(req);
+  if (fehler) return res.status(fehler.status).json({ error: fehler.error });
+  const gewuenscht = String(req.query.datei || '').trim();
+  if (gewuenscht && !BACKUP_DATEI_MUSTER.test(gewuenscht)) {
+    return res.status(400).json({ error: 'Ungueltiger Backup-Name.' });
+  }
+  const liste = backupListe();
+  if (!liste.length) return res.status(404).json({ error: 'Es gibt noch keine Sicherung zum Abholen.' });
+  const eintrag = gewuenscht ? liste.find(b => b.datei === gewuenscht) : liste[0];
+  if (!eintrag) return res.status(404).json({ error: 'Diese Sicherung gibt es nicht (mehr).' });
+  let roh;
+  try { roh = fs.readFileSync(path.join(BACKUP_DIR, eintrag.datei)); }
+  catch (e) { return res.status(500).json({ error: 'Sicherung nicht lesbar: ' + String(e.message).slice(0, 80) }); }
+  // Die Pruefsumme wird UEBER DIE BYTES gebildet, die gleich rausgehen, und im Kopf mitgeschickt:
+  // Die Gegenseite rechnet sie nach und lehnt eine unterwegs abgeschnittene Datei ab. Ohne sie
+  // waere ein halb uebertragener Spielstand eine Datei, die aussieht wie eine Sicherung.
+  const summe = crypto.createHash('sha256').update(roh).digest('hex');
+  res.set({
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Backup-Datei': eintrag.datei,
+    'X-Backup-Zeit': String(eintrag.zeit),
+    'X-Backup-Groesse': String(roh.length),
+    'X-Backup-Sha256': summe
+  });
+  // Vermerkt wird erst bei 'finish', also wenn die Antwort wirklich vollstaendig rausgegangen
+  // ist - nicht schon beim Absenden. Ein abgebrochener Abruf soll die Uhr nicht zuruecksetzen,
+  // sonst meldet der Waechter "alles frisch", waehrend nichts angekommen ist.
+  res.on('finish', () => { if (res.statusCode === 200) offsiteVermerken(eintrag.datei, roh.length); });
+  res.send(roh);
+});
 app.get('/api/admin/backups', authMiddleware, (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
   res.json({ backups: backupListe(), behalt: BACKUP_RETENTION, taktMinuten: 30 });
@@ -14812,12 +14972,18 @@ app.get('/api/admin/systemstand', authMiddleware, (req, res) => {
       { name: 'DEPLOY_WEBHOOK_SECRET', gesetzt: gesetzt('DEPLOY_WEBHOOK_SECRET'), zweck: 'Ohne ihn weist der Deploy-Webhook JEDEN Aufruf ab' },
       { name: 'KOFI_VERIFICATION_TOKEN', gesetzt: gesetzt('KOFI_VERIFICATION_TOKEN'), zweck: 'Ohne ihn wird jede Ko-fi-Spende verworfen' },
       { name: 'FEEDBACK_EMAIL', gesetzt: gesetzt('FEEDBACK_EMAIL'), zweck: 'Feedback zusaetzlich per Mail (die Ansicht hier ist davon unabhaengig)' },
-      { name: 'PUBLIC_URL', gesetzt: gesetzt('PUBLIC_URL'), zweck: 'Adresse in Mail-Links und VAPID-Subject' }
+      { name: 'PUBLIC_URL', gesetzt: gesetzt('PUBLIC_URL'), zweck: 'Adresse in Mail-Links und VAPID-Subject' },
+      { name: 'BACKUP_PULL_TOKEN', gesetzt: gesetzt('BACKUP_PULL_TOKEN'), zweck: 'Ohne ihn holt der M715q keine Off-Site-Sicherung ab (Endpunkt antwortet 503)' }
     ],
     // Abgeleitete Betriebszustaende - sie beantworten dieselbe Art Frage wie die Liste darueber,
     // haengen aber nicht an einer Env-Variablen, sondern daran, ob etwas WIRKLICH geladen ist.
     laufzeit: {
       passwortlisteEintraege: BEKANNTE_PASSWOERTER.size,
+      // Nicht "ist der Token gesetzt" (das steht schon oben), sondern: ist in den letzten
+      // Stunden WIRKLICH etwas abgeholt worden. Ein gesetzter Token bei totem Timer auf dem
+      // M715q saehe in der Zeile darueber aus wie Normalbetrieb.
+      offsiteAlterMin: (() => { const a = offsiteAlterMs(); return a === null ? null : Math.round(a / 60000); })(),
+      offsiteDatei: (db.offsite && db.offsite.datei) || null,
       pushSchluesselDa: !!(VAPID_KEYS && VAPID_KEYS.publicKey),
       selbstheilungDa: typeof deployAufraeumen === 'function'
     }

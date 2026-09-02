@@ -305,7 +305,10 @@ function faelligesNest(jetzt) {
   // A2Tick die blanke Konstante, und der Admin konnte die Konvois nicht anhalten.
   // Fuenf seit dem 02.09.2026 (B2): `vorposten` stoppt den BAU neuer Vorposten - im ausgelieferten Stand
   // (VORPOSTEN_AKTIV=false) meldet er imCode:false, bis der Frontend-PR ihn umlegt.
-  check('3a: die fuenf Schalter werden gemeldet (festung, bauteile, nester, konvois, vorposten)', (st0.body.schalter || []).length === 5,
+  // Sechs seit dem 02.09.2026 (Wartungsankuendigung): `angriffe` pausiert alle Angriffsrouten mit 503;
+  // er hat keine Code-Konstante und meldet imCode:true (test_admin_support_http prueft die Wirkung).
+  check('3a: die sechs Schalter werden gemeldet (festung, bauteile, nester, konvois, vorposten, angriffe)',
+    (st0.body.schalter || []).length === 6 && (st0.body.schalter || []).some(x => x.name === 'angriffe'),
     { namen: (st0.body.schalter || []).map(x => x.name) });
   check('3a2: im Ausgangszustand ist nichts abgeschaltet',
     nester0.notAus === false && nester0.wirksam === true && nester0.imCode === true,

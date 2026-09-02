@@ -675,3 +675,56 @@ zum Admin und stuft bisherige Admins zu Offizieren herab (5b/5c). `POST /api/adm
 `disbandedByAdmin`), alle aktiven Rollen auf `left` – damit jeder Mitglieds-Client beim nächsten
 Laden dasselbe sieht wie nach einer Auflösung durch den Anführer, und der Tag für eine Neugründung
 frei ist (5f). Ein zweites Auflösen gibt 409.
+
+## Feedback beantworten, Wartungsankündigung, Support-Werkzeuge, Lage (02.09.2026, Auftrag Sascha)
+
+**Wortlaut:** „Weitere Ideen für Admin Funktionen vorschlagen" – vier gemessene Lücken vorgelegt,
+alle vier gewählt. Wächter: `tests/test_admin_support_http.js` (24 Prüfungen, Port 3245, sechs
+Gegenproben mit Pflichtlisten).
+
+### Feedback beantworten
+
+`POST /api/admin/feedback/antwort { id, text }` hängt die Antwort an den Eintrag (`antwort`) und
+schreibt dem Einsender einen Postfach-Eintrag `feedback-antwort` (Handy-Push über die Kategorie
+`messages` – eine Antwort ist eine Nachricht an ihn). Der Haken „erledigt" war nur für den
+Betreiber sichtbar; der Einsender erfuhr nie, was aus seiner Idee wurde. `GET /api/admin/feedback`
+liefert `antwort` mit.
+
+### Wartungsankündigung: EINE Ankündigung, offen lesbar, läuft von selbst ab
+
+`db.ankuendigung = { text, ab, dauerMinuten, gesetzt }`. `GET /api/ankuendigung` ist **offen**
+(auch die Landeseite soll sie zeigen können) und liefert nach `ab + dauer` **null** – der Client
+rechnet nichts weg. `jetzt` reist mit, damit ein Client mit schiefer Uhr den Countdown richtig
+rechnet. Setzen über `POST /api/admin/ankuendigung { text, abInMinuten, dauerMinuten }`, Aufheben
+über `…/aufheben`.
+
+### Sechster Notaus: `angriffe`
+
+Kein Spawn, sondern die **Annahme von Angriffen** an allen fünf Endpunkten (`/api/attack`,
+Festung, Nest, Konvoi, Vorposten): 503 mit `pausiert: true` und Text. Für die Dauer einer
+Rücksicherung oder db.json-Arbeit – ein Angriff während eines Stopps ginge sonst auf einen Stand,
+den es gleich nicht mehr gibt. Im Code immer an (`spawnAktivImCode('angriffe') === true`), der
+Admin kann ihn nur abschalten; die Schalter-Fläche im Frontend zeigt ihn datengetrieben. Der Client
+bucht einen 503 wie jeden abgewiesenen Angriff (Flotte kehrt zurück, Bericht ohne Kampf).
+
+### Support-Werkzeuge: dieselben Regeln wie Registrierung und Reset
+
+- `POST /api/admin/konto/email { targetUsername, email }` – `EMAIL_MUSTER`, Eindeutigkeit über alle
+  Konten, gilt als bestätigt (der Betreiber bürgt; sonst hätte der Spieler wieder keinen Zugang).
+- `POST /api/admin/konto/umbenennen { targetUsername, neuerName }` – `NAME_MUSTER` (3–18 Zeichen,
+  wie die Registrierung), Eindeutigkeit auch bei anderer Schreibweise, Betreiberkonto ausgenommen
+  (`isAdmin()` hängt am Namen). **Alle Namensstellen werden umgeschrieben**: `db.users`-Schlüssel,
+  `user.username`, `player.name` im Spielstand (der Client übernimmt `data.username` nur bei
+  leerem Namen), Bestenlisten-Eintrag, Allianz-Rollen. Dafür wird der Spielstand serverseitig
+  umgeschrieben (Version hoch) und die Sitzungen entwertet – dieselbe Begründung wie bei der
+  Rücksicherung. Chat und Meldungen behalten den alten Namen, sie sind Historie.
+- `POST /api/admin/konto/reset-link { targetUsername }` – Token wie beim Reset (eine Stunde), der
+  Link kommt zurück und geht auf anderem Weg an den Spieler. Im Protokoll steht der Link **nicht**
+  (der Token kommt nicht aus dem Request-Körper; 5b misst das).
+
+### Lage: nur lesen
+
+`GET /api/admin/lage`: Wirtschaft über alle Spielstände (dieselbe `spielstandZusammenfassung` wie
+das Blatt – Kredite gesamt/Median/Top 5, Ressourcen, Kampfpunkte, aktiv in 7 Tagen), Markt
+(Preise gegen Basis, Ereignis, Trend), PvE-Ziele (Weltboss, Nester, Festungen aus dem Feld,
+Wrackkonvois, Vorposten) und die gesetzten Notaus-Schalter. Nichts wird gerechnet oder verändert.

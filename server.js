@@ -1579,6 +1579,14 @@ function pushNotificationText(type, payload) {
   if (type === 'asteroid-contested') return payload.verloren
     ? { title: 'Schürfrecht verloren!', body: (payload.angreiferName || 'Ein Kommandant') + ' hat dir das Schürfrecht abgenommen. Deine überlebende Eskorte kehrt zurück - das Vorkommen gehört jetzt ihm.' }
     : { title: 'Angriff auf dein Schürfrecht abgewehrt', body: 'Deine Eskorte hat ' + (payload.angreiferName || 'einen Angreifer') + ' zurückgeschlagen. Das Vorkommen bleibt deins - sieh nach, was von der Wache übrig ist.' };
+  /* Vorposten (02.09.2026). Der Besitzer erfaehrt sonst NICHTS, bis sein Vorposten faellt: Der
+     Kampfvermerk steht nur im Dokument (sichtbar erst, wenn er das Kartenmenue oeffnet), und die
+     Warteschlange bekommt erst der Verlust. Das Konzept sagt ihm aber ausdruecklich zu, er koenne
+     mit einer Garnison gegenhalten - dafuer muss er den ERSTEN Schlag mitbekommen, nicht den
+     letzten. Der Kernstand steht im Text, weil er die Dringlichkeit traegt. */
+  if (type === 'vorposten-angegriffen') return payload.gefallen
+    ? { title: 'Vorposten geschleift!', body: (payload.angreiferName || 'Ein Kommandant') + ' hat deinen ' + (payload.name || 'Vorposten') + ' bei ' + (payload.system || '?') + ' geschleift - die Garnison ist mit ihm verloren.' }
+    : { title: 'Vorposten angegriffen!', body: (payload.angreiferName || 'Ein Kommandant') + ' beschiesst deinen ' + (payload.name || 'Vorposten') + ' bei ' + (payload.system || '?') + ' - Kern noch ' + (payload.kernProzent || 0) + '%. Verstärke die Garnison, solange er steht.' };
   if (type === 'spy-detected') return payload.sabotage
     ? { title: 'Störmanöver!', body: (payload.fromName || 'Ein Spieler') + ' hat ein Sabotage-Störmanöver gegen dich geflogen - prüfe deine Ressourcen und Spionageabwehr.' }
     : { title: 'Spionage entdeckt', body: (payload.fromName || 'Ein Spieler') + ' hat deine Kolonie ausgespäht' + (payload.deep ? ' (Tiefen-Aufklärung inkl. Beute-Schätzung).' : '.') };
@@ -12422,6 +12430,28 @@ app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
     if (weg > 0) eigeneVerluste[typ] = weg;
   }
   const meinAnteil = erg.anteile[req.userId] || 0;
+
+  /* DEN BESITZER BENACHRICHTIGEN - bei JEDEM Schlag, nicht erst beim Fall. Genau derselbe Weg wie
+     bei der Anfechtung (asteroid-contested): Prefs pruefen, Handy-Push ueber allowAttackPush
+     drosseln, Fehler schlucken (eine Benachrichtigung darf einen Kampf nie scheitern lassen -
+     fail-open ist hier richtig, weil es KEINE Sicherung ist). Steht VOR saveDb, damit die
+     eingereihte Meldung mit demselben Schreibvorgang auf die Platte geht.
+     Der Besitzer bekommt beim FALL zusaetzlich 'vorposten-verlust' in die Warteschlange - der
+     eine Weg meldet sofort aufs Handy, der andere wirkt im Spielstand; sie ersetzen einander nicht. */
+  try {
+    const besitzerUser = doc.besitzer ? findUserById(doc.besitzer) : null;
+    if (besitzerUser) {
+      const vPrefs = getNotifPrefs(besitzerUser);
+      if (vPrefs.enabled && vPrefs.attack) {
+        pushNotificationEvent(doc.besitzer, 'vorposten-angegriffen', {
+          angreiferName: req.username || 'Ein Kommandant',
+          name: vorpostenStufe(doc.stufe).name, system: sys, gefallen: erg.gefallen,
+          kernProzent: erg.gefallen ? 0 : Math.round(100 * Math.max(0, Math.min(1, (erg.lp || 0) / Math.max(1, erg.lpMax || 1))))
+        }, { skipWebPush: !allowAttackPush(doc.besitzer) });
+      }
+    }
+  } catch (e) { console.warn('[vorposten-angriff] Push fehlgeschlagen:', e.message); }
+
   console.log('[vorposten-angriff] userId=' + req.userId + ' sys=' + sys + ' kraft=' + Math.round(kraft) + ' verteidigung=' + erg.verteidigung +
     ' schaden=' + erg.schaden + ' lp=' + (erg.gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax);
   await saveDb();

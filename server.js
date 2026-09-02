@@ -66,6 +66,75 @@ function loadDb() {
 }
 let db = loadDb();
 
+/* ===== Das Betriebsnetz: Takte, die scheitern duerfen (02.09.2026, Strukturpruefung C2) ==========
+   BEFUND, gemessen: Der Prozess hatte KEINE Handler fuer 'uncaughtException' und
+   'unhandledRejection'. Ein Wurf in irgendeinem Takt - galaxyTick alle paar Minuten,
+   pruefeLoeschungen stuendlich, der Erinnerungs-Sweep jede Minute - beendete damit den ganzen
+   Server. Docker startet ihn zwar neu, aber: bis zu 5 Minuten nur im RAM gehaltener Stand sind
+   dann weg (das periodische saveDb laeuft in genau diesem Takt), und die Spieler sehen einen 502.
+   Die Graceful-Shutdown-Handler helfen dabei NICHT - sie haengen an SIGTERM/SIGINT, und ein
+   Absturz schickt kein Signal.
+
+   Die Takte, die schon ein try/catch hatten, waren dabei nicht besser dran, nur leiser: Sie
+   schrieben ihren Fehler ins Containerlog, und das liest niemand. Genau daran sind die neun
+   Deploy-Ausfaelle vom August lange unbemerkt geblieben.
+
+   Also beides, und zwar getrennt:
+   - takt(name, fn) faengt den Wurf UND die abgelehnte Zusage. Der naechste Durchlauf laeuft
+     wieder; ein einzelner kaputter Takt legt nicht den Rest des Servers still.
+   - Der Fehler wird GEZAEHLT und ist von aussen sichtbar (/api/health, Admin-Lage) und meldet
+     sich einmal je Stunde und Takt per Mail. Ein Netz, das nur auffaengt, verwandelt einen
+     lauten Absturz in einen stillen Dauerschaden - das waere schlechter als vorher. */
+const TAKT_FEHLER_MERKEN = 20;
+const taktFehlerListe = [];            // neueste zuerst
+const taktFehlerAnzahl = {};           // Name -> Anzahl seit Prozessstart
+function taktFehlerVermerken(name, fehler) {
+  // Die ersten drei Zeilen des Stacks: Die Meldung allein sagt oft nicht, WO es passiert ist,
+  // der ganze Stack sprengt jede Uebersicht.
+  const meldung = String((fehler && fehler.stack) || fehler || 'unbekannt')
+    .split('\n').slice(0, 3).map(z => z.trim()).join(' | ').slice(0, 400);
+  taktFehlerAnzahl[name] = (taktFehlerAnzahl[name] || 0) + 1;
+  console.error('[takt:' + name + '] Durchlauf ' + taktFehlerAnzahl[name] + ' gescheitert: ' + meldung);
+  taktFehlerListe.unshift({ name, zeit: Date.now(), nummer: taktFehlerAnzahl[name], meldung });
+  if (taktFehlerListe.length > TAKT_FEHLER_MERKEN) taktFehlerListe.pop();
+  betriebsMail('takt:' + name, 'Takt "' + name + '" ist gescheitert',
+    'Der Takt "' + name + '" ist gescheitert (Durchlauf ' + taktFehlerAnzahl[name] +
+    ' seit dem letzten Start).\n\n' + meldung +
+    '\n\nDer Server laeuft weiter - der naechste Durchlauf dieses Takts versucht es erneut.\n' +
+    'Stand von aussen: curl -s https://gamegeeeeek.de/api/health (Feld taktFehler)');
+}
+function takt(name, fn) {
+  return function (...args) {
+    try {
+      const ergebnis = fn.apply(this, args);
+      // Ein async-Takt wirft nicht, er lehnt ab - ohne dieses .catch waere die Ablehnung eine
+      // unbehandelte Zusage und beendete den Prozess (Node seit v15).
+      if (ergebnis && typeof ergebnis.then === 'function') {
+        return ergebnis.catch(f => taktFehlerVermerken(name, f));
+      }
+      return ergebnis;
+    } catch (f) { taktFehlerVermerken(name, f); }
+  };
+}
+// Eine Mail je Schluessel und Stunde. Dieselbe Ueberlegung wie beim Deploy-Alarm: Ein dauerhaft
+// kaputter Takt feuert bei jedem Durchlauf, und ein Postfach voller identischer Meldungen ist so
+// unlesbar wie das Containerlog. Bewusst FAIL-OPEN - eine Benachrichtigung ist keine Sicherung.
+const BETRIEBS_MAIL_PAUSE_MS = 60 * 60 * 1000;
+const betriebsMailZuletzt = {};
+function mailAnBetreiber(betreff, text) {
+  if (!DEPLOY_ALARM_MAIL) { console.error('Betriebs-Mail "' + betreff + '": DEPLOY_ALARM_MAIL ist nicht gesetzt - nicht verschickt.'); return; }
+  sendEmail(DEPLOY_ALARM_MAIL, '[Kepler-7] ' + betreff,
+    '<pre style="font-family:monospace;white-space:pre-wrap">' + text.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre>', text)
+    .then(() => console.log('Betriebs-Mail verschickt: ' + betreff))
+    .catch((e) => console.error('Betriebs-Mail fehlgeschlagen (' + betreff + '):', e.message));
+}
+function betriebsMail(schluessel, betreff, text) {
+  const jetzt = Date.now();
+  if (betriebsMailZuletzt[schluessel] && jetzt - betriebsMailZuletzt[schluessel] < BETRIEBS_MAIL_PAUSE_MS) return;
+  betriebsMailZuletzt[schluessel] = jetzt;
+  mailAnBetreiber(betreff, text);
+}
+
 // saveDb() mit In-Flight-Coalescing: Bisher reihte jeder Aufruf einen EIGENEN vollständigen Schreib-
 // vorgang der gesamten db.json in eine Kette - bei mehreren gleichzeitigen Requests also N teure
 // JSON.stringify+write-Durchläufe. Jetzt läuft immer nur EIN Schreibvorgang; alle Aufrufe, die während
@@ -130,10 +199,10 @@ app.use(cors({
 const rateLimitBuckets = new Map();
 // Räumt abgelaufene Einträge regelmäßig auf, damit die Map nicht unbegrenzt wächst (jede neue IP
 // erzeugt sonst dauerhaft einen Eintrag, auch nach Ablauf des Zeitfensters).
-setInterval(() => {
+setInterval(takt('rateLimit-aufraeumen', () => {
   const now = Date.now();
   for (const [key, bucket] of rateLimitBuckets.entries()) if (now > bucket.resetAt) rateLimitBuckets.delete(key);
-}, 5 * 60 * 1000);
+}), 5 * 60 * 1000);
 function rateLimit(windowMs, max, message) {
   return (req, res, next) => {
     const key = req.ip + ':' + (req.rateLimitScope || req.path);
@@ -187,11 +256,67 @@ function backupDb() {
       fs.unlinkSync(path.join(BACKUP_DIR, oldest));
     }
     return name;
-  } catch (e) { console.error('Backup fehlgeschlagen:', e); return null; }
+  } catch (e) { taktFehlerVermerken('backupDb', e); return null; }
 }
 backupDb();
-setInterval(backupDb, 30 * 60 * 1000);
-setInterval(() => { saveDb(); }, 5 * 60 * 1000);
+setInterval(takt('backupDb', backupDb), 30 * 60 * 1000);
+/* --- Off-Site-Sicherung: die Abholung durch den M715q (02.09.2026, Strukturpruefung C1) ---
+   BEFUND: db.json UND alle 48 Sicherungen liegen im SELBEN Volume auf dem Pi. Ein Ausfall der
+   Karte, ein verlorenes Volume oder ein versehentliches Loeschen nimmt Original und Sicherungen
+   in einem Zug mit - es gibt bis heute keine Kopie auf einer zweiten Maschine. Der Kommentar
+   ueber backupDb() nennt genau den Fall, gegen den die Sicherungen helfen (Beschaedigung), und
+   genau den nicht, gegen den sie nicht helfen.
+
+   ENTSCHEIDUNG: HOLEN statt SCHICKEN. Der M715q fragt die Datei beim Pi ab; der Pi bekommt
+   keinerlei Zugang zum M715q. Das ist der Unterschied, der im Ernstfall zaehlt: Wer den Pi
+   uebernimmt oder sein Dateisystem zerlegt, erreicht damit die Kopien NICHT. Ein Push-Weg haette
+   dem Pi Schreibrechte auf dem Sicherungsziel gegeben - dann faellt die Sicherung mit derselben
+   Maschine, gegen deren Ausfall sie da ist.
+
+   FAIL-CLOSED: Ohne BACKUP_PULL_TOKEN gibt es die Abholung schlicht nicht (503, kein Datenweg).
+   Die db.json enthaelt Passwort-Hashes, E-Mail-Adressen und Push-Anmeldungen; ein Endpunkt, der
+   sie im Fehlerfall ungeschuetzt herausgibt, waere schlimmer als gar keine Off-Site-Sicherung.
+   Der Token ist bewusst NICHT der Admin-JWT: Die Abholung laeuft unbeaufsichtigt aus einer
+   Cron-Zeile, und ein dort hinterlegtes Admin-Token koennte alles, was der Admin kann. */
+const BACKUP_PULL_TOKEN = process.env.BACKUP_PULL_TOKEN || '';
+// Die Abholung laeuft einmal je halbe Stunde. 20 Aufrufe je 10 Minuten sind reichlich Luft fuer
+// Wiederholungen und trotzdem eine Bremse gegen das Durchprobieren des Tokens.
+const offsiteRateLimit = rateLimit(10 * 60 * 1000, 20, 'Zu viele Abhol-Versuche - bitte kurz warten.');
+// Drei Faelle, drei Meldungen. Die Zusammenfassung "ungueltig ODER fehlend" hat im AI-Core-Repo
+// am 17.08.2026 eine ganze Fehlersuche gekostet: Sie beschreibt zwei Ursachen mit einem Satz und
+// ist damit im Fehlerfall keine Diagnose. Genannt wird die LAENGE des Empfangenen, nie der Wert -
+// 0 heisst fehlend, eine Zahl heisst falsch.
+function offsiteTokenPruefen(req) {
+  if (!BACKUP_PULL_TOKEN) {
+    return { status: 503, error: 'Off-Site-Abholung ist auf diesem Server nicht eingerichtet (BACKUP_PULL_TOKEN fehlt).' };
+  }
+  const kopf = String(req.get('authorization') || '');
+  const wert = kopf.startsWith('Bearer ') ? kopf.slice(7).trim() : '';
+  if (!wert) return { status: 401, error: 'Kein Abhol-Token mitgeschickt (Header "Authorization: Bearer <token>").' };
+  // timingSafeEqual verlangt gleiche Laenge und wirft sonst - die Laenge wird deshalb vorher
+  // verglichen. Auf BUFFERN, nicht auf Zeichenketten: ein Nicht-ASCII-Zeichen im Header haette
+  // sonst einen 500er statt einer sauberen 401 ergeben (derselbe Fehler steckte im ersten
+  // Entwurf der AI-Core-Auth und ist dort als Test verankert).
+  const a = Buffer.from(wert, 'utf8');
+  const b = Buffer.from(BACKUP_PULL_TOKEN, 'utf8');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return { status: 401, error: 'Abhol-Token stimmt nicht (' + a.length + ' Zeichen empfangen).' };
+  }
+  return null;
+}
+// Der Pi merkt sich SELBST, wann zuletzt abgeholt wurde - er beobachtet die Abholung, statt sich
+// vom M715q melden zu lassen. Das ist der Unterschied zwischen einer Sicherung und dem Anschein
+// einer: Stirbt der Timer auf dem M715q, meldet niemand etwas; ein Zaehler, der auf dem Pi steht,
+// wird trotzdem alt und faellt in /api/health und in der Lage auf.
+function offsiteVermerken(datei, groesse) {
+  db.offsite = { letzteAbholung: Date.now(), datei, groesse };
+  saveDb();
+}
+function offsiteAlterMs() {
+  const letzte = (db.offsite && db.offsite.letzteAbholung) || 0;
+  return letzte ? Date.now() - letzte : null;
+}
+setInterval(takt('saveDb', () => saveDb()), 5 * 60 * 1000);
 // verify-Callback speichert den ROHEN Body zusätzlich (req.rawBody) - wird für die
 // GitHub-Webhook-Signaturprüfung gebraucht, da express.json() den Body normalerweise nur geparst
 // bereitstellt. Für alle anderen Routen ändert sich dadurch nichts.
@@ -1956,7 +2081,7 @@ function handleSharedStorageWrite(key, prevRaw, newRaw) {
 // Periodischer Sweep für geplante Überfall-Erinnerungen (Client meldet fireAt aktiv, siehe
 // /api/schedule-raid-alert weiter unten - eine lokale NPC-Bedrohung, von der der Server sonst nie
 // erfährt). Alle 30s geprüft, damit ein Server-Neustart nichts Endgültiges verpasst.
-setInterval(async () => {
+setInterval(takt('ueberfall-erinnerungen', async () => {
   try {
     let changed = false;
     const now = Date.now();
@@ -1974,8 +2099,8 @@ setInterval(async () => {
       }
     }
     if (changed) await saveDb();
-  } catch (e) { console.error('Überfall-Erinnerungs-Sweep fehlgeschlagen:', e.message); }
-}, 30000);
+  } catch (e) { taktFehlerVermerken('ueberfall-erinnerungen', e); }
+}), 30000);
 const SAVE_KEY = 'kepler7-save-v3';
 function getSaveValue(userId) {
   const entry = db.private[userId] && db.private[userId][SAVE_KEY];
@@ -5026,6 +5151,16 @@ app.get('/api/health', (req, res) => res.json({
   checkout: gitKopfJetzt(),
   blob: LAUFENDE_DATEI,
   uptimeSec: Math.round(process.uptime()),
+  // Alter der letzten Off-Site-Abholung in Minuten, null wenn noch nie abgeholt wurde
+  // (02.09.2026). Gehoert hierher und nicht nur in die Admin-Lage, weil genau das die Frage ist,
+  // die man von aussen beantworten koennen muss, OHNE sich anzumelden: Laeuft die Sicherung auf
+  // der zweiten Maschine noch? Der Wert nennt weder Dateinamen noch Groesse noch Abholer.
+  offsiteAlterMin: (() => { const a = offsiteAlterMs(); return a === null ? null : Math.round(a / 60000); })(),
+  // Gescheiterte Takt-Durchlaeufe seit dem Start und das Alter des letzten Absturzes in Minuten
+  // (02.09.2026). Ohne sie faengt das Netz zwar auf, aber niemand erfaehrt davon - und ein
+  // aufgefangener Dauerfehler waere schlechter als der laute Absturz, den er ersetzt.
+  taktFehler: Object.values(taktFehlerAnzahl).reduce((a, b) => a + b, 0),
+  letzterAbsturzMin: db.absturz && db.absturz.zeit ? Math.round((Date.now() - db.absturz.zeit) / 60000) : null,
   // Ob der Container umgebaut ist (nodemon raus, Selbst-Neustart an), war von aussen bisher gar
   // nicht erkennbar - man musste `docker inspect` fahren, also einen SSH-Zugang haben. Genau
   // diese Luecke hatten `commit` und `blob` vorher auch. Der Wert ist ein blankes Ja/Nein und
@@ -5684,6 +5819,70 @@ async function handleTerminate(signal) {
 }
 process.on('SIGTERM', () => handleTerminate('SIGTERM'));
 process.on('SIGINT', () => handleTerminate('SIGINT'));
+
+/* --- Der Absturz-Fall: dieselbe Sorgfalt wie beim geordneten Stopp (02.09.2026, C2) ---
+   Die beiden Handler darueber haengen an einem SIGNAL. Ein Absturz schickt kein Signal - bis
+   hierher endete der Prozess bei einem unbehandelten Wurf also OHNE Flush, und mit ihm bis zu
+   fuenf Minuten Spielstand (das periodische saveDb laeuft in diesem Takt).
+
+   Geschrieben wird deshalb SYNCHRON, nicht ueber saveDb(): Nach einem uncaughtException ist der
+   Zustand der Ereignisschleife nicht mehr belastbar, und ein Promise, auf das man wartet, kann
+   ausbleiben. Eine eigene Zwischendatei (.notfall), damit sie nicht mit einem gerade laufenden
+   asynchronen Schreibvorgang um dieselbe .tmp streitet.
+
+   Gemeldet wird NICHT von hier aus: Eine Mail ist asynchron und erreicht diesen Prozess nicht
+   mehr. Der Absturz wird stattdessen IN die Datenbank geschrieben und beim naechsten Start
+   verschickt - der Weg ueber die Platte ueberlebt den Neustart, ein offener Mailversand nicht. */
+let notfallFlushGelaufen = false;
+function notfallFlushSynchron() {
+  if (notfallFlushGelaufen) return 'schon gelaufen';
+  notfallFlushGelaufen = true;
+  try {
+    const zwischen = DB_FILE + '.notfall';
+    fs.writeFileSync(zwischen, JSON.stringify(db));
+    fs.renameSync(zwischen, DB_FILE);
+    return null;
+  } catch (e) { return String(e && e.message || e); }
+}
+function fehlerText(fehler) {
+  return String((fehler && fehler.stack) || fehler || 'unbekannt')
+    .split('\n').slice(0, 4).map(z => z.trim()).join(' | ').slice(0, 600);
+}
+process.on('uncaughtException', (fehler, herkunft) => {
+  const meldung = fehlerText(fehler);
+  console.error('[absturz] uncaughtException (' + herkunft + '): ' + meldung);
+  try { db.absturz = { zeit: Date.now(), herkunft: String(herkunft || ''), meldung, gemeldet: false }; } catch (e) {}
+  const flushFehler = notfallFlushSynchron();
+  console.error('[absturz] Notfall-Flush: ' + (flushFehler ? 'FEHLGESCHLAGEN (' + flushFehler + ')' : 'db.json geschrieben'));
+  // Danach wirklich beenden. Weiterlaufen nach einem uncaughtException hiesse, mit einem
+  // Zustand weiterzuarbeiten, ueber den man nichts mehr weiss - und ausgerechnet dieser Server
+  // schreibt fremde Spielstaende. Docker startet in rund 7 Sekunden neu.
+  process.exit(1);
+});
+/* Eine abgelehnte Zusage ist NICHT dasselbe und wird bewusst anders behandelt: Der Prozess laeuft
+   weiter. Node beendet ihn seit v15 von sich aus - fuer diesen Server ist das die schlechtere
+   Wahl, denn die unbehandelten Zusagen, die es hier realistisch gibt, kommen aus dem Mail- und
+   Push-Versand (fire and forget). Das ganze Spiel anzuhalten, weil Resend nicht antwortet, waere
+   genau die Sorte Sicherung, die mehr kaputt macht als sie schuetzt.
+   Verschluckt wird sie trotzdem nicht: Sie laeuft durch denselben Melder wie ein gescheiterter
+   Takt, wird also gezaehlt, steht in /api/health und meldet sich per Mail. */
+process.on('unhandledRejection', (grund) => {
+  taktFehlerVermerken('unbehandelte-zusage', grund);
+});
+// Beim Start nachsehen, ob der letzte Lauf abgestuerzt ist - das ist die Stelle, an der die
+// Meldung wirklich rausgehen kann. setImmediate wegen der temporalen Todeszone.
+setImmediate(() => {
+  const a = db.absturz;
+  if (!a || a.gemeldet) return;
+  a.gemeldet = true;
+  saveDb();
+  mailAnBetreiber('Server war abgestuerzt',
+    'Der vorige Lauf endete mit einem unbehandelten Fehler (' + (a.herkunft || 'uncaughtException') + ').\n\n' +
+    new Date(a.zeit).toISOString() + '\n' + a.meldung +
+    '\n\nDie Datenbank wurde vor dem Beenden noch geschrieben.\n' +
+    'Stand: curl -s https://gamegeeeeek.de/api/health\n' +
+    'Log:   docker logs --tail 120 kepler7-backend | grep absturz');
+});
 // nodemon signalisiert einen Neustart per SIGUSR2. Wir flushen erst und lösen das Signal danach erneut
 // aus (Handler ist per `once` schon entfernt), damit nodemon seinen Neustart wie gewohnt durchführt -
 // dieser Prozess darf sich hier NICHT selbst per process.exit beenden, sonst bleibt nodemon hängen.
@@ -7023,9 +7222,9 @@ function checkCompletionReminders() {
       pushNotificationEvent(userId, 'job-complete', { jobType: due[0].type });
     }
     if (changed) saveDb();
-  } catch (e) { console.error('checkCompletionReminders fehlgeschlagen:', e.message); }
+  } catch (e) { taktFehlerVermerken('checkCompletionReminders', e); }
 }
-setInterval(checkCompletionReminders, 60 * 1000);
+setInterval(takt('checkCompletionReminders', checkCompletionReminders), 60 * 1000);
 
 // --- Reaktivierung: Winback-E-Mails für inaktive Spieler ---
 // Push deckt bereits laufende Ereignisse ab (Überfall, überholt, Bau fertig ...), erreicht aber nur
@@ -7092,12 +7291,12 @@ async function checkDormantWinback() {
       } catch (e) { console.error('Winback-Mail fehlgeschlagen:', e.message); }
     }
     if (changed) await saveDb();
-  } catch (e) { console.error('checkDormantWinback fehlgeschlagen:', e.message); }
+  } catch (e) { taktFehlerVermerken('checkDormantWinback', e); }
 }
-setInterval(checkDormantWinback, 60 * 60 * 1000);   // stündlich prüfen
-setTimeout(checkDormantWinback, 2 * 60 * 1000);     // erster Lauf ~2 Min nach Start (blockiert den Boot nicht)
+setInterval(takt('checkDormantWinback', checkDormantWinback), 60 * 60 * 1000);   // stündlich prüfen
+setTimeout(takt('checkDormantWinback', checkDormantWinback), 2 * 60 * 1000);     // erster Lauf ~2 Min nach Start (blockiert den Boot nicht)
 
-setInterval(galaxyTick, GALAXY_TICK_MS);
+setInterval(takt('galaxyTick', galaxyTick), GALAXY_TICK_MS);
 /* Der Startlauf liegt in setImmediate und NICHT direkt hier - gemessen, nicht vermutet (18.08.2026).
    Diese Zeile steht bei 5526, der Rest der Datei geht bis 9100+. Ein direkter Aufruf führt den
    Rumpf von galaxyTick MITTEN in der Modulauswertung aus; jede `const`, die weiter unten steht,
@@ -7110,7 +7309,7 @@ setInterval(galaxyTick, GALAXY_TICK_MS);
    ist, also Millisekunden später - die Absicht "nicht 15 Minuten auf den ersten Zustand warten"
    bleibt vollständig erhalten. Nach der Zeile stehen ohnehin nur noch Funktions-, Konstanten- und
    Routendefinitionen, nichts, was den Takt vorher gelaufen sehen müsste (nachgesehen). */
-setImmediate(galaxyTick);
+setImmediate(takt('galaxyTick-start', galaxyTick));
 
 // Die Front fuehrt zwei Dinge, die ausserhalb des Servers niemanden etwas angehen: die Pufferstaende
 // beider Seiten (wer sie sieht, kennt das Ergebnis des naechsten Takts, bevor er faellt) und je Konto
@@ -9959,6 +10158,46 @@ function deployAlarm(repoName, betreff, detail) {
     .then(() => console.log('Deploy-Alarm-Mail für ' + repoName + ' verschickt.'))
     .catch((e) => console.error('Deploy-Alarm-Mail für ' + repoName + ' fehlgeschlagen:', e.message));
 }
+// ---- Waechter ueber die Off-Site-Sicherung (02.09.2026, Strukturpruefung C1) ----
+// "Eine Sicherung, deren Ausfall wie Normalbetrieb aussieht, ist keine" - die Regel steht in
+// CLAUDE.md und trifft hier doppelt zu: Holt der M715q nicht mehr ab (Timer aus, Maschine aus,
+// Token gedreht, Netz weg), aendert sich am Pi NICHTS. Der Spielbetrieb laeuft weiter, /api/health
+// meldet ok, und die Off-Site-Sicherung ist trotzdem tot. Genau derselbe Fingerabdruck wie bei den
+// neun Deploy-Ausfaellen, die alle nur zufaellig bemerkt wurden - deshalb dieselbe Antwort: eine
+// Mail. Bewusst FAIL-OPEN wie der Deploy-Alarm; er ist eine Benachrichtigung, keine Sicherung.
+const OFFSITE_WARNUNG_AB_MS = 26 * 60 * 60 * 1000;  // Takt ist stuendlich - 26h laesst einen
+                                                    // ausgefallenen Lauf und einen Neustart durch
+let offsiteAlarmGestellt = false;
+function offsiteMail(betreff, text) {
+  console.error('Off-Site-Sicherung: ' + betreff);
+  mailAnBetreiber(betreff, text);
+}
+function offsiteWaechter() {
+  // Kein Token = die Abholung ist gar nicht eingerichtet. Dann gibt es nichts zu ueberwachen,
+  // und eine Mail waere reines Rauschen auf jedem Testcontainer.
+  if (!BACKUP_PULL_TOKEN) return;
+  const alter = offsiteAlterMs();
+  // "Noch nie abgeholt" ist ein echter Befund, aber erst nach 26h Laufzeit: Waehrend der
+  // Einrichtung ist der Token schon gesetzt und der Cron-Eintrag auf dem M715q noch nicht - eine
+  // Mail eine Stunde spaeter waere ein Fehlalarm ueber einen Zustand, an dem gerade gearbeitet wird.
+  const zuAlt = alter === null ? process.uptime() * 1000 > OFFSITE_WARNUNG_AB_MS : alter > OFFSITE_WARNUNG_AB_MS;
+  if (zuAlt && !offsiteAlarmGestellt) {
+    offsiteAlarmGestellt = true;
+    offsiteMail('Off-Site-Sicherung haengt',
+      'Der M715q hat seit ' + (alter === null ? 'noch nie' : Math.round(alter / 3600000) + ' Stunden') +
+      ' keine Sicherung mehr abgeholt.\n\nDamit liegen db.json und alle Sicherungen wieder NUR auf dem Pi.\n\n' +
+      'Naechste Schritte auf dem M715q:\n' +
+      '- systemctl --user status kepler-offsite.timer   (bzw. crontab -l)\n' +
+      '- cd ~/gamegeeeeek-ai-core && .venv/bin/python tools/kepler_offsite_backup.py --nur-pruefen\n' +
+      '- Von aussen ohne Anmeldung: curl -s https://gamegeeeeek.de/api/health | grep offsite');
+  } else if (!zuAlt && offsiteAlarmGestellt) {
+    offsiteAlarmGestellt = false;
+    offsiteMail('Off-Site-Sicherung laeuft wieder',
+      'Die letzte Abholung liegt ' + Math.round(alter / 60000) + ' Minuten zurueck.');
+  }
+}
+setInterval(takt('offsiteWaechter', offsiteWaechter), 60 * 60 * 1000);
+
 // ===== Selbstheilung vor dem Pull (28.08.2026, Auftrag Sascha) ===============================
 // ZWOELF Deploy-Ausfaelle, und sechs davon (Nr. 6, 7, 8, 9, 11, 12) hatten denselben
 // Fingerabdruck: Arbeitsbaum neu, .git/HEAD alt, eine *.lock liegengeblieben. Ab da bricht JEDER
@@ -14496,6 +14735,61 @@ app.get('/api/admin/spielstand', authMiddleware, (req, res) => {
     schatten: schatten ? { zeit: schatten.zeit, quelle: schatten.quelle, zusammenfassung: spielstandZusammenfassung(schatten.value) } : null
   });
 });
+/* --- Off-Site-Abholung durch den M715q (02.09.2026, Strukturpruefung C1) ---
+   Zwei Routen, weil sie zwei verschiedene Fragen beantworten und verschieden teuer sind:
+   /api/offsite/stand kostet ein readdir und beantwortet "gibt es etwas Neues und wie alt ist die
+   letzte Abholung?" - das darf oft laufen. /api/offsite/backup liefert die Datei selbst.
+   Beide liegen NICHT unter /api/admin und NICHT hinter authMiddleware: Sie haengen an einem
+   eigenen Token (siehe offsiteTokenPruefen), damit die Cron-Zeile auf dem M715q kein
+   Admin-Token braucht. Ohne diesen Token gibt es sie faktisch nicht. */
+app.get('/api/offsite/stand', offsiteRateLimit, (req, res) => {
+  const fehler = offsiteTokenPruefen(req);
+  if (fehler) return res.status(fehler.status).json({ error: fehler.error });
+  const liste = backupListe();
+  res.json({
+    neuestes: liste[0] || null,
+    anzahl: liste.length,
+    behalt: BACKUP_RETENTION,
+    taktMinuten: 30,
+    letzteAbholung: (db.offsite && db.offsite.letzteAbholung) || null,
+    // Die Kontenzahl ist der Massstab, an dem die Gegenseite eine geschrumpfte Sicherung
+    // erkennt - eine Datei, die sich sauber liest und trotzdem die Haelfte der Konten verloren
+    // hat, ist der Fall, den ein blosses "heruntergeladen, Groesse > 0" nicht sieht.
+    konten: Object.keys(db.users).length
+  });
+});
+app.get('/api/offsite/backup', offsiteRateLimit, (req, res) => {
+  const fehler = offsiteTokenPruefen(req);
+  if (fehler) return res.status(fehler.status).json({ error: fehler.error });
+  const gewuenscht = String(req.query.datei || '').trim();
+  if (gewuenscht && !BACKUP_DATEI_MUSTER.test(gewuenscht)) {
+    return res.status(400).json({ error: 'Ungueltiger Backup-Name.' });
+  }
+  const liste = backupListe();
+  if (!liste.length) return res.status(404).json({ error: 'Es gibt noch keine Sicherung zum Abholen.' });
+  const eintrag = gewuenscht ? liste.find(b => b.datei === gewuenscht) : liste[0];
+  if (!eintrag) return res.status(404).json({ error: 'Diese Sicherung gibt es nicht (mehr).' });
+  let roh;
+  try { roh = fs.readFileSync(path.join(BACKUP_DIR, eintrag.datei)); }
+  catch (e) { return res.status(500).json({ error: 'Sicherung nicht lesbar: ' + String(e.message).slice(0, 80) }); }
+  // Die Pruefsumme wird UEBER DIE BYTES gebildet, die gleich rausgehen, und im Kopf mitgeschickt:
+  // Die Gegenseite rechnet sie nach und lehnt eine unterwegs abgeschnittene Datei ab. Ohne sie
+  // waere ein halb uebertragener Spielstand eine Datei, die aussieht wie eine Sicherung.
+  const summe = crypto.createHash('sha256').update(roh).digest('hex');
+  res.set({
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Backup-Datei': eintrag.datei,
+    'X-Backup-Zeit': String(eintrag.zeit),
+    'X-Backup-Groesse': String(roh.length),
+    'X-Backup-Sha256': summe
+  });
+  // Vermerkt wird erst bei 'finish', also wenn die Antwort wirklich vollstaendig rausgegangen
+  // ist - nicht schon beim Absenden. Ein abgebrochener Abruf soll die Uhr nicht zuruecksetzen,
+  // sonst meldet der Waechter "alles frisch", waehrend nichts angekommen ist.
+  res.on('finish', () => { if (res.statusCode === 200) offsiteVermerken(eintrag.datei, roh.length); });
+  res.send(roh);
+});
 app.get('/api/admin/backups', authMiddleware, (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
   res.json({ backups: backupListe(), behalt: BACKUP_RETENTION, taktMinuten: 30 });
@@ -14816,12 +15110,12 @@ async function pruefeLoeschungen() {
       if (z) { geloescht++; console.log('[loeschung] ' + key + ' entfernt: ' + JSON.stringify(z)); }
     }
     if (geloescht) await saveDb();
-  } catch (e) { console.error('pruefeLoeschungen fehlgeschlagen:', e.message); }
+  } catch (e) { taktFehlerVermerken('pruefeLoeschungen', e); }
 }
-setInterval(pruefeLoeschungen, 60 * 60 * 1000);
+setInterval(takt('pruefeLoeschungen', pruefeLoeschungen), 60 * 60 * 1000);
 // setImmediate, nicht direkt: Der erste Lauf saehe sonst jede const weiter unten in dieser Datei
 // nicht (temporale Todeszone) - node --check findet das nicht.
-setImmediate(() => { pruefeLoeschungen(); });
+setImmediate(takt('pruefeLoeschungen-start', () => pruefeLoeschungen()));
 
 app.post('/api/admin/konto/loeschen', authMiddleware, async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
@@ -15367,12 +15661,21 @@ app.get('/api/admin/systemstand', authMiddleware, (req, res) => {
       { name: 'DEPLOY_WEBHOOK_SECRET', gesetzt: gesetzt('DEPLOY_WEBHOOK_SECRET'), zweck: 'Ohne ihn weist der Deploy-Webhook JEDEN Aufruf ab' },
       { name: 'KOFI_VERIFICATION_TOKEN', gesetzt: gesetzt('KOFI_VERIFICATION_TOKEN'), zweck: 'Ohne ihn wird jede Ko-fi-Spende verworfen' },
       { name: 'FEEDBACK_EMAIL', gesetzt: gesetzt('FEEDBACK_EMAIL'), zweck: 'Feedback zusaetzlich per Mail (die Ansicht hier ist davon unabhaengig)' },
-      { name: 'PUBLIC_URL', gesetzt: gesetzt('PUBLIC_URL'), zweck: 'Adresse in Mail-Links und VAPID-Subject' }
+      { name: 'PUBLIC_URL', gesetzt: gesetzt('PUBLIC_URL'), zweck: 'Adresse in Mail-Links und VAPID-Subject' },
+      { name: 'BACKUP_PULL_TOKEN', gesetzt: gesetzt('BACKUP_PULL_TOKEN'), zweck: 'Ohne ihn holt der M715q keine Off-Site-Sicherung ab (Endpunkt antwortet 503)' }
     ],
     // Abgeleitete Betriebszustaende - sie beantworten dieselbe Art Frage wie die Liste darueber,
     // haengen aber nicht an einer Env-Variablen, sondern daran, ob etwas WIRKLICH geladen ist.
     laufzeit: {
       passwortlisteEintraege: BEKANNTE_PASSWOERTER.size,
+      // Nicht "ist der Token gesetzt" (das steht schon oben), sondern: ist in den letzten
+      // Stunden WIRKLICH etwas abgeholt worden. Ein gesetzter Token bei totem Timer auf dem
+      // M715q saehe in der Zeile darueber aus wie Normalbetrieb.
+      offsiteAlterMin: (() => { const a = offsiteAlterMs(); return a === null ? null : Math.round(a / 60000); })(),
+      offsiteDatei: (db.offsite && db.offsite.datei) || null,
+      taktFehlerJeTakt: Object.assign({}, taktFehlerAnzahl),
+      taktFehlerLetzte: taktFehlerListe.slice(0, 5),
+      letzterAbsturz: db.absturz || null,
       pushSchluesselDa: !!(VAPID_KEYS && VAPID_KEYS.publicKey),
       selbstheilungDa: typeof deployAufraeumen === 'function'
     }

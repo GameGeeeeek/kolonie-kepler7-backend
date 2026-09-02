@@ -7313,6 +7313,10 @@ app.post('/api/modulemarket/buy', authMiddleware, async (req, res) => {
 // Verluste/Belohnungen serverseitig an und entfernt die Mission sofort aus der Liste (verhindert
 // Mehrfachauflösung derselben Mission durch Doppelklick, Netzwerk-Retry oder Missbrauch).
 const WORLDBOSS_KEY = 'worldboss:current';
+// Tagessperre des Weltboss-Angriffs (Spiegel der 24 h in sendWorldBossMission im Frontend) und die
+// Toleranz dazu - Begründung im Block "Tagessperre serverseitig" in /api/worldboss/resolve.
+const WELTBOSS_ABKLING_MS = 24 * 60 * 60 * 1000;
+const WELTBOSS_ABKLING_TOLERANZ_MS = 60 * 60 * 1000;
 // Rotierende Weltboss-Schwäche je Level (13.07.2026, Feature-Wunsch: Kontersystem auf mehr Kontexte
 // ausweiten) - identisch zum Frontend (siehe pirateLairWeakness/WORLDBOSS_WEAKNESS dort). +25%
 // Schaden bei passendem Schiffstyp in der Zusammensetzung.
@@ -7392,19 +7396,34 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
 
   fleetObj.missions.splice(missionIdx, 1);
 
-  // 24h-Cooldown serverseitig durchgesetzt (nicht nur clientseitig beim Missionsstart geprüft) - im
-  // eigenen Spielstand gespeichert (nicht am Boss-Objekt), damit die Sperre auch über einen
-  // Boss-Respawn hinweg bestehen bleibt. Ohne diese Prüfung hier könnte man die Sperre umgehen, indem
-  // man eine bereits "angekommene" Mission direkt im Spielstand präpariert und diesen Endpoint beliebig
-  // oft aufruft.
-  const cdLeft = Math.max(0, (save.worldBossLastAttack || 0) + 24 * 60 * 60 * 1000 - Date.now());
+  // Tagessperre serverseitig durchgesetzt (nicht nur clientseitig beim Missionsstart geprüft). Ohne
+  // diese Prüfung könnte man die Sperre umgehen, indem man eine bereits "angekommene" Mission direkt
+  // im Spielstand präpariert und diesen Endpoint beliebig oft aufruft.
+  //
+  // AM NUTZEROBJEKT, nicht im Spielstand (02.09.2026, Spieler-Report Sascha: "mehrmals angegriffen,
+  // an mehreren Tagen, HP sinken nicht"): Bis hierher las der Server `save.worldBossLastAttack` -
+  // denselben Stempel, den das Frontend beim LOSFLIEGEN setzt (sendWorldBossMission) und sofort
+  // speichert. Bei der Ankunft, Minuten später, sah der Server also "vor fünf Minuten angegriffen"
+  // und wertete JEDEN regulären Schlag als Abklingzeit (0 Schaden, 50 Kredite Spesen). Seit die
+  // Prüfung am 04.08.2026 hierher kam, hat kein regulärer Angriff den Boss getroffen; nur die
+  // Testfixture ohne Startstempel (test_geteilter_speicher_http 4b) sah Schaden. Gemessen in
+  // tests/test_weltboss_abklingzeit_http.js.
+  //
+  // Jetzt: `user.weltbossLetzterSchlag`, gesetzt vom Server bei einem GEWERTETEN Schlag (nicht bei
+  // "zu spät" - wer keinen Schaden gemacht hat, hat seinen Tag nicht verbraucht). Der Startstempel
+  // des Clients bleibt dessen Torwächter und wird hier weder gelesen noch geschrieben. Eine Stunde
+  // Toleranz, weil Startstempel (Client) und Ankunftsstempel (Server) eine Flugzeit auseinander
+  // liegen: Der Client lässt den nächsten Start 24 h nach dem letzten Start zu, der Server misst
+  // ab der letzten Ankunft - ohne Toleranz wäre der zweite Tagesschlag um eine Flugzeit zu früh.
+  const user = findUserById(req.userId);
+  const letzterSchlag = (user && user.weltbossLetzterSchlag) || 0;
+  const cdLeft = Math.max(0, letzterSchlag + WELTBOSS_ABKLING_MS - WELTBOSS_ABKLING_TOLERANZ_MS - Date.now());
   if (cdLeft > 0) {
     save.credits = (save.credits || 0) + 50;
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
     await saveDb();
     return res.json({ ok: true, arrivedTooLate: true, onCooldown: true, killed: false, damage: 0, bossHp: null, bossMaxHp: null, lostShips: {}, saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
   }
-  save.worldBossLastAttack = Date.now();
 
   const bLevel = mission.bossLevel || 1;
   const composition = mission.composition || {};
@@ -7434,6 +7453,7 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
     bossHpAfter = boss.hp;
     bossMaxHp = boss.maxHp;
     db.shared[WORLDBOSS_KEY] = JSON.stringify(boss);
+    if (user) user.weltbossLetzterSchlag = Date.now(); // der Tag ist verbraucht - siehe Block oben
 
     // Verluste (8+Stufe% bis 15+Stufe%, gedeckelt bei 50%) - Prozentsatz aus der beim Start
     // eingefrorenen Zusammensetzung, angewendet auf die AKTUELLE Flotte am Standort.

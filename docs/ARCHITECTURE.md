@@ -25,3 +25,21 @@ Verschoben aus `CLAUDE.md` am 01.09.2026 (Strukturprüfung, Punkt 1: Startkontex
 - **CORS ist auf die Spiel-Domains beschränkt** (`CORS_ALLOWED`, überschreibbar per Env `CORS_ORIGINS`). Anfragen ohne Origin (Server-zu-Server wie Ko-fi-/GitHub-Webhooks, native Apps, same-origin) bleiben erlaubt. Ein neuer legitimer Browser-Client von einer anderen Domain braucht einen Eintrag in `CORS_ORIGINS`, sonst blockt der Browser ihn.
 
 
+
+## Weltboss-Tagessperre am Nutzerobjekt (02.09.2026)
+
+Spieler-Report Sascha: „mehrmals angegriffen, an mehreren Tagen, HP sinken nicht". Ursache war
+kein Rechenfehler, sondern zwei Stempel mit demselben Namen und verschiedener Bedeutung: Das
+Frontend setzt `state.worldBossLastAttack` beim **Losfliegen** (Torwächter gegen einen zweiten
+Start) und speichert; `/api/worldboss/resolve` las seit dem 04.08.2026 denselben Stempel aus dem
+Spielstand bei der **Ankunft** und hielt jeden regulären Schlag für Abklingzeit (`onCooldown`,
+0 Schaden, 50 Kredite Spesen). Vier Wochen lang traf kein regulärer Angriff den Boss; die
+Testfixture in `test_geteilter_speicher_http` (4b) hatte keinen Startstempel und sah deshalb Schaden.
+
+Jetzt liegt die Sperre am Nutzerobjekt (`user.weltbossLetzterSchlag`), gesetzt vom Server nur bei
+einem gewerteten Schlag, geprüft gegen 24 h minus eine Stunde Toleranz (Start- und Ankunftsstempel
+liegen eine Flugzeit auseinander). Der Client-Stempel wird serverseitig weder gelesen noch
+geschrieben. Wächter: `tests/test_weltboss_abklingzeit_http.js` (Port 3246, 11 Prüfungen; am alten
+Stand fallen 1b 1c 1d 3a). Übertragbar: Ein Feld, das Client und Server unter demselben Namen mit
+verschiedener Bedeutung führen, ist ein Fehler, der wie Normalbetrieb aussieht - Zähler, an denen
+Belohnungen hängen, gehören ans Nutzerobjekt (CLAUDE.md).

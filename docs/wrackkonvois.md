@@ -59,12 +59,35 @@ Bug-Report"-Rückfall (`test_A2_http.js` 4b, Gegenprobe `typ`).
 
 ### Der Notausschalter und die Auslieferungsreihenfolge
 
-`A2_SPAWN_AKTIV` steht auf **`false`** – Notausschalter und Auslieferungs-Riegel (Regel 60): A2
-wirft ein PvP-relevantes Kampfmodul ab, also muss das Backend VOR dem Frontend live sein und der
-Schalter erst im Frontend-PR umgelegt werden. Solange er aus ist, kehrt `A2Tick` in Zeile 1 zurück
-und der ganze Abschnitt tut nichts. `test_A2_http.js` Abschnitt 9 hält den Stand fest (jetzt
-`false`); beim Umlegen wird die Prüfung mit umgestellt, damit ein versehentliches früheres Kippen
-auffällt – dasselbe Muster wie `test_festung_http.js` Abschnitt 10.
+**`A2_SPAWN_AKTIV` steht seit dem 02.09.2026 auf `true`** – das Frontend ist ausgeliefert
+(v8.625.0: Kartenknoten, Kartenmenü, Mission `konvoi-angriff`, Bericht, Belohnungszweig
+`wrackkonvoi`, beide Module mit `quelle:'konvoi'`), und damit ist die Bedingung erfüllt, unter der
+er auf `false` stehen musste. Von außen belegt, bevor der Schalter kippte: Frontend-Version 8.625.0
+live, `/api/health` auf `commit e2cc326`/`blob ce1a10f` (#191).
+
+**Der Schalter bleibt trotzdem stehen** – als Notausschalter, aus demselben Grund wie
+`FESTUNG_SPAWN_AKTIV` und `NEST_SPAWN_AKTIV`: eine Zeile umzulegen ist schneller und sicherer als
+ein Merge zurückzunehmen, Endpunkte, Härtungen und Tests bleiben unangetastet. `test_A2_http.js`
+Abschnitt 9 prüft jetzt, dass er auf `true` steht; ein Wechsel auf `false` ist damit eine bewusste
+Notabschaltung, die auffällt statt still zu geschehen – und ihr Grund gehört dann hierher.
+
+**Seit demselben Tag hängt A2 auch am Admin-Notaus** (`db.notAus`, `POST /api/admin/schalter`,
+Schlüssel `konvois`, ohne Deploy wirksam). Beim Umlegen gemessen: `A2Tick` las bis dahin die
+**blanke Konstante** (`if (!A2_SPAWN_AKTIV) return`), nicht `spawnAktiv()` – der Admin-Notaus
+erreichte A2 gar nicht, obwohl `CLAUDE.md` `A2_SPAWN_AKTIV` als admin-abschaltbar führte. Genau
+in dem Moment, in dem der Schalter live geht, wäre das die einzige Notbremse ohne Deploy gewesen.
+Jetzt läuft der **ganze Takt** über `spawnAktiv('konvois')` (kein Entstehen, kein Driften, kein
+Entkommen), wie `nestTick`; der Angriffs-Endpunkt hängt nicht am Schalter, bestehende Ziele
+bleiben also angreifbar. `spawnAktivImCode('konvois')` liefert die Konstante –
+ohne diesen Eintrag liefe `A2Tick` nie (der Rückfall ist `false`). Wächter:
+`test_admin_funktionen_http.js` 3a (vier Schalter) und 3d (vier Aufrufstellen).
+
+Warum er überhaupt gebaut wurde, bleibt als Begründung wichtig: A2 wirft ein PvP-relevantes
+Kampfmodul ab, also musste das Backend VOR dem Frontend live sein (Regel 60) und der Schalter erst
+im Fenster des Frontend-PRs kippen. Solange er aus war, kehrte `A2Tick` in Zeile 1 zurück und der
+ganze Abschnitt tat nichts. Umgelegt wurde er unmittelbar nach dem Frontend-Merge
+(GameGeeeeek/kolonie-kepler7#516), damit Patchnote und Wirkung im selben Fenster liegen – bei den
+Alien-Nestern stand genau diese Lücke zwischen Ankündigung und Wirkung zwei Tage lang.
 
 Wächter: `tests/test_A2_http.js` (**Port 3234**, 35 Prüfungen, vier Gegenproben je mit „was fällt
 MUSS"-Liste: `schaden`→3a, `abkling`→2a, `entkommen`→5e-grund, `typ`→4b). Der Test startet eine

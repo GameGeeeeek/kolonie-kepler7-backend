@@ -12363,26 +12363,92 @@ const VORPOSTEN_AUSBAU_MS = 12 * 3600 * 1000;      // zwischen zwei Ausbauten, a
 const VORPOSTEN_GARNISON_FAKTOR = 0.5;             // Anteil der rohen Flottenkraft der Garnison, der verteidigt
 const VORPOSTEN_VERLUST = 0.06;                    // Grundverlust des Angreifers je Schlag (Familie Festung/A2)
 const VORPOSTEN_STUFEN = [
-  /* kernLp gegen die gemessenen Schlagkraefte 7.500 / 44.000 / 240.000 je Schlag (Festungs-
-     Kalibrierung, docs/asteroidenfestungen.md):
-       Feldlager    20.000 =  2,7 Einsteiger- / 0,45 Mittelfeld- / 0,08 Endspiel-Schlaege
-       Stuetzpunkt  90.000 = 12   / 2,0  / 0,4
-       Bastion     400.000 = 53   / 9,1  / 1,7
-     Die Struktur verteidigt selbst (`verteidigung`), die Garnison kommt obendrauf. Ohne Garnison ist
-     ein Feldlager fuer sein Publikum ein Ziel von zwei bis drei Schlaegen - eine gehaltene Praesenz,
-     die man verteidigen MUSS, kein Selbstlaeufer. `flug`/`prod`/`scan` sind die drei uebrigen
-     Nutzen-Kanaele (Anteil Flugzeit-Ersparnis, additiver Produktionsbonus, Aufklaerungsstufe); das
-     Frontend liest sie aus GET /api/vorposten. `kampfpunkte`/`xp`/`credits` sind die Beute beim
-     Fall, anteilig - klein und flach, nie aus der Produktion des Besitzers abgeleitet. */
-  { stufe: 1, name: 'Feldlager',  kernLp: 20000,  verteidigung: 2500,  garnisonMax: 300,  flug: 0.06, prod: 0.015, scan: 1, kampfpunkte: 30,  xp: 250,  credits: 1200 },
-  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,  verteidigung: 12000, garnisonMax: 800,  flug: 0.10, prod: 0.03,  scan: 2, kampfpunkte: 80,  xp: 700,  credits: 3500 },
-  { stufe: 3, name: 'Bastion',    kernLp: 400000, verteidigung: 60000, garnisonMax: 2000, flug: 0.15, prod: 0.05,  scan: 3, kampfpunkte: 200, xp: 2000, credits: 9000 }
-];
+  /* DIE LEITER (Auftrag Sascha 02.09.2026: "sehr, sehr viele Ausbaustufen fuer verschiedene
+     Spezialisierungen", Entscheidung "8 Stufen + 3 Spezialisierungen ab Stufe 4").
 
-function vorpostenStufe(n) {
+     kernLp gegen die gemessenen Schlagkraefte 7.500 / 44.000 / 240.000 je Schlag (Festungs-
+     Kalibrierung, docs/asteroidenfestungen.md), Abklingzeit 4 h je Angreifer:
+       Feldlager      20.000 =  2,7 Einsteiger- / 0,45 Mittelfeld- / 0,08 Endspiel-Schlaege
+       Stuetzpunkt    90.000 = 12   / 2,0  / 0,4
+       Bastion       400.000 = 53   / 9,1  / 1,7
+       Stufe 6     2.400.000 =        55   / 10
+       Stufe 8     6.500.000 =       148   / 27   -> allein 4,5 Tage, im Verband ein Abend
+     Die Leiter ist die EINE Zahlenreihe; die Zweige (VORPOSTEN_ZWEIGE) sind Multiplikatoren
+     darauf. So bleibt die Balance an einer Stelle messbar, statt in drei parallelen Tabellen
+     auseinanderzulaufen - dieselbe Ueberlegung wie bei den Festungsstufen.
+
+     `kosten` ist der Preis fuer den Ausbau AUF diese Stufe. Sie steht hier und reist mit
+     GET /api/vorposten zum Client: Die Stufentabelle hatte nie eine Kopie im Frontend, die
+     Kostentabelle aber schon (VORPOSTEN_AUSBAU_KOSTEN, zwei Eintraege) - mit acht Stufen waere
+     daraus eine Kopie-Familie geworden, und genau die hat dieses Projekt schon dreimal erwischt.
+     `flug`/`prod`/`scan` sind die drei Nutzen-Kanaele (Anteil Flugzeit-Ersparnis, additiver
+     Produktionsbonus, Aufklaerungsstufe); alle drei wirken im Frontend bereits.
+     `kampfpunkte`/`xp`/`credits` sind die Beute beim Fall, anteilig - sie haengen bewusst NUR an
+     der Stufe, nicht am Zweig: sonst lohnte es sich, gezielt die wehrhaftesten Ziele zu schleifen. */
+  { stufe: 1, name: 'Feldlager',  kernLp: 20000,   verteidigung: 2500,   garnisonMax: 300,   flug: 0.06, prod: 0.015, scan: 1, kampfpunkte: 30,   xp: 250,   credits: 1200,  kosten: null },
+  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,   verteidigung: 12000,  garnisonMax: 800,   flug: 0.10, prod: 0.03,  scan: 2, kampfpunkte: 80,   xp: 700,   credits: 3500,  kosten: { erz: 200000, kristalle: 130000, deuterium: 80000 } },
+  { stufe: 3, name: 'Bastion',    kernLp: 400000,  verteidigung: 60000,  garnisonMax: 2000,  flug: 0.15, prod: 0.05,  scan: 3, kampfpunkte: 200,  xp: 2000,  credits: 9000,  kosten: { erz: 600000, kristalle: 400000, deuterium: 250000 } },
+  { stufe: 4, name: 'Ausbaustufe 4', kernLp: 800000,  verteidigung: 110000, garnisonMax: 3200,  flug: 0.18, prod: 0.065, scan: 3, kampfpunkte: 320,  xp: 3200,  credits: 15000, kosten: { erz: 1200000, kristalle: 800000,  deuterium: 500000,  nanolegierungen: 400 } },
+  { stufe: 5, name: 'Ausbaustufe 5', kernLp: 1400000, verteidigung: 190000, garnisonMax: 4800,  flug: 0.21, prod: 0.08,  scan: 4, kampfpunkte: 480,  xp: 5000,  credits: 24000, kosten: { erz: 2000000, kristalle: 1400000, deuterium: 900000,  nanolegierungen: 900,  quantenchips: 300 } },
+  { stufe: 6, name: 'Ausbaustufe 6', kernLp: 2400000, verteidigung: 320000, garnisonMax: 7000,  flug: 0.24, prod: 0.095, scan: 4, kampfpunkte: 700,  xp: 7500,  credits: 38000, kosten: { erz: 3400000, kristalle: 2400000, deuterium: 1500000, nanolegierungen: 1800, quantenchips: 800 } },
+  { stufe: 7, name: 'Ausbaustufe 7', kernLp: 4000000, verteidigung: 520000, garnisonMax: 10000, flug: 0.27, prod: 0.11,  scan: 5, kampfpunkte: 1000, xp: 11000, credits: 60000, kosten: { erz: 5500000, kristalle: 4000000, deuterium: 2600000, nanolegierungen: 3200, quantenchips: 1600, metamaterial: 400 } },
+  { stufe: 8, name: 'Ausbaustufe 8', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskerne: 120 } }
+];
+/* DIE DREI SPEZIALISIERUNGEN. Ab Stufe VORPOSTEN_ZWEIG_AB waehlt der Besitzer EINMAL eine
+   Ausrichtung; sie steht danach im Dokument (`doc.zweig`) und ist unveraenderlich - eine
+   Entscheidung, die man zurueckdrehen kann, ist keine.
+
+   Die Zweige sind MULTIPLIKATOREN auf die Leiter, keine eigenen Tabellen (Begruendung oben). Sie
+   differenzieren ausschliesslich ueber Kanaele, die im Frontend HEUTE SCHON WIRKEN - Flugzeit,
+   Produktion, Aufklaerung, Struktur, Garnison. Ein angezeigter Nutzen, der nichts tut, waere eine
+   Luege; neue Kanaele (Werftrabatt, Marktgebuehr, Modul-Steckplaetze, Projekte, Sprungtor) kommen
+   in spaeteren Etappen ZUSAMMEN mit ihrer Wirkung.
+
+   Summe der Faktoren je Zweig ist bewusst ungleich: Der Festungsring zahlt seine Wehrhaftigkeit mit
+   Nutzen, der Handelsknoten seinen Ertrag mit Weichheit. Wer drei Vorposten haelt, kann alle drei
+   Rollen einmal besetzen (VORPOSTEN_MAX_JE_KONTO = 3). */
+const VORPOSTEN_ZWEIG_AB = 4;
+const VORPOSTEN_ZWEIGE = {
+  werft: {
+    key: 'werft', name: 'Werft', kurz: 'Schnelle Flotten: kurze Flugzeiten, solide Struktur.',
+    namen: { 4: 'Werftgerüst', 5: 'Dockring', 6: 'Schiffsschmiede', 7: 'Flottenwerft', 8: 'Sternenwerft' },
+    mult: { kernLp: 0.90, verteidigung: 0.85, garnisonMax: 1.00, flug: 1.50, prod: 0.60, scan: 1.00 }
+  },
+  handel: {
+    key: 'handel', name: 'Handelsknoten', kurz: 'Ertrag und Fernsicht - dafür die dünnste Hülle.',
+    namen: { 4: 'Handelsposten', 5: 'Umschlagring', 6: 'Frachtkreuz', 7: 'Handelsknoten', 8: 'Sternenmarkt' },
+    mult: { kernLp: 0.80, verteidigung: 0.75, garnisonMax: 0.85, flug: 1.00, prod: 1.80, scan: 1.25 }
+  },
+  festung: {
+    key: 'festung', name: 'Festungsring', kurz: 'Hält Systeme: dickster Kern, größte Garnison.',
+    namen: { 4: 'Wehrring', 5: 'Zitadelle', 6: 'Sperrfeuerring', 7: 'Kriegsbastion', 8: 'Sternenfestung' },
+    mult: { kernLp: 1.35, verteidigung: 1.60, garnisonMax: 1.45, flug: 0.70, prod: 0.50, scan: 1.00 }
+  }
+};
+function vorpostenZweigOk(z) { return typeof z === 'string' && Object.prototype.hasOwnProperty.call(VORPOSTEN_ZWEIGE, z); }
+
+/* Die fertige Stufe: Leiter-Eintrag, ab VORPOSTEN_ZWEIG_AB mit den Multiplikatoren des gewaehlten
+   Zweigs und dessen Namen. OHNE Zweig (noch nicht gewaehlt oder unbekannter Schluessel) bleibt die
+   Leiter unveraendert - ein Dokument aus der Zeit vor den Zweigen rechnet damit weiter korrekt.
+   `scan` ist eine STUFE, keine Quote: erst multiplizieren, dann runden, mindestens 1. */
+function vorpostenStufe(n, zweig) {
   const i = Math.min(VORPOSTEN_STUFEN.length, Math.max(1, Math.floor(Number(n) || 1))) - 1;
-  return VORPOSTEN_STUFEN[i];
+  const basis = VORPOSTEN_STUFEN[i];
+  const z = vorpostenZweigOk(zweig) ? VORPOSTEN_ZWEIGE[zweig] : null;
+  if (!z || basis.stufe < VORPOSTEN_ZWEIG_AB) return basis;
+  const m = z.mult;
+  return Object.assign({}, basis, {
+    name: z.namen[basis.stufe] || basis.name,
+    zweig: z.key, zweigName: z.name,
+    kernLp: Math.round(basis.kernLp * m.kernLp),
+    verteidigung: Math.round(basis.verteidigung * m.verteidigung),
+    garnisonMax: Math.round(basis.garnisonMax * m.garnisonMax),
+    flug: Math.round(basis.flug * m.flug * 1000) / 1000,
+    prod: Math.round(basis.prod * m.prod * 1000) / 1000,
+    scan: Math.max(1, Math.round(basis.scan * m.scan))
+  });
 }
+function vorpostenStufeVon(doc) { return vorpostenStufe(doc && doc.stufe, doc && doc.zweig); }
 function vorpostenSysOk(sys) { return typeof sys === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(sys); }
 function vorpostenKey(sys) { return 'vorposten:' + sys; }
 function vorpostenLies(sys) {
@@ -12405,7 +12471,7 @@ function vorpostenGarnisonAnzahl(doc) {
   return Object.values((doc && doc.garnison) || {}).reduce((a, n) => a + (typeof n === 'number' && n > 0 ? n : 0), 0);
 }
 function vorpostenVerteidigung(doc) {
-  const st = vorpostenStufe(doc.stufe);
+  const st = vorpostenStufeVon(doc);
   return Math.round(st.verteidigung + rawFleetPower(doc.garnison || {}, 1, 1, null) * VORPOSTEN_GARNISON_FAKTOR);
 }
 function vorpostenHeimatSystem(userId) {
@@ -12437,14 +12503,21 @@ function checkVorpostenKeyPermission(req, key, isWrite) {
   return 'Vorposten werden ausschließlich über die Vorposten-Endpunkte verändert.';
 }
 function vorpostenFuerClient(doc, userId, jetzt) {
-  const st = vorpostenStufe(doc.stufe);
+  const st = vorpostenStufeVon(doc);
   const eigener = doc.besitzer === userId;
   const out = {
     id: doc.id, sys: doc.sys, besitzer: doc.besitzer, besitzerName: doc.besitzerName || 'Kommandant',
     seit: doc.seit || 0, stufe: doc.stufe || 1, name: st.name,
+    zweig: vorpostenZweigOk(doc.zweig) ? doc.zweig : null,
+    zweigName: vorpostenZweigOk(doc.zweig) ? VORPOSTEN_ZWEIGE[doc.zweig].name : null,
+    maxStufe: VORPOSTEN_STUFEN.length,
     kern: { lp: Math.max(0, Math.round((doc.kern && doc.kern.lp) || 0)), lpMax: Math.round((doc.kern && doc.kern.lpMax) || st.kernLp) },
     verteidigung: vorpostenVerteidigung(doc),
     garnisonAnzahl: vorpostenGarnisonAnzahl(doc),
+    /* garnisonMax gehoert HIERHER und nicht in die Stufentabelle des Clients: Die Tabelle ist die
+       Leiter OHNE Zweig-Multiplikatoren - ein Festungsring haette dort eine um 45 % zu kleine
+       Grenze angezeigt, und der Spieler haette Schiffe geschickt, die der Server ablehnt. */
+    garnisonMax: st.garnisonMax,
     schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
     nutzen: { flug: st.flug, prod: st.prod, scan: st.scan },
@@ -12454,7 +12527,27 @@ function vorpostenFuerClient(doc, userId, jetzt) {
   };
   // Zusammensetzung und Verlauf sieht nur der Besitzer; Fremde sehen die Zahl (wie die Eskorte am
   // Vorkommen ihre Staerke zeigt, ohne dass jemand die Liste braucht).
-  if (eigener) { out.garnison = Object.assign({}, doc.garnison || {}); out.kampfverlauf = (doc.kampfverlauf || []).slice(0, 10); }
+  if (eigener) {
+    out.garnison = Object.assign({}, doc.garnison || {});
+    out.kampfverlauf = (doc.kampfverlauf || []).slice(0, 10);
+    /* Die NAECHSTE Stufe fertig gerechnet - der Client soll den Sprung zeigen koennen, ohne die
+       Multiplikatoren selbst anzuwenden (sonst waere die Zweigtabelle doch wieder eine Kopie).
+       Steht die Zweigwahl an, kommen alle drei Varianten mit; sonst genau eine. */
+    const naechste = (doc.stufe || 1) + 1;
+    if (naechste <= VORPOSTEN_STUFEN.length) {
+      const basis = VORPOSTEN_STUFEN[naechste - 1];
+      const wahlSteht = naechste === VORPOSTEN_ZWEIG_AB && !vorpostenZweigOk(doc.zweig);
+      out.naechsteStufe = {
+        stufe: naechste, kosten: basis.kosten, zweigWahl: wahlSteht,
+        varianten: (wahlSteht ? Object.keys(VORPOSTEN_ZWEIGE) : [doc.zweig]).map(z => {
+          const s = vorpostenStufe(naechste, z);
+          return { zweig: vorpostenZweigOk(z) ? z : null, name: s.name,
+            kernLp: s.kernLp, verteidigung: s.verteidigung, garnisonMax: s.garnisonMax,
+            nutzen: { flug: s.flug, prod: s.prod, scan: s.scan } };
+        })
+      };
+    }
+  }
   return out;
 }
 
@@ -12467,7 +12560,7 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
   const durchschlag = Math.max(0.15, Math.min(0.95, kraft / (kraft + verteidigung)));
   const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4) * durchschlag);
 
-  doc.kern = doc.kern || { lp: vorpostenStufe(doc.stufe).kernLp, lpMax: vorpostenStufe(doc.stufe).kernLp };
+  doc.kern = doc.kern || { lp: vorpostenStufeVon(doc).kernLp, lpMax: vorpostenStufeVon(doc).kernLp };
   const lpVorher = Math.max(0, doc.kern.lp || 0);
   doc.kern.lp = Math.max(0, lpVorher - wurf);
   const schaden = lpVorher - doc.kern.lp;          // was ANGEKOMMEN ist, nicht der Wurf
@@ -12509,7 +12602,7 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
   const anteile = {};
   let teilnehmer = 0;
   if (gefallen) {
-    const st = vorpostenStufe(doc.stufe);
+    const st = vorpostenStufeVon(doc);
     const summe = Object.values(doc.beitraege).reduce((a, b) => a + (b.schaden || 0), 0) || 1;
     for (const [uid, b] of Object.entries(doc.beitraege)) {
       const anteil = (b.schaden || 0) / summe;
@@ -12548,7 +12641,9 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
     ok: true, aktiv: VORPOSTEN_AKTIV, bauAktiv: spawnAktiv('vorposten'),
     maxJeKonto: VORPOSTEN_MAX_JE_KONTO, schutzMs: VORPOSTEN_SCHUTZ_MS, abklingMs: VORPOSTEN_ABKLING_MS,
     ausbauMs: VORPOSTEN_AUSBAU_MS, garnisonFaktor: VORPOSTEN_GARNISON_FAKTOR,
-    stufen: VORPOSTEN_STUFEN, liste, eigene: liste.filter(x => x.eigener).length
+    stufen: VORPOSTEN_STUFEN, zweige: Object.values(VORPOSTEN_ZWEIGE).map(z => ({ key: z.key, name: z.name, kurz: z.kurz, namen: z.namen, mult: z.mult })),
+    zweigAb: VORPOSTEN_ZWEIG_AB, maxStufe: VORPOSTEN_STUFEN.length,
+    liste, eigene: liste.filter(x => x.eigener).length
   });
 });
 
@@ -12591,13 +12686,26 @@ app.post('/api/vorposten/ausbauen', authMiddleware, async (req, res) => {
   if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
   if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann seinen Vorposten ausbauen.' });
   if ((doc.stufe || 1) >= VORPOSTEN_STUFEN.length) return res.status(400).json({ error: 'Dieser Vorposten ist bereits voll ausgebaut.', endausbau: true });
+  /* Die Zweigwahl faellt GENAU beim Sprung auf VORPOSTEN_ZWEIG_AB und nur dort: davor gibt es
+     nichts zu waehlen, danach steht sie im Dokument und ist unveraenderlich. Ein mitgeschickter
+     Zweig zu einem spaeteren Ausbau wird ignoriert, nicht abgelehnt - der Client darf ihn der
+     Einfachheit halber immer mitsenden. */
+  const zielStufe = (doc.stufe || 1) + 1;
+  const brauchtZweig = zielStufe === VORPOSTEN_ZWEIG_AB && !vorpostenZweigOk(doc.zweig);
+  const zweigWunsch = String((req.body && req.body.zweig) || '');
+  if (brauchtZweig && !vorpostenZweigOk(zweigWunsch)) {
+    return res.status(400).json({ error: 'Ab Stufe ' + VORPOSTEN_ZWEIG_AB + ' braucht der Vorposten eine Ausrichtung.', zweigNoetig: true,
+      zweige: Object.values(VORPOSTEN_ZWEIGE).map(z => ({ key: z.key, name: z.name, kurz: z.kurz })) });
+  }
   const jetzt = Date.now();
   const ausbauAb = (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS;
   if (jetzt < ausbauAb) {
     return res.status(400).json({ error: 'Der nächste Ausbau ist in ' + Math.ceil((ausbauAb - jetzt) / 60000) + ' Minuten möglich.', abklingzeit: true, ausbauAb });
   }
-  const alt = vorpostenStufe(doc.stufe), neu = vorpostenStufe((doc.stufe || 1) + 1);
-  doc.stufe = (doc.stufe || 1) + 1;
+  if (brauchtZweig) doc.zweig = zweigWunsch;
+  const alt = vorpostenStufeVon(doc);
+  doc.stufe = zielStufe;
+  const neu = vorpostenStufeVon(doc);
   doc.kern = doc.kern || { lp: alt.kernLp, lpMax: alt.kernLp };
   // Ein Ausbau HEILT nicht - die LP steigen um dieselbe Differenz wie das Maximum, angerichteter
   // Schaden bleibt angerichtet (dieselbe Entscheidung wie beim reifenden Nest).
@@ -12626,7 +12734,7 @@ app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
   if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand.' });
   const fleetObj = planetKey === 'home' ? save.fleet : (save.colonies && save.colonies[planetKey] && save.colonies[planetKey].fleet);
   if (!fleetObj) return res.status(404).json({ error: 'Kein Flottenstandort gefunden.' });
-  const st = vorpostenStufe(doc.stufe);
+  const st = vorpostenStufeVon(doc);
   let platz = Math.max(0, st.garnisonMax - vorpostenGarnisonAnzahl(doc));
   const angenommen = {};
   doc.garnison = doc.garnison || {};

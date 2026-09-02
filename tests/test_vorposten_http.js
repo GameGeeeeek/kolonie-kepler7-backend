@@ -39,7 +39,11 @@ const WURZEL = path.resolve(__dirname, '..');
 const PORT = 3242;
 const QUELLE = path.join(WURZEL, 'server_vptest_tmp.js');
 const SAB = process.env.KEPLER_VP_SABOTAGE || '';
-const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a'], typ: ['5b'], meldung: ['4h', '4h2'] };
+// Was bei welcher Sabotage fallen MUSS - gemessen, nicht geschaetzt (Regel 71). Die Listen der zwei
+// Zweig-Sabotagen stammen aus dem Lauf vom 02.09.2026: 'zweigwahl' 7e 7f 7g 7h, 'zweigwerte' nur 7g
+// (die Wahl greift dort weiter, nur die Multiplikatoren wirken nicht - genau der stille Fall).
+const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a'], typ: ['5b'], meldung: ['4h', '4h2'],
+  zweigwahl: ['7e', '7f', '7g', '7h'], zweigwerte: ['7g'] };
 
 let fail = false;
 const ergebnis = {};
@@ -182,6 +186,10 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     else if (SAB === 'rechte') geflippt = geflippt.replace("  return 'Vorposten werden ausschließlich über die Vorposten-Endpunkte verändert.';", '  return null;');
     else if (SAB === 'typ') geflippt = geflippt.replace("        type: 'vorposten',           // eigener Typ", "        type: 'alien-nest',          // eigener Typ");
     else if (SAB === 'meldung') geflippt = geflippt.replace("        pushNotificationEvent(doc.besitzer, 'vorposten-angegriffen', {", "        if (false) pushNotificationEvent(doc.besitzer, 'vorposten-angegriffen', {");
+    // Die zwei Haelften der Spezialisierung (02.09.2026) einzeln sabotierbar: die WAHL beim Ausbau
+    // und die WIRKUNG der Multiplikatoren. Beide zusammen waeren eine Sabotage, die zu viel trifft.
+    else if (SAB === 'zweigwahl') geflippt = geflippt.replace('  const brauchtZweig = zielStufe === VORPOSTEN_ZWEIG_AB && !vorpostenZweigOk(doc.zweig);', '  const brauchtZweig = false;');
+    else if (SAB === 'zweigwerte') geflippt = geflippt.replace('  if (!z || basis.stufe < VORPOSTEN_ZWEIG_AB) return basis;', '  return basis;');
     else { console.log('unbekannte Sabotage: ' + SAB); process.exit(2); }
     check('0-sab: die Sabotage "' + SAB + '" hat den Quelltext veraendert', geflippt !== vorher, { veraendert: geflippt !== vorher });
   }
@@ -204,9 +212,21 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
   const get0 = await s.j('/vorposten', { headers: kopf(tokA) });
   check('1b: GET /api/vorposten antwortet mit aktiv:true und leerer Liste',
     get0.status === 200 && get0.body.aktiv === true && Array.isArray(get0.body.liste) && get0.body.liste.length === 0, get0.body && { aktiv: get0.body.aktiv, n: (get0.body.liste || []).length });
-  check('1c: die Stufentabelle reist mit (drei Stufen, jede mit kernLp/flug/prod/scan/garnisonMax)',
-    Array.isArray(get0.body.stufen) && get0.body.stufen.length === 3 && get0.body.stufen.every(st => st.kernLp > 0 && st.flug > 0 && st.prod > 0 && st.scan > 0 && st.garnisonMax > 0),
+  /* Die Leiter als REGEL, nicht als Momentaufnahme (die Zahl der Stufen waechst, 02.09.2026: 3 -> 8):
+     jede Stufe traegt die Pflichtfelder, jede ausser der ersten hat Ausbaukosten, und die Werte
+     STEIGEN streng. Ein Ausbau, der nichts verbessert, faellt damit auf. */
+  check('1c: die Stufentabelle reist mit - jede Stufe mit kernLp/flug/prod/scan/garnisonMax, Kosten ab Stufe 2',
+    Array.isArray(get0.body.stufen) && get0.body.stufen.length >= 3
+    && get0.body.stufen.every(st => st.kernLp > 0 && st.flug > 0 && st.prod > 0 && st.scan > 0 && st.garnisonMax > 0)
+    && get0.body.stufen.every((st, i) => i === 0 ? st.kosten === null : (st.kosten && Object.keys(st.kosten).length > 0)),
     get0.body.stufen && get0.body.stufen.map(st => st.name));
+  check('1c2: die Leiter steigt streng (Kern, Verteidigung, Garnison) - kein Ausbau ohne Gewinn',
+    get0.body.stufen.every((st, i) => i === 0 || (st.kernLp > get0.body.stufen[i-1].kernLp && st.verteidigung > get0.body.stufen[i-1].verteidigung && st.garnisonMax > get0.body.stufen[i-1].garnisonMax)),
+    get0.body.stufen && get0.body.stufen.map(st => st.kernLp));
+  check('1c3: die drei Zweige reisen mit, jeder mit Namen ab der Wahlstufe und Multiplikatoren',
+    Array.isArray(get0.body.zweige) && get0.body.zweige.length === 3 && get0.body.zweigAb >= 2
+    && get0.body.zweige.every(z => z.key && z.name && z.kurz && z.mult && z.namen && Object.keys(z.namen).length === (get0.body.maxStufe - get0.body.zweigAb + 1)),
+    get0.body.zweige && get0.body.zweige.map(z => z.key));
   const lese = await s.j('/storage/vorposten:' + SYS1 + '?shared=true', { headers: kopf(tokB) });
   check('1d: Lesen bleibt offen (kein 403)', lese.status !== 403, { status: lese.status });
 
@@ -351,9 +371,29 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     aus.body && aus.body.vorposten && { stufe: aus.body.vorposten.stufe, lp: aus.body.vorposten.kern.lp, lpMax: aus.body.vorposten.kern.lpMax, erwartetLp: 10000 + (KERN2 - KERN1) });
   const fremdAus = await post(tokB, '/vorposten/ausbauen', { system: SYS7 });
   check('7c: ein Fremder kann nicht ausbauen', fremdAus.status === 403, { status: fremdAus.status });
-  await aendereDb(d => { const dd = liesDoc(d, SYS7); dd.stufe = 3; dd.ausbauSeit = Date.now() - 13 * 3600 * 1000; schreibDoc(d, dd); });
-  const voll = await post(tokA, '/vorposten/ausbauen', { system: SYS7 });
-  check('7d: nach dem Endausbau kein weiterer', voll.status === 400 && voll.body.endausbau === true, { status: voll.status });
+  // ---- 7e-7h) Die Zweigwahl faellt beim Sprung auf die Wahlstufe, einmalig -----------------------
+  const maxStufe = get0.body.maxStufe, zweigAb = get0.body.zweigAb;
+  await aendereDb(d => { const dd = liesDoc(d, SYS7); dd.stufe = zweigAb - 1; delete dd.zweig; dd.ausbauSeit = Date.now() - 13 * 3600 * 1000; schreibDoc(d, dd); });
+  const ohneZweig = await post(tokA, '/vorposten/ausbauen', { system: SYS7 });
+  check('7e: der Ausbau auf die Wahlstufe verlangt eine Ausrichtung und nennt die drei Zweige',
+    ohneZweig.status === 400 && ohneZweig.body.zweigNoetig === true && (ohneZweig.body.zweige || []).length === 3,
+    { status: ohneZweig.status, zweige: (ohneZweig.body.zweige || []).map(z => z.key) });
+  const falsch = await post(tokA, '/vorposten/ausbauen', { system: SYS7, zweig: 'gibtsnicht' });
+  check('7f: ein erfundener Zweig wird abgelehnt', falsch.status === 400 && falsch.body.zweigNoetig === true, { status: falsch.status });
+  const mitZweig = await post(tokA, '/vorposten/ausbauen', { system: SYS7, zweig: 'festung' });
+  const basisWahl = get0.body.stufen[zweigAb - 1];
+  check('7g: mit Ausrichtung geht der Ausbau durch - der Zweig steht im Dokument und praegt Namen und Werte',
+    mitZweig.status === 200 && mitZweig.body.vorposten.zweig === 'festung'
+    && mitZweig.body.vorposten.name !== basisWahl.name
+    && mitZweig.body.vorposten.kern.lpMax > basisWahl.kernLp,   // Festungsring: dickerer Kern als die Leiter
+    mitZweig.body && mitZweig.body.vorposten && { zweig: mitZweig.body.vorposten.zweig, name: mitZweig.body.vorposten.name, lpMax: mitZweig.body.vorposten.kern.lpMax, leiter: basisWahl.kernLp });
+  await aendereDb(d => { const dd = liesDoc(d, SYS7); dd.ausbauSeit = Date.now() - 13 * 3600 * 1000; schreibDoc(d, dd); });
+  const zweitWahl = await post(tokA, '/vorposten/ausbauen', { system: SYS7, zweig: 'handel' });
+  check('7h: die Ausrichtung ist unveraenderlich - ein spaeter mitgeschickter Zweig aendert nichts',
+    zweitWahl.status === 200 && zweitWahl.body.vorposten.zweig === 'festung', zweitWahl.body && zweitWahl.body.vorposten && { zweig: zweitWahl.body.vorposten.zweig, stufe: zweitWahl.body.vorposten.stufe });
+  await aendereDb(d => { const dd = liesDoc(d, SYS7); dd.stufe = maxStufe; dd.ausbauSeit = Date.now() - 13 * 3600 * 1000; schreibDoc(d, dd); });
+  const voll = await post(tokA, '/vorposten/ausbauen', { system: SYS7, zweig: 'festung' });
+  check('7d: nach dem Endausbau (letzte Stufe der Leiter) kein weiterer', voll.status === 400 && voll.body.endausbau === true, { status: voll.status, maxStufe });
 
   // ---- 8) Der Schalter ist der Auslieferungs-Riegel ---------------------------------------------
   {

@@ -180,3 +180,44 @@ egal ob die Sperre griff. Eine Sabotage, die den Ablauf kaputtmacht statt die Ei
 nichts.
 
 **Belegte Testports sind jetzt 3195–3200 und 3210–3247** – ein neuer Test nimmt 3248.
+
+## Acht Stufen und drei Spezialisierungen (02.09.2026)
+
+Auftrag Sascha: „Ich will, dass der Vorposten ein Highlight des Spiels wird … am liebsten sehr,
+sehr viele Ausbaustufen für verschiedene Spezialisierungen." Entscheidung nach Vorlage von drei
+Zuschnitten: **8 Stufen, ab Stufe 4 eine einmalige Ausrichtung**, Etappe 1 zuerst die Tiefe.
+
+**Eine Leiter, drei Multiplikatoren.** `VORPOSTEN_STUFEN` hat acht Einträge (die gemeinsame
+Zahlenreihe), `VORPOSTEN_ZWEIGE` sind Multiplikatoren darauf – keine drei parallelen Tabellen.
+Die Balance ist damit an einer Stelle messbar; drei Tabellen wären in drei Richtungen abgedriftet.
+
+| Stufe | Kern | Verteidigung | Garnison | Endspiel-Schläge (240k) |
+|---|---|---|---|---|
+| 1 Feldlager | 20.000 | 2.500 | 300 | 0,08 |
+| 3 Bastion | 400.000 | 60.000 | 2.000 | 1,7 |
+| 6 | 2.400.000 | 320.000 | 7.000 | 10 |
+| 8 | 6.500.000 | 850.000 | 14.000 | 27 |
+
+Stufe 8 ist bei 4 h Abklingzeit allein 4,5 Tage Arbeit, im Verband ein Abend – ein echtes
+Belagerungsziel, kein Selbstläufer.
+
+**Die drei Zweige** (Werft, Handelsknoten, Festungsring) differenzieren ausschließlich über Kanäle,
+die im Frontend **heute schon wirken**: Flugzeit, Produktion, Aufklärung, Struktur, Garnison. Ein
+angezeigter Nutzen, der nichts tut, wäre eine Lüge; neue Kanäle (Werftrabatt, Marktgebühr,
+Modul-Steckplätze, Projekte, Sprungtor) kommen in späteren Etappen **zusammen mit ihrer Wirkung**.
+
+**Die Wahl fällt beim Sprung auf Stufe 4 und ist unveränderlich** (`doc.zweig`). Ein später
+mitgeschickter Zweig wird ignoriert, nicht abgelehnt – der Client darf ihn immer mitsenden.
+
+**Die Ausbaukosten sind aus dem Frontend in die Stufentabelle gewandert** und reisen mit
+`GET /api/vorposten`. Grund: Die Stufentabelle hatte nie eine Kopie im Frontend, die Kostentabelle
+schon (zwei Einträge) – mit acht Stufen wäre daraus eine Kopie-Familie geworden.
+
+**Ein Deckel, der die Leiter eingeholt hätte:** `VORPOSTEN_PROD_DECKEL` im Frontend stand auf 0,10.
+Ein Handelsknoten der Stufe 8 trägt allein 0,234 – jeder Ausbau ab Stufe 3 wäre wirkungslos
+gewesen. Der Deckel steht jetzt auf 0,25 (Frontend, im selben Auftrag).
+
+Wächter: `tests/test_vorposten_http.js` – 1c/1c2/1c3 prüfen die Leiter als **Regel** (Pflichtfelder,
+streng steigend, Zweige vollständig) statt der alten Momentaufnahme „drei Stufen"; 7e–7h die
+Zweigwahl. Zwei neue Sabotagen mit gemessener Pflichtliste: `zweigwahl` → 7e 7f 7g 7h,
+`zweigwerte` → nur 7g (die Wahl greift, die Multiplikatoren wirken nicht – der stille Fall).

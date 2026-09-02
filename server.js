@@ -12108,7 +12108,14 @@ function festungSchlagAusfuehren(feld, fest, sysId, kraft, composition, beteilig
       // Etappe B: ein Boss-Set-Teil kann hier fallen. Der Wurf liegt beim SERVER (wie im Raid),
       // der Client zieht daraus nur den Typ - das Herkunfts-Schloss bleibt damit unberuehrt.
       const bsFest = bosssetPveWurf(BOSSSET_PVE_CHANCE.festung[fest.stufe], anteil, fest.stufe);
-      pushPendingReward(uid, Object.assign(bsFest ? { bossset: bsFest } : {}, {
+      /* Stationsmodul-Fund (Etappe 3): Der Wurf haengt an der SCHWERE des Ziels und am eigenen
+         Anteil. Er geht direkt in den Bestand am Nutzerobjekt, nicht ins Belohnungsfach - ein
+         Stationsmodul ist kein Rohstoff, den der Client buchen muesste. Die Meldung reist in der
+         Belohnung mit (`vpModul`), damit der Spieler erfaehrt, was er hat. */
+      const festSchwere = fest.stufe === 'sternenfeste' ? 3 : fest.stufe === 'bastion' ? 2 : 1;
+      const modFest = vpModulFundwurf(festSchwere, anteil);
+      if (modFest) { const u = findUserById(uid); if (u) vpModulGeben(u, modFest, 1); }
+      pushPendingReward(uid, Object.assign(bsFest ? { bossset: bsFest } : {}, modFest ? { vpModul: modFest } : {}, {
         type: 'festung',
         system: sysId, stufe: fest.stufe, stufeName: st.name,
         sorte: fest.sorte, anteil: Math.round(anteil * 1000) / 1000,
@@ -12224,8 +12231,10 @@ function nestSchlagAusfuehren(g, nest, kraft, composition, beteiligte, jetzt) {
       // Nur die KOENIGIN zaehlt - ein Sporenherd ist kein Meilenstein. Gezaehlt wird vor dem
       // Loeschen des Nestes, solange `nest.stufe` noch dasteht.
       if (nest.stufe === 5) pveKillZaehlen(uid, 'koeniginnen');
+      const modNest = vpModulFundwurf(Math.min(3, Math.max(1, Math.round((nest.stufe || 1) / 2))), anteil);
+      if (modNest) { const u = findUserById(uid); if (u) vpModulGeben(u, modNest, 1); }
       const bsNest = bosssetPveWurf(BOSSSET_PVE_CHANCE.nest[nest.stufe], anteil, nest.stufe);
-      pushPendingReward(uid, Object.assign(bsNest ? { bossset: bsNest } : {}, {
+      pushPendingReward(uid, Object.assign(bsNest ? { bossset: bsNest } : {}, modNest ? { vpModul: modNest } : {}, {
         type: 'alien-nest',
         system: nest.sys, volk: nest.volk, volkName: volk.name,
         stufe: nest.stufe, stufeName: st.name,
@@ -12494,6 +12503,24 @@ function vorpostenStufe(n, zweig) {
   });
 }
 function vorpostenStufeVon(doc) { return vorpostenStufe(doc && doc.stufe, doc && doc.zweig); }
+/* Stufe PLUS eingebaute Module - die EINE Stelle, die beides zusammensetzt. Alles, was Werte des
+   Vorpostens liest (Verteidigung, Garnisonsgrenze, Kern beim Ausbau, die Client-Sicht), geht
+   hierdurch; sonst waere ein Modul an der einen Anzeige wirksam und an der anderen nicht - genau
+   die zweite Anzeigestelle, die dieses Projekt wieder und wieder erwischt hat.
+   `scan` ist eine STUFE: der Bonus wird gerundet addiert, nicht multipliziert. */
+function vorpostenWerte(doc) {
+  const st = vorpostenStufeVon(doc);
+  const b = vpModulBoni(doc);
+  return Object.assign({}, st, {
+    kernLp: Math.round(st.kernLp * (1 + b.kern)),
+    verteidigung: Math.round(st.verteidigung * (1 + b.verteidigung)),
+    garnisonMax: Math.round(st.garnisonMax * (1 + b.garnison)),
+    flug: Math.round(st.flug * (1 + b.flug) * 1000) / 1000,
+    prod: Math.round(st.prod * (1 + b.prod) * 1000) / 1000,
+    scan: st.scan + Math.round(b.scan),
+    modulBoni: b
+  });
+}
 function vorpostenSysOk(sys) { return typeof sys === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(sys); }
 function vorpostenKey(sys) { return 'vorposten:' + sys; }
 function vorpostenLies(sys) {
@@ -12515,8 +12542,102 @@ function vorpostenAlle() {
 function vorpostenGarnisonAnzahl(doc) {
   return Object.values((doc && doc.garnison) || {}).reduce((a, n) => a + (typeof n === 'number' && n > 0 ? n : 0), 0);
 }
+/* ===== STATIONSMODULE (Etappe 3, 02.09.2026) ==================================================
+   Auftrag Sascha: "man soll Module finden koennen, die selten sind - die sind natuerlich am
+   besten, random natuerlich. Und man soll auch Module bauen koennen, die sind aber weniger gut.
+   Die kann man ausbauen, kostet aber eine Kleinigkeit."
+
+   WARUM DER SERVER DAS FUEHRT und nicht der Spielstand: Ein Stationsmodul erhoeht die
+   VERTEIDIGUNG eines PvP-Ziels. Laege der Bestand im klientenautoritativen Spielstand, koennte
+   sich jeder beliebig viele legendaere Module ausstellen und seinen Vorposten unangreifbar
+   machen - genau die Grenze, die CLAUDE.md zieht ("kann ich etwas anfassen, das ANDEREN gehoert
+   oder allen gemeinsam ist?"). Deshalb:
+     - der BESTAND liegt am Nutzerobjekt (user.vpModule = { 'kernpanzer:selten': 2 }),
+     - die EINGEBAUTEN liegen im Vorposten-Dokument (doc.module = [instKey, ...]) in db.shared,
+     - Fund, Bau, Einbau und Ausbau laufen ausschliesslich ueber Endpunkte.
+
+   DIE WIRKUNG geht ausschliesslich auf Kanaele, die es SCHON GIBT (Kern, Verteidigung, Garnison,
+   Flug, Produktion, Aufklaerung) - ein Modul, das etwas verspricht, was das Spiel nicht auswertet,
+   waere eine Luege. Neue Kanaele kommen mit ihrer Wirkung, nicht davor.
+
+   FUND vs. BAU (die Kernentscheidung des Auftrags): Gefunden wird selten und zufaellig, mit den
+   besten Stufen; gebaut wird verlaesslich, aber nur bis 'ungewoehnlich'. Der Bau ist damit der
+   Boden, der Fund die Spitze - wer nur baut, kommt nie an das heran, was ein Fall einer
+   Sternenfeste hergibt. */
+const VP_MODUL_DEFS = [
+  { key: 'kernpanzer',   name: 'Kernpanzerung',    icon: 'ti-shield',              wirkung: 'kern',        basis: 0.08, desc: 'Verstärkt den Kern der Station: mehr Lebenspunkte, bevor sie fällt.' },
+  { key: 'geschuetz',    name: 'Geschützbank',     icon: 'ti-sword',               wirkung: 'verteidigung', basis: 0.10, desc: 'Zusätzliche Geschütze: die Station wehrt sich stärker, unabhängig von der Garnison.' },
+  { key: 'hangar',       name: 'Hangarerweiterung',icon: 'ti-rocket',              wirkung: 'garnison',     basis: 0.12, desc: 'Mehr Liegeplätze: die Garnison fasst mehr Schiffe.' },
+  { key: 'sprungrechner',name: 'Sprungrechner',    icon: 'ti-atom-2',              wirkung: 'flug',         basis: 0.15, desc: 'Rechnet Sprungbahnen vor: eigene Nicht-PvP-Missionen hierher fliegen kürzer.' },
+  { key: 'raffinerie',   name: 'Umlaufraffinerie', icon: 'ti-building-factory-2',  wirkung: 'prod',         basis: 0.15, desc: 'Verarbeitet im Orbit: erhöht den Produktionsbonus dieses Vorpostens.' },
+  { key: 'horchposten',  name: 'Horchposten',      icon: 'ti-antenna-bars-5',      wirkung: 'scan',         basis: 1,    desc: 'Lauscht weiter ins System: erhöht die Aufklärungsstufe um eine Stufe.' }
+];
+// Die Seltenheiten spiegeln MODULE_RARITY im Frontend (Namen und Reihenfolge), tragen hier aber
+// ihren EIGENEN Multiplikator: ein Stationsmodul ist keine Standort-Ausruestung.
+const VP_MODUL_SELTENHEIT = {
+  gewoehnlich:   { label: 'Gewöhnlich',   mult: 1.0 },
+  ungewoehnlich: { label: 'Ungewöhnlich', mult: 1.4 },
+  selten:        { label: 'Selten',       mult: 2.0 },
+  episch:        { label: 'Episch',       mult: 2.8 },
+  legendaer:     { label: 'Legendär',     mult: 4.0 }
+};
+// Gebaut wird nur bis 'ungewoehnlich' - der Rest kommt aus dem Fall von PvE-Zielen.
+const VP_MODUL_BAUBAR = ['gewoehnlich', 'ungewoehnlich'];
+const VP_MODUL_BAU_ABKLING_MS = 6 * 3600 * 1000;   // je Konto, am Nutzerobjekt
+const VP_MODUL_AUSBAU_KREDITE = 250;               // "kostet eine Kleinigkeit" - der Ausbau, nicht der Einbau
+// Steckplaetze: erst ab der Wahlstufe, dann einer je Stufe bis zur Spitze.
+/* Der Bestand am Nutzerobjekt. `user.vpModule` ist ein Zaehlerobjekt { instKey: anzahl } - die
+   Form, die auch das Frontend-Inventar benutzt, damit die Anzeige sich nicht neu erfinden muss. */
+function vpModulBestand(user) {
+  if (!user.vpModule || typeof user.vpModule !== 'object') user.vpModule = {};
+  return user.vpModule;
+}
+function vpModulGeben(user, instKey, n) {
+  const b = vpModulBestand(user);
+  b[instKey] = (b[instKey] || 0) + (n || 1);
+  return b[instKey];
+}
+function vpModulNehmen(user, instKey) {
+  const b = vpModulBestand(user);
+  if (!(b[instKey] > 0)) return false;
+  b[instKey] -= 1;
+  if (b[instKey] <= 0) delete b[instKey];
+  return true;
+}
+/* DER FUND. Aufgerufen, wenn ein PvE-Ziel FAELLT - je Beteiligtem, gewichtet mit seinem Anteil.
+   `stufe` ist die Schwere des Ziels (1 klein bis 3 Endspiel); sie hebt die Chance UND verschiebt
+   die Seltenheit nach oben. Gefunden wird selten: Der haeufigste Ausgang ist gar kein Modul.
+   Die Verteilung ist bewusst kopflastig zur Mitte - 'legendaer' bleibt die Ausnahme, sonst waere
+   der Bau nach zwei Abenden sinnlos. */
+function vpModulFundwurf(schwere, anteil) {
+  const chance = Math.min(0.5, (0.06 + 0.05 * Math.max(0, Math.min(3, schwere))) * (0.4 + 0.6 * Math.max(0, Math.min(1, anteil || 0))));
+  if (Math.random() >= chance) return null;
+  const wurf = Math.random() + 0.06 * Math.max(0, Math.min(3, schwere));
+  const seltenheit = wurf > 0.97 ? 'legendaer' : wurf > 0.85 ? 'episch' : wurf > 0.55 ? 'selten' : 'ungewoehnlich';
+  const def = VP_MODUL_DEFS[Math.floor(Math.random() * VP_MODUL_DEFS.length)];
+  return def.key + ':' + seltenheit;
+}
+function vpModulSlots(stufe) { return Math.max(0, Math.min(5, (Number(stufe) || 1) - VORPOSTEN_ZWEIG_AB + 1)); }
+function vpModulDef(key) { return VP_MODUL_DEFS.find(d => d.key === key) || null; }
+function vpModulTeile(instKey) {
+  const [key, seltenheit] = String(instKey || '').split(':');
+  const def = vpModulDef(key), sel = VP_MODUL_SELTENHEIT[seltenheit];
+  return (def && sel) ? { key, seltenheit, def, sel } : null;
+}
+/* Die Summe der eingebauten Module je Kanal. Ein Kanal mit zwei Modulen addiert - ein Deckel
+   waere hier falsch: die Steckplaetze SIND der Deckel (hoechstens fuenf, und jeder kostet). */
+function vpModulBoni(doc) {
+  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0 };
+  const slots = vpModulSlots(doc && doc.stufe);
+  for (const instKey of (doc && Array.isArray(doc.module) ? doc.module : []).slice(0, slots)) {
+    const teil = vpModulTeile(instKey);
+    if (!teil) continue;
+    aus[teil.def.wirkung] += teil.def.basis * teil.sel.mult;
+  }
+  return aus;
+}
 function vorpostenVerteidigung(doc) {
-  const st = vorpostenStufeVon(doc);
+  const st = vorpostenWerte(doc);
   return Math.round(st.verteidigung + rawFleetPower(doc.garnison || {}, 1, 1, null) * VORPOSTEN_GARNISON_FAKTOR);
 }
 function vorpostenHeimatSystem(userId) {
@@ -12548,7 +12669,7 @@ function checkVorpostenKeyPermission(req, key, isWrite) {
   return 'Vorposten werden ausschließlich über die Vorposten-Endpunkte verändert.';
 }
 function vorpostenFuerClient(doc, userId, jetzt) {
-  const st = vorpostenStufeVon(doc);
+  const st = vorpostenWerte(doc);
   const eigener = doc.besitzer === userId;
   const out = {
     id: doc.id, sys: doc.sys, besitzer: doc.besitzer, besitzerName: doc.besitzerName || 'Kommandant',
@@ -12563,6 +12684,12 @@ function vorpostenFuerClient(doc, userId, jetzt) {
        Leiter OHNE Zweig-Multiplikatoren - ein Festungsring haette dort eine um 45 % zu kleine
        Grenze angezeigt, und der Spieler haette Schiffe geschickt, die der Server ablehnt. */
     garnisonMax: st.garnisonMax,
+    /* Steckplaetze und was drinsteckt - fuer JEDEN sichtbar, nicht nur fuer den Besitzer: Ein
+       Angreifer soll sehen koennen, warum diese Station haerter ist als ihre Stufe vermuten laesst
+       (dieselbe Offenheit wie bei Verteidigung und Garnisonszahl). */
+    slots: vpModulSlots(doc.stufe),
+    module: (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlots(doc.stufe)),
+    modulBoni: st.modulBoni || null,
     schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
     nutzen: { flug: st.flug, prod: st.prod, scan: st.scan },
@@ -12605,7 +12732,7 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
   const durchschlag = Math.max(0.15, Math.min(0.95, kraft / (kraft + verteidigung)));
   const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4) * durchschlag);
 
-  doc.kern = doc.kern || { lp: vorpostenStufeVon(doc).kernLp, lpMax: vorpostenStufeVon(doc).kernLp };
+  doc.kern = doc.kern || { lp: vorpostenWerte(doc).kernLp, lpMax: vorpostenWerte(doc).kernLp };
   const lpVorher = Math.max(0, doc.kern.lp || 0);
   doc.kern.lp = Math.max(0, lpVorher - wurf);
   const schaden = lpVorher - doc.kern.lp;          // was ANGEKOMMEN ist, nicht der Wurf
@@ -12647,6 +12774,8 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
   const anteile = {};
   let teilnehmer = 0;
   if (gefallen) {
+    // Bewusst die STUFE ohne Module: sonst lohnte es sich, gut bestueckte Stationen zu jagen,
+    // und wer ausbaut, macht sich zur besseren Beute. Der Ertrag haengt am Rang, nicht am Zubehoer.
     const st = vorpostenStufeVon(doc);
     const summe = Object.values(doc.beitraege).reduce((a, b) => a + (b.schaden || 0), 0) || 1;
     for (const [uid, b] of Object.entries(doc.beitraege)) {
@@ -12687,6 +12816,12 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
     maxJeKonto: VORPOSTEN_MAX_JE_KONTO, schutzMs: VORPOSTEN_SCHUTZ_MS, abklingMs: VORPOSTEN_ABKLING_MS,
     ausbauMs: VORPOSTEN_AUSBAU_MS, garnisonFaktor: VORPOSTEN_GARNISON_FAKTOR,
     stufen: VORPOSTEN_STUFEN, zweige: Object.values(VORPOSTEN_ZWEIGE).map(z => ({ key: z.key, name: z.name, kurz: z.kurz, namen: z.namen, mult: z.mult })),
+    /* Der Modulkatalog reist mit - wie die Stufentabelle. Er hat damit keine Kopie im Frontend,
+       und `baubar` sagt dem Spiel, welche Seltenheiten die Schmiede annimmt. */
+    modulDefs: VP_MODUL_DEFS, modulSeltenheiten: VP_MODUL_SELTENHEIT, modulBaubar: VP_MODUL_BAUBAR,
+    modulAusbauKosten: VP_MODUL_AUSBAU_KREDITE, modulBauAbklingMs: VP_MODUL_BAU_ABKLING_MS,
+    modulBestand: vpModulBestand(findUserById(req.userId) || {}),
+    modulBauAb: (findUserById(req.userId) || {}).vpModulBauAb || 0,
     zweigAb: VORPOSTEN_ZWEIG_AB, maxStufe: VORPOSTEN_STUFEN.length,
     liste, eigene: liste.filter(x => x.eigener).length
   });
@@ -12748,9 +12883,11 @@ app.post('/api/vorposten/ausbauen', authMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Der nächste Ausbau ist in ' + Math.ceil((ausbauAb - jetzt) / 60000) + ' Minuten möglich.', abklingzeit: true, ausbauAb });
   }
   if (brauchtZweig) doc.zweig = zweigWunsch;
-  const alt = vorpostenStufeVon(doc);
+  // MIT Modulen gerechnet: sonst faellt das Maximum beim Ausbau unter den Stand von vorher,
+  // sobald eine Kernpanzerung steckt - ein Ausbau, der den Kern SCHRUMPFEN laesst.
+  const alt = vorpostenWerte(doc);
   doc.stufe = zielStufe;
-  const neu = vorpostenStufeVon(doc);
+  const neu = vorpostenWerte(doc);
   doc.kern = doc.kern || { lp: alt.kernLp, lpMax: alt.kernLp };
   // Ein Ausbau HEILT nicht - die LP steigen um dieselbe Differenz wie das Maximum, angerichteter
   // Schaden bleibt angerichtet (dieselbe Entscheidung wie beim reifenden Nest).
@@ -12766,6 +12903,87 @@ app.post('/api/vorposten/ausbauen', authMiddleware, async (req, res) => {
    WIRKLICH hat (Deckel: Bestand, freier Platz bis garnisonMax, nur Kampfschiffe) und schreibt es ins
    Dokument. Er zieht NICHT vom Spielstand ab - der Client bucht genau `angenommen` ab, nachdem die
    Antwort da ist. Andersherum (Server zieht ab) liefe die Abbuchung gegen den Autosave des Clients. */
+/* MODUL BAUEN. Verlaesslich, aber nur bis 'ungewoehnlich' - der Boden des Systems. Die Kosten
+   zahlt der Client aus seinem Spielstand (wie jede Baukosten-Buchung dieses Spiels; der Server
+   kann sie bauartbedingt nicht nachrechnen). Was der Server DOCH kontrolliert, ist die Menge:
+   eine Abklingzeit je Konto am Nutzerobjekt. Ohne sie waere der Bau eine Endlosquelle, und die
+   gefundenen Module - der eigentliche Reiz - waeren wertlos. */
+app.post('/api/vorposten/modul/bauen', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const key = String((req.body && req.body.modul) || '');
+  const seltenheit = String((req.body && req.body.seltenheit) || 'gewoehnlich');
+  if (!vpModulDef(key)) return res.status(400).json({ error: 'Dieses Stationsmodul gibt es nicht.' });
+  if (VP_MODUL_BAUBAR.indexOf(seltenheit) < 0) {
+    return res.status(400).json({ error: 'Bauen lassen sich nur Module bis „' + VP_MODUL_SELTENHEIT.ungewoehnlich.label + '". Bessere findet man beim Fall von Festungen, Nestern und Konvois.', nurFund: true });
+  }
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+  const jetzt = Date.now();
+  const frei = (user.vpModulBauAb || 0);
+  if (jetzt < frei) {
+    return res.status(400).json({ error: 'Die Modulschmiede kühlt noch ab - das nächste Modul ist in ' + Math.ceil((frei - jetzt) / 60000) + ' Minuten fertig.', abklingzeit: true, bauAb: frei });
+  }
+  user.vpModulBauAb = jetzt + VP_MODUL_BAU_ABKLING_MS;
+  const instKey = key + ':' + seltenheit;
+  const anzahl = vpModulGeben(user, instKey, 1);
+  await saveDb();
+  res.json({ ok: true, modul: instKey, anzahl, bestand: vpModulBestand(user), bauAb: user.vpModulBauAb });
+});
+
+/* EINBAUEN. Das Modul wandert vom Nutzerobjekt in das Vorposten-Dokument - beide Seiten in
+   DERSELBEN Anfrage, sonst kann ein Abbruch dazwischen eines verdoppeln oder verschlucken. */
+app.post('/api/vorposten/modul/einbauen', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  const instKey = String((req.body && req.body.modul) || '');
+  if (!vorpostenSysOk(sys) || !vpModulTeile(instKey)) return res.status(400).json({ error: 'System und Modul erforderlich.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer bestückt seinen Vorposten.' });
+  const slots = vpModulSlots(doc.stufe);
+  if (slots < 1) return res.status(400).json({ error: 'Steckplätze gibt es erst ab Stufe ' + VORPOSTEN_ZWEIG_AB + '.', keineSlots: true, abStufe: VORPOSTEN_ZWEIG_AB });
+  if (!Array.isArray(doc.module)) doc.module = [];
+  if (doc.module.length >= slots) return res.status(400).json({ error: 'Alle ' + slots + ' Steckplätze sind belegt - bau erst eines aus.', voll: true, slots });
+  const user = findUserById(req.userId);
+  if (!user || !vpModulNehmen(user, instKey)) return res.status(400).json({ error: 'Dieses Modul liegt nicht in deinem Bestand.' });
+  doc.module.push(instKey);
+  vorpostenSchreib(doc);
+  await saveDb();
+  res.json({ ok: true, vorposten: vorpostenFuerClient(doc, req.userId, Date.now()), bestand: vpModulBestand(user) });
+});
+
+/* AUSBAUEN. "Kostet aber eine Kleinigkeit" (Auftrag Sascha): VP_MODUL_AUSBAU_KREDITE Kredite,
+   abgebucht am SPIELSTAND (dort liegen die Kredite) und zurueckgemeldet, damit der Client seinen
+   Stand angleicht - dasselbe Muster wie /api/worldboss/resolve. Das Modul geht heil zurueck in
+   den Bestand: eine Umbestueckung soll man sich trauen. */
+app.post('/api/vorposten/modul/ausbauen', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  const platz = Math.floor(Number((req.body && req.body.platz)));
+  if (!vorpostenSysOk(sys) || !(platz >= 0)) return res.status(400).json({ error: 'System und Steckplatz erforderlich.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer bestückt seinen Vorposten.' });
+  if (!Array.isArray(doc.module) || !doc.module[platz]) return res.status(404).json({ error: 'In diesem Steckplatz steckt nichts.' });
+  const saveRaw = getSaveValue(req.userId);
+  let save = null;
+  try { save = saveRaw ? JSON.parse(saveRaw) : null; } catch (e) {}
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern, dann umbauen.' });
+  if ((save.credits || 0) < VP_MODUL_AUSBAU_KREDITE) {
+    return res.status(400).json({ error: 'Der Ausbau kostet ' + VP_MODUL_AUSBAU_KREDITE + ' Kredite - so viel hast du nicht.', kosten: VP_MODUL_AUSBAU_KREDITE });
+  }
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+  save.credits = (save.credits || 0) - VP_MODUL_AUSBAU_KREDITE;
+  const instKey = doc.module.splice(platz, 1)[0];
+  vpModulGeben(user, instKey, 1);
+  vorpostenSchreib(doc);
+  const saveVersion = setSaveValue(req.userId, JSON.stringify(save));
+  await saveDb();
+  res.json({ ok: true, modul: instKey, kosten: VP_MODUL_AUSBAU_KREDITE, newCredits: save.credits, saveVersion,
+    vorposten: vorpostenFuerClient(doc, req.userId, Date.now()), bestand: vpModulBestand(user) });
+});
+
 app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
   if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
   const sys = String((req.body && req.body.system) || '');
@@ -12779,7 +12997,7 @@ app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
   if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand.' });
   const fleetObj = planetKey === 'home' ? save.fleet : (save.colonies && save.colonies[planetKey] && save.colonies[planetKey].fleet);
   if (!fleetObj) return res.status(404).json({ error: 'Kein Flottenstandort gefunden.' });
-  const st = vorpostenStufeVon(doc);
+  const st = vorpostenWerte(doc);
   let platz = Math.max(0, st.garnisonMax - vorpostenGarnisonAnzahl(doc));
   const angenommen = {};
   doc.garnison = doc.garnison || {};

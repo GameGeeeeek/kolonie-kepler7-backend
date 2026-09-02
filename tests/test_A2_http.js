@@ -26,8 +26,9 @@
 //      galaxieweite Deckel A2_MAX haelt.
 //   8. DIE MODUL-BEUTE faellt mit CHANCE JE ANTEIL (server-gewuerfelt), traegt quelle:'konvoi',
 //      und das Kampf-Modul (kv_bergungspanzer) steht in SHIP_MODULE_COMBAT_BASE (PvP-Paritaet).
-//   9. DER SCHALTER A2_SPAWN_AKTIV steht auf false (Auslieferungs-Riegel, Regel 60) - er wird erst
-//      im Frontend-PR umgelegt. Ein voreiliges true faellt hier auf.
+//   9. DER SCHALTER A2_SPAWN_AKTIV steht auf true (seit dem 02.09.2026, Frontend v8.625.0
+//      ausgeliefert). Er bleibt als Notausschalter stehen; ein Wechsel auf false ist eine bewusste
+//      Notabschaltung, die hier auffaellt statt still zu geschehen (Muster test_festung_http 10).
 //
 // GEGENPROBEN (KEPLER_A2_SABOTAGE, je mit "was fallen MUSS"-Liste, Regel 1/71 - der Lauf exit-0t,
 // WENN genau die erwarteten Pruefungen fielen, sonst WERKZEUGFEHLER):
@@ -428,10 +429,10 @@ const a2mission = (id, zielId, sys) => ({
   {
     const schalter = (roh.match(/const A2_SPAWN_AKTIV = (true|false);/) || [])[1];
     check('9a: der Spawn-Schalter ist auffindbar', !!schalter, { steht_auf: schalter });
-    check('9b: und er steht auf FALSE (Auslieferungs-Riegel, Regel 60 - erst der Frontend-PR legt ihn um)',
-      schalter === 'false',
+    check('9b: und er steht auf TRUE (Frontend v8.625.0 ausgeliefert - false waere eine Notabschaltung, deren Grund nach docs/wrackkonvois.md gehoert)',
+      schalter === 'true',
       { steht_auf: schalter,
-        hinweis: 'true heisst: A2 geht LIVE, obwohl das Frontend die Ziele evtl. noch nicht zeichnet - beabsichtigt?' });
+        hinweis: 'false heisst: Notabschaltung - beabsichtigt? Dann den Grund in docs/wrackkonvois.md eintragen und diese Pruefung mit umstellen.' });
   }
 
   await stoppeServer();

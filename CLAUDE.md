@@ -55,7 +55,7 @@ Daraus folgt:
 - Eine neue Schiffsklasse lebt in **sechs** Tabellen: `grep -c "<schluessel>" server.js` muss 6 sein, jede Auslassung mit Begründung.
 - Ändert ein Backend-Merge eine spielersichtbare Zahl oder liest das Frontend ein neues Feld: **Backend zuerst live**, per `/api/health`
   belegt, dann Frontend. Für Mechaniken, die das Frontend noch nicht kennt, gibt es Notausschalter
-  (`FESTUNG_SPAWN_AKTIV`, `FESTUNG_BAUTEILE_AKTIV`, `NEST_SPAWN_AKTIV`, `A2_SPAWN_AKTIV`); umgelegt werden sie im **Frontend-PR**.
+  (`FESTUNG_SPAWN_AKTIV`, `FESTUNG_BAUTEILE_AKTIV`, `NEST_SPAWN_AKTIV`, `A2_SPAWN_AKTIV`, `VORPOSTEN_AKTIV`); umgelegt werden sie im **Frontend-PR**.
   Der Admin kann sie zur Laufzeit nur AB-, nie einschalten (`db.notAus`).
 - Ein Refactor, der eine Funktion zusammenführt, die ein Frontend-Test liest, wird im PR-Text benannt.
 
@@ -108,12 +108,14 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/asteroidenfeld.md` | Kampfvermerk am Vorkommen, Urmaterie-Nachsaat und -Boden |
 | `docs/alien-nester.md` | Nester, bewegliche NPC-Stärke, Verbandsangriff, PvE-Embleme (Phase 3–6) |
 | `docs/wrackkonvois.md` | A2, die wandernden Beute-Ziele |
+| `docs/vorposten.md` | B2, Vorposten: spielergebaute PvP-Ziele in db.shared, Stufen, Garnison, Schalter |
 | `docs/beute.md` | Boss-Set-Teile ohne Allianz, mythische Stufe |
 | `docs/kampfrechnung-paritaet.md` | Flottenverteidigung, Klassen-Sets, Raid-Vorschau, sechs Schiffstabellen, Kausalitätsbrecher |
 | `docs/pvp-standorte.md` | `targetPlanet` an `/api/attack`, Standort-Verteidigung |
 | `docs/sicherheit-auth.md` | Passwort-Regeln, Sitzungs-Cookie (Etappen a und b) |
-| `docs/admin.md` | Bonuscodes, Betreiber-Push, Admin-Fähigkeiten, Notaus, Aktivitäts-Uhr und ihre Erweiterungen (Verdacht, Geschenk, abgelehnte Spielstände) |
+| `docs/admin.md` | Bonuscodes, Betreiber-Push, Admin-Fähigkeiten, Notaus, Aktivitäts-Uhr und ihre Erweiterungen (Verdacht, Geschenk, abgelehnte Spielstände), Protokoll-Middleware, Sperre mit Frist und Stummschaltung, Spielstand-Rücksicherung aus dem Backup, Allianz-Verwaltung |
 | `docs/chat.md` | Bündel-Abruf, Retention |
+| `docs/ki-kampfberichte.md` | Etappe E1a: Prompt-Zuschnitt, Wahrheits-Sperren, Warteschlange, `KAMPFTEXT_AKTIV` |
 
 Der vollständige frühere Text dieser Datei liegt in der Git-Historie vor dem 01.09.2026.
 

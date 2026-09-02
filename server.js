@@ -171,18 +171,23 @@ const globalApiRateLimit = rateLimit(60 * 1000, 240, 'Zu viele Anfragen von dies
 const BACKUP_DIR = path.join(path.dirname(DB_FILE), 'backups');
 const BACKUP_RETENTION = 48; // ca. 1 Tag bei 30-Minuten-Takt
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+// Gibt den Dateinamen der neuen Sicherung zurueck, sonst null (02.09.2026, Codex-Hinweis auf #196):
+// Der Takt-Aufruf ignoriert den Rueckgabewert wie bisher, der Admin-Knopf "Backup jetzt" verlaesst
+// sich darauf - ein Fehlschlag darf dort nicht als Erfolg mit einer aelteren Sicherung erscheinen.
 function backupDb() {
   try {
-    if (!fs.existsSync(DB_FILE)) return; // beim allerersten Start evtl. noch keine DB vorhanden
+    if (!fs.existsSync(DB_FILE)) return null; // beim allerersten Start evtl. noch keine DB vorhanden
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    const dest = path.join(BACKUP_DIR, `db-${ts}.json`);
+    const name = `db-${ts}.json`;
+    const dest = path.join(BACKUP_DIR, name);
     fs.copyFileSync(DB_FILE, dest);
     const files = fs.readdirSync(BACKUP_DIR).filter(f => f.startsWith('db-') && f.endsWith('.json')).sort();
     while (files.length > BACKUP_RETENTION) {
       const oldest = files.shift();
       fs.unlinkSync(path.join(BACKUP_DIR, oldest));
     }
-  } catch (e) { console.error('Backup fehlgeschlagen:', e); }
+    return name;
+  } catch (e) { console.error('Backup fehlgeschlagen:', e); return null; }
 }
 backupDb();
 setInterval(backupDb, 30 * 60 * 1000);
@@ -192,6 +197,9 @@ setInterval(() => { saveDb(); }, 5 * 60 * 1000);
 // bereitstellt. Für alle anderen Routen ändert sich dadurch nichts.
 app.use(express.json({ limit: '2mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use('/api', globalApiRateLimit);
+// Protokoll aller Admin-Handlungen (02.09.2026) - MUSS vor den Routen registriert sein, sonst
+// sieht es keine Antwort. Siehe adminProtokollMiddleware.
+app.use('/api/admin', adminProtokollMiddleware);
 
 // --- Sitzungs-Cookie (Sicherheits-Audit P3, Etappe a: 19.08.2026) ---------------------------
 // Der Token liegt im Frontend in localStorage und ist damit in JS-Reichweite: Die erste
@@ -501,6 +509,194 @@ function verdachtTick(jetzt) {
   return gemeldet;
 }
 
+/* ===== Vier weitere Admin-Faehigkeiten (02.09.2026, Auftrag Sascha "Ideen fuer noch mehr admin
+   Funktionen jeglicher Art") ==========================================================================
+   Gemessen vorher: 23 Admin-Routen, aber keine Wiederherstellung eines einzelnen Spielstands (die
+   Backups alle 30 Minuten liegen nur auf der Platte), keine Sicht auf den Spielstand selbst, eine
+   Sperre als nacktes Ja/Nein ohne Grund und Frist, keine Stummschaltung, kein Protokoll der
+   Admin-Aktionen, Allianzen vom Admin-Bereich aus unsichtbar. Gewaehlt hat Sascha alle vier
+   Vorschlaege. Hier die Helfer; die Routen stehen im Admin-Block vor dem Systemstand.
+
+   --- 1. Das Protokoll ---
+   EINE Middleware ueber alle POST /api/admin/*-Routen statt einem Aufruf je Route: Eine Liste, die
+   man je Route pflegt, findet nur die Routen, an die man beim Schreiben gedacht hat - die naechste
+   neue Route fehlte still (Frontend-Arbeitsregel 40). Der Eintrag entsteht beim ERFOLGREICHEN
+   Antworten (Status < 300); ein abgelehnter Versuch (403, 400) ist keine Handlung. Der Koerper
+   wird gekuerzt mitgeschrieben, Zeichenketten auf 120 Zeichen; Admin-Routen tragen keine
+   Passwoerter oder Schluessel. */
+const ADMIN_PROTOKOLL_MERKEN = 300;
+function adminProtokollDetails(body) {
+  const out = {};
+  for (const [k, v] of Object.entries(body || {})) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'string') out[k] = v.slice(0, 120);
+    else if (typeof v === 'number' || typeof v === 'boolean') out[k] = v;
+    else { try { out[k] = JSON.stringify(v).slice(0, 200); } catch (e) { out[k] = '?'; } }
+  }
+  return out;
+}
+function adminProtokoll(art, von, body) {
+  const b = body || {};
+  const ziel = b.targetUsername || b.tag || b.code || b.name || b.email || null;
+  if (!Array.isArray(db.adminProtokoll)) db.adminProtokoll = [];
+  db.adminProtokoll.unshift({ zeit: Date.now(), art: String(art || '').slice(0, 60), von: von || null,
+    ziel: ziel ? String(ziel).slice(0, 60) : null, details: adminProtokollDetails(b) });
+  if (db.adminProtokoll.length > ADMIN_PROTOKOLL_MERKEN) db.adminProtokoll.length = ADMIN_PROTOKOLL_MERKEN;
+}
+function adminProtokollMiddleware(req, res, next) {
+  if (req.method !== 'POST') return next();
+  const original = res.json.bind(res);
+  res.json = function (body) {
+    if (res.statusCode < 300) {
+      // req.username setzt authMiddleware - die laeuft je Route NACH dieser Middleware, ist beim
+      // Antworten also laengst durch. originalUrl statt req.path: Beim Antworten hat Express den
+      // Pfad laengst wieder auf den vollen Wert gesetzt (gemessen: 'api/admin/set-banned').
+      adminProtokoll(String(req.originalUrl || '').split('?')[0].replace(/^\/api\/admin\//, ''), req.username || null, req.body);
+      // Die Antwort wartet auf das Speichern des Eintrags. Ein nicht abgewartetes saveDb() reihte
+      // sich hinter das der Route und war bei einem harten Stopp kurz nach der Antwort gemessen
+      // noch nicht auf der Platte (Gegenprobe 1d fiel unter Last) - ein Protokoll, das der Admin
+      // als "ok" gesehen hat, muss den Neustart ueberleben.
+      saveDb().catch(() => {}).then(() => original(body));
+      return res;
+    }
+    return original(body);
+  };
+  next();
+}
+
+/* --- 2. Sperre mit Grund und Frist, Stummschaltung ---
+   `banned` bleibt das Feld, das jede bestehende Pruefung liest; dazu kommen bannGrund, bannBis
+   (0 = unbefristet) und bannSeit. Eine abgelaufene Frist hebt die Sperre beim NAECHSTEN Kontakt
+   auf (sperreAktiv), nicht per Cron - dasselbe Muster wie beim Aufraeumen der Uhr. Der Spieler
+   sieht Grund und Frist im Anmeldetext; ein nacktes "gesperrt" war die Meldung, die zu jedem
+   Support-Gespraech gefuehrt hat.
+   Die Stummschaltung ist die mildere Stufe: stummBis sperrt den globalen Chat, den Allianz-Chat
+   und Direktnachrichten, sonst nichts. Spielen geht weiter. */
+function zeitText(ms) {
+  try { return new Date(ms).toLocaleString('de-DE', { timeZone: 'Europe/Berlin', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+  catch (e) { return new Date(ms).toISOString(); }
+}
+function sperreAktiv(user, jetzt) {
+  if (!user || !user.banned) return false;
+  const t = jetzt || Date.now();
+  if (user.bannBis && t > user.bannBis) {
+    user.banned = false; user.bannAbgelaufen = t; user.bannBis = 0;
+    return false;
+  }
+  return true;
+}
+function sperrText(user) {
+  return 'Dieses Konto wurde gesperrt' + (user.bannGrund ? ' – Grund: ' + user.bannGrund : '')
+    + (user.bannBis ? ' – bis ' + zeitText(user.bannBis) + ' Uhr' : '') + '.';
+}
+function stummAktiv(user, jetzt) { return !!(user && user.stummBis && (jetzt || Date.now()) < user.stummBis); }
+function stummText(user) {
+  return 'Du bist bis ' + zeitText(user.stummBis) + ' Uhr stummgeschaltet' + (user.stummGrund ? ' – Grund: ' + user.stummGrund : '') + '.';
+}
+
+/* --- 3. Spielstand-Blatt und Backups ---
+   Der Spielstand ist eine JSON-Zeichenkette; das Blatt zeigt eine ZUSAMMENFASSUNG (Ressourcen,
+   Kredite, Gebaeude- und Forschungsstufen, Flotte, Kolonien), nie den rohen Text - der ist bei
+   grossen Konten mehrere hundert Kilobyte. Dieselbe Zusammenfassung dient fuer den heutigen Stand
+   und fuer einen Stand aus einem Backup, damit der Admin VOR dem Zurueckholen vergleichen kann.
+   Backups sind ganze db.json-Kopien (backupDb, alle 30 Minuten, BACKUP_RETENTION Stueck). Ein
+   Backup wird bei Bedarf gelesen und geparst - synchron, im Admin-Aufruf; bei 13 Konten ein
+   Bruchteil einer Sekunde, und ein Admin-Aufruf ist kein Spielerpfad. Der Dateiname wird gegen
+   ein Muster geprueft, damit "../" nie ein Pfad wird. */
+const SPIELSTAND_RESSOURCEN = ['energie', 'erz', 'kristalle', 'deuterium', 'antimaterie', 'forschungspunkte'];
+function spielstandZusammenfassung(raw) {
+  if (raw === null || raw === undefined) return null;
+  let sv = null;
+  try { sv = JSON.parse(raw); } catch (e) { return { fehler: 'kein gueltiges JSON', groesse: String(raw).length }; }
+  // Gueltiges JSON, aber kein Objekt (null, Zahl, Liste): Die Plausibilitaetspruefung beim Speichern
+  // laesst `null` durch, und ein Zugriff auf sv.fleet wuerfe hier einen TypeError - 500 statt Blatt,
+  // und im async-Handler der Ruecksicherung eine unbehandelte Promise (Codex-Hinweis auf #196).
+  if (!sv || typeof sv !== 'object' || Array.isArray(sv)) return { fehler: 'kein Spielstand-Objekt', groesse: String(raw).length };
+  const zahl = v => (typeof v === 'number' && Number.isFinite(v)) ? Math.round(v) : 0;
+  const stufen = obj => { const o = {}; for (const [k, v] of Object.entries(obj || {})) if (zahl(v) > 0) o[k] = zahl(v); return o; };
+  const flotte = {};
+  for (const [k, v] of Object.entries(sv.fleet || {})) if (k !== 'missions' && zahl(v) > 0) flotte[k] = zahl(v);
+  const res = {};
+  for (const k of SPIELSTAND_RESSOURCEN) res[k] = zahl((sv.resources || {})[k]);
+  return {
+    groesse: String(raw).length,
+    spielerName: sv.player && sv.player.name ? String(sv.player.name).slice(0, 40) : null,
+    lastTick: zahl(sv.lastTick), credits: zahl(sv.credits), xp: zahl(sv.xp), prestige: zahl(sv.prestige),
+    kampfpunkte: zahl(sv.battlePoints), ressourcen: res,
+    gebaeude: stufen(sv.buildings), forschung: stufen(sv.research), flotte,
+    kolonien: Object.keys(sv.colonies || {}).length,
+    missionen: Array.isArray(sv.fleet && sv.fleet.missions) ? sv.fleet.missions.length : 0,
+    bauauftraege: Array.isArray(sv.constructionQueue) ? sv.constructionQueue.length : 0,
+    allianz: sv.player && sv.player.allianceTag ? String(sv.player.allianceTag).slice(0, 12) : null
+  };
+}
+const BACKUP_DATEI_MUSTER = /^db-[0-9A-Za-z-]+\.json$/;
+function backupListe() {
+  let dateien = [];
+  try { dateien = fs.readdirSync(BACKUP_DIR).filter(f => BACKUP_DATEI_MUSTER.test(f)); } catch (e) { return []; }
+  return dateien.sort().reverse().map(f => {
+    let st = null;
+    try { st = fs.statSync(path.join(BACKUP_DIR, f)); } catch (e) {}
+    return { datei: f, zeit: st ? st.mtimeMs : 0, groesse: st ? st.size : 0 };
+  });
+}
+function backupLesen(datei) {
+  if (!BACKUP_DATEI_MUSTER.test(String(datei || ''))) return { fehler: 'Ungueltiger Backup-Name.' };
+  const pfad = path.join(BACKUP_DIR, datei);
+  if (!fs.existsSync(pfad)) return { fehler: 'Dieses Backup gibt es nicht (mehr).' };
+  try { return { db: JSON.parse(fs.readFileSync(pfad, 'utf8')), zeit: fs.statSync(pfad).mtimeMs, zeitDatei: datei }; }
+  catch (e) { return { fehler: 'Backup nicht lesbar: ' + String(e.message).slice(0, 80) }; }
+}
+// Den Spielstand EINES Kontos aus einem Backup holen. Gesucht wird ueber den Kontonamen, nicht
+// ueber die userId: Ein neu angelegtes Konto gleichen Namens traegt eine andere Id, und der
+// Admin fragt nach dem Namen.
+function backupSpielstand(sicherung, kontoName) {
+  const u = sicherung && sicherung.users && sicherung.users[kontoName];
+  if (!u) return { vorhanden: false };
+  const eintrag = sicherung.private && sicherung.private[u.userId] && sicherung.private[u.userId][SAVE_KEY];
+  if (eintrag === undefined) return { vorhanden: false };
+  return { vorhanden: true, value: typeof eintrag === 'string' ? eintrag : eintrag.value };
+}
+
+/* --- 4. Allianzen ---
+   Alles liegt in db.shared unter alliance:<tag>:* - info, role:<userId>, base, applications:<id>.
+   Die Uebersicht liest genau diese Schluessel; Anfuehrer uebertragen und Aufloesen schreiben sie
+   auf demselben Weg wie der Client (disbandAlliance im Frontend: info.disbanded = true, alle
+   aktiven Rollen auf 'left'), damit jeder Mitglieds-Client beim naechsten Laden dasselbe sieht wie
+   nach einer Aufloesung durch den Anfuehrer selbst. */
+function allianzUebersicht() {
+  const tags = [];
+  for (const k of Object.keys(db.shared)) { const m = k.match(/^alliance:([^:]+):info$/); if (m) tags.push(m[1]); }
+  return tags.sort().map(tag => {
+    const info = allianceInfoOf(tag) || {};
+    const rollenPrefix = 'alliance:' + tag + ':role:';
+    const mitglieder = [];
+    for (const k of Object.keys(db.shared)) {
+      if (!k.startsWith(rollenPrefix)) continue;
+      try {
+        const r = JSON.parse(db.shared[k]);
+        if (r.role && r.role !== 'left') {
+          const konto = findUserById(k.slice(rollenPrefix.length));
+          mitglieder.push({ userId: k.slice(rollenPrefix.length), name: r.name || (konto && konto.username) || '?', rolle: r.role,
+            seit: r.joinedAt || 0, letzteSitzung: konto ? (konto.activeSessionAt || 0) : 0, kontoDa: !!konto });
+        }
+      } catch (e) {}
+    }
+    mitglieder.sort((a, b) => (a.rolle === 'admin' ? 0 : a.rolle === 'officer' ? 1 : 2) - (b.rolle === 'admin' ? 0 : b.rolle === 'officer' ? 1 : 2) || a.name.localeCompare(b.name));
+    let basisStufe = null;
+    try { const b = JSON.parse(db.shared['alliance:' + tag + ':base'] || 'null'); if (b && typeof b.level === 'number') basisStufe = b.level; } catch (e) {}
+    let bewerbungen = 0;
+    const appPrefix = 'alliance:' + tag + ':applications:';
+    for (const k of Object.keys(db.shared)) {
+      if (!k.startsWith(appPrefix)) continue;
+      try { if (JSON.parse(db.shared[k]).status === 'pending') bewerbungen++; } catch (e) {}
+    }
+    return { tag, name: info.name || null, gegruendet: info.createdAt || 0, gruender: info.creatorName || null,
+      beitritt: info.joinMode || 'open', aufgeloest: info.disbanded === true, aufgeloestAm: info.disbandedAt || 0,
+      basisStufe, bewerbungen, mitglieder, mitgliederMax: allianceMemberLimitMax(tag) };
+  });
+}
+
 function authMiddleware(req, res, next) {
   // Der Bearer-Header hat VORRANG vor dem Cookie, nicht umgekehrt. Grund: Solange Etappe a und b
   // auseinander liegen, traegt ein Browser beides - und massgeblich muss das sein, was das
@@ -516,7 +712,9 @@ function authMiddleware(req, res, next) {
     // gültig, wird sonst nie serverseitig invalidiert - siehe Kommentar bei /api/login) würde eine
     // Sperrung sonst erst beim nächsten Login-Versuch wirksam werden lassen, nicht sofort.
     const user = findUserById(payload.userId);
-    if (user && user.banned) return res.status(403).json({ error: 'Dieses Konto wurde gesperrt.' });
+    // sperreAktiv hebt eine abgelaufene Frist hier gleich auf (02.09.2026); der Text nennt Grund
+    // und Frist, damit die Sperre nicht mehr jedes Mal ein Support-Gespraech ausloest.
+    if (user && sperreAktiv(user)) return res.status(403).json({ error: sperrText(user), gesperrt: true });
     // Token-Versions-Prüfung: nach einem Passwort-Reset zählt user.tokenVersion hoch, wodurch ältere
     // Tokens (mit kleinerem tv) ungültig werden - ein gestohlenes/geleaktes Token verliert so beim
     // Passwortwechsel sofort seine Gültigkeit, statt bis zu 180 Tage weiterzuleben. Fehlende Felder
@@ -885,6 +1083,8 @@ function checkPactKeyPermission(req, key, isWrite) {
 function checkChatKeyPermission(req, key, isWrite) {
   if (!key.startsWith('globalchat:msg:')) return null;
   if (!isWrite) return null;
+  const sprecher = findUserById(req.userId);
+  if (stummAktiv(sprecher)) return stummText(sprecher);   // Stummschaltung (02.09.2026)
   let submitted = null;
   try { submitted = JSON.parse(req.body && req.body.value); } catch (e) { return 'Ungültiges Format.'; }
   if (!submitted || submitted.authorId !== req.userId) return 'Du kannst nur Nachrichten in deinem eigenen Namen senden.';
@@ -1048,6 +1248,8 @@ function checkAllianceKeyPermission(req, key, isWrite) {
   const myRole = allianceRoleOf(tag, req.userId);
   const isAdmin = myRole === 'admin';
   const isOfficerPlus = myRole === 'admin' || myRole === 'officer';
+  // Allianz-Chat unterliegt derselben Stummschaltung wie der globale (02.09.2026).
+  if (isWrite && rest.startsWith('msg:')) { const sprecher = findUserById(req.userId); if (stummAktiv(sprecher)) return stummText(sprecher); }
 
   if (rest === 'banner') {
     return (isWrite && !isOfficerPlus) ? 'Nur Admins/Offiziere dürfen den Allianz-Banner ändern.' : null;
@@ -2210,7 +2412,7 @@ app.post('/api/login', authRateLimit, async (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unbekannter Name oder falsches Passwort.' });
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) return res.status(401).json({ error: 'Unbekannter Name oder falsches Passwort.' });
-  if (user.banned) return res.status(403).json({ error: 'Dieses Konto wurde gesperrt.' });
+  if (sperreAktiv(user)) return res.status(403).json({ error: sperrText(user), gesperrt: true });
   // Double-Opt-In: neue Konten (emailVerified === false) sind erst nach Klick auf den
   // Bestätigungslink nutzbar. Bestandskonten haben das Feld nicht und sind nicht betroffen.
   if (user.emailVerified === false) {
@@ -2471,7 +2673,7 @@ app.get('/api/storage/:key', authMiddleware, (req, res) => {
   const shared = req.query.shared === 'true';
   const key = req.params.key;
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false) || checkChatKeyPermission(req, key, false) || checkHallOfFamePermission(req, key, false) || checkMoonDefensePermission(req, key, false) || checkWorldBossPermission(req, key, false) || checkMissionsKeyPermission(req, key, false) || checkAsteroidKeyPermission(req, key, false);
+    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false) || checkChatKeyPermission(req, key, false) || checkHallOfFamePermission(req, key, false) || checkMoonDefensePermission(req, key, false) || checkWorldBossPermission(req, key, false) || checkMissionsKeyPermission(req, key, false) || checkAsteroidKeyPermission(req, key, false) || checkVorpostenKeyPermission(req, key, false);
     if (denyReason) return res.status(403).json({ error: denyReason });
   }
   const store = shared ? db.shared : (db.private[req.userId] || {});
@@ -2509,7 +2711,7 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   const expectedVersion = req.body ? req.body.expectedVersion : undefined;
 
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true) || checkWorldBossPermission(req, key, true) || checkMissionsKeyPermission(req, key, true) || checkAsteroidKeyPermission(req, key, true);
+    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true) || checkWorldBossPermission(req, key, true) || checkMissionsKeyPermission(req, key, true) || checkAsteroidKeyPermission(req, key, true) || checkVorpostenKeyPermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
     // Mengenschutz (siehe MAX_SHARED_VALUE_BYTES oben). Bewusst NACH der Rechteprüfung und VOR jedem
     // Schreibzugriff - und bewusst nur für NEUE Schlüssel, damit die normale Spielschleife
@@ -3561,10 +3763,12 @@ const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, 
 const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130, metamaterialtitan:150, singularitaetsvernichter:280, kausalitaetsbrecher:340, urmateriekoloss:250, paktkorvette:40, bundeskreuzer:110, sternenbanner:240 };
 // marks (31.07.2026): derselbe atk-Markenfaktor wie in rawFleetPower - es ist derselbe
 // Angriffswert, hier nur mit defWeight verrechnet.
-/* save ist OPTIONAL: Die Asteroiden-Anfechtung ruft mit der Eskorte eines FREMDEN Spielers auf und
-   hat dessen Spielstand nicht zur Hand - dort bleibt es (wie schon bei den Marken) beim blanken
-   Flottenwert. Mit save spiegelt die Funktion shipDefenseContribution() im Frontend vollstaendig:
-   Huellen-Module, Traegerhangar und die Kampfforschung. */
+/* save ist OPTIONAL. Die Asteroiden-Anfechtung uebergab bis zum 01.09.2026 null (die Eskorte
+   eines FREMDEN Spielers ohne dessen Spielstand) - seither liest astEskorteVerteidigung() den
+   Spielstand des Halters aus db.private und uebergibt ihn, damit seine Marken, Module und
+   Kampfforschung so zaehlen, wie die Werft sie ihm anzeigt. Mit save spiegelt die Funktion
+   shipDefenseContribution() im Frontend vollstaendig: Huellen-Module, Traegerhangar und die
+   Kampfforschung. Ohne save (Halter ohne Spielstand) bleibt es beim blanken Flottenwert. */
 function weightedFleetDefensePower(f, marks, save) {
   if (!f) return 0;
   const huelle = save ? shipModulKlassenBoni(save, 'hull') : null;
@@ -4613,6 +4817,7 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
   const { toUserId, text } = req.body || {};
   const cleanText = String(text || '').trim().slice(0, 500);
   if (!toUserId || !cleanText) return res.status(400).json({ error: 'Empfänger und Nachricht erforderlich.' });
+  { const sprecher = findUserById(req.userId); if (stummAktiv(sprecher)) return res.status(403).json({ error: stummText(sprecher), stumm: true }); }
   if (!db.private[toUserId]) db.private[toUserId] = {};
   const list = db.private[toUserId].__messages || [];
   list.unshift({ id: crypto.randomUUID(), time: Date.now(), fromUserId: req.userId, fromName: req.username, text: cleanText });
@@ -4927,13 +5132,38 @@ app.get('/api/admin/reports', authMiddleware, (req, res) => {
 });
 app.post('/api/admin/set-banned', authMiddleware, async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
-  const { targetUsername, banned } = req.body || {};
+  const { targetUsername, banned, grund, tage } = req.body || {};
   const key = String(targetUsername || '').trim().toLowerCase();
   const target = db.users[key];
   if (!target) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const devUser = db.users['gamegeeeeek'];
+  if (devUser && target.userId === devUser.userId) return res.status(400).json({ error: 'Das Betreiberkonto kann sich nicht selbst sperren.' });
   target.banned = !!banned;
+  if (target.banned) {
+    // Grund und Frist (02.09.2026): tage = 0 heisst unbefristet. Der Grund steht im Anmeldetext.
+    const t = Math.max(0, Math.floor(Number(tage) || 0));
+    target.bannGrund = String(grund || '').trim().slice(0, 200);
+    target.bannBis = t > 0 ? Date.now() + t * 86400000 : 0;
+    target.bannSeit = Date.now();
+  } else {
+    target.bannBis = 0;
+  }
   await saveDb();
-  res.json({ ok: true, username: target.username, banned: target.banned });
+  res.json({ ok: true, username: target.username, banned: target.banned, bannGrund: target.bannGrund || '', bannBis: target.bannBis || 0 });
+});
+// Stummschaltung (02.09.2026): stunden = 0 hebt sie auf. Wirkt auf globalen Chat, Allianz-Chat
+// und Direktnachrichten - siehe checkChatKeyPermission, checkAllianceKeyPermission, /api/messages.
+app.post('/api/admin/stumm', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const { targetUsername, stunden, grund } = req.body || {};
+  const key = String(targetUsername || '').trim().toLowerCase();
+  const target = db.users[key];
+  if (!target) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const h = Math.max(0, Math.min(24 * 30, Math.floor(Number(stunden) || 0)));
+  target.stummBis = h > 0 ? Date.now() + h * 3600000 : 0;
+  target.stummGrund = h > 0 ? String(grund || '').trim().slice(0, 200) : '';
+  await saveDb();
+  res.json({ ok: true, username: target.username, stummBis: target.stummBis, stummGrund: target.stummGrund });
 });
 app.post('/api/admin/dismiss-report', authMiddleware, async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
@@ -8224,6 +8454,18 @@ function listMusterJoins(tag, musterAttackId) {
   return out;
 }
 
+/* Zielarten des koordinierten Angriffs OHNE Verteidiger: das Alien-Nest (Phase 5) und seit dem
+   01.09.2026 die Asteroidenfestung. Beide haben keine Allianz, keine Basis, kein incomingmuster-
+   Dokument und keinen Schutzschild - und bei beiden darf der Verteidiger-Zweig von `resolve` gar
+   nicht erst betreten werden (siehe den Kommentar dort). EINE Funktion dafuer statt zweier
+   Vergleiche an vier Stellen, damit eine dritte PvE-Zielart nicht eine davon vergisst. */
+function musterIstPveZiel(zielArt) { return zielArt === 'alien-nest' || zielArt === 'festung'; }
+function musterZielBeschreibung(doc) {
+  if (!doc) return '?';
+  if (doc.zielArt === 'alien-nest') return 'ein Alien-Nest bei ' + (doc.nestSystem || '?');
+  if (doc.zielArt === 'festung') return 'eine Asteroidenfestung bei ' + (doc.festungSystem || '?');
+  return '[' + doc.targetTag + ']';
+}
 app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
   const { tag, targetTag: targetTagRaw, gatherSeconds, message } = req.body || {};
   /* ZIELART (Phase 5). Ohne das Feld ist alles wie bisher - eine fremde Allianzbasis. Mit
@@ -8231,18 +8473,20 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
      Ein Nest hat keine Allianz, keine Basis, kein incomingmuster-Dokument und keinen
      Schutzschild. Was stattdessen geprueft wird, steht im Zweig darunter. */
   const zielArt = String((req.body && req.body.zielArt) || 'allianz');
+  if (!['allianz', 'alien-nest', 'festung'].includes(zielArt)) return res.status(400).json({ error: 'Unbekannte Zielart.' });
   const istNest = zielArt === 'alien-nest';
-  const targetTag = istNest ? null : String(targetTagRaw || '').trim().toUpperCase();
+  const istFestung = zielArt === 'festung';
+  const istPve = musterIstPveZiel(zielArt);
+  const targetTag = istPve ? null : String(targetTagRaw || '').trim().toUpperCase();
   const gatherOk = ALLIANCE_MUSTER_DURATIONS.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
   if (!tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
-  if (!istNest && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!istPve && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   const myRole = allianceRoleOf(tag, req.userId);
   if (myRole !== 'admin' && myRole !== 'officer') return res.status(403).json({ error: 'Nur Admins/Offiziere können einen koordinierten Angriff starten.' });
 
   const mine = getMusterAttackDoc(tag);
   if (mine && (mine.phase === 'gathering' || mine.phase === 'enroute')) {
-    const gegen = mine.zielArt === 'alien-nest' ? 'ein Alien-Nest bei ' + (mine.nestSystem || '?') : '[' + mine.targetTag + ']';
-    return res.status(409).json({ error: 'Es läuft bereits ein koordinierter Angriff eurer Allianz (gegen ' + gegen + ').' });
+    return res.status(409).json({ error: 'Es läuft bereits ein koordinierter Angriff eurer Allianz (gegen ' + musterZielBeschreibung(mine) + ').' });
   }
 
   let nestZiel = null;
@@ -8260,7 +8504,26 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     if (!nestZiel) return res.status(404).json({ error: 'Dieses Alien-Nest gibt es nicht (mehr).' });
   }
 
-  if (!istNest) {
+  /* ASTEROIDENFESTUNG als Ziel (01.09.2026). Eine Sternenfeste braucht fuenf Endspiel-Schlaege bei
+     sechs Stunden Abklingzeit - zwei Tage allein; genau dafuer ist ein Verband gedacht. Dieselbe
+     Bauart wie der Nest-Zweig darueber: der Schalter gilt mit (die Konstante, nicht spawnAktiv -
+     eine Notabschaltung stoppt den Nachschub, enteignet aber niemanden), die Festung wird ueber
+     System UND Kennung gefunden, und die Zielwahl (Kern, Schild, Tuerme) steht im Dokument, weil
+     sie beim Ausrufen eine Entscheidung der ganzen Allianz ist. */
+  let festungZiel = null, festungSystem = null, festungWahl = 'kern';
+  if (istFestung) {
+    if (!FESTUNG_SPAWN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Asteroidenfestungen in der Galaxie.' });
+    festungSystem = String((req.body && req.body.festungSystem) || '');
+    const festungId = String((req.body && req.body.festungId) || '');
+    if (!festungSystem || astGuertelSysteme().indexOf(festungSystem) < 0) return res.status(404).json({ error: 'Dieses System trägt keinen Asteroidengürtel.' });
+    const feldF = astAlleFelder().felder[festungSystem];
+    festungZiel = feldF && feldF.festung;
+    if (!festungZiel || (festungId && festungZiel.id !== festungId)) return res.status(404).json({ error: 'Diese Festung gibt es nicht (mehr).' });
+    festungWahl = String((req.body && req.body.festungZiel) || 'kern');
+    if (festungWahl !== 'kern' && !FESTUNG_BAUTEILE[festungWahl]) return res.status(400).json({ error: 'Unbekanntes Bauteil als Ziel.' });
+  }
+
+  if (!istPve) {
   const targetBaseRaw = db.shared['alliance:' + targetTag + ':base'];
   let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
   if (!targetBase || !targetBase.foundedAt) return res.status(404).json({ error: 'Die Allianz [' + targetTag + '] hat keine (auffindbare) Allianzbasis.' });
@@ -8283,6 +8546,11 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     nestVolk: nestZiel ? nestZiel.volk : null,
     nestVolkName: nestZiel ? ((ALIEN_VOELKER[nestZiel.volk] || {}).name || nestZiel.volk) : null,
     nestStufeName: nestZiel ? nestStufe(nestZiel.stufe).name : null,
+    festungId: festungZiel ? festungZiel.id : null,
+    festungSystem: festungZiel ? festungSystem : null,
+    festungStufe: festungZiel ? festungZiel.stufe : null,
+    festungStufeName: festungZiel ? ((FESTUNG_STUFEN[festungZiel.stufe] || FESTUNG_STUFEN.schanze).name) : null,
+    festungZiel: festungZiel ? festungWahl : null,
     message: String(message || '').replace(/[<>]/g, '').slice(0, 140),
     createdAt: now, museterEndsAt: now + gatherSeconds * 1000,
     phase: 'gathering', dispatch: null, result: null
@@ -8409,10 +8677,12 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
   const myBaseRaw = db.shared['alliance:' + tag + ':base'];
   let myBase = null; try { myBase = myBaseRaw ? JSON.parse(myBaseRaw) : null; } catch (e) {}
   let sameSys;
-  if (doc.zielArt === 'alien-nest') {
-    // Dieselbe Regel wie bei einer fremden Basis, nur mit dem SYSTEM des Nestes als Gegenstueck:
-    // gleicher Sektor = kurzer Anflug. Eine zweite Entfernungsrechnung waere eine zweite Wahrheit.
-    sameSys = !!(myBase && doc.nestSystem && myBase.sector === doc.nestSystem);
+  if (musterIstPveZiel(doc.zielArt)) {
+    // Dieselbe Regel wie bei einer fremden Basis, nur mit dem SYSTEM des Nestes bzw. der Festung
+    // als Gegenstueck: gleicher Sektor = kurzer Anflug. Eine zweite Entfernungsrechnung waere
+    // eine zweite Wahrheit.
+    const pveSystem = doc.zielArt === 'festung' ? doc.festungSystem : doc.nestSystem;
+    sameSys = !!(myBase && pveSystem && myBase.sector === pveSystem);
   } else {
     const targetBaseRaw = db.shared['alliance:' + doc.targetTag + ':base'];
     let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
@@ -8435,9 +8705,10 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
   };
   doc.phase = 'enroute';
   setMusterAttackDoc(tag, doc);
-  // Ein Nest wird nicht gewarnt - es gibt keinen Verteidiger, der ein incomingmuster-Dokument
-  // lesen koennte, und ein Eintrag unter `alliance:null:incomingmuster` waere schlicht Muell.
-  if (doc.zielArt !== 'alien-nest') {
+  // Ein Nest oder eine Festung wird nicht gewarnt - es gibt keinen Verteidiger, der ein
+  // incomingmuster-Dokument lesen koennte, und ein Eintrag unter `alliance:null:incomingmuster`
+  // waere schlicht Muell.
+  if (!musterIstPveZiel(doc.zielArt)) {
     db.shared['alliance:' + doc.targetTag + ':incomingmuster'] = JSON.stringify({
       attackerTag: tag, musterAttackId: doc.id, phase: 'enroute', dispatchedAt: now,
       arrivalAt: doc.dispatch.arrivalAt, lastAttackAt: now, totalShips, resolvedAt: null
@@ -8468,7 +8739,8 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
      Nest-Verbandsangriff aufloesen. Ein Nest hat keinen Verteidiger; also gibt es hier auch
      keine Verteidiger-Rolle zu pruefen. */
   const istNestZiel = !!(doc && doc.zielArt === 'alien-nest');
-  const myRoleDefender = (doc && !istNestZiel) ? allianceRoleOf(doc.targetTag, req.userId) : null;
+  const istFestungZiel = !!(doc && doc.zielArt === 'festung');
+  const myRoleDefender = (doc && !musterIstPveZiel(doc.zielArt)) ? allianceRoleOf(doc.targetTag, req.userId) : null;
   if (!myRoleAttacker && !myRoleDefender) return res.status(403).json({ error: 'Nur Mitglieder der angreifenden oder verteidigenden Allianz.' });
 
   if (!doc || doc.phase !== 'enroute' || !doc.dispatch || doc.dispatch.arrivalAt > Date.now()) return res.json({ ok: true, doc });
@@ -8533,6 +8805,61 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
       ' kraft=' + doc.dispatch.totalPower + ' schaden=' + erg.schaden +
       ' lp=' + (erg.gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax +
       (erg.schwarmGefallen ? ' SCHWARM ZERFALLEN (+' + erg.mitgerissen + ')' : ''));
+    await saveDb();
+    return res.json({ ok: true, doc });
+  }
+
+  if (istFestungZiel) {
+    /* Der Verband gegen eine Asteroidenfestung (01.09.2026). Gebaut nach dem Nest-Zweig darueber
+       und ueber DENSELBEN Rechenkern wie der Einzelangriff (festungSchlagAusfuehren) - eine
+       zweite Kopie der Rechnung waere die uebliche zweite Wahrheit. Marken uebergibt der Verband
+       als null: Werftmarken sind personengebunden, eine Summe aus zehn Flotten hat keine. */
+    const jetzt = Date.now();
+    const { felder } = astAlleFelder();          // reift den Hort auf den Stand dieser Sekunde
+    const feld = felder[doc.festungSystem];
+    const fest = feld && feld.festung;
+    if (!fest || (doc.festungId && fest.id !== doc.festungId)) {
+      doc.phase = 'resolved';
+      doc.result = { festung: true, verpasst: true, grund: 'gefallen', system: doc.festungSystem,
+        stufeName: doc.festungStufeName || null, success: false, destroyed: false, damage: 0,
+        defensePower: 0, ownLossPct: 0, resolvedAt: jetzt };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+    const rohF = doc.dispatch.participants;
+    const beteiligteF = (Array.isArray(rohF) && rohF.length)
+      ? rohF.map(p => ({ userId: p.id, name: p.name || 'Kommandant', gewicht: p.power || 0 }))
+      : (doc.dispatch.participantIds || []).map(id => ({ userId: id, name: 'Kommandant', gewicht: 1 }));
+    if (!beteiligteF.length) {
+      doc.phase = 'resolved';
+      doc.result = { festung: true, noParticipants: true, success: false, destroyed: false, damage: 0,
+        defensePower: 0, ownLossPct: 0, resolvedAt: jetzt };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+    const ergF = festungSchlagAusfuehren(feld, fest, doc.festungSystem, doc.dispatch.totalPower,
+      doc.dispatch.totalComposition || {}, beteiligteF, jetzt, doc.festungZiel || 'kern', null);
+    db.shared[astFeldKey(doc.festungSystem)] = feld;
+    doc.phase = 'resolved';
+    doc.result = {
+      festung: true, verpasst: false,
+      stufeName: ergF.stufeName, system: doc.festungSystem,
+      damage: ergF.schaden, teilSchaden: ergF.teilSchaden, ziel: ergF.ziel, zerstoert: ergF.zerstoert,
+      rollenFaktor: ergF.rollenFaktor,
+      destroyed: ergF.gefallen, success: (ergF.schaden + ergF.teilSchaden) > 0,
+      kern: ergF.kern, kernMax: ergF.kernMax, bauteile: ergF.bauteile,
+      ownLossPct: Math.round(ergF.quote * 1000) / 1000,
+      defensePower: 0, chancePct: null,
+      teilnehmer: ergF.teilnehmer,
+      belohnungUeberPendingRewards: true,
+      resolvedAt: jetzt
+    };
+    setMusterAttackDoc(tag, doc);
+    console.log('[muster-festung] tag=' + tag + ' sys=' + doc.festungSystem + ' teilnehmer=' + beteiligteF.length +
+      ' kraft=' + doc.dispatch.totalPower + ' ziel=' + ergF.ziel + ' kernschaden=' + ergF.schaden +
+      ' teilschaden=' + ergF.teilSchaden + ' kern=' + (ergF.gefallen ? 'gefallen' : ergF.kern) + '/' + ergF.kernMax);
     await saveDb();
     return res.json({ ok: true, doc });
   }
@@ -8659,11 +8986,12 @@ app.post('/api/musterattack/claim', authMiddleware, async (req, res) => {
     return res.json({ ok: true, noParticipants: true, saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
   }
 
-  if (res_.nest) {
-    /* Bei einem Nest gibt claim NUR die Schiffe zurueck. Die eigentliche Belohnung liegt anteilig
-       in __pendingRewards (siehe Kommentar im Ergebnis) - sie hier ein zweites Mal auszuzahlen
-       waere eine Doppelzahlung fuer dasselbe Ereignis. Bei `verpasst` ist die Quote 0, der Verband
-       kommt also vollzaehlig heim: Das Nest war nicht da, das ist kein Fehler des Spielers. */
+  if (res_.nest || res_.festung) {
+    /* Bei einem Nest oder einer Festung gibt claim NUR die Schiffe zurueck. Die eigentliche
+       Belohnung liegt anteilig in __pendingRewards (siehe Kommentar im Ergebnis) - sie hier ein
+       zweites Mal auszuzahlen waere eine Doppelzahlung fuer dasselbe Ereignis. Bei `verpasst` ist
+       die Quote 0, der Verband kommt also vollzaehlig heim: Das Ziel war nicht da, das ist kein
+       Fehler des Spielers. */
     const verloren = {};
     if (fleetObj) {
       for (const [k, sentCount] of Object.entries(join.composition || {})) {
@@ -8678,9 +9006,11 @@ app.post('/api/musterattack/claim', authMiddleware, async (req, res) => {
     db.shared[joinKey] = JSON.stringify(join);
     const nestSaveVersion = setSaveValue(req.userId, JSON.stringify(save));
     await saveDb();
-    return res.json({ ok: true, nest: true, verpasst: !!res_.verpasst, grund: res_.grund || null,
+    return res.json({ ok: true, nest: !!res_.nest, festung: !!res_.festung, pve: true,
+      verpasst: !!res_.verpasst, grund: res_.grund || null,
       destroyed: !!res_.destroyed, damage: res_.damage || 0, volkName: res_.volkName || null,
       stufeName: res_.stufeName || null, lostShips: verloren,
+      teilSchaden: res_.teilSchaden || 0, ziel: res_.ziel || null, zerstoert: res_.zerstoert || null,
       belohnungUeberPendingRewards: true,
       saveVersion: nestSaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
   }
@@ -10247,6 +10577,79 @@ function astFindeAngriffsmission(save, missionId, sysId, platz) {
 // sie - dasselbe Muster wie bei /api/asteroid/mine. Der Halter erfährt seine Verluste über das
 // Felddokument, das ihm der nächste Feld-Abruf liefert. Damit entsteht das Wettrennen zwischen
 // Server-Schreibung und Client-Save gar nicht erst.
+/* Die Verteidigung einer stationierten Eskorte (01.09.2026). Bis hierher stand in der Anfechtung
+   `weightedFleetDefensePower(vork.eskorte, null) + fleetShieldSum(vork.eskorte, null)` - also OHNE
+   den Spielstand des Halters. Seine Werftmarken, seine Klassenmodule und seine Kampfforschung
+   zaehlten damit nicht, waehrend die Werft sie ihm anzeigt; und der Kommentar an der Vorschau des
+   Frontends behauptete das Gegenteil ("der Server rechnet mit Werftmarken, Modulen des Halters").
+   Der Halter hat einen Spielstand, und der liegt in db.private - er wird hier gelesen, genau wie
+   /api/attack den Spielstand des Verteidigers liest. Ein Halter ohne Spielstand (Konto geloescht)
+   faellt auf den alten Wert zurueck.
+   EINE Funktion fuer den Kampf UND die Vorschau (/api/asteroid/anfechtung-vorschau): Die Vorschau
+   darf keine zweite Zahl neben der echten sein (Punkt 6 der Checkliste im Frontend-Repo). */
+function astEskorteVerteidigung(vork) {
+  const eskorte = (vork && vork.eskorte) || {};
+  const halterSave = (vork && vork.halter) ? astLeseSave(vork.halter) : null;
+  const marks = halterSave ? halterSave.shipMarks : null;
+  return weightedFleetDefensePower(eskorte, marks, halterSave) + fleetShieldSum(eskorte, marks, halterSave);
+}
+/* Die Chance einer Anfechtung bei gegebenem Wurf - EINE Formel fuer Kampf und Vorschau. Der Wurf
+   liegt im Kampf zwischen 0,85 und 1,15; die Vorschau nennt deshalb die Spanne an beiden Enden
+   statt einer Zahl, die der Kampf dann "widerlegt". Deckel wie im PvP (AST_CHANCE_MIN/MAX). */
+function astAnfechtungChance(angriff, verteidigung, wurf) {
+  return Math.max(AST_CHANCE_MIN, Math.min(AST_CHANCE_MAX, (angriff * wurf) / (angriff * wurf + Math.max(1, verteidigung))));
+}
+/* Die Verlustanteile derselben Anfechtung - ebenfalls EINE Stelle fuer Kampf und Vorschau. */
+function astAnfechtungVerluste(angriff, verteidigung) {
+  return {
+    sieg: Math.min(0.5, verteidigung / Math.max(1, angriff) * 0.35),
+    niederlage: Math.min(0.85, 0.45 + verteidigung / Math.max(1, angriff) * 0.2),
+    gegnerBeiNiederlage: Math.min(0.6, angriff / Math.max(1, verteidigung) * 0.35)
+  };
+}
+/* Die Vorschau der Anfechtung (01.09.2026, Auftrag Sascha "Alle umsetzen"). Bis hierher zeigte die
+   Flottenwahl der Anfechtung bewusst KEINE Zahl - der Client kennt die Marken und Module des
+   Halters nicht und haette raten muessen. Der Server kennt beide Spielstaende und rechnet hier mit
+   GENAU den Funktionen, die der Kampf benutzt (astEskorteVerteidigung, astAnfechtungChance,
+   astAnfechtungVerluste). Die Zusammensetzung kommt fuer die VORSCHAU aus dem Request - das ist
+   unkritisch, weil daraus nichts gebucht wird; der KAMPF liest sie weiterhin ausschliesslich aus
+   der gespeicherten Mission. Dieselbe Arbeitsteilung wie GET /api/spieler-standorte, das die
+   Verteidigung eines fremden Standorts fuer die Zielwahl nennt. */
+app.post('/api/asteroid/anfechtung-vorschau', authMiddleware, (req, res) => {
+  const sysId = String((req.body && req.body.system) || '');
+  const platz = String((req.body && req.body.platz) !== undefined ? req.body.platz : '');
+  const roh = (req.body && req.body.composition && typeof req.body.composition === 'object') ? req.body.composition : null;
+  if (!sysId || !platz || !roh) return res.status(400).json({ error: 'System, Platz und Flotte fehlen.' });
+  if (astGuertelSysteme().indexOf(sysId) < 0) return res.status(400).json({ error: 'Dieses System trägt keinen Asteroidengürtel.' });
+  const { felder } = astAlleFelder();
+  const feld = felder[sysId];
+  const vork = feld && feld.plaetze && feld.plaetze[platz];
+  if (!vork || vork.frei) return res.status(409).json({ error: 'Dieses Vorkommen ist nicht mehr da.', weg: true });
+  if (!vork.halter) return res.status(409).json({ error: 'Dieses Vorkommen ist gar nicht reserviert - es lässt sich einfach abbauen.' });
+  if (vork.halter === req.userId) return res.status(400).json({ error: 'Das ist dein eigenes Schürfrecht.' });
+  const save = astLeseSave(req.userId);
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern.' });
+  const composition = {};
+  for (const [k, v] of Object.entries(roh)) {
+    const n = Math.floor(Number(v));
+    if (Number.isFinite(n) && n > 0 && SHIP_ATK_VALUES[k] !== undefined) composition[k] = n;
+  }
+  const angriff = rawFleetPower(composition, 1, 1, save.shipMarks);
+  if (!(angriff > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
+  const verteidigung = astEskorteVerteidigung(vork);
+  const verluste = astAnfechtungVerluste(angriff, verteidigung);
+  const wache = Object.values(vork.eskorte || {}).reduce((a, b) => a + (typeof b === 'number' && b > 0 ? b : 0), 0);
+  res.json({
+    ok: true,
+    angriff: Math.round(angriff), verteidigung: Math.round(verteidigung), wache,
+    chanceMin: Math.round(astAnfechtungChance(angriff, verteidigung, 0.85) * 100),
+    chanceMax: Math.round(astAnfechtungChance(angriff, verteidigung, 1.15) * 100),
+    chance: Math.round(astAnfechtungChance(angriff, verteidigung, 1.0) * 100),
+    verlustSieg: Math.round(verluste.sieg * 100),
+    verlustNiederlage: Math.round(verluste.niederlage * 100),
+    schutzBis: vork.schutzBis || 0
+  });
+});
 app.post('/api/asteroid/contest', authMiddleware, async (req, res) => {
   const sysId = String((req.body && req.body.system) || '');
   const platz = String((req.body && req.body.platz) !== undefined ? req.body.platz : '');
@@ -10293,19 +10696,23 @@ app.post('/api/asteroid/contest', authMiddleware, async (req, res) => {
   }
 
   const angriff = rawFleetPower(mission.composition, 1, 1, save.shipMarks);
-  const verteidigung = weightedFleetDefensePower(vork.eskorte || {}, null) + fleetShieldSum(vork.eskorte || {}, null);
+  // MIT dem Spielstand des Halters (Marken, Module, Kampfforschung) - siehe astEskorteVerteidigung.
+  const verteidigung = astEskorteVerteidigung(vork);
   if (!(angriff > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
 
   // Zufallsband wie bei der Mondbelagerung, Deckel wie im PvP: Überzahl gewinnt meist, aber nie
-  // sicher - und ein unterlegener Angriff ist nicht von vornherein sinnlos.
+  // sicher - und ein unterlegener Angriff ist nicht von vornherein sinnlos. Die Formel steht in
+  // astAnfechtungChance, weil die Vorschau dieselbe benutzen muss.
   const wurf = 0.85 + Math.random() * 0.3;
-  const chance = Math.max(AST_CHANCE_MIN, Math.min(AST_CHANCE_MAX, (angriff * wurf) / (angriff * wurf + Math.max(1, verteidigung))));
+  const chance = astAnfechtungChance(angriff, verteidigung, wurf);
   const gewonnen = Math.random() < chance;
 
   // Verluste: der Verlierer trägt schwerer. Anteilig auf beide Seiten, damit auch ein gewonnener
-  // Angriff etwas kostet - sonst wäre eine Übermacht ein Freifahrtschein.
-  const eigenerVerlustAnteil = gewonnen ? Math.min(0.5, verteidigung / Math.max(1, angriff) * 0.35) : Math.min(0.85, 0.45 + verteidigung / Math.max(1, angriff) * 0.2);
-  const gegnerVerlustAnteil = gewonnen ? 1 : Math.min(0.6, angriff / Math.max(1, verteidigung) * 0.35);
+  // Angriff etwas kostet - sonst wäre eine Übermacht ein Freifahrtschein. Eine Stelle fuer Kampf
+  // und Vorschau: astAnfechtungVerluste.
+  const verlustAnteile = astAnfechtungVerluste(angriff, verteidigung);
+  const eigenerVerlustAnteil = gewonnen ? verlustAnteile.sieg : verlustAnteile.niederlage;
+  const gegnerVerlustAnteil = gewonnen ? 1 : verlustAnteile.gegnerBeiNiederlage;
 
   const gegnerVerluste = {};
   const neueEskorte = {};
@@ -10756,11 +11163,18 @@ function nestTick(g) {
        ist ('findbar'), praesent genug, dass es sich lohnt.
      - A2_VERLUST = 0,08: Grundverlust des Angreifers je Schlag, wie beim Nest.
 
-   A2_SPAWN_AKTIV STEHT AUF false - NOTAUSSCHALTER und Auslieferungs-Riegel (Regel 60): A2 wirft
-   ein Kampf-Modul-Set ab (Beute-Variante 3, PvP-relevant), also muss das Backend vor dem Frontend
-   live sein und der Schalter im Frontend-PR umgelegt werden. Solange er aus ist, kehrt A2Tick in
-   Zeile 1 zurueck und der ganze Abschnitt tut nichts. */
-const A2_SPAWN_AKTIV = false;
+   A2_SPAWN_AKTIV STEHT SEIT DEM 02.09.2026 AUF true - das Frontend ist ausgeliefert (v8.625.0:
+   Kartenknoten, Kartenmenue, Mission konvoi-angriff, Bericht, Belohnungszweig wrackkonvoi, beide
+   Module mit quelle:'konvoi'). Damit ist die Bedingung erfuellt, unter der er auf false stehen
+   musste: A2 wirft ein Kampf-Modul-Set ab (Beute-Variante 3, PvP-relevant), also musste das
+   Backend VOR dem Frontend live sein (Regel 60) und der Schalter erst danach kippen.
+   Der Schalter bleibt trotzdem stehen - als NOTAUSSCHALTER, aus demselben Grund wie
+   FESTUNG_SPAWN_AKTIV und NEST_SPAWN_AKTIV: eine Zeile umzulegen ist schneller und sicherer als
+   ein Merge zurueckzunehmen, Endpunkte und Tests bleiben unangetastet. Steht er aus, kehrt A2Tick
+   in Zeile 1 zurueck und es entsteht kein neues Ziel. test_A2_http.js Abschnitt 9 prueft jetzt,
+   dass er auf true steht - ein Wechsel auf false ist damit eine bewusste Notabschaltung, die
+   auffaellt statt still zu geschehen, und ihr Grund gehoert nach docs/wrackkonvois.md. */
+const A2_SPAWN_AKTIV = true;
 const A2_ART = 'wrackkonvoi';
 const A2_ART_NAME = 'Wrackkonvoi';
 const A2_LP = 40000;
@@ -10837,7 +11251,12 @@ function a2Neu(g, sysId, now) {
    Galaxie (es entsteht, driftet, entkommt), und diese Ereignisse gehoeren in den Weltentakt.
    Drei Zweige; der Endpunkt (Angriff, Fall) ist Task 2 und lebt woanders. */
 function A2Tick(g) {
-  if (!A2_SPAWN_AKTIV) return;
+  // spawnAktiv() statt der blanken Konstante: Damit greift zusaetzlich die Notabschaltung ueber
+  // db.notAus (POST /api/admin/schalter, ohne Deploy) - wie bei nestTick. Sie haelt den GANZEN Takt
+  // an (kein Entstehen, kein Driften, kein Entkommen); bestehende Ziele bleiben ueber den Endpunkt
+  // angreifbar, der nicht am Schalter haengt. Bis zum 02.09.2026 las diese Zeile die Konstante
+  // direkt - der Admin-Notaus erreichte A2 nicht, obwohl CLAUDE.md ihn dafuer fuehrte.
+  if (!spawnAktiv('konvois')) return;
   const now = Date.now();
   const liste = a2Liste(g);
 
@@ -11108,29 +11527,80 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Deine Flotte ist noch unterwegs.', unterwegs: true });
   }
 
-  const st = FESTUNG_STUFEN[fest.stufe] || FESTUNG_STUFEN.schanze;
   // Dritter Parameter 0: Der Weltboss-Schwaechenbonus gilt hier nicht - eine Festung hat keinen
   // Archetyp.
   const kraft = computeAttackPowerFromComposition(save, mission.composition, 0);
   if (!(kraft > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
-  const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4));
 
   /* ZIELWAHL (Phase 2). Sie steht in der MISSION, nicht im Request - genau wie der
      Gefechtsvorrat und aus demselben Grund: /api/festung/angriff nimmt keinen einzigen
-     Kampfparameter aus dem Body entgegen, das ist eine Eigenschaft dieses Endpunkts.
-     Ist das gewaehlte Bauteil schon zerstoert (ein Mitstreiter war schneller), geht der Schaden
+     Kampfparameter aus dem Body entgegen, das ist eine Eigenschaft dieses Endpunkts. */
+  const erg = festungSchlagAusfuehren(feld, fest, sysId, kraft, mission.composition,
+    [{ userId: req.userId, name: req.username || 'Kommandant', gewicht: 1 }], jetzt, mission.ziel, save.shipMarks);
+  // Reaktionszeit: nur beim ERSTEN Schlag dieses Kontos auf diese Festung (`letzter` ist dann
+  // 0). Danach misst die Differenz nur noch die Abklingzeit, nicht die Aufmerksamkeit.
+  if (!letzter && fest.seit) reaktionVermerken(findUserById(req.userId), 'festung', (jetzt - fest.seit) / 1000);
+  fest.abgerechnet[missionId] = jetzt;
+
+  // Aus der Quote werden hier - und NUR hier - konkrete Verluste (der Einzelangreifer hat genau
+  // eine Zusammensetzung; der Verband bekommt die Quote selbst, siehe /api/musterattack/resolve).
+  const eigeneVerluste = {};
+  for (const [typ, n] of Object.entries(mission.composition)) {
+    if (typeof n !== 'number' || n <= 0) continue;
+    const weg = Math.min(n, Math.round(n * erg.quote));
+    if (weg > 0) eigeneVerluste[typ] = weg;
+  }
+  db.shared[astFeldKey(sysId)] = feld;
+
+  console.log('[festung-angriff] userId=' + req.userId + ' sys=' + sysId + ' stufe=' + erg.stufeName +
+    ' ziel=' + erg.ziel + ' rolle=' + erg.rollenFaktor.toFixed(2) +
+    ' kernschaden=' + erg.schaden + ' teilschaden=' + erg.teilSchaden + (erg.zerstoert ? ' ZERSTOERT:' + erg.zerstoert : '') +
+    ' kern=' + (erg.gefallen ? 'gefallen' : erg.kern) + '/' + erg.kernMax);
+  await saveDb();
+  res.json({
+    ok: true, schaden: erg.schaden, teilSchaden: erg.teilSchaden, ziel: erg.ziel, zerstoert: erg.zerstoert,
+    rollenFaktor: Math.round(erg.rollenFaktor * 100) / 100,
+    bauteile: erg.bauteile,
+    gefallen: erg.gefallen, eigeneVerluste,
+    kern: erg.kern, kernMax: erg.kernMax,
+    stufe: erg.stufe, stufeName: erg.stufeName,
+    anteil: erg.gefallen ? Math.round((erg.anteile[req.userId] || 0) * 1000) / 1000 : 0,
+    teilnehmer: erg.teilnehmer,
+    naechsterSchlagAb: jetzt + FESTUNG_ABKLING_MS
+  });
+});
+
+/* DER GEMEINSAME KERN EINES FESTUNGSSCHLAGS (01.09.2026). Zwei Wege fuehren hierher: der
+   Einzelangriff (/api/festung/angriff, oben) und der koordinierte Verbandsangriff
+   (/api/musterattack/resolve, zielArt 'festung') - dieselbe Konstruktion wie
+   nestSchlagAusfuehren, und aus demselben Grund: Eine zweite Kopie der Rechnung waere die
+   uebliche zweite Wahrheit.
+   Rein geht die KRAFT (ein Verband hat keinen einen Spielstand), raus kommen die Verluste als
+   QUOTE (der Server schreibt keine fremden Spielstaende). `beteiligte` ist
+   [{ userId, name, gewicht }] - beim Einzelangriff ein Eintrag mit Gewicht 1; beim Verband alle
+   Teilnehmer nach ihrer beim Beitritt gemessenen Kraft, damit der Hortanteil nicht an dem haengt,
+   wer zufaellig ausloest, und ALLE die Abklingzeit bekommen (sonst schlaegt man im Verband zu
+   und danach noch einmal allein). `marks` sind die Werftmarken des Einzelangreifers fuer den
+   Rollenanteil; ein Verband uebergibt null (Marken sind personengebunden).
+   DER EINZELWEG IST BYTE-GLEICH ZU VORHER: Mit einem Beteiligten (Gewicht 1) ist jeder Anteil
+   exakt 1, und jede Zeile steht an derselben Stelle wie im alten Rumpf des Endpunkts -
+   tests/test_festung_http.js und tests/test_festung_bauteile_http.js messen das. */
+function festungSchlagAusfuehren(feld, fest, sysId, kraft, composition, beteiligte, jetzt, zielWunsch, marks) {
+  const st = FESTUNG_STUFEN[fest.stufe] || FESTUNG_STUFEN.schanze;
+  const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4));
+
+  /* Ist das gewaehlte Bauteil schon zerstoert (ein Mitstreiter war schneller), geht der Schaden
      OHNE Rollenfaktor auf den Kern: Die Flotte wird nicht dafuer bestraft, dass jemand anders
      schneller war - aber sie bekommt auch nicht den Bonus fuer ein Ziel, das sie nicht trifft. */
-  let ziel = String(mission.ziel || 'kern');
+  let ziel = String(zielWunsch || 'kern');
   if (ziel !== 'kern' && !festungTeilSteht(fest, ziel)) ziel = 'kern-ersatz';
 
   let schaden = 0, teilSchaden = 0, zerstoert = null, rollenFaktor = 1;
-  const marks = save.shipMarks;
   const kernVorher = fest.kern;
 
   if (ziel === 'schild' || ziel === 'tuerme') {
     const spec = FESTUNG_BAUTEILE[ziel];
-    rollenFaktor = festungRollenFaktor(mission.composition, spec, marks);
+    rollenFaktor = festungRollenFaktor(composition, spec, marks);
     const teil = fest.bauteile[ziel];
     const vorher = teil.lp || 0;
     teil.lp = Math.max(0, vorher - Math.round(wurf * rollenFaktor));
@@ -11138,7 +11608,7 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
     if (teil.lp <= 0 && vorher > 0) zerstoert = ziel;
   } else {
     // Auf den Kern - mit Rollenfaktor, ausser das Ersatzziel greift.
-    rollenFaktor = ziel === 'kern' ? festungRollenFaktor(mission.composition, FESTUNG_KERN_ROLLE, marks) : 1;
+    rollenFaktor = ziel === 'kern' ? festungRollenFaktor(composition, FESTUNG_KERN_ROLLE, marks) : 1;
     // Solange die Schildkuppel steht, kommt nur ein Bruchteil durch. DAS ist ihr Zweck, und
     // deshalb lohnt der Umweg ueber sie (Rechnung im Kommentar bei FESTUNG_BAUTEILE).
     const durchlass = festungTeilSteht(fest, 'schild') ? FESTUNG_BAUTEILE.schild.kernDurchlass : 1;
@@ -11147,37 +11617,32 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
   }
 
   fest.beitraege = fest.beitraege || {};
-  const mein = fest.beitraege[req.userId] || { name: req.username || 'Kommandant', schaden: 0 };
+  fest.schlaege = fest.schlaege || {};
   /* Schaden an Schild und Tuermen zaehlt zu 60 % auf den Hortanteil. Ohne diesen Ausgleich wuerde
      niemand den Schild angreifen - die Arbeit nuetzt dem VERBAND, nicht dem eigenen Zaehler.
      Gewichtet, nicht voll: Wer den Kern zerlegt, hat die Festung gestuerzt; wer den Schild
      gebrochen hat, hat es ermoeglicht. Beides zaehlt, nicht gleich viel. */
-  mein.schaden = (mein.schaden || 0) + schaden + Math.round(teilSchaden * FESTUNG_BAUTEIL_BEITRAG);
-  mein.name = req.username || mein.name;
-  fest.beitraege[req.userId] = mein;
-  // Reaktionszeit: nur beim ERSTEN Schlag dieses Kontos auf diese Festung (`letzter` ist dann
-  // 0). Danach misst die Differenz nur noch die Abklingzeit, nicht die Aufmerksamkeit.
-  if (!letzter && fest.seit) reaktionVermerken(findUserById(req.userId), 'festung', (jetzt - fest.seit) / 1000);
-  fest.schlaege[req.userId] = jetzt;
-  fest.abgerechnet[missionId] = jetzt;
+  const beitrag = schaden + Math.round(teilSchaden * FESTUNG_BAUTEIL_BEITRAG);
+  const gewichtSumme = beteiligte.reduce((a, b) => a + (b.gewicht > 0 ? b.gewicht : 0), 0) || 1;
+  for (const t of beteiligte) {
+    const anteil = (t.gewicht > 0 ? t.gewicht : 0) / gewichtSumme;
+    const b = fest.beitraege[t.userId] || { name: t.name || 'Kommandant', schaden: 0 };
+    b.schaden = (b.schaden || 0) + beitrag * anteil;
+    b.name = t.name || b.name;
+    fest.beitraege[t.userId] = b;
+    fest.schlaege[t.userId] = jetzt;
+  }
 
-  // Die Festung schiesst zurueck. Anteilig auf die LOSGESCHICKTE Zusammensetzung; abgebucht wird
-  // im Client, deshalb steht hier nur die Liste.
-  /* Stehen die Geschuetztuerme, kostet der Anflug ein Vielfaches. Das ist ihr Zweck und der
-     Grund, warum es sich lohnt, sie zuerst zu brechen: Der Wert, den man sich damit erkauft,
-     ist der ganze Sinn der Bauteile. Der 50-%-Deckel bleibt aussen. */
+  // Die Festung schiesst zurueck - als QUOTE. Stehen die Geschuetztuerme, kostet der Anflug ein
+  // Vielfaches. Das ist ihr Zweck und der Grund, warum es sich lohnt, sie zuerst zu brechen: Der
+  // Wert, den man sich damit erkauft, ist der ganze Sinn der Bauteile. Der 50-%-Deckel bleibt aussen.
   const quote = Math.min(0.5, (festungTeilSteht(fest, 'tuerme')
     ? FESTUNG_BAUTEILE.tuerme.verlustQuote
     : st.verlust) + Math.random() * 0.06);
-  const eigeneVerluste = {};
-  for (const [typ, n] of Object.entries(mission.composition)) {
-    if (typeof n !== 'number' || n <= 0) continue;
-    const weg = Math.min(n, Math.round(n * quote));
-    if (weg > 0) eigeneVerluste[typ] = weg;
-  }
 
   const gefallen = fest.kern <= 0;
-  let meinAnteil = 0, teilnehmer = 0;
+  const anteile = {};
+  let teilnehmer = 0;
   if (gefallen) {
     /* Ausschuettung an ALLE Beitragenden - auch an den, der gerade anfragt. Bewusst EIN Weg fuer
        alle statt "die anderen ueber die Warteschlange, ich ueber die Antwort": Zwei Wege waeren
@@ -11193,7 +11658,7 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
       const anteil = (b.schaden || 0) / summe;
       if (!(anteil > 0)) continue;
       teilnehmer++;
-      if (uid === req.userId) meinAnteil = anteil;
+      anteile[uid] = anteil;
       pveKillZaehlen(uid, 'festungen');          // Meilenstein-Emblem, Phase 6
       // Etappe B: ein Boss-Set-Teil kann hier fallen. Der Wurf liegt beim SERVER (wie im Raid),
       // der Client zieht daraus nur den Typ - das Herkunfts-Schloss bleibt damit unberuehrt.
@@ -11215,13 +11680,6 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
       Math.round(FESTUNG_GERAEUMT_MS / 3600000) + ' Stunden lang frei, der Abbau dort um ' +
       Math.round(FESTUNG_GERAEUMT_BONUS * 100) + ' % ergiebiger.');
   }
-  db.shared[astFeldKey(sysId)] = feld;
-
-  console.log('[festung-angriff] userId=' + req.userId + ' sys=' + sysId + ' stufe=' + st.name +
-    ' ziel=' + ziel + ' rolle=' + rollenFaktor.toFixed(2) +
-    ' kernschaden=' + schaden + ' teilschaden=' + teilSchaden + (zerstoert ? ' ZERSTOERT:' + zerstoert : '') +
-    ' kern=' + (gefallen ? 'gefallen' : fest.kern) + '/' + st.kern);
-  await saveDb();
   // Der Zustand der Bauteile reist MIT - das Frontend zeigt daraus die Balken und weiss, welche
   // Ziele es ueberhaupt anbieten darf. Ein Client, der das Feld nicht kennt, ignoriert es.
   const bauteileAus = {};
@@ -11229,18 +11687,14 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
     const t = fest.bauteile && fest.bauteile[k];
     if (t) bauteileAus[k] = { lp: Math.max(0, Math.round(t.lp || 0)), lpMax: t.lpMax || 0 };
   }
-  res.json({
-    ok: true, schaden, teilSchaden, ziel, zerstoert,
-    rollenFaktor: Math.round(rollenFaktor * 100) / 100,
-    bauteile: gefallen ? {} : bauteileAus,
-    gefallen, eigeneVerluste,
+  return {
+    wurf, schaden, teilSchaden, ziel, zerstoert, rollenFaktor, quote, gefallen, anteile,
+    teilnehmer: gefallen ? teilnehmer : Object.keys(fest.beitraege).length,
     kern: gefallen ? 0 : fest.kern, kernMax: st.kern,
     stufe: gefallen ? null : fest.stufe, stufeName: st.name,
-    anteil: gefallen ? Math.round(meinAnteil * 1000) / 1000 : 0,
-    teilnehmer: gefallen ? teilnehmer : Object.keys(fest.beitraege).length,
-    naechsterSchlagAb: jetzt + FESTUNG_ABKLING_MS
-  });
-});
+    bauteile: gefallen ? {} : bauteileAus
+  };
+}
 
 
 function nestFindeMission(save, missionId, nestId) {
@@ -11459,6 +11913,434 @@ app.post('/api/deploy-webhook', (req, res) => {
   // schnelle Antwort und markiert den Webhook sonst als fehlgeschlagen.
   res.json({ ok: true, repo: repoName });
   starteDeploy(repoName, ziel.command, ziel.dir);
+});
+
+/* ===== B2: Vorposten (Aussenposten) - spielergebaute PvP-Ziele in db.shared (02.09.2026) ==========
+
+   Auftrag Sascha ("beide umsetzten": A2 UND B2; per Auswahl "Echtes PvP-Ziel (db.shared)" und
+   "alle 4 optionen" beim Nutzen-Kanal). Konzept: docs/vorposten-konzept.md im FRONTEND-Repo,
+   Entscheidungen und Messungen: docs/vorposten.md in DIESEM Repo. Hier nur das Noetigste:
+
+   - EIN Vorposten je System, Schluessel `vorposten:<sysId>` in db.shared. Die generische
+     Storage-Route SCHREIBT ihn nie (checkVorpostenKeyPermission - dieselbe Sperre wie bei den
+     Asteroidenfeldern); gelesen wird ueber GET /api/vorposten, daraus zeichnet das Frontend
+     fremde wie eigene Vorposten.
+   - Der Server ist Autoritaet ueber Stufe (gezaehlte Ausbau-Ereignisse mit Abklingzeit AM OBJEKT),
+     Kern-LP, Garnison und Verteidigung. Der Spielstand bleibt klientenautoritativ und wird hier
+     NIE geschrieben: Verluste des Angreifers reisen als Quote, die Garnison wohnt im Dokument
+     (der Client zieht beim Stationieren genau das ab, was der Server ANGENOMMEN hat).
+   - Die vier Nutzen-Kanaele (Flugzeit, Scan, Produktion, Stationierung) sind Zahlen je Stufe in
+     VORPOSTEN_STUFEN und reisen mit GET /api/vorposten zum Client - KEINE Kopie der Tabelle im
+     Frontend, also keine Kopie-Familie. Der Stationierungs-Kanal wirkt HIER: die Garnison
+     verteidigt den Vorposten (rawFleetPower * VORPOSTEN_GARNISON_FAKTOR). Nur Kampfschiffe
+     (SHIP_ATK_VALUES > 0) werden angenommen - sonst waere die Garnison ein sicherer Hafen fuer
+     Frachter, den kein /api/attack erreicht.
+   - Abklingzeit AM OBJEKT (`doc.schlaege[uid]`), Beitraege AM OBJEKT (`doc.beitraege`); gezaehlt
+     wird der ANGEKOMMENE Schaden (kernVorher - kernNachher), nicht der Wurf - wie beim
+     Festungsschlag. Beim Fall geht die Belohnung anteilig an ALLE Beitragenden ueber
+     pushPendingReward mit eigenem type:'vorposten'; der Besitzer bekommt type:'vorposten-verlust'.
+     Jeder Schlag davor steht als Kampfvermerk IM DOKUMENT (kein Eintrag in seiner Warteschlange -
+     die haelt 20 und verdraengte sonst Wertvolleres, siehe die Boss-Set-Lehre).
+   - Bauschutz VORPOSTEN_SCHUTZ_MS nach dem Bau: Ein frischer Vorposten waere sonst in der Minute
+     nach der Baukolonne schleifbar, bevor der Besitzer eine Garnison hinschicken konnte.
+   - Der Server kennt PLANETS nicht; "nicht im eigenen System" prueft er deshalb nur gegen das
+     Heimatsystem aus dem Bestenlisten-Eintrag (leaderboard:<uid>.homeSystem). Kolonie-Systeme
+     prueft der Client (dort steht die Tabelle) - ein Vorposten im eigenen Kolonie-System waere
+     nutzlos, aber kein Zugriff auf Fremdes.
+
+   VORPOSTEN_AKTIV STEHT AUF false - NOTAUSSCHALTER und Auslieferungs-Riegel (Regel 60): Ein
+   Vorposten ist ein PvP-Ziel mit spielersichtbaren Zahlen, also muss das Backend VOR dem Frontend
+   live sein und der Schalter erst im Fenster des Frontend-PRs kippen (wie A2_SPAWN_AKTIV). Solange
+   er aus ist, antworten alle Vorposten-Endpunkte mit 404/inaktiv und GET /api/vorposten meldet
+   aktiv:false mit leerer Liste. Dazu der Admin-Notaus `vorposten` (db.notAus): er stoppt nur den
+   BAU neuer Vorposten - bestehende bleiben angreifbar, wie bei den Nestern. */
+const VORPOSTEN_AKTIV = false;
+const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
+const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
+const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer, am Objekt
+const VORPOSTEN_AUSBAU_MS = 12 * 3600 * 1000;      // zwischen zwei Ausbauten, am Objekt
+const VORPOSTEN_GARNISON_FAKTOR = 0.5;             // Anteil der rohen Flottenkraft der Garnison, der verteidigt
+const VORPOSTEN_VERLUST = 0.06;                    // Grundverlust des Angreifers je Schlag (Familie Festung/A2)
+const VORPOSTEN_STUFEN = [
+  /* kernLp gegen die gemessenen Schlagkraefte 7.500 / 44.000 / 240.000 je Schlag (Festungs-
+     Kalibrierung, docs/asteroidenfestungen.md):
+       Feldlager    20.000 =  2,7 Einsteiger- / 0,45 Mittelfeld- / 0,08 Endspiel-Schlaege
+       Stuetzpunkt  90.000 = 12   / 2,0  / 0,4
+       Bastion     400.000 = 53   / 9,1  / 1,7
+     Die Struktur verteidigt selbst (`verteidigung`), die Garnison kommt obendrauf. Ohne Garnison ist
+     ein Feldlager fuer sein Publikum ein Ziel von zwei bis drei Schlaegen - eine gehaltene Praesenz,
+     die man verteidigen MUSS, kein Selbstlaeufer. `flug`/`prod`/`scan` sind die drei uebrigen
+     Nutzen-Kanaele (Anteil Flugzeit-Ersparnis, additiver Produktionsbonus, Aufklaerungsstufe); das
+     Frontend liest sie aus GET /api/vorposten. `kampfpunkte`/`xp`/`credits` sind die Beute beim
+     Fall, anteilig - klein und flach, nie aus der Produktion des Besitzers abgeleitet. */
+  { stufe: 1, name: 'Feldlager',  kernLp: 20000,  verteidigung: 2500,  garnisonMax: 300,  flug: 0.06, prod: 0.015, scan: 1, kampfpunkte: 30,  xp: 250,  credits: 1200 },
+  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,  verteidigung: 12000, garnisonMax: 800,  flug: 0.10, prod: 0.03,  scan: 2, kampfpunkte: 80,  xp: 700,  credits: 3500 },
+  { stufe: 3, name: 'Bastion',    kernLp: 400000, verteidigung: 60000, garnisonMax: 2000, flug: 0.15, prod: 0.05,  scan: 3, kampfpunkte: 200, xp: 2000, credits: 9000 }
+];
+
+function vorpostenStufe(n) {
+  const i = Math.min(VORPOSTEN_STUFEN.length, Math.max(1, Math.floor(Number(n) || 1))) - 1;
+  return VORPOSTEN_STUFEN[i];
+}
+function vorpostenSysOk(sys) { return typeof sys === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(sys); }
+function vorpostenKey(sys) { return 'vorposten:' + sys; }
+function vorpostenLies(sys) {
+  const raw = db.shared[vorpostenKey(sys)];
+  if (typeof raw !== 'string') return null;
+  try { const d = JSON.parse(raw); return (d && d.sys === sys && d.besitzer) ? d : null; } catch (e) { return null; }
+}
+function vorpostenSchreib(doc) { db.shared[vorpostenKey(doc.sys)] = JSON.stringify(doc); }
+function vorpostenLoesch(sys) { delete db.shared[vorpostenKey(sys)]; }
+function vorpostenAlle() {
+  const out = [];
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith('vorposten:')) continue;
+    const d = vorpostenLies(k.slice('vorposten:'.length));
+    if (d) out.push(d);
+  }
+  return out;
+}
+function vorpostenGarnisonAnzahl(doc) {
+  return Object.values((doc && doc.garnison) || {}).reduce((a, n) => a + (typeof n === 'number' && n > 0 ? n : 0), 0);
+}
+function vorpostenVerteidigung(doc) {
+  const st = vorpostenStufe(doc.stufe);
+  return Math.round(st.verteidigung + rawFleetPower(doc.garnison || {}, 1, 1, null) * VORPOSTEN_GARNISON_FAKTOR);
+}
+function vorpostenHeimatSystem(userId) {
+  try { return JSON.parse(db.shared['leaderboard:' + userId] || '{}').homeSystem || null; } catch (e) { return null; }
+}
+function vorpostenKampfschiff(typ) {
+  return Object.prototype.hasOwnProperty.call(SHIP_ATK_VALUES, typ) && (SHIP_ATK_VALUES[typ] || 0) > 0;
+}
+// Mission aus dem GESPEICHERTEN Spielstand - kein Kampfparameter kommt aus dem Request (wie
+// /api/festung/angriff): die Zusammensetzung steht in der Mission, die der Client beim Start
+// gespeichert hat.
+function vorpostenFindeMission(save, missionId, typ, sysId) {
+  const flotten = [];
+  if (save && save.fleet) flotten.push(save.fleet);
+  if (save && save.colonies) for (const c of Object.values(save.colonies)) if (c && c.fleet) flotten.push(c.fleet);
+  for (const f of flotten) {
+    for (const m of (f.missions || [])) {
+      if (String(m.id) === String(missionId) && m.type === typ && String(m.targetId) === sysId) return m;
+    }
+  }
+  return null;
+}
+// Gibt bei erlaubtem Zugriff null zurueck, sonst den Fehlertext fuer die 403-Antwort (Muster
+// checkAsteroidKeyPermission): Lesen bleibt fuer jedes angemeldete Konto offen, Schreiben geht nur
+// ueber die Endpunkte - sonst setzte jeder Beliebige einen fremden Kern auf null.
+function checkVorpostenKeyPermission(req, key, isWrite) {
+  if (!key.startsWith('vorposten:')) return null;
+  if (!isWrite) return null;
+  return 'Vorposten werden ausschließlich über die Vorposten-Endpunkte verändert.';
+}
+function vorpostenFuerClient(doc, userId, jetzt) {
+  const st = vorpostenStufe(doc.stufe);
+  const eigener = doc.besitzer === userId;
+  const out = {
+    id: doc.id, sys: doc.sys, besitzer: doc.besitzer, besitzerName: doc.besitzerName || 'Kommandant',
+    seit: doc.seit || 0, stufe: doc.stufe || 1, name: st.name,
+    kern: { lp: Math.max(0, Math.round((doc.kern && doc.kern.lp) || 0)), lpMax: Math.round((doc.kern && doc.kern.lpMax) || st.kernLp) },
+    verteidigung: vorpostenVerteidigung(doc),
+    garnisonAnzahl: vorpostenGarnisonAnzahl(doc),
+    schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
+    ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
+    nutzen: { flug: st.flug, prod: st.prod, scan: st.scan },
+    eigener,
+    meinLetzterSchlag: (doc.schlaege && doc.schlaege[userId]) || 0,
+    letzterKampf: doc.letzterKampf || null
+  };
+  // Zusammensetzung und Verlauf sieht nur der Besitzer; Fremde sehen die Zahl (wie die Eskorte am
+  // Vorkommen ihre Staerke zeigt, ohne dass jemand die Liste braucht).
+  if (eigener) { out.garnison = Object.assign({}, doc.garnison || {}); out.kampfverlauf = (doc.kampfverlauf || []).slice(0, 10); }
+  return out;
+}
+
+/* DER SCHLAG. Gemeinsamer Kern fuer den Einzelangriff (und einen spaeteren Verband, der `beteiligte`
+   gewichtet uebergibt). Die Verteidigung wirkt als DURCHSCHLAG auf den Wurf: kraft / (kraft +
+   verteidigung), gedeckelt auf 15-95 %. Eine starke Garnison laesst also weniger ankommen UND kostet
+   den Angreifer mehr - und sie verliert selbst, serverseitig, weil sie im Dokument wohnt. */
+function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
+  const verteidigung = vorpostenVerteidigung(doc);
+  const durchschlag = Math.max(0.15, Math.min(0.95, kraft / (kraft + verteidigung)));
+  const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4) * durchschlag);
+
+  doc.kern = doc.kern || { lp: vorpostenStufe(doc.stufe).kernLp, lpMax: vorpostenStufe(doc.stufe).kernLp };
+  const lpVorher = Math.max(0, doc.kern.lp || 0);
+  doc.kern.lp = Math.max(0, lpVorher - wurf);
+  const schaden = lpVorher - doc.kern.lp;          // was ANGEKOMMEN ist, nicht der Wurf
+
+  doc.beitraege = doc.beitraege || {};
+  doc.schlaege = doc.schlaege || {};
+  const gewichtSumme = beteiligte.reduce((a, b) => a + (b.gewicht > 0 ? b.gewicht : 0), 0) || 1;
+  for (const t of beteiligte) {
+    const anteil = (t.gewicht > 0 ? t.gewicht : 0) / gewichtSumme;
+    const b = doc.beitraege[t.userId] || { name: t.name || 'Kommandant', schaden: 0 };
+    b.schaden = (b.schaden || 0) + schaden * anteil;
+    b.name = t.name || b.name;
+    doc.beitraege[t.userId] = b;
+    doc.schlaege[t.userId] = jetzt;
+  }
+
+  // Die Garnison verliert serverseitig - sie wohnt im Dokument, nicht in einem Spielstand.
+  const garnQuote = Math.max(0.02, Math.min(0.5, 0.05 + 0.30 * (kraft / (kraft + verteidigung))));
+  const garnisonVerluste = {};
+  for (const [typ, n] of Object.entries(doc.garnison || {})) {
+    if (typeof n !== 'number' || n <= 0) continue;
+    const weg = Math.min(n, Math.round(n * garnQuote));
+    if (weg <= 0) continue;
+    doc.garnison[typ] = n - weg;
+    if (doc.garnison[typ] <= 0) delete doc.garnison[typ];
+    garnisonVerluste[typ] = weg;
+  }
+  // Der Angreifer verliert als QUOTE (der Server schreibt keinen fremden Spielstand); die Garnison
+  // treibt sie hoch, ein leerer Vorposten kostet fast nur den Grundverlust.
+  const quote = Math.max(0.03, Math.min(0.45, VORPOSTEN_VERLUST + 0.20 * (verteidigung / (kraft + verteidigung)) + Math.random() * 0.04));
+
+  const gefallen = doc.kern.lp <= 0;
+  const erster = beteiligte[0] || {};
+  const vermerk = { zeit: jetzt, angreifer: erster.userId || null, angreiferName: erster.name || 'Kommandant',
+    schaden, gefallen, garnisonVerluste, kraft: Math.round(kraft), verteidigung, teilnehmer: beteiligte.length };
+  doc.letzterKampf = vermerk;
+  doc.kampfverlauf = [vermerk].concat(doc.kampfverlauf || []).slice(0, 10);
+
+  const anteile = {};
+  let teilnehmer = 0;
+  if (gefallen) {
+    const st = vorpostenStufe(doc.stufe);
+    const summe = Object.values(doc.beitraege).reduce((a, b) => a + (b.schaden || 0), 0) || 1;
+    for (const [uid, b] of Object.entries(doc.beitraege)) {
+      const anteil = (b.schaden || 0) / summe;
+      if (!(anteil > 0)) continue;
+      teilnehmer++;
+      anteile[uid] = anteil;
+      pushPendingReward(uid, {
+        type: 'vorposten',           // eigener Typ, sonst Bug-Report-Rueckfall im Client
+        system: doc.sys, stufe: doc.stufe, name: st.name, besitzerName: doc.besitzerName || 'Kommandant',
+        anteil: Math.round(anteil * 1000) / 1000,
+        kampfpunkte: Math.max(1, Math.round(st.kampfpunkte * anteil)),
+        xp: Math.max(1, Math.round(st.xp * anteil)),
+        credits: Math.max(1, Math.round(st.credits * anteil)),
+        zeit: jetzt
+      });
+    }
+    // Der Besitzer erfaehrt vom Fall ueber seine Warteschlange - das Dokument, aus dem er sonst
+    // liest, gibt es gleich nicht mehr. Die Restgarnison ist mit dem Vorposten verloren.
+    pushPendingReward(doc.besitzer, {
+      type: 'vorposten-verlust', system: doc.sys, stufe: doc.stufe, name: st.name,
+      angreiferName: vermerk.angreiferName, teilnehmer,
+      garnisonVerloren: Object.assign({}, doc.garnison || {}), zeit: jetzt
+    });
+    vorpostenLoesch(doc.sys);
+  } else {
+    vorpostenSchreib(doc);
+  }
+  return { schaden, gefallen, lp: doc.kern.lp, lpMax: doc.kern.lpMax, verteidigung, durchschlag: Math.round(durchschlag * 100) / 100,
+    quote, garnisonVerluste, anteile, teilnehmer };
+}
+
+app.get('/api/vorposten', authMiddleware, (req, res) => {
+  const jetzt = Date.now();
+  const liste = VORPOSTEN_AKTIV ? vorpostenAlle().map(d => vorpostenFuerClient(d, req.userId, jetzt)) : [];
+  res.json({
+    ok: true, aktiv: VORPOSTEN_AKTIV, bauAktiv: spawnAktiv('vorposten'),
+    maxJeKonto: VORPOSTEN_MAX_JE_KONTO, schutzMs: VORPOSTEN_SCHUTZ_MS, abklingMs: VORPOSTEN_ABKLING_MS,
+    ausbauMs: VORPOSTEN_AUSBAU_MS, garnisonFaktor: VORPOSTEN_GARNISON_FAKTOR,
+    stufen: VORPOSTEN_STUFEN, liste, eigene: liste.filter(x => x.eigener).length
+  });
+});
+
+app.post('/api/vorposten/bauen', authMiddleware, async (req, res) => {
+  const sys = String((req.body && req.body.system) || '');
+  const missionId = (req.body && req.body.missionId) !== undefined ? String(req.body.missionId) : '';
+  if (!vorpostenSysOk(sys) || !missionId) return res.status(400).json({ error: 'System und Mission fehlen.' });
+  // spawnAktiv() statt der blanken Konstante: Der Admin-Notaus `vorposten` stoppt den BAU ohne Deploy.
+  if (!spawnAktiv('vorposten')) return res.status(404).json({ error: 'Vorposten lassen sich derzeit nicht errichten.', inaktiv: true });
+  const save = astLeseSave(req.userId);
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern, dann bauen.' });
+  const mission = vorpostenFindeMission(save, missionId, 'vorposten-bau', sys);
+  if (!mission) return res.status(403).json({ error: 'Zu diesem Bau ist keine Baukolonne im gespeicherten Spielstand unterwegs.' });
+  const jetzt = Date.now();
+  if (mission.endTime && mission.endTime > jetzt) return res.status(400).json({ error: 'Deine Baukolonne ist noch unterwegs.', unterwegs: true });
+  if (vorpostenLies(sys)) return res.status(409).json({ error: 'In diesem System steht bereits ein Vorposten.', belegt: true });
+  const heimat = vorpostenHeimatSystem(req.userId);
+  if (heimat && String(heimat) === sys) return res.status(400).json({ error: 'Im eigenen Heimatsystem braucht es keinen Vorposten.', heimat: true });
+  const eigene = vorpostenAlle().filter(d => d.besitzer === req.userId).length;
+  if (eigene >= VORPOSTEN_MAX_JE_KONTO) {
+    return res.status(400).json({ error: 'Du hältst bereits ' + eigene + ' Vorposten - mehr als ' + VORPOSTEN_MAX_JE_KONTO + ' sind nicht möglich. Gib einen auf, um neu zu bauen.', deckel: true, max: VORPOSTEN_MAX_JE_KONTO });
+  }
+  const st = vorpostenStufe(1);
+  const doc = {
+    id: 'vp_' + crypto.randomUUID(), sys, besitzer: req.userId, besitzerName: req.username || 'Kommandant',
+    seit: jetzt, stufe: 1, kern: { lp: st.kernLp, lpMax: st.kernLp }, garnison: {}, schlaege: {}, beitraege: {},
+    ausbauSeit: jetzt, kampfverlauf: []
+  };
+  vorpostenSchreib(doc);
+  console.log('[vorposten] gebaut userId=' + req.userId + ' sys=' + sys);
+  await saveDb();
+  res.json({ ok: true, vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
+});
+
+app.post('/api/vorposten/ausbauen', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann seinen Vorposten ausbauen.' });
+  if ((doc.stufe || 1) >= VORPOSTEN_STUFEN.length) return res.status(400).json({ error: 'Dieser Vorposten ist bereits voll ausgebaut.', endausbau: true });
+  const jetzt = Date.now();
+  const ausbauAb = (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS;
+  if (jetzt < ausbauAb) {
+    return res.status(400).json({ error: 'Der nächste Ausbau ist in ' + Math.ceil((ausbauAb - jetzt) / 60000) + ' Minuten möglich.', abklingzeit: true, ausbauAb });
+  }
+  const alt = vorpostenStufe(doc.stufe), neu = vorpostenStufe((doc.stufe || 1) + 1);
+  doc.stufe = (doc.stufe || 1) + 1;
+  doc.kern = doc.kern || { lp: alt.kernLp, lpMax: alt.kernLp };
+  // Ein Ausbau HEILT nicht - die LP steigen um dieselbe Differenz wie das Maximum, angerichteter
+  // Schaden bleibt angerichtet (dieselbe Entscheidung wie beim reifenden Nest).
+  doc.kern.lpMax = neu.kernLp;
+  doc.kern.lp = Math.min(neu.kernLp, Math.max(0, doc.kern.lp || 0) + (neu.kernLp - alt.kernLp));
+  doc.ausbauSeit = jetzt;
+  vorpostenSchreib(doc);
+  await saveDb();
+  res.json({ ok: true, vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
+});
+
+/* Stationieren: Der Server nimmt an, was der gespeicherte Spielstand am angegebenen Standort
+   WIRKLICH hat (Deckel: Bestand, freier Platz bis garnisonMax, nur Kampfschiffe) und schreibt es ins
+   Dokument. Er zieht NICHT vom Spielstand ab - der Client bucht genau `angenommen` ab, nachdem die
+   Antwort da ist. Andersherum (Server zieht ab) liefe die Abbuchung gegen den Autosave des Clients. */
+app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  const planetKey = String((req.body && req.body.planetKey) || 'home');
+  const composition = (req.body && req.body.composition) || null;
+  if (!vorpostenSysOk(sys) || !composition || typeof composition !== 'object' || planetKey.length > 64) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann hier stationieren.' });
+  const save = astLeseSave(req.userId);
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand.' });
+  const fleetObj = planetKey === 'home' ? save.fleet : (save.colonies && save.colonies[planetKey] && save.colonies[planetKey].fleet);
+  if (!fleetObj) return res.status(404).json({ error: 'Kein Flottenstandort gefunden.' });
+  const st = vorpostenStufe(doc.stufe);
+  let platz = Math.max(0, st.garnisonMax - vorpostenGarnisonAnzahl(doc));
+  const angenommen = {};
+  doc.garnison = doc.garnison || {};
+  for (const typ of Object.keys(composition)) {
+    if (!vorpostenKampfschiff(typ)) continue;
+    const angefordert = Math.max(0, Math.floor(Number(composition[typ]) || 0));
+    const verfuegbar = Math.max(0, Math.floor(fleetObj[typ] || 0));
+    const n = Math.min(angefordert, verfuegbar, platz);
+    if (n <= 0) continue;
+    angenommen[typ] = n;
+    doc.garnison[typ] = (doc.garnison[typ] || 0) + n;
+    platz -= n;
+  }
+  if (!Object.keys(angenommen).length) {
+    return res.status(400).json({ error: 'Nichts stationiert - keine Kampfschiffe verfügbar oder die Garnison ist voll (' + st.garnisonMax + ' Schiffe).', garnisonMax: st.garnisonMax, frei: platz });
+  }
+  vorpostenSchreib(doc);
+  await saveDb();
+  res.json({ ok: true, angenommen, garnison: doc.garnison, garnisonAnzahl: vorpostenGarnisonAnzahl(doc), verteidigung: vorpostenVerteidigung(doc), garnisonMax: st.garnisonMax });
+});
+
+app.post('/api/vorposten/rueckruf', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann seine Garnison zurückrufen.' });
+  const garnison = Object.assign({}, doc.garnison || {});
+  doc.garnison = {};
+  vorpostenSchreib(doc);
+  await saveDb();
+  res.json({ ok: true, garnison, verteidigung: vorpostenVerteidigung(doc) });
+});
+
+// Aufgeben: keine Rueckerstattung (Konzept §9, Empfehlung a) - der Bau ist eine verbindliche
+// Ortswahl, und ein Abbau-Wiederaufbau-Kreislauf entsteht so gar nicht erst. Die Garnison kommt
+// zurueck (der Client legt dafuer die Rueckflug-Mission an).
+app.post('/api/vorposten/aufgeben', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann seinen Vorposten aufgeben.' });
+  const garnison = Object.assign({}, doc.garnison || {});
+  vorpostenLoesch(sys);
+  console.log('[vorposten] aufgegeben userId=' + req.userId + ' sys=' + sys);
+  await saveDb();
+  res.json({ ok: true, garnison, rueckerstattung: 0 });
+});
+
+app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  const missionId = (req.body && req.body.missionId) !== undefined ? String(req.body.missionId) : '';
+  const vorpostenId = String((req.body && req.body.vorpostenId) || '');
+  if (!vorpostenSysOk(sys) || !missionId) return res.status(400).json({ error: 'System und Mission fehlen.' });
+  const save = astLeseSave(req.userId);
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern, dann angreifen.' });
+  const mission = vorpostenFindeMission(save, missionId, 'vorposten-angriff', sys);
+  if (!mission || !mission.composition) {
+    return res.status(403).json({ error: 'Zu diesem Angriff ist keine Flotte im gespeicherten Spielstand unterwegs.' });
+  }
+  const jetzt = Date.now();
+  if (mission.endTime && mission.endTime > jetzt) return res.status(400).json({ error: 'Deine Flotte ist noch unterwegs.', unterwegs: true });
+
+  const doc = vorpostenLies(sys);
+  // Das Ziel ist weg - geschleift oder aufgegeben. Kein Fehler des Spielers, kostet nichts, aber die
+  // Antwort nennt den Grund (kein stilles ok).
+  if (!doc) {
+    return res.status(200).json({ ok: true, verpasst: true, grund: 'weg',
+      text: 'Bei der Ankunft steht in diesem System kein Vorposten mehr - geschleift oder aufgegeben. Dein Verband kehrt vollzählig zurück.' });
+  }
+  if (vorpostenId && doc.id !== vorpostenId) {
+    return res.status(200).json({ ok: true, verpasst: true, grund: 'ersetzt',
+      text: 'Der Vorposten, gegen den du geflogen bist, steht nicht mehr - an seiner Stelle hat jemand einen neuen errichtet. Dein Verband kehrt vollzählig zurück.' });
+  }
+  if (doc.besitzer === req.userId) return res.status(400).json({ error: 'Den eigenen Vorposten greift man nicht an.' });
+  const schutzBis = (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS;
+  if (jetzt < schutzBis) {
+    return res.status(403).json({ error: 'Dieser Vorposten steht noch unter Bauschutz - angreifbar in ' + Math.ceil((schutzBis - jetzt) / 60000) + ' Minuten.', schutz: true, schutzBis });
+  }
+  doc.schlaege = doc.schlaege || {};
+  const letzter = doc.schlaege[req.userId] || 0;
+  if (letzter && jetzt - letzter < VORPOSTEN_ABKLING_MS) {
+    return res.status(403).json({ error: 'Deine Verbände haben diesen Vorposten erst vor Kurzem angegriffen - der nächste Schlag ist in ' +
+      Math.ceil((letzter + VORPOSTEN_ABKLING_MS - jetzt) / 60000) + ' Minuten möglich.', abklingzeit: true, naechsterSchlagAb: letzter + VORPOSTEN_ABKLING_MS });
+  }
+  const kraft = computeAttackPowerFromComposition(save, mission.composition, 0);
+  if (!(kraft > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
+  const erg = vorpostenSchlagAusfuehren(doc, kraft, mission.composition,
+    [{ userId: req.userId, name: req.username || 'Kommandant', gewicht: 1 }], jetzt);
+
+  // Aus der Quote werden hier - und NUR hier - konkrete Verluste (der Einzelangreifer hat genau eine
+  // Zusammensetzung; ein spaeterer Verband bekaeme die Quote selbst).
+  const eigeneVerluste = {};
+  for (const [typ, n] of Object.entries(mission.composition)) {
+    if (typeof n !== 'number' || n <= 0) continue;
+    const weg = Math.min(n, Math.round(n * erg.quote));
+    if (weg > 0) eigeneVerluste[typ] = weg;
+  }
+  const meinAnteil = erg.anteile[req.userId] || 0;
+  console.log('[vorposten-angriff] userId=' + req.userId + ' sys=' + sys + ' kraft=' + Math.round(kraft) + ' verteidigung=' + erg.verteidigung +
+    ' schaden=' + erg.schaden + ' lp=' + (erg.gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax);
+  await saveDb();
+  res.json({
+    ok: true, schaden: erg.schaden, gefallen: erg.gefallen, lp: erg.lp, lpMax: erg.lpMax,
+    stufe: doc.stufe, besitzerName: doc.besitzerName || 'Kommandant',
+    verteidigung: erg.verteidigung, durchschlag: erg.durchschlag,
+    eigeneVerluste, garnisonVerluste: erg.garnisonVerluste,
+    anteil: erg.gefallen ? Math.round(meinAnteil * 1000) / 1000 : 0,
+    teilnehmer: erg.gefallen ? erg.teilnehmer : Object.keys(doc.beitraege || {}).length,
+    naechsterSchlagAb: jetzt + VORPOSTEN_ABKLING_MS
+  });
 });
 
 // ===== Ko-fi-Spenden: Top-Unterstützer im Spiel anzeigen =====
@@ -12497,7 +13379,9 @@ app.get('/api/admin/feedback/bild/:id', authMiddleware, (req, res) => {
 const NOTAUS_NAMEN = {
   festung:  'Asteroidenfestungen entstehen',
   bauteile: 'Neue Festungen bekommen Schild und Tuerme',
-  nester:   'Alien-Nester entstehen, reifen und wandern'
+  nester:   'Alien-Nester entstehen, reifen und wandern',
+  konvois:  'Wrackkonvois entstehen, driften und entkommen',
+  vorposten: 'Neue Vorposten werden errichtet'
 };
 function notAusGesetzt(name) {
   return !!(db.notAus && db.notAus[name] && db.notAus[name].aus === true);
@@ -12532,6 +13416,8 @@ function spawnAktivImCode(name) {
   if (name === 'festung') return FESTUNG_SPAWN_AKTIV;
   if (name === 'bauteile') return FESTUNG_BAUTEILE_AKTIV;
   if (name === 'nester') return NEST_SPAWN_AKTIV;
+  if (name === 'konvois') return A2_SPAWN_AKTIV;
+  if (name === 'vorposten') return VORPOSTEN_AKTIV;
   return false;
 }
 
@@ -12592,7 +13478,7 @@ app.get('/api/admin/konto', authMiddleware, (req, res) => {
     const staub = u.staub || {};
     return {
       username: u.username,
-      gesperrt: !!u.banned,
+      gesperrt: sperreAktiv(u, jetzt),
       registriert: u.createdAt || 0,
       emailForm: emailForm(u.email),
       emailBestaetigt: !!u.emailVerified,
@@ -12631,7 +13517,12 @@ app.get('/api/admin/konto', authMiddleware, (req, res) => {
                  letzteZeit: r.letzteZeit || 0, letzterPfad: r.letzterPfad || null }; })(),
       spielstandAbgelehnt: (() => { const a = u.saveAblehnungen || {};
         return { n: a.n || 0, letzteZeit: a.letzteZeit || 0, letzterGrund: a.letzterGrund || null,
-                 letzte: (a.letzte || []).slice(-SAVE_ABLEHNUNG_GRUENDE_MERKEN) }; })()
+                 letzte: (a.letzte || []).slice(-SAVE_ABLEHNUNG_GRUENDE_MERKEN) }; })(),
+      // Sperre mit Grund und Frist, Stummschaltung, Schatten einer Ruecksicherung (02.09.2026).
+      // sperreAktiv() hebt eine abgelaufene Frist beim Ansehen gleich auf.
+      sperre: sperreAktiv(u, jetzt) ? { grund: u.bannGrund || '', bis: u.bannBis || 0, seit: u.bannSeit || 0 } : null,
+      stumm: stummAktiv(u, jetzt) ? { bis: u.stummBis, grund: u.stummGrund || '' } : null,
+      schattenDa: !!(priv.__spielstandSchatten && typeof priv.__spielstandSchatten.value === 'string')
     };
   });
   res.json({ konten, gefunden: Object.keys(db.users).filter(k => k.includes(suche)).length });
@@ -12758,6 +13649,158 @@ app.get('/api/admin/geschenke', authMiddleware, (req, res) => {
     empfaengerGesamt: konten.length,
     empfaenger30Tage: konten.filter(u => (jetzt - (u.activeSessionAt || 0)) <= 30 * 86400000).length
   });
+});
+
+// --- Spielstand-Blatt, Backups, Ruecksicherung (02.09.2026) ------------------------------------
+/* Siehe den Helfer-Block bei spielstandZusammenfassung. Die Ruecksicherung ist der einzige
+   Schreibzugriff auf einen FREMDEN Spielstand im ganzen Server, deshalb dreifach abgesichert:
+   (1) der bisherige Stand bleibt als Schatten erhalten (__spielstandSchatten, ein Eintrag) und
+   laesst sich mit einem Klick zurueckholen; (2) setSaveValue zaehlt die Version hoch; (3) alle
+   Sitzungen des Kontos werden entwertet (derselbe Weg wie "alle Sitzungen beenden"). Ohne (3)
+   schriebe der laufende Client des Spielers seinen alten Stand binnen zehn Sekunden zurueck:
+   Sein Autosave bekaeme wegen (2) einen 409, laedt die Version nach und WIEDERHOLT den Schreib-
+   vorgang mit seinem eigenen Stand (saveGameStateVersioned im Frontend). Der Spieler meldet sich
+   neu an und laedt dann den zurueckgeholten Stand vom Server. */
+function kontoNachName(req, feld) {
+  const key = String((req.body && req.body[feld]) || (req.query && req.query[feld]) || '').trim().toLowerCase();
+  return db.users[key] || null;
+}
+app.get('/api/admin/spielstand', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const u = kontoNachName(req, 'name');
+  if (!u) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const priv = db.private[u.userId] || {};
+  const eintrag = priv[SAVE_KEY];
+  const schatten = priv.__spielstandSchatten || null;
+  res.json({
+    username: u.username, vorhanden: eintrag !== undefined,
+    version: eintrag === undefined ? null : (typeof eintrag === 'string' ? 0 : (eintrag.version || 0)),
+    zusammenfassung: spielstandZusammenfassung(getSaveValue(u.userId)),
+    schatten: schatten ? { zeit: schatten.zeit, quelle: schatten.quelle, zusammenfassung: spielstandZusammenfassung(schatten.value) } : null
+  });
+});
+app.get('/api/admin/backups', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  res.json({ backups: backupListe(), behalt: BACKUP_RETENTION, taktMinuten: 30 });
+});
+app.post('/api/admin/backup-jetzt', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  // Erst den Speicher auf die Platte, dann kopieren - sonst sichert das Backup den Stand von vor
+  // dem letzten Schreibvorgang. saveDb() buendelt; danach ist DB_FILE aktuell.
+  // saveDb() loest auch nach einem Schreibfehler auf, backupDb() faengt seine Fehler selbst -
+  // deshalb wird hier NACHGEZAEHLT: Es muss eine neue Datei geben, und sie muss lesbar und nicht
+  // leer sein. Sonst 500, damit der Knopf nie eine aeltere Sicherung als Erfolg praesentiert
+  // (Codex-Hinweis auf #196).
+  saveDb().then(() => {
+    const vorher = new Set(backupListe().map(b => b.datei));
+    const name = backupDb();
+    const liste = backupListe();
+    const neu = name ? liste.find(b => b.datei === name) : null;
+    if (!neu || vorher.has(name) || !(neu.groesse > 0)) {
+      return res.status(500).json({ error: 'Backup fehlgeschlagen - es ist keine neue Sicherung entstanden. Platz und Rechte im Backup-Verzeichnis pruefen.' });
+    }
+    res.json({ ok: true, neuestes: neu, anzahl: liste.length });
+  }).catch(e => res.status(500).json({ error: 'Backup fehlgeschlagen: ' + String(e.message).slice(0, 80) }));
+});
+app.get('/api/admin/backup-spielstand', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const u = kontoNachName(req, 'name');
+  if (!u) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const b = backupLesen(String(req.query.datei || ''));
+  if (b.fehler) return res.status(400).json({ error: b.fehler });
+  const st = backupSpielstand(b.db, String(req.query.name || '').trim().toLowerCase());
+  res.json({ username: u.username, datei: String(req.query.datei), zeit: b.zeit, vorhanden: st.vorhanden,
+    zusammenfassung: st.vorhanden ? spielstandZusammenfassung(st.value) : null });
+});
+app.post('/api/admin/spielstand-zurueckholen', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const u = kontoNachName(req, 'targetUsername');
+  if (!u) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const b = backupLesen(String((req.body && req.body.datei) || ''));
+  if (b.fehler) return res.status(400).json({ error: b.fehler });
+  const st = backupSpielstand(b.db, String(req.body.targetUsername || '').trim().toLowerCase());
+  if (!st.vorhanden) return res.status(404).json({ error: 'In diesem Backup gibt es fuer das Konto keinen Spielstand.' });
+  const pruefung = spielstandZusammenfassung(st.value);
+  if (!pruefung || pruefung.fehler) return res.status(400).json({ error: 'Der Stand im Backup ist kein gueltiger Spielstand.' });
+  db.private[u.userId] = db.private[u.userId] || {};
+  const bisher = getSaveValue(u.userId);
+  if (bisher !== null) db.private[u.userId].__spielstandSchatten = { zeit: Date.now(), quelle: 'vor Ruecksicherung aus ' + b.zeitDatei, value: bisher };
+  const version = setSaveValue(u.userId, st.value);
+  u.tokenVersion = (u.tokenVersion || 0) + 1;
+  delete u.activeSessionId;
+  delete u.activeSessionAt;
+  console.log('[ruecksicherung] konto=' + u.username + ' datei=' + req.body.datei + ' version=' + version);
+  await saveDb();
+  res.json({ ok: true, username: u.username, version, zusammenfassung: pruefung, schattenDa: bisher !== null });
+});
+// Rueckgaengig: den Schatten wieder einsetzen (und den jetzigen Stand als neuen Schatten behalten).
+app.post('/api/admin/spielstand-schatten-zurueck', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const u = kontoNachName(req, 'targetUsername');
+  if (!u) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const priv = db.private[u.userId] || {};
+  const schatten = priv.__spielstandSchatten;
+  if (!schatten || typeof schatten.value !== 'string') return res.status(404).json({ error: 'Fuer dieses Konto liegt kein Schatten vor.' });
+  const bisher = getSaveValue(u.userId);
+  const version = setSaveValue(u.userId, schatten.value);
+  priv.__spielstandSchatten = bisher !== null ? { zeit: Date.now(), quelle: 'vor Rueckgaengig', value: bisher } : undefined;
+  if (priv.__spielstandSchatten === undefined) delete priv.__spielstandSchatten;
+  u.tokenVersion = (u.tokenVersion || 0) + 1;
+  delete u.activeSessionId;
+  delete u.activeSessionAt;
+  await saveDb();
+  res.json({ ok: true, username: u.username, version, zusammenfassung: spielstandZusammenfassung(schatten.value) });
+});
+
+// --- Protokoll (02.09.2026) -----------------------------------------------------------------------
+app.get('/api/admin/protokoll', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  res.json({ eintraege: (db.adminProtokoll || []).slice(0, ADMIN_PROTOKOLL_MERKEN), behalt: ADMIN_PROTOKOLL_MERKEN });
+});
+
+// --- Allianzen (02.09.2026) -----------------------------------------------------------------------
+app.get('/api/admin/allianzen', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const liste = allianzUebersicht();
+  res.json({ allianzen: liste, gesamt: liste.length, aktiv: liste.filter(a => !a.aufgeloest).length });
+});
+/* Anfuehrer uebertragen: das Ziel muss aktives Mitglied sein. Bisherige Admins werden Offiziere -
+   eine Allianz mit zwei Admins gibt es auf dem Spielerweg nicht, und der bisherige Anfuehrer soll
+   nichts verlieren ausser der Fuehrung. Fuer den Fall "der Anfuehrer ist seit Monaten weg". */
+app.post('/api/admin/allianz/anfuehrer', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const tag = String((req.body && req.body.tag) || '').trim();
+  const ziel = kontoNachName(req, 'targetUsername');
+  if (!tag || !allianceInfoOf(tag)) return res.status(404).json({ error: 'Diese Allianz gibt es nicht.' });
+  if (!ziel) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const rolle = allianceRoleOf(tag, ziel.userId);
+  if (!rolle) return res.status(400).json({ error: ziel.username + ' ist kein aktives Mitglied von [' + tag + '].' });
+  const prefix = 'alliance:' + tag + ':role:';
+  let herabgestuft = 0;
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix) || k === prefix + ziel.userId) continue;
+    try { const r = JSON.parse(db.shared[k]); if (r.role === 'admin') { r.role = 'officer'; db.shared[k] = JSON.stringify(r); herabgestuft++; } } catch (e) {}
+  }
+  try { const r = JSON.parse(db.shared[prefix + ziel.userId]); r.role = 'admin'; db.shared[prefix + ziel.userId] = JSON.stringify(r); } catch (e) { return res.status(500).json({ error: 'Rolleneintrag nicht lesbar.' }); }
+  await saveDb();
+  res.json({ ok: true, tag, anfuehrer: ziel.username, herabgestuft });
+});
+app.post('/api/admin/allianz/aufloesen', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const tag = String((req.body && req.body.tag) || '').trim();
+  const info = allianceInfoOf(tag);
+  if (!tag || !info) return res.status(404).json({ error: 'Diese Allianz gibt es nicht.' });
+  if (info.disbanded) return res.status(409).json({ error: 'Diese Allianz ist bereits aufgeloest.' });
+  info.disbanded = true; info.disbandedAt = Date.now(); info.disbandedByAdmin = true;
+  db.shared['alliance:' + tag + ':info'] = JSON.stringify(info);
+  const prefix = 'alliance:' + tag + ':role:';
+  let entfernt = 0;
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix)) continue;
+    try { const r = JSON.parse(db.shared[k]); if (r.role && r.role !== 'left') { r.role = 'left'; db.shared[k] = JSON.stringify(r); entfernt++; } } catch (e) {}
+  }
+  await saveDb();
+  res.json({ ok: true, tag, entfernt });
 });
 
 // --- 4. Systemstand ----------------------------------------------------------------------------
@@ -12908,4 +13951,380 @@ app.post('/api/claim-supporter', authMiddleware, authRateLimit, async (req, res)
   await saveDb();
   const status = supporterStatusFor(req.userId);
   res.json({ ok: true, active: status.active, tier: status.tier || null, daysLeft: status.active ? Math.max(0, Math.ceil(SUPPORTER_BADGE_DAYS - (Date.now() - status.lastDonationAt) / 86400000)) : 0 });
+});
+
+// ============================================================================================
+// KI-Kampfberichte, Etappe E1a (Backend) - 28.08.2026
+//
+// Konzept: kolonie-kepler7/docs/ki-kampfberichte-konzept.md. Der Client schickt die Kampf-FELDER,
+// dieser Server baut daraus einen Prompt, laesst AI Core auf dem M715q einen Erzaehltext
+// schreiben, prueft ihn und legt ihn zum Abholen bereit. Der Text ist reiner Schmuck: Der Bericht
+// daneben rechnet, der Text erzaehlt. Ein fehlender Text ist kein Fehler, die Sektion bleibt weg.
+//
+// SIEBEN Entscheidungen, die man kennen muss, bevor man hier etwas aendert:
+//
+// 1. KAMPFTEXT_AKTIV steht auf false (Auslieferungsschutz wie FESTUNG_SPAWN_AKTIV). Ohne das
+//    Frontend ruft niemand den Endpunkt auf - aber er wuerde M715q-Zeit verbrauchen, sobald ihn
+//    jemand findet, und der M715q bedient auch Social Hub. Umgelegt wird im Frontend-PR der
+//    Etappe E1b, nicht vorher.
+//
+// 2. KEIN neues Paket. Der Aufruf laeuft ueber den Kern (`http`/`https`), nicht ueber fetch oder
+//    axios. Zwei Gruende, beide gemessen: Eine Aenderung an package.json verlangt auf dem Pi ein
+//    `docker restart` VON HAND (nodemon installiert nichts nach) - das darf ein Feature hinter
+//    einem ausgeschalteten Schalter nicht erzwingen. Und globales `fetch` gibt es erst ab Node 18;
+//    welche Node-Version im Container laeuft, ist von aussen nicht messbar.
+//
+// 3. Der Prompt entsteht AUSSCHLIESSLICH hier aus einer festen Schablone. Der Client schickt
+//    Felder, niemals Text und niemals einen Prompt - sonst waere der Endpunkt ein freier
+//    LLM-Zugang fuer jeden, der ein Konto hat.
+//
+// 4. Der GEGNERNAME ist die einzige vom Client kontrollierte Zeichenkette im Prompt. Er wird auf
+//    40 Zeichen und eine Zeichen-Whitelist gekuerzt: keine Steuerzeichen, keine Zeilenumbrueche,
+//    keine Klammern und keine Anfuehrungszeichen. Damit laesst sich weder die JSON-Struktur
+//    faelschen noch eine zweite Anweisungssektion vortaeuschen. Dass darin trotzdem 40 Zeichen
+//    Prosa Platz haben, ist bekannt und BEWUSST in Kauf genommen: Bei 10 Texten je Konto und Tag
+//    ist das als freier LLM-Zugang unbrauchbar, und der erzeugte Text sieht ohnehin nur der
+//    Spieler, der ihn ausgeloest hat.
+//
+// 5. SCHIFFE reisen als SCHLUESSEL, nicht als Namen. Der Server uebersetzt ueber seine eigene
+//    Tabelle; ein unbekannter Schluessel faellt weg. Damit erreicht ausser dem Gegnernamen keine
+//    einzige Client-Zeichenkette den Prompt.
+//
+// 6. Die Sperren sind eine KOPIE-FAMILIE mit gamegeeeeek-ai-core/tools/kampftext_messlauf.py.
+//    Dort sind sie am echten Modell gemessen worden, hier entscheiden sie. Laufen die beiden
+//    auseinander, misst das Werkzeug etwas anderes, als der Server durchlaesst - Paritaetstest
+//    tests/test_kampftext_paritaet.js im Frontend-Repo.
+//
+// 7. Die Warteschlange lebt NUR im Speicher und ist nach einem Neustart weg. Das ist Absicht:
+//    Ein Auftrag ist Sekunden bis Minuten alt, der Client hoert bei unbekannter Auftrags-ID auf
+//    zu fragen, und die Sektion bleibt dann eben weg. Ein persistenter Auftragsspeicher waere
+//    Aufwand fuer einen Fall, der nichts kostet.
+// ============================================================================================
+
+const KAMPFTEXT_AKTIV = false;
+const KAMPFTEXT_AI_CORE_URL = (process.env.AI_CORE_URL || 'http://192.168.178.45:8000').replace(/\/+$/, '');
+const KAMPFTEXT_AI_CORE_KEY = process.env.AI_CORE_API_KEY || '';
+// Modellwahl aus E0 (28.08.2026): qwen3.5:4b. 2b war unbrauchbar - erfundene Schiffsnamen, ein
+// umgedrehter Ausgang, 1374 statt 500 Zeichen; sein Geschwindigkeitsvorteil lag bei 55 gegen 70 s.
+const KAMPFTEXT_MODELL = process.env.KAMPFTEXT_MODELL || 'qwen3.5:4b';
+// Gemessen 69,7 s je Text (kalter Lauf) - 180 s Deckel laesst reichlich Luft und bleibt unter den
+// 900 s, die AI Core selbst Ollama gibt.
+const KAMPFTEXT_TIMEOUT_MS = 180000;
+// 10 je Konto und Tag: die Zahl aus dem Konzept. Sie ist bewusst klein - der M715q schafft
+// gemessen rund 52 Texte je Stunde, und er bedient auch Social Hub.
+const KAMPFTEXT_PRO_TAG = 10;
+// Notbremse fuer alle zusammen: 300 Texte sind rund 5,8 Stunden M715q am Tag.
+const KAMPFTEXT_GESAMT_PRO_TAG = 300;
+// Laengendeckel aus dem Konzept. Der Text ist Serverdaten im Client und darf die Berichtskarte
+// nicht sprengen - derselbe Grund wie escapeHtml.
+const KAMPFTEXT_MAX_ZEICHEN = 600;
+// Wie lange ein fertiger Auftrag zum Abholen bereitliegt. Der Client fragt im 30-s-Takt; eine
+// Stunde ist grosszuegig und haelt db.kampftexte klein.
+const KAMPFTEXT_AUFBEWAHRUNG_MS = 3600 * 1000;
+
+// Schluessel -> deutscher Anzeigename. ABGELEITET aus SHIP_DEFS des Frontends, nicht getippt
+// (Regel: Namen ablesen, nie raten). Die Tabelle ist eine Kopie-Familie, aber eine harmlose: Ein
+// fehlender Schluessel laesst das Schiff aus dem Prompt fallen, mehr nicht - nichts PvP-Relevantes
+// haengt daran. Der Paritaetstest im Frontend-Repo haelt sie trotzdem zusammen, damit ein neues
+// Schiff im Erzaehltext nicht stillschweigend fehlt.
+const KAMPFTEXT_SCHIFFSNAMEN = {
+  ships: 'Erkundungsschiffe',
+  jaeger: 'Jäger',
+  kometenjaeger: 'Kometenjäger',
+  enterschiff: 'Enterschiff',
+  phantomschiff: 'Phantomschiff',
+  riftwaechter: 'Riftwächter',
+  gesandtenschiff: 'Gesandtenschiff',
+  schuerfschiff: 'Schürfschiff',
+  recycler: 'Recycler',
+  carrier: 'Trägerschiff',
+  cruisers: 'Kreuzer',
+  waechter: 'Wächter',
+  destroyers: 'Zerstörer',
+  bomber: 'Bomber',
+  schlachtschiff: 'Schlachtschiff',
+  lotsenboot: 'Lotsenboot',
+  kessel: 'Kessel',
+  bergungskran: 'Bergungskran',
+  presslufthai: 'Presslufthai',
+  ankerwerfer: 'Ankerwerfer',
+  echoschnitter: 'Echoschnitter',
+  bannschiff: 'Bannschiff',
+  nullkiel: 'Nullkiel',
+  grundgaenger: 'Der Grundgänger',
+  leerenjaeger: 'Leerenjäger',
+  paktkorvette: 'Paktkorvette',
+  bundeskreuzer: 'Bundeskreuzer',
+  sternenbanner: 'Sternenbanner',
+  nanoklinge: 'Nanoklinge',
+  quantenkreuzer: 'Quantenkreuzer',
+  fusionsdreadnought: 'Fusionsdreadnought',
+  hyperjaeger: 'Hyperjäger',
+  hyperbomber: 'Hyperbomber',
+  metamaterialtitan: 'Metamaterial-Titan',
+  urmateriekoloss: 'Urmaterie-Koloss',
+  singularitaetsvernichter: 'Singularitäts-Vernichter',
+  kausalitaetsbrecher: 'Kausalitätsbrecher',
+  mondzerstoerer: 'Mondzerstörer',
+  frachter: 'Kleiner Frachter',
+  frachtergross: 'Großer Frachter',
+  bergungsfrachter: 'Bergungsfrachter',
+  spaeher: 'Spähschiff',
+  spionageschiff: 'Spionagekreuzer',
+  forscher: 'Forschungsschiff',
+  superschlachtschiff: 'Superschlachtschiff',
+};
+
+// --- Prompt-Bau: dieselben fuenf Felder wie in AI Cores prompt_daten() ---------------------
+//
+// Der Zuschnitt ist am 28.08.2026 am echten Modell gemessen worden (Entscheidung Sascha:
+// "Ausgang, Gegner, Verluste - sonst nichts"). Vorher bekam das Modell den ganzen Bericht und
+// gab dabei jede Groesse falsch wieder, ohne dass die Zahlen-Sperre es sah: "1260 Minuten" statt
+// Sekunden, "vierzig Quantenkreuzer" statt 45 (als Zahlwort unsichtbar), eine genutzte Schwaeche
+// ohne das passende Schiff, und die gekappte Beute verschwiegen. Was hier nicht drinsteht, kann
+// nicht falsch wiedergegeben werden.
+//
+// Der Nebeneffekt ist der eigentliche Gewinn: Die STUFE ist die einzige Zahl in den Daten, jede
+// andere Ziffernfolge im Text ist damit zwangslaeufig eine Erfindung.
+function kampftextGegnerName(roh) {
+  // Die einzige vom Client kontrollierte Zeichenkette im Prompt (siehe Punkt 4 oben).
+  // Erlaubt sind Buchstaben, Ziffern, Leerzeichen, Bindestrich und Apostroph - keine
+  // Zeilenumbrueche, keine Klammern, keine Anfuehrungszeichen, kein Doppelpunkt.
+  return String(roh == null ? '' : roh)
+    .replace(/[^A-Za-z0-9ÄÖÜäöüß \-']/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 40);
+}
+
+function kampftextSchiffsliste(roh) {
+  // Der Client schickt SCHLUESSEL; unbekannte fallen weg. Sortiert, damit derselbe Kampf
+  // denselben Prompt ergibt - sonst haengt der Text an der Reihenfolge eines Objekts.
+  if (!roh || typeof roh !== 'object') return [];
+  const namen = [];
+  for (const key of Object.keys(roh)) {
+    const anzahl = Number(roh[key]);
+    if (!(anzahl > 0)) continue;
+    const name = KAMPFTEXT_SCHIFFSNAMEN[key];
+    if (name && namen.indexOf(name) < 0) namen.push(name);
+  }
+  return namen.sort();
+}
+
+function kampftextDaten(roh) {
+  return {
+    gegner: kampftextGegnerName(roh && roh.npcName),
+    stufe: Math.max(1, Math.min(999, Math.floor(Number(roh && roh.npcLevel) || 1))),
+    ausgang: (roh && roh.result) === 'win' ? 'Sieg' : 'Niederlage',
+    eigene_schiffe: kampftextSchiffsliste(roh && roh.fleet),
+    verlorene_schiffe: kampftextSchiffsliste(roh && roh.ownLostShips),
+  };
+}
+
+function kampftextDatenText(daten) {
+  // Die EINE Quelle fuer beide Leser: der Prompt haengt sie an den Anweisungstext, die
+  // Zahlen-Sperre liest sie als Liste der erlaubten Zahlen. Zwei getrennte Fassungen koennten
+  // auseinanderlaufen - dann erlaubte die Sperre etwas, das im Prompt gar nicht steht.
+  return JSON.stringify(daten, null, 1);
+}
+
+function kampftextPrompt(daten) {
+  return 'Du bist der Bordschreiber eines Raumschiff-Verbands im Browsergame Kolonie Kepler-7. ' +
+    'Verfasse einen kurzen, atmosphaerischen Logbucheintrag (hoechstens 500 Zeichen, Deutsch) ' +
+    'ueber den folgenden Kampf. STRIKTE REGELN: Nutze ausschliesslich die untenstehenden ' +
+    'Daten. Nenne KEINE Zahlen und KEINE Zeitangaben - die genauen Werte stehen im Bericht ' +
+    'daneben, dein Text erzaehlt nur. Erfinde keine Schiffsnamen, keine Orte, keine ' +
+    'Mechaniken. Du entscheidest nichts - du beschreibst nur, was geschehen ist.\n\n' +
+    'KAMPFDATEN:\n' + kampftextDatenText(daten);
+}
+
+// --- Die drei Sperren -----------------------------------------------------------------------
+//
+// Sie sind die WAHRHEIT, der Prompt ist nur die Bitte (AI-Core-Lektion 10). Am 28.08.2026 am
+// echten Modell gemessen: Von acht Texten verwarf die Sperre zwei - nachgelesen trugen alle acht
+// eine Falschaussage. Deshalb steht die erste Verteidigungslinie oben im Zuschnitt und nicht hier.
+function kampftextZahlen(text) {
+  // Tausendertrenner vorher entfernen: '184.500' und '184500' sind dieselbe Zahl.
+  const treffer = String(text || '').match(/\d(?:[\d.,]*\d)?/g) || [];
+  const raus = new Set();
+  for (const t of treffer) raus.add(t.replace(/[.,]/g, ''));
+  return raus;
+}
+
+function kampftextErfundeneZahlen(text, daten) {
+  // Verglichen wird gegen den DATENBLOCK, nicht gegen den ganzen Prompt. Gemessen erlaubte der
+  // ganze Prompt drei Zahlen statt einer - die 500 aus "hoechstens 500 Zeichen" und die 7 aus
+  // "Kolonie Kepler-7". Ein Text mit "500 Jaeger fielen in 7 Wellen" kam damit sauber durch.
+  const erlaubt = kampftextZahlen(kampftextDatenText(daten));
+  const raus = [];
+  for (const z of kampftextZahlen(text)) if (!erlaubt.has(z)) raus.push(z);
+  return raus.sort((a, b) => a.length - b.length || a.localeCompare(b));
+}
+
+function kampftextFremdeSchiffe(text, daten) {
+  // EXAKTER Vergleich, kein Teilstring: Sonst gilt der Mondzerstoerer als erlaubt, sobald
+  // Zerstoerer im Verband stehen - genau der Anlassfall dieser Pruefung.
+  const norm = (n) => n.replace(/ae/g, 'ä').replace(/oe/g, 'ö').replace(/ue/g, 'ü').toLowerCase();
+  const erlaubt = new Set(daten.eigene_schiffe.concat(daten.verlorene_schiffe).map(norm));
+  const raus = [];
+  for (const name of Object.values(KAMPFTEXT_SCHIFFSNAMEN)) {
+    if (String(text || '').indexOf(name) >= 0 && !erlaubt.has(norm(name)) && raus.indexOf(name) < 0) raus.push(name);
+  }
+  return raus.sort();
+}
+
+function kampftextMaengel(text, daten) {
+  const t = String(text || '');
+  if (!t.trim()) return ['leerer Text'];
+  const raus = [];
+  if (t.length > KAMPFTEXT_MAX_ZEICHEN) raus.push('zu lang: ' + t.length + ' Zeichen (Deckel ' + KAMPFTEXT_MAX_ZEICHEN + ')');
+  for (const z of kampftextErfundeneZahlen(t, daten)) raus.push('erfundene Zahl ' + z);
+  for (const s of kampftextFremdeSchiffe(t, daten)) raus.push('fremdes Schiff ' + s);
+  return raus;
+}
+
+// --- Der Aufruf bei AI Core ------------------------------------------------------------------
+// Ueber den Kern, nicht ueber fetch (siehe Punkt 2 im Kopf). `require` steht bewusst hier drin
+// und nicht oben: ein Kernmodul kostet nichts, und der Kopf der Datei bleibt unberuehrt.
+function kampftextAnfrage(prompt) {
+  return new Promise((resolve, reject) => {
+    let ziel;
+    try { ziel = new URL(KAMPFTEXT_AI_CORE_URL + '/ai/chat'); }
+    catch (e) { return reject(new Error('AI_CORE_URL ist keine gueltige Adresse: ' + KAMPFTEXT_AI_CORE_URL)); }
+    const mod = require(ziel.protocol === 'https:' ? 'https' : 'http');
+    const koerper = JSON.stringify({ prompt, model: KAMPFTEXT_MODELL, temperature: 0.7, num_predict: 400 });
+    const kopf = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(koerper) };
+    if (KAMPFTEXT_AI_CORE_KEY) kopf['Authorization'] = 'Bearer ' + KAMPFTEXT_AI_CORE_KEY;
+    const anfrage = mod.request({
+      hostname: ziel.hostname,
+      port: ziel.port || (ziel.protocol === 'https:' ? 443 : 80),
+      path: ziel.pathname,
+      method: 'POST',
+      headers: kopf,
+      timeout: KAMPFTEXT_TIMEOUT_MS,
+    }, (antwort) => {
+      let roh = '';
+      antwort.setEncoding('utf8');
+      antwort.on('data', (d) => {
+        roh += d;
+        // Ein Deckel auf die Antwort: Wir reden mit einem Dienst im eigenen Netz, aber eine
+        // unbegrenzt wachsende Zeichenkette im Speicher ist nie eine gute Idee.
+        if (roh.length > 200000) anfrage.destroy(new Error('AI Core lieferte eine unplausibel grosse Antwort'));
+      });
+      antwort.on('end', () => {
+        if (antwort.statusCode !== 200) {
+          return reject(new Error('AI Core antwortete HTTP ' + antwort.statusCode + ': ' + roh.slice(0, 200)));
+        }
+        let text;
+        try { text = String(JSON.parse(roh).response || '').trim(); }
+        catch (e) { return reject(new Error('AI Core lieferte kein JSON: ' + roh.slice(0, 200))); }
+        resolve(text);
+      });
+    });
+    anfrage.on('timeout', () => anfrage.destroy(new Error('AI Core antwortete nicht in ' + Math.round(KAMPFTEXT_TIMEOUT_MS / 1000) + 's')));
+    anfrage.on('error', reject);
+    anfrage.write(koerper);
+    anfrage.end();
+  });
+}
+
+// --- Warteschlange: EIN Auftrag gleichzeitig Richtung M715q ----------------------------------
+// AI Cores Drossel zaehlt je Herkunft (20 Aufrufe je 5 Minuten, 2 gleichzeitig) - aus seiner
+// Sicht ist dieser Pi EINE Herkunft, alle Spieler teilen sich also dieses Budget. Deshalb liegt
+// die Warteschlange hier und nicht je Client.
+let kampftextLaeuft = false;
+const kampftextWarteschlange = [];
+
+function kampftextAufraeumen() {
+  if (!db.kampftexte) db.kampftexte = {};
+  const jetzt = Date.now();
+  for (const id of Object.keys(db.kampftexte)) {
+    if (jetzt - (db.kampftexte[id].zeit || 0) > KAMPFTEXT_AUFBEWAHRUNG_MS) delete db.kampftexte[id];
+  }
+}
+
+async function kampftextArbeite() {
+  if (kampftextLaeuft) return;
+  const auftrag = kampftextWarteschlange.shift();
+  if (!auftrag) return;
+  kampftextLaeuft = true;
+  const eintrag = (db.kampftexte || {})[auftrag.id];
+  if (eintrag) eintrag.status = 'laeuft';
+  try {
+    const text = await kampftextAnfrage(kampftextPrompt(auftrag.daten));
+    const maengel = kampftextMaengel(text, auftrag.daten);
+    if (maengel.length) {
+      // Kein zweiter Versuch: Ein Retry kostet weitere 70 s M715q fuer denselben Text, und ein
+      // fehlender Text ist per Konzept kein Fehler - die Sektion bleibt einfach weg.
+      console.warn('[kampftext] verworfen ' + auftrag.id + ': ' + maengel.join('; '));
+      if (eintrag) { eintrag.status = 'verworfen'; eintrag.grund = maengel.join('; '); }
+    } else if (eintrag) {
+      eintrag.status = 'fertig';
+      eintrag.text = text;
+    }
+  } catch (e) {
+    console.error('[kampftext] Fehler ' + auftrag.id + ': ' + e.message);
+    if (eintrag) { eintrag.status = 'fehlgeschlagen'; eintrag.grund = e.message; }
+  }
+  kampftextLaeuft = false;
+  try { await saveDb(); } catch (e) { console.error('[kampftext] saveDb: ' + e.message); }
+  if (kampftextWarteschlange.length) kampftextArbeite();
+}
+
+function kampftextTagesZaehler(traeger, feld) {
+  // Dasselbe Muster wie user.marktTag und user.staub: Stempel gegen den UTC-Tag halten, bei
+  // Abweichung zuruecksetzen. Kein Cron, kein Aufraeumlauf.
+  const heute = staubTagesschluessel();
+  if (!traeger[feld] || traeger[feld].stempel !== heute) traeger[feld] = { stempel: heute, anzahl: 0 };
+  return traeger[feld];
+}
+
+app.post('/api/kampfbericht/text', authMiddleware, async (req, res) => {
+  if (!KAMPFTEXT_AKTIV) return res.status(503).json({ error: 'KI-Kampfberichte sind derzeit abgeschaltet.' });
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+
+  const daten = kampftextDaten(req.body);
+  // Ohne Gegnernamen und ohne ein einziges eigenes Schiff gibt es nichts zu erzaehlen - das ist
+  // kein Fehler des Spielers, aber auch kein Auftrag wert.
+  if (!daten.gegner || !daten.eigene_schiffe.length) {
+    return res.status(400).json({ error: 'Kampfdaten unvollstaendig (Gegner und mindestens ein eigenes Schiff noetig).' });
+  }
+
+  kampftextAufraeumen();
+  const jeKonto = kampftextTagesZaehler(user, 'kampftextTag');
+  if (jeKonto.anzahl >= KAMPFTEXT_PRO_TAG) {
+    return res.status(429).json({ error: 'Tagesgrenze erreicht: ' + KAMPFTEXT_PRO_TAG + ' KI-Kampfberichte pro Tag.', proTag: KAMPFTEXT_PRO_TAG });
+  }
+  const gesamt = kampftextTagesZaehler(db, 'kampftextTag');
+  if (gesamt.anzahl >= KAMPFTEXT_GESAMT_PRO_TAG) {
+    return res.status(429).json({ error: 'Heute sind alle KI-Kampfberichte vergeben - morgen wieder.' });
+  }
+
+  // Erst zaehlen, dann einreihen: Zwei gleichzeitige Anfragen duerfen die Grenze nicht gemeinsam
+  // durchbrechen. Beide Zaehler wachsen im selben synchronen Block vor dem ersten await.
+  jeKonto.anzahl++;
+  gesamt.anzahl++;
+  const id = crypto.randomUUID();
+  db.kampftexte[id] = { status: 'wartet', userId: req.userId, zeit: Date.now(), text: '', grund: '' };
+  kampftextWarteschlange.push({ id, daten });
+  await saveDb();
+  res.status(202).json({ auftragId: id, wartend: kampftextWarteschlange.length });
+  kampftextArbeite();
+});
+
+app.get('/api/kampfbericht/text/:id', authMiddleware, (req, res) => {
+  const eintrag = (db.kampftexte || {})[String(req.params.id || '')];
+  // Unbekannt und fremd sehen fuer den Client gleich aus - er soll in beiden Faellen aufhoeren
+  // zu fragen, und ein Fremder erfaehrt so nicht einmal, ob es die Auftrags-ID gibt.
+  if (!eintrag || eintrag.userId !== req.userId) return res.status(404).json({ status: 'unbekannt' });
+  // Ein Auftrag, der die Zeit ueberschritten hat und trotzdem noch "wartet", gehoert zu einem
+  // Serverneustart: Die Warteschlange lebt nur im Speicher (Punkt 7 im Kopf). Statt ihn ewig
+  // haengen zu lassen, wird er hier als gescheitert gemeldet.
+  if ((eintrag.status === 'wartet' || eintrag.status === 'laeuft') &&
+      Date.now() - (eintrag.zeit || 0) > KAMPFTEXT_TIMEOUT_MS + 60000) {
+    return res.json({ status: 'fehlgeschlagen', grund: 'Auftrag ging bei einem Serverneustart verloren.' });
+  }
+  if (eintrag.status === 'fertig') return res.json({ status: 'fertig', text: eintrag.text });
+  res.json({ status: eintrag.status, grund: eintrag.grund || '' });
 });

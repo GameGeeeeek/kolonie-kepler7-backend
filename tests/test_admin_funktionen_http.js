@@ -301,7 +301,11 @@ function faelligesNest(jetzt) {
   // ---- 3. Notabschaltung der PvE-Spawns --------------------------------------------------------
   const st0 = await s.j('/admin/schalter', { headers: kopf(tokAdmin) });
   const nester0 = (st0.body.schalter || []).find(x => x.name === 'nester') || {};
-  check('3a: die drei Schalter werden gemeldet', (st0.body.schalter || []).length === 3,
+  // Vier seit dem 02.09.2026: A2 (Wrackkonvois) haengt seither ebenfalls am Notaus - vorher las
+  // A2Tick die blanke Konstante, und der Admin konnte die Konvois nicht anhalten.
+  // Fuenf seit dem 02.09.2026 (B2): `vorposten` stoppt den BAU neuer Vorposten - im ausgelieferten Stand
+  // (VORPOSTEN_AKTIV=false) meldet er imCode:false, bis der Frontend-PR ihn umlegt.
+  check('3a: die fuenf Schalter werden gemeldet (festung, bauteile, nester, konvois, vorposten)', (st0.body.schalter || []).length === 5,
     { namen: (st0.body.schalter || []).map(x => x.name) });
   check('3a2: im Ausgangszustand ist nichts abgeschaltet',
     nester0.notAus === false && nester0.wirksam === true && nester0.imCode === true,
@@ -370,15 +374,20 @@ function faelligesNest(jetzt) {
   };
   const nestTickRumpf = schnitt('nestTick');
   const festungSpawnRumpf = schnitt('festungSpawn');
-  check('3d-vorab: beide Rumpfe liessen sich schneiden', !!nestTickRumpf && !!festungSpawnRumpf,
-    { nestTick: !!nestTickRumpf, festungSpawn: !!festungSpawnRumpf });
-  check('3d: der Nachschub laeuft ueber den Schalter',
+  const a2TickRumpf = schnitt('A2Tick');
+  check('3d-vorab: alle drei Rumpfe liessen sich schneiden', !!nestTickRumpf && !!festungSpawnRumpf && !!a2TickRumpf,
+    { nestTick: !!nestTickRumpf, festungSpawn: !!festungSpawnRumpf, a2Tick: !!a2TickRumpf });
+  check('3d: der Nachschub laeuft ueber den Schalter (Nester, Festungen, Bauteile, Konvois)',
     !!nestTickRumpf && nestTickRumpf.includes("spawnAktiv('nester')")
       && !!festungSpawnRumpf && festungSpawnRumpf.includes("spawnAktiv('festung')")
-      && QUELLE.includes("bauteile: !spawnAktiv('bauteile')"),
+      && QUELLE.includes("bauteile: !spawnAktiv('bauteile')")
+      && !!a2TickRumpf && a2TickRumpf.includes("spawnAktiv('konvois')")
+      && QUELLE.includes("if (!spawnAktiv('vorposten'))"),
     { nestTick: !!nestTickRumpf && nestTickRumpf.includes("spawnAktiv('nester')"),
       festungSpawn: !!festungSpawnRumpf && festungSpawnRumpf.includes("spawnAktiv('festung')"),
-      bauteile: QUELLE.includes("bauteile: !spawnAktiv('bauteile')") });
+      bauteile: QUELLE.includes("bauteile: !spawnAktiv('bauteile')"),
+      a2Tick: !!a2TickRumpf && a2TickRumpf.includes("spawnAktiv('konvois')"),
+      vorposten: QUELLE.includes("if (!spawnAktiv('vorposten'))") });
   check('3d2: der Angriffsweg haengt WEITERHIN an der blanken Konstante',
     QUELLE.includes("if (!NEST_SPAWN_AKTIV) return res.status(404)"),
     { gefunden: QUELLE.includes("if (!NEST_SPAWN_AKTIV) return res.status(404)") });

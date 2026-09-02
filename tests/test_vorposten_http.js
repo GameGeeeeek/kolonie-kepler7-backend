@@ -14,7 +14,7 @@
 //      Besitzer bekommt type:'vorposten-verlust' mit der verlorenen Restgarnison.
 //   6. AUFGEBEN: nur der Besitzer, Garnison kommt zurueck, keine Rueckerstattung.
 //   7. AUSBAU: Abklingzeit am Objekt, Stufe steigt, LP wachsen um die Differenz (kein Heilen), Endausbau.
-//   8. SCHALTER: VORPOSTEN_AKTIV steht auf false (Auslieferungs-Riegel, Regel 60 - erst der
+//   8. SCHALTER: VORPOSTEN_AKTIV steht auf TRUE (seit dem 02.09.2026, Frontend live; vorher der
 //      Frontend-PR legt ihn um), der Notaus `vorposten` ist verdrahtet, beide Rechte-Ketten kennen
 //      checkVorpostenKeyPermission.
 //
@@ -340,8 +340,8 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
   {
     const schalter = (roh.match(/const VORPOSTEN_AKTIV = (true|false);/) || [])[1];
     check('8a: der Schalter ist auffindbar', !!schalter, { steht_auf: schalter });
-    check('8b: und er steht auf FALSE (Auslieferungs-Riegel, Regel 60 - erst der Frontend-PR legt ihn um)',
-      schalter === 'false', { steht_auf: schalter, hinweis: 'true heisst: Vorposten gehen LIVE, obwohl das Frontend sie evtl. noch nicht zeichnet - beabsichtigt?' });
+    check('8b: und er steht auf TRUE (Frontend mit dem Vorposten-Zweig ausgeliefert - false waere eine Notabschaltung, deren Grund nach docs/vorposten.md gehoert)',
+      schalter === 'true', { steht_auf: schalter, hinweis: 'umgelegt am 02.09.2026 unmittelbar nach dem Frontend-Merge; der Admin-Notaus stoppt nur den BAU' });
     check('8c: der Admin-Notaus kennt vorposten (NOTAUS_NAMEN und spawnAktivImCode)',
       /vorposten:\s*'Neue Vorposten werden errichtet'/.test(roh) && roh.includes("if (name === 'vorposten') return VORPOSTEN_AKTIV;") && roh.includes("if (!spawnAktiv('vorposten'))"));
     check('8d: BEIDE Rechte-Ketten der Storage-Route kennen checkVorpostenKeyPermission',

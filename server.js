@@ -4338,9 +4338,75 @@ function grantNewbieShield(userId) {
   db.private[userId].__attackShieldUntil = Math.max(db.private[userId].__attackShieldUntil || 0, Date.now() + NEWBIE_SHIELD_MS);
 }
 
+/* ===== PvP-Mindesteinsatz (03.09.2026, Balance-Entscheidung Sascha) ==========================
+   BEFUND: Kampfkraft und Risiko waren entkoppelt. computeAttackPower rechnet ueber allFleetsOf -
+   die GANZE Reichsflotte -, waehrend die Verluste im Client nur aus der geschickten
+   m.composition gezogen werden. Ein Angriff mit EINEM Jaeger kaempfte also mit voller Reichskraft
+   und riskierte diesen einen Jaeger; er brachte +25 Kampfpunkte, zerstoerte Anlagen und kostete
+   den Verteidiger Flotte. Beute nicht - der Frachtdeckel greift -, aber alles andere schon.
+
+   DIE REGEL: Ein Angriff unter der Schwelle wird NICHT abgelehnt, sondern ERTRAGLOS. Der Kampf
+   laeuft normal, die Siegchance bleibt die Reichsflotte (die Zusage aus v8.634.0 bleibt damit
+   woertlich wahr), Beute nimmt der Angreifer wie bisher mit - aber es gibt keine Kampfpunkte,
+   keinen Anlagenschaden und keinen Flottenverlust beim Ziel.
+   Ablehnen waere die schlechtere Bauform: Der Angreifer hat beim Eintreffen Treibstoff und
+   Flugzeit laengst bezahlt, und seine Flotte kann seit dem Start gewachsen sein - eine Schwelle,
+   die dort NEIN sagt, bestraft ihn fuer etwas, das er nicht mehr aendern kann.
+
+   WARUM missionId UND NICHT DIE FLOTTE IM REQUEST: Der Spielstand ist klientenautoritativ, eine
+   Flottenangabe im Body waere eine PvP-relevante Groesse aus der Hand des Angreifers. Der Server
+   liest die Zusammensetzung deshalb aus dem GESPEICHERTEN Spielstand - dasselbe Muster wie
+   /api/asteroid/contest (astFindeAngriffsmission). Ehrlich bleibt: Wer sich den Request baut,
+   kann eine grosse Mission in seinen Spielstand schreiben. Der Missbrauch wandert damit aus
+   "drei Klicks in der offiziellen Oberflaeche" in die Klasse "Spielstand faelschen" - das ist
+   eine Spielregel, kein Sicherheitsschloss, und so steht es auch im PR.
+
+   GNADENFRIST: Ein Request OHNE missionId bekommt vollen Ertrag. Ein Browser-Tab, der beim
+   Umlegen des Schalters schon offen war, liefert die alte Datei aus und kennt das Feld nicht -
+   er soll nicht stillschweigend leer ausgehen. Faellt weg, sobald das Frontend ausgeliefert ist.
+
+   DIE SCHWELLE IST NOCH GERATEN. 25 % ist ein Startwert; bevor der Schalter umgelegt wird, muss
+   ueber db.private gemessen werden, welchen Anteil der staerkste Standort eines Kontos ueblich
+   an der Reichsflotte haelt. Solange steht PVP_MINDESTEINSATZ_AKTIV auf false. */
+const PVP_MINDESTEINSATZ_AKTIV = false;
+const PVP_MINDESTEINSATZ = 0.25;
+
+/* Der Anteil der geschickten Flotte an der Reichs-Rohkraft. Bewusst NUR der flottenabhaengige
+   Teil von computeAttackPower (rawFleetPower x fleetDiversityMult je Flotte): Alles danach -
+   Forschung, Doktrin, Haltung, Bonusgruppe, Buffs, Aura - ist KONTOWEIT und kuerzt sich im
+   Quotienten heraus. Damit haengt die Schwelle an der Flotte und nicht daran, welche Boni gerade
+   laufen; und die bekannte Altabweichung zwischen der standortabhaengigen und der kontoweiten
+   Bonusrechnung kann den Anteil gar nicht erst verschieben.
+   ssAtkMult/t2AtkMult bleiben DRIN - sie wirken klassenselektiv und kuerzen sich deshalb nicht. */
+function pvpEinsatzAnteil(save, composition) {
+  const ssAtkMult = 1 + shipModuleBonus(save, 'schlachtschiff', 'atk');
+  const t2AtkMult = 1 + shipModuleBonus(save, 'raffiniert', 'atk');
+  const roh = (f) => rawFleetPower(f, ssAtkMult, t2AtkMult, save.shipMarks) * fleetDiversityMult(f);
+  let gesamt = 0;
+  for (const f of allFleetsOf(save)) gesamt += roh(f);
+  // Kein Reich, keine Schwelle: Wer gar keine Kampfschiffe hat, soll nicht durch eine Division
+  // durch null aus dem PvP fallen.
+  if (!(gesamt > 0)) return 1;
+  return Math.min(1, roh(composition) / gesamt);
+}
+
+/* Die Angriffsmission aus dem GESPEICHERTEN Spielstand des Angreifers. Muster wie
+   astFindeAngriffsmission: Der Client nennt nur eine Kennung, gelesen wird beim Server. */
+function pvpFindeAngriffsmission(save, missionId, targetUserId) {
+  for (const f of allFleetsOf(save)) {
+    for (const m of (f.missions || [])) {
+      if (String(m.id) === String(missionId) && m.type === 'attack-player'
+          && String(m.targetId) === String(targetUserId)) return m;
+    }
+  }
+  return null;
+}
+
 app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });   // Notaus 'angriffe' (02.09.2026)
   const { targetUserId, targetPlanet } = req.body || {};
+  // Nur eine KENNUNG aus dem Request - die Flotte dazu liest der Server selbst (siehe oben).
+  const missionId = (req.body && req.body.missionId) !== undefined ? String(req.body.missionId) : '';
   if (!targetUserId || targetUserId === req.userId) return res.status(400).json({ error: 'Ungültiges Ziel.' });
   // Ziel unter Schutzschild? -> Angriff prallt ab (kein Kampf, keine Beute, kein Punktgewinn).
   // Der Schild ist KONTOWEIT und gilt deshalb auch fuer jeden Standort-Angriff - sonst liesse
@@ -4357,6 +4423,19 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   let attacker, target;
   try { attacker = JSON.parse(attackerRaw); target = JSON.parse(targetRaw); }
   catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
+
+  /* Ertragsstufe (PvP-Mindesteinsatz, siehe Kommentarblock ueber /api/attack). 'voll' ist der
+     Altpfad und bleibt es, solange der Schalter aus ist ODER der Client keine missionId schickt
+     (Gnadenfrist) ODER die Mission im gespeicherten Spielstand nicht auffindbar ist. Der Angriff
+     wird nie abgelehnt - nur sein Ertrag faellt weg. */
+  let einsatzAnteil = null, ertragStufe = 'voll';
+  if (PVP_MINDESTEINSATZ_AKTIV && missionId) {
+    const einsatzMission = pvpFindeAngriffsmission(attacker, missionId, targetUserId);
+    if (einsatzMission && einsatzMission.composition) {
+      einsatzAnteil = pvpEinsatzAnteil(attacker, einsatzMission.composition);
+      if (einsatzAnteil < PVP_MINDESTEINSATZ) ertragStufe = 'sockel';
+    }
+  }
 
   /* PvP auf alle Standorte (Etappe 1): `targetPlanet` ist OPTIONAL. Fehlt das Feld (alter
      Client), laeuft exakt der heutige Konto-Kampf - jede Standort-Weiche unten ist ein bedingter
@@ -4504,7 +4583,12 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Standort-Fall: targetPlanet/standortArt/beuteFaktor - hier fuer die beiden ANTWORTEN
     // (beide spreaden kampfDetails); die vier addReport-Aufrufe spreaden standortFelder selbst.
     // Im Altpfad ist das ein leerer Spread und aendert kein Byte.
-    ...standortFelder
+    ...standortFelder,
+    /* PvP-Mindesteinsatz: Anteil und Stufe reisen in BEIDEN Antworten mit (beide spreaden
+       kampfDetails) und damit auch in den Berichten. Im Altpfad ist der Anteil null und die
+       Stufe 'voll' - ein alter Client ignoriert beide Felder. Ohne sie koennte das Frontend dem
+       Spieler nicht erklaeren, warum ein gewonnener Angriff nichts eingebracht hat. */
+    einsatzAnteil, ertragStufe
   });
 
   if (success) {
@@ -4513,7 +4597,9 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Die Variable ist WEITER OBEN deklariert, damit kampfDetails() sie sieht - eine hier
     // deklarierte const laege ausserhalb der Sichtbarkeit dieser Funktion, und `typeof` haette
     // dort still "undefined" geliefert, ohne Fehler und ohne Wirkung.
-    defenderLossPct = Math.round(lootPct * 0.5 * 1000) / 1000;
+    // Sockel: kein Flottenverlust beim Ziel. Der Nadelstich soll nichts anrichten - genau das
+    // war die teuerste Zahl am Ein-Jaeger-Angriff (6-12,5 % der stationierten Flotte, gratis).
+    defenderLossPct = ertragStufe === 'sockel' ? 0 : Math.round(lootPct * 0.5 * 1000) / 1000;
     // Anti-Farming: deutlich stärkere Angreifer bekommen anteilig weniger Beute (nie unter 30%).
     const farmPenalty = farmingPenaltyFor(req.userId, targetUserId);
     // Schildmodule des Ziels senken die Beute (siehe raidlossProtectionMult - vorher wirkungslos im PvP).
@@ -4522,13 +4608,23 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Ressourcen sind KONTOWEIT (ein Pool) - der Faktor bildet ab, dass an einer Kolonie weniger
     // zu holen ist. Im Altpfad ist er 1 und der Term byte-neutral (x*1 ist in IEEE 754 exakt).
     const beuteFaktor = standortKey ? (STANDORT_BEUTE_FAKTOR[standortArtVon(standortKey)] || 1) : 1;
+    /* Sockel: KEINE Beute - und das ist der teuerste Teil der Regel, nicht der kleinste.
+       GEMESSEN am 03.09.2026: Der Server kennt `cargoCapacity` ueberhaupt nicht (null Vorkommen
+       in dieser Datei). Er zog dem Ziel bisher IMMER den vollen Satz ab und schrieb ihn dem
+       Angreifer gut; der Frachtdeckel sitzt allein im Client, der den Spielstand des Angreifers
+       danach ueberschreibt. Ein Angriff mit einem Jaeger pluenderte also ein Viertel des
+       Ressourcenkontos - und der groesste Teil davon wurde schlicht VERNICHTET, weil ihn niemand
+       tragen konnte. Fuer den Angreifer sah es nach "keine Beute" aus, fuer das Opfer nicht.
+       Damit haengt der Ressourcenverlust jetzt an derselben Schwelle wie alles andere. */
     const stolen = {};
-    for (const [r, amt] of Object.entries(target.resources || {})) {
-      const take = Math.floor((amt || 0) * lootPct * farmPenalty * lootProtection * beuteFaktor);
-      if (take > 0) {
-        stolen[r] = take;
-        target.resources[r] = Math.max(0, (target.resources[r] || 0) - take);
-        attacker.resources[r] = (attacker.resources[r] || 0) + take;
+    if (ertragStufe !== 'sockel') {
+      for (const [r, amt] of Object.entries(target.resources || {})) {
+        const take = Math.floor((amt || 0) * lootPct * farmPenalty * lootProtection * beuteFaktor);
+        if (take > 0) {
+          stolen[r] = take;
+          target.resources[r] = Math.max(0, (target.resources[r] || 0) - take);
+          attacker.resources[r] = (attacker.resources[r] || 0) + take;
+        }
       }
     }
     let destroyedBuilding = null, destroyedBuildingCount = 0;
@@ -4536,7 +4632,9 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Angriffsflotte wird ein ZUSÄTZLICHES Verteidigungsgebäude zerstört (max +2, also bis zu 3 statt 1).
     // destroyedBuilding bleibt das ERSTE zerstörte (Abwärtskompatibilität der Berichte), Anzahl separat.
     const hbCount = attackerFleetSummary.hyperbomber || 0;
-    const buildingHits = 1 + Math.min(2, Math.floor(hbCount / 4));
+    // Sockel: keine Anlagenzerstoerung. buildingHits 0 laesst die Schleife unten gar nicht erst
+    // laufen; destroyedBuilding bleibt null und die Berichte melden korrekt "nichts zerstoert".
+    const buildingHits = ertragStufe === 'sockel' ? 0 : 1 + Math.min(2, Math.floor(hbCount / 4));
     for (let hbi = 0; hbi < buildingHits; hbi++) {
       // Standort-Fall: Zerstoert wird nur, was am ANGEGRIFFENEN Standort steht - ein Angriff auf
       // eine Kolonie darf keine Anlage der Heimat treffen.
@@ -4549,7 +4647,9 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
       if (!destroyedBuilding) destroyedBuilding = k;
       destroyedBuildingCount++;
     }
-    attacker.battlePoints = (attacker.battlePoints || 0) + 25;
+    // Sockel: keine Kampfpunkte. Das ist die Groesse, wegen der der Ein-Jaeger-Angriff ueberhaupt
+    // gefahren wurde.
+    if (ertragStufe !== 'sockel') attacker.battlePoints = (attacker.battlePoints || 0) + 25;
 
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     setSaveValue(targetUserId, JSON.stringify(target));
@@ -4571,7 +4671,16 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Die zweite Bedingung ist seit dem Flottenverlust nötig: Ein leergeräumtes Ziel hat keine
     // Beute mehr, wäre ohne sie also ab jetzt unbegrenzt auf reine Schiffszerstörung farmbar -
     // genau das Dauer-Farmen schwächerer Konten, gegen das der Schild eingeführt wurde.
-    if (Object.keys(stolen).length > 0 || defenderLossPct > 0) grantAttackShield(targetUserId);
+    /* Der Schild haengt seit dem 03.09.2026 NICHT mehr am Ertrag. Bis hierher stand hier
+       `if (Object.keys(stolen).length > 0 || defenderLossPct > 0)`; im Siegzweig war
+       defenderLossPct IMMER > 0 (lootPct 12-25 %, halbiert), die Bedingung also byte-neutral
+       wahr - diese Zeile aendert heute nichts.
+       Mit dem Mindesteinsatz waere sie zur Falle geworden: Ein Sockel-Angriff nimmt nichts mit
+       und richtet nichts an, das Opfer haette also seine EINZIGE Angriffs-Abklingzeit verloren -
+       und genau das Dauer-Farmen schwaecherer Konten waere wieder offen, gegen das der Schild
+       eingefuehrt wurde. Wer angegriffen wurde, bekommt den Schild; was der Angreifer davon
+       hatte, ist eine andere Frage. */
+    grantAttackShield(targetUserId);
     // Kopfgeld (#2): Wer den aktuellen Kopfgeld-Träger (Bestenlisten-Erster) schlägt, kassiert die Prämie
     // - nur einmal pro Woche, nicht auf sich selbst.
     {
@@ -4599,7 +4708,9 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     await saveDb();
     return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
   } else {
-    attacker.battlePoints = (attacker.battlePoints || 0) + 3;
+    // Sockel: auch die drei Trostpunkte fallen weg - sonst bliebe der Nadelstich eine, wenn auch
+    // duenne, Punktequelle, und genau die sollte er nicht mehr sein.
+    if (ertragStufe !== 'sockel') attacker.battlePoints = (attacker.battlePoints || 0) + 3;
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
 
     // ===== Der erfolgreiche Verteidiger bekommt endlich etwas (02.08.2026) =====
@@ -13521,6 +13632,9 @@ const NOTAUS_NAMEN = {
   nester:   'Alien-Nester entstehen, reifen und wandern',
   konvois:  'Wrackkonvois entstehen, driften und entkommen',
   vorposten: 'Neue Vorposten werden errichtet',
+  // Kein Spawn, sondern eine Ertragsregel: Steht der Schalter aus, bringt JEDER Angriff wieder
+  // vollen Ertrag - der Rueckwaertsgang fuer den Mindesteinsatz, ohne Frontend-Release.
+  mindesteinsatz: 'Kampfpunkte und Schaden nur ab Mindesteinsatz',
   // Sechster Schalter (02.09.2026): KEIN Spawn, sondern die Annahme von Angriffen - PvP, Festung,
   // Nest, Konvoi, Vorposten. Fuer die Dauer einer Ruecksicherung oder db.json-Arbeit: Ein Angriff,
   // der waehrend eines Stopps ankommt, geht sonst auf einen Stand, den es gleich nicht mehr gibt.
@@ -13565,6 +13679,7 @@ function spawnAktivImCode(name) {
   if (name === 'konvois') return A2_SPAWN_AKTIV;
   if (name === 'vorposten') return VORPOSTEN_AKTIV;
   if (name === 'angriffe') return true;
+  if (name === 'mindesteinsatz') return PVP_MINDESTEINSATZ_AKTIV;
   return false;
 }
 

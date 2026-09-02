@@ -138,3 +138,45 @@ Wächter: `tests/test_vorposten_http.js` 4h und 4h2 (Postfach-Eintrag samt Kerns
 fallen. Der bestehende `tests/test_pushkategorien.js` im Frontend-Repo fand die fehlende
 Postfach-Zeile von selbst und nannte sie beim Namen (2b) – der Frontend-Eintrag in
 `NOTIF_EVENT_INFO` ist damit erzwungen, nicht nur erinnert.
+
+## Der Allianz-Verband gegen einen Vorposten (02.09.2026)
+
+Derselbe Grund wie bei der Sternenfeste: Eine **Bastion** hat 400.000 Kern-LP und 60.000
+Verteidigung – bei der gemessenen Einsteiger-Schlagkraft von 7.500 sind das **53 Schläge** bei vier
+Stunden Abklingzeit. Solo ist sie nicht zu schleifen; genau dafür gibt es den Verband.
+`zielArt: 'vorposten'` (mit `vorpostenSystem`, `vorpostenId`) läuft über **denselben Rechenkern**
+wie der Einzelangriff (`vorpostenSchlagAusfuehren`) – wie bei Nest und Festung, aus demselben Grund.
+
+### Der Name der Weiche hat sich geändert
+
+`musterIstPveZiel` heißt jetzt **`musterZielOhneAllianz`**. Der alte Name wurde mit dieser Zielart
+falsch: Ein Vorposten gehört einem **Spieler**, ist also PvP-Inhalt – er verhält sich in `resolve`
+nur deshalb wie ein PvE-Ziel, weil sein Besitzer **keine Allianz** ist. Genau das ist die Frage, die
+an allen vier Aufrufstellen zählt (`targetTag`, `incomingmuster`, `allianceRoleOf`), und der Name
+sagt sie jetzt. `tests/test_muster_festung_http.js` liest ihn in seiner Sabotage-Zeile und wurde
+mitgezogen.
+
+### Drei Dinge, die es bei Nest und Festung nicht gibt
+
+1. **Den eigenen greift man auch im Verband nicht an** – dieselbe Regel wie am Einzelendpunkt,
+   geprüft beim Ausrufen.
+2. **Der Bauschutz gilt auch für den Verband, und zwar zweimal**: beim Ausrufen und noch einmal
+   **bei der Ankunft**. Ohne die zweite Prüfung wäre der Verband der Weg, den Bauschutz zu umgehen –
+   ein Vorposten, der während der Sammelphase neu gebaut wurde (der alte fiel, jemand baute nach),
+   stünde sonst ungeschützt da. Der Verband kommt dann an und richtet nichts an (`verpasst`,
+   Grund `'schutz'`).
+3. **Der Besitzer wird benachrichtigt**, mit dem Allianz-Tag als Angreifer statt eines einzelnen
+   Namens. Ohne diese Zeile wäre die Lücke vom selben Tag über den Verbandsweg wieder offen –
+   ausgerechnet für den Angriff, der ihn am ehesten kostet.
+
+Wächter: `tests/test_muster_vorposten_http.js` (**Port 3247**, 29 Prüfungen). Vier Gegenproben, je
+mit Pflichtliste und identischer Prüfliste: `schutz` → 6a, `gewicht` → 4c und 4d, `meldung` → 4h,
+`eigen` → 1b.
+
+**Eine Lehre aus der Gegenprobe `eigen`:** Sie riss zunächst 18 Prüfungen statt einer. Nicht der
+Code war schuld, sondern der Testablauf – ohne die Sperre entsteht in 1b ein **echter** Angriff, der
+als laufender jeden weiteren `create` mit 409 blockiert. Der Test räumt seither nach 1b immer auf,
+egal ob die Sperre griff. Eine Sabotage, die den Ablauf kaputtmacht statt die Eigenschaft, belegt
+nichts.
+
+**Belegte Testports sind jetzt 3195–3200 und 3210–3247** – ein neuer Test nimmt 3248.

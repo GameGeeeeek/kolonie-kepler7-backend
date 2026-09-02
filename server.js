@@ -589,6 +589,22 @@ function sperrText(user) {
   return 'Dieses Konto wurde gesperrt' + (user.bannGrund ? ' – Grund: ' + user.bannGrund : '')
     + (user.bannBis ? ' – bis ' + zeitText(user.bannBis) + ' Uhr' : '') + '.';
 }
+/* --- Konto-Loeschung mit Frist (02.09.2026) ---
+   Eine Loeschung ist der einzige Eingriff dieses Bereichs, der sich NICHT zuruecknehmen laesst -
+   deshalb passiert sie nie sofort. `loeschungAb` merkt den Zeitpunkt vor; bis dahin kommt der
+   Spieler nicht mehr herein (er liest beim Anmelden Frist und Grund), und der Betreiber kann die
+   Vormerkung folgenlos aufheben. Bewusst EIGENE Felder statt der Sperr-Felder: Wer eine bestehende
+   Sperre ueberschreibt, kann sie beim Abbrechen nicht wiederherstellen.
+   Die Frist laeuft ohne Cron ab (pruefeLoeschungen, stuendlich) - anders als bei der Sperre reicht
+   "beim naechsten Kontakt" hier NICHT: Ein geloeschtes Konto meldet sich per Definition nie wieder
+   an, und eine Loeschung, die auf den naechsten Besuch des Geloeschten wartet, findet nie statt. */
+const LOESCH_FRIST_MS = 7 * 24 * 60 * 60 * 1000;
+function loeschungOffen(user, jetzt) { return !!(user && user.loeschungAb && (jetzt || Date.now()) < user.loeschungAb); }
+function loeschungText(user) {
+  return 'Dieses Konto wird am ' + zeitText(user.loeschungAb) + ' Uhr endgueltig geloescht'
+    + (user.loeschungGrund ? ' - Grund: ' + user.loeschungGrund : '')
+    + '. Wenn das ein Irrtum ist, wende dich vorher an den Betreiber.';
+}
 function stummAktiv(user, jetzt) { return !!(user && user.stummBis && (jetzt || Date.now()) < user.stummBis); }
 function stummText(user) {
   return 'Du bist bis ' + zeitText(user.stummBis) + ' Uhr stummgeschaltet' + (user.stummGrund ? ' – Grund: ' + user.stummGrund : '') + '.';
@@ -2471,8 +2487,20 @@ app.post('/api/login', authRateLimit, async (req, res) => {
   const user = db.users[key];
   if (!user) return res.status(401).json({ error: 'Unbekannter Name oder falsches Passwort.' });
   const ok = await bcrypt.compare(password, user.passwordHash);
-  if (!ok) return res.status(401).json({ error: 'Unbekannter Name oder falsches Passwort.' });
+  if (!ok) {
+    /* Fehlversuche je KONTO (02.09.2026). authRateLimit bremst schon, aber je IP - ein verteilter
+       Versuch auf EIN Konto sah dadurch aus wie Normalbetrieb, und der Besitzer erfuhr nie davon.
+       Gezaehlt wird nur fuer ein existierendes Konto; nach aussen ist das nicht beobachtbar, weil
+       die Antwort fuer "kein Konto" und "falsches Passwort" woertlich dieselbe bleibt. */
+    user.loginFehlversuche = (user.loginFehlversuche || 0) + 1;
+    user.loginFehlerZuletzt = Date.now();
+    await saveDb();
+    return res.status(401).json({ error: 'Unbekannter Name oder falsches Passwort.' });
+  }
   if (sperreAktiv(user)) return res.status(403).json({ error: sperrText(user), gesperrt: true });
+  // Vorgemerkt zur Loeschung: kein Zutritt mehr, aber mit Frist und Grund im Klartext - sonst
+  // steht der Spieler vor einem "falsches Passwort" und meldet sich beim Support.
+  if (loeschungOffen(user)) return res.status(403).json({ error: loeschungText(user), loeschung: true });
   // Double-Opt-In: neue Konten (emailVerified === false) sind erst nach Klick auf den
   // Bestätigungslink nutzbar. Bestandskonten haben das Feld nicht und sind nicht betroffen.
   if (user.emailVerified === false) {
@@ -2488,6 +2516,13 @@ app.post('/api/login', authRateLimit, async (req, res) => {
   const previousSessionAt = user.activeSessionAt || null;
   user.activeSessionId = sid;
   user.activeSessionAt = Date.now();
+  // Anmelde-Forensik: Wie viele Fehlversuche standen VOR dieser Anmeldung? Das ist die Zahl, die
+  // etwas aussagt ("dreimal daneben, dann drin" gegen "vierzigmal daneben, nie drin") - der
+  // laufende Zaehler faengt danach bei 0 wieder an.
+  user.fehlversucheVorAnmeldung = user.loginFehlversuche || 0;
+  user.loginFehlversuche = 0;
+  user.letzteAnmeldung = user.activeSessionAt;
+  user.anmeldungen = (user.anmeldungen || 0) + 1;
   const token = jwt.sign({ userId: user.userId, username: user.username, tv: user.tokenVersion || 0, sid }, JWT_SECRET, { expiresIn: '180d' });
   await saveDb();
   recordAnalyticsEvent(user.userId, 'funnel:login'); // Onboarding-Trichter: erfolgreiche Anmeldung
@@ -3063,6 +3098,20 @@ const REPORTS_MAX_SUPPORTER = 150;
 function reportLimitFor(userId) {
   try { return supporterFeaturesFor(userId).active ? REPORTS_MAX_SUPPORTER : REPORTS_MAX_STANDARD; }
   catch (e) { return REPORTS_MAX_STANDARD; }
+}
+/* --- Kampfverlauf am Nutzerobjekt (02.09.2026) ---
+   Warum ein ZWEITER Speicher neben den Berichten: Die Berichte in db.private gehoeren dem Spieler.
+   Er kann sie einzeln und komplett loeschen (DELETE /api/reports), und sie rollen ohnehin ab
+   (gemessen: 40 Eintraege ohne Unterstuetzer-Rang, 150 mit) - beides zusammen heisst, dass genau
+   der Verdaechtige seine Spur wegwischen kann, bevor eine Meldung geprueft wird. Dieser Verlauf
+   liegt deshalb am NUTZEROBJEKT, wo kein Client hinkommt, und traegt nur, was eine Meldung
+   beantwortet: wer, wann, wohin, Ausgang und Kraefte. Kein Spielstand, keine Beutewerte. */
+const KAMPF_VERLAUF_MERKEN = 30;
+function kampfVerlaufVermerken(user, eintrag) {
+  if (!user) return;
+  const liste = Array.isArray(user.kampfVerlauf) ? user.kampfVerlauf : [];
+  liste.unshift(Object.assign({ zeit: Date.now() }, eintrag));
+  user.kampfVerlauf = liste.slice(0, KAMPF_VERLAUF_MERKEN);
 }
 function addReport(userId, report) {
   db.private[userId] = db.private[userId] || {};
@@ -4705,6 +4754,8 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Verteidiger benachrichtigen (Retention-Trigger 21.07.2026): angegriffen zu werden ist einer der
     // stärksten Rückkehr-Anlässe. Server hat den Kampf ohnehin aufgelöst - hier nur der Push obendrauf.
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: false, looted: Object.keys(stolen).length > 0 }, { skipWebPush: !allowAttackPush(targetUserId) }); }
+    kampfVerlaufVermerken(findUserById(req.userId), { rolle: 'angriff', gegner: targetUser ? targetUser.username : null, ziel: standortFelder.targetPlanet || 'home', erfolg: true, angriff: attackPower, verteidigung: defensePower, beute: Object.keys(stolen).length });
+    kampfVerlaufVermerken(targetUser, { rolle: 'verteidigung', gegner: req.username, ziel: standortFelder.targetPlanet || 'home', erfolg: false, angriff: attackPower, verteidigung: defensePower, beute: Object.keys(stolen).length });
     await saveDb();
     return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
   } else {
@@ -4757,6 +4808,8 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
       phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder
     });
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: true, looted: false }, { skipWebPush: !allowAttackPush(targetUserId) }); }
+    kampfVerlaufVermerken(findUserById(req.userId), { rolle: 'angriff', gegner: targetUser ? targetUser.username : null, ziel: standortFelder.targetPlanet || 'home', erfolg: false, angriff: attackPower, verteidigung: defensePower, beute: 0 });
+    kampfVerlaufVermerken(targetUser, { rolle: 'verteidigung', gegner: req.username, ziel: standortFelder.targetPlanet || 'home', erfolg: true, angriff: attackPower, verteidigung: defensePower, beute: 0 });
     await saveDb();
     return res.json({ success: false, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
   }
@@ -8661,16 +8714,23 @@ function listMusterJoins(tag, musterAttackId) {
   return out;
 }
 
-/* Zielarten des koordinierten Angriffs OHNE Verteidiger: das Alien-Nest (Phase 5) und seit dem
-   01.09.2026 die Asteroidenfestung. Beide haben keine Allianz, keine Basis, kein incomingmuster-
-   Dokument und keinen Schutzschild - und bei beiden darf der Verteidiger-Zweig von `resolve` gar
-   nicht erst betreten werden (siehe den Kommentar dort). EINE Funktion dafuer statt zweier
-   Vergleiche an vier Stellen, damit eine dritte PvE-Zielart nicht eine davon vergisst. */
-function musterIstPveZiel(zielArt) { return zielArt === 'alien-nest' || zielArt === 'festung'; }
+/* Zielarten des koordinierten Angriffs OHNE VERTEIDIGENDE ALLIANZ: Alien-Nest (Phase 5),
+   Asteroidenfestung (01.09.2026) und Vorposten (02.09.2026). Keines von ihnen hat ein targetTag,
+   eine Basis, ein incomingmuster-Dokument oder einen Schutzschild - und bei keinem darf der
+   Verteidiger-Zweig von `resolve` betreten werden (siehe den Kommentar dort).
+
+   DIE FUNKTION HIESS BIS ZUM 02.09.2026 musterIstPveZiel, UND DER NAME WURDE MIT DEM VORPOSTEN
+   FALSCH: Ein Vorposten gehoert einem SPIELER, ist also PvP-Inhalt - er verhaelt sich hier nur
+   deshalb wie ein PvE-Ziel, weil sein Besitzer keine ALLIANZ ist. Genau das ist die Frage, die an
+   allen vier Aufrufstellen zaehlt (targetTag, incomingmuster, allianceRoleOf), und der Name sagt
+   sie jetzt. Ein Name, der das Gegenteil behauptet, waere die naechste falsche Annahme, die
+   jemand uebernimmt. tests/test_muster_festung_http.js liest ihn in seiner Sabotage-Zeile mit. */
+function musterZielOhneAllianz(zielArt) { return zielArt === 'alien-nest' || zielArt === 'festung' || zielArt === 'vorposten'; }
 function musterZielBeschreibung(doc) {
   if (!doc) return '?';
   if (doc.zielArt === 'alien-nest') return 'ein Alien-Nest bei ' + (doc.nestSystem || '?');
   if (doc.zielArt === 'festung') return 'eine Asteroidenfestung bei ' + (doc.festungSystem || '?');
+  if (doc.zielArt === 'vorposten') return 'den Vorposten von ' + (doc.vorpostenBesitzerName || '?') + ' bei ' + (doc.vorpostenSystem || '?');
   return '[' + doc.targetTag + ']';
 }
 app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
@@ -8680,14 +8740,15 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
      Ein Nest hat keine Allianz, keine Basis, kein incomingmuster-Dokument und keinen
      Schutzschild. Was stattdessen geprueft wird, steht im Zweig darunter. */
   const zielArt = String((req.body && req.body.zielArt) || 'allianz');
-  if (!['allianz', 'alien-nest', 'festung'].includes(zielArt)) return res.status(400).json({ error: 'Unbekannte Zielart.' });
+  if (!['allianz', 'alien-nest', 'festung', 'vorposten'].includes(zielArt)) return res.status(400).json({ error: 'Unbekannte Zielart.' });
   const istNest = zielArt === 'alien-nest';
   const istFestung = zielArt === 'festung';
-  const istPve = musterIstPveZiel(zielArt);
-  const targetTag = istPve ? null : String(targetTagRaw || '').trim().toUpperCase();
+  const istVorposten = zielArt === 'vorposten';
+  const istOhneAllianz = musterZielOhneAllianz(zielArt);
+  const targetTag = istOhneAllianz ? null : String(targetTagRaw || '').trim().toUpperCase();
   const gatherOk = ALLIANCE_MUSTER_DURATIONS.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
   if (!tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
-  if (!istPve && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!istOhneAllianz && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   const myRole = allianceRoleOf(tag, req.userId);
   if (myRole !== 'admin' && myRole !== 'officer') return res.status(403).json({ error: 'Nur Admins/Offiziere können einen koordinierten Angriff starten.' });
 
@@ -8730,7 +8791,29 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     if (festungWahl !== 'kern' && !FESTUNG_BAUTEILE[festungWahl]) return res.status(400).json({ error: 'Unbekanntes Bauteil als Ziel.' });
   }
 
-  if (!istPve) {
+  /* VORPOSTEN als Verbandsziel (02.09.2026). Der Grund ist derselbe wie bei der Sternenfeste:
+     Eine Bastion hat 400.000 Kern-LP und 60.000 Verteidigung - bei der gemessenen
+     Einsteiger-Schlagkraft von 7.500 sind das 53 Schlaege bei vier Stunden Abklingzeit, also
+     solo nicht zu schleifen. Genau dafuer gibt es den Verband.
+     ANDERS als Nest und Festung gehoert ein Vorposten einem SPIELER. Zwei Folgen, beide hier:
+     den EIGENEN greift man auch im Verband nicht an (dieselbe Regel wie am Einzelendpunkt), und
+     der Bauschutz gilt auch fuer den Verband - sonst waere der Verband der Weg, ihn zu umgehen. */
+  let vorpostenZiel = null;
+  if (istVorposten) {
+    if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.' });
+    const vpSys = String((req.body && req.body.vorpostenSystem) || '');
+    const vpId = String((req.body && req.body.vorpostenId) || '');
+    if (!vorpostenSysOk(vpSys)) return res.status(400).json({ error: 'Unbekanntes System.' });
+    vorpostenZiel = vorpostenLies(vpSys);
+    if (!vorpostenZiel || (vpId && vorpostenZiel.id !== vpId)) return res.status(404).json({ error: 'Dort steht kein (solcher) Vorposten mehr.' });
+    if (vorpostenZiel.besitzer === req.userId) return res.status(400).json({ error: 'Den eigenen Vorposten greift man nicht an.' });
+    const schutzBis = (vorpostenZiel.seit || 0) + VORPOSTEN_SCHUTZ_MS;
+    if (Date.now() < schutzBis) {
+      return res.status(403).json({ error: 'Dieser Vorposten steht noch unter Bauschutz - angreifbar in ' + Math.ceil((schutzBis - Date.now()) / 60000) + ' Minuten.', schutz: true, schutzBis });
+    }
+  }
+
+  if (!istOhneAllianz) {
   const targetBaseRaw = db.shared['alliance:' + targetTag + ':base'];
   let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
   if (!targetBase || !targetBase.foundedAt) return res.status(404).json({ error: 'Die Allianz [' + targetTag + '] hat keine (auffindbare) Allianzbasis.' });
@@ -8758,6 +8841,11 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     festungStufe: festungZiel ? festungZiel.stufe : null,
     festungStufeName: festungZiel ? ((FESTUNG_STUFEN[festungZiel.stufe] || FESTUNG_STUFEN.schanze).name) : null,
     festungZiel: festungZiel ? festungWahl : null,
+    vorpostenId: vorpostenZiel ? vorpostenZiel.id : null,
+    vorpostenSystem: vorpostenZiel ? vorpostenZiel.sys : null,
+    vorpostenBesitzer: vorpostenZiel ? vorpostenZiel.besitzer : null,
+    vorpostenBesitzerName: vorpostenZiel ? (vorpostenZiel.besitzerName || 'Kommandant') : null,
+    vorpostenStufeName: vorpostenZiel ? vorpostenStufe(vorpostenZiel.stufe).name : null,
     message: String(message || '').replace(/[<>]/g, '').slice(0, 140),
     createdAt: now, museterEndsAt: now + gatherSeconds * 1000,
     phase: 'gathering', dispatch: null, result: null
@@ -8884,12 +8972,13 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
   const myBaseRaw = db.shared['alliance:' + tag + ':base'];
   let myBase = null; try { myBase = myBaseRaw ? JSON.parse(myBaseRaw) : null; } catch (e) {}
   let sameSys;
-  if (musterIstPveZiel(doc.zielArt)) {
+  if (musterZielOhneAllianz(doc.zielArt)) {
     // Dieselbe Regel wie bei einer fremden Basis, nur mit dem SYSTEM des Nestes bzw. der Festung
     // als Gegenstueck: gleicher Sektor = kurzer Anflug. Eine zweite Entfernungsrechnung waere
     // eine zweite Wahrheit.
-    const pveSystem = doc.zielArt === 'festung' ? doc.festungSystem : doc.nestSystem;
-    sameSys = !!(myBase && pveSystem && myBase.sector === pveSystem);
+    const zielSystem = doc.zielArt === 'festung' ? doc.festungSystem
+      : doc.zielArt === 'vorposten' ? doc.vorpostenSystem : doc.nestSystem;
+    sameSys = !!(myBase && zielSystem && myBase.sector === zielSystem);
   } else {
     const targetBaseRaw = db.shared['alliance:' + doc.targetTag + ':base'];
     let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
@@ -8915,7 +9004,7 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
   // Ein Nest oder eine Festung wird nicht gewarnt - es gibt keinen Verteidiger, der ein
   // incomingmuster-Dokument lesen koennte, und ein Eintrag unter `alliance:null:incomingmuster`
   // waere schlicht Muell.
-  if (!musterIstPveZiel(doc.zielArt)) {
+  if (!musterZielOhneAllianz(doc.zielArt)) {
     db.shared['alliance:' + doc.targetTag + ':incomingmuster'] = JSON.stringify({
       attackerTag: tag, musterAttackId: doc.id, phase: 'enroute', dispatchedAt: now,
       arrivalAt: doc.dispatch.arrivalAt, lastAttackAt: now, totalShips, resolvedAt: null
@@ -8947,7 +9036,8 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
      keine Verteidiger-Rolle zu pruefen. */
   const istNestZiel = !!(doc && doc.zielArt === 'alien-nest');
   const istFestungZiel = !!(doc && doc.zielArt === 'festung');
-  const myRoleDefender = (doc && !musterIstPveZiel(doc.zielArt)) ? allianceRoleOf(doc.targetTag, req.userId) : null;
+  const istVorpostenZiel = !!(doc && doc.zielArt === 'vorposten');
+  const myRoleDefender = (doc && !musterZielOhneAllianz(doc.zielArt)) ? allianceRoleOf(doc.targetTag, req.userId) : null;
   if (!myRoleAttacker && !myRoleDefender) return res.status(403).json({ error: 'Nur Mitglieder der angreifenden oder verteidigenden Allianz.' });
 
   if (!doc || doc.phase !== 'enroute' || !doc.dispatch || doc.dispatch.arrivalAt > Date.now()) return res.json({ ok: true, doc });
@@ -9067,6 +9157,90 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
     console.log('[muster-festung] tag=' + tag + ' sys=' + doc.festungSystem + ' teilnehmer=' + beteiligteF.length +
       ' kraft=' + doc.dispatch.totalPower + ' ziel=' + ergF.ziel + ' kernschaden=' + ergF.schaden +
       ' teilschaden=' + ergF.teilSchaden + ' kern=' + (ergF.gefallen ? 'gefallen' : ergF.kern) + '/' + ergF.kernMax);
+    await saveDb();
+    return res.json({ ok: true, doc });
+  }
+
+  if (istVorpostenZiel) {
+    /* Der Verband gegen einen Vorposten (02.09.2026). Ueber DENSELBEN Rechenkern wie der
+       Einzelangriff (vorpostenSchlagAusfuehren) - wie bei Nest und Festung, aus demselben Grund.
+       DREI Dinge sind anders, weil der Vorposten einem SPIELER gehoert:
+       1. Der Bauschutz wird bei der ANKUNFT erneut geprueft. Beim Ausrufen steht er schon im
+          create; ein Verband kann aber laenger sammeln, als der Schutz noch laeuft - und
+          andersherum: Ein Vorposten, der waehrend der Sammelphase NEU gebaut wurde (der alte fiel,
+          jemand baute nach), stuende sonst ohne seinen Schutz da.
+       2. Der BESITZER wird benachrichtigt, genau wie beim Einzelschlag. Ohne diese Zeile waere die
+          Luecke, die am 02.09.2026 geschlossen wurde, ueber den Verbandsweg wieder offen - und
+          zwar fuer den Angriff, der ihn am ehesten kostet.
+       3. Faellt er, bekommt der Besitzer zusaetzlich 'vorposten-verlust' in die Warteschlange -
+          das erledigt der gemeinsame Kern, nicht dieser Zweig. */
+    const jetztV = Date.now();
+    const vp = vorpostenLies(doc.vorpostenSystem);
+    if (!vp || (doc.vorpostenId && vp.id !== doc.vorpostenId)) {
+      doc.phase = 'resolved';
+      doc.result = { vorposten: true, verpasst: true, grund: 'weg', system: doc.vorpostenSystem,
+        stufeName: doc.vorpostenStufeName || null, besitzerName: doc.vorpostenBesitzerName || null,
+        success: false, destroyed: false, damage: 0, defensePower: 0, ownLossPct: 0, resolvedAt: jetztV };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+    const schutzBisV = (vp.seit || 0) + VORPOSTEN_SCHUTZ_MS;
+    if (jetztV < schutzBisV) {
+      doc.phase = 'resolved';
+      doc.result = { vorposten: true, verpasst: true, grund: 'schutz', system: doc.vorpostenSystem,
+        stufeName: vorpostenStufe(vp.stufe).name, besitzerName: vp.besitzerName || null,
+        success: false, destroyed: false, damage: 0, defensePower: 0, ownLossPct: 0, resolvedAt: jetztV };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+    const rohV = doc.dispatch.participants;
+    const beteiligteV = (Array.isArray(rohV) && rohV.length)
+      ? rohV.map(p => ({ userId: p.id, name: p.name || 'Kommandant', gewicht: p.power || 0 }))
+      : (doc.dispatch.participantIds || []).map(id => ({ userId: id, name: 'Kommandant', gewicht: 1 }));
+    if (!beteiligteV.length) {
+      doc.phase = 'resolved';
+      doc.result = { vorposten: true, noParticipants: true, success: false, destroyed: false, damage: 0,
+        defensePower: 0, ownLossPct: 0, resolvedAt: jetztV };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+    const stufeNameV = vorpostenStufe(vp.stufe).name;
+    const besitzerV = vp.besitzer, besitzerNameV = vp.besitzerName || 'Kommandant';
+    const ergV = vorpostenSchlagAusfuehren(vp, doc.dispatch.totalPower, doc.dispatch.totalComposition || {}, beteiligteV, jetztV);
+    doc.phase = 'resolved';
+    doc.result = {
+      vorposten: true, verpasst: false,
+      system: doc.vorpostenSystem, stufeName: stufeNameV, besitzerName: besitzerNameV,
+      damage: ergV.schaden, destroyed: ergV.gefallen, success: ergV.schaden > 0,
+      lp: ergV.lp, lpMax: ergV.lpMax, defensePower: ergV.verteidigung, durchschlag: ergV.durchschlag,
+      garnisonVerluste: ergV.garnisonVerluste || {},
+      ownLossPct: Math.round(ergV.quote * 1000) / 1000,
+      chancePct: null, teilnehmer: ergV.teilnehmer,
+      belohnungUeberPendingRewards: true,
+      resolvedAt: jetztV
+    };
+    setMusterAttackDoc(tag, doc);
+
+    // Den Besitzer benachrichtigen - derselbe Weg wie am Einzelendpunkt (siehe docs/vorposten.md).
+    try {
+      const besUser = besitzerV ? findUserById(besitzerV) : null;
+      if (besUser) {
+        const bPrefs = getNotifPrefs(besUser);
+        if (bPrefs.enabled && bPrefs.attack) {
+          pushNotificationEvent(besitzerV, 'vorposten-angegriffen', {
+            angreiferName: '[' + tag + ']', name: stufeNameV, system: doc.vorpostenSystem, gefallen: ergV.gefallen,
+            kernProzent: ergV.gefallen ? 0 : Math.round(100 * Math.max(0, Math.min(1, (ergV.lp || 0) / Math.max(1, ergV.lpMax || 1))))
+          }, { skipWebPush: !allowAttackPush(besitzerV) });
+        }
+      }
+    } catch (e) { console.warn('[muster-vorposten] Push fehlgeschlagen:', e.message); }
+
+    console.log('[muster-vorposten] tag=' + tag + ' sys=' + doc.vorpostenSystem + ' teilnehmer=' + beteiligteV.length +
+      ' kraft=' + doc.dispatch.totalPower + ' schaden=' + ergV.schaden +
+      ' lp=' + (ergV.gefallen ? 'gefallen' : ergV.lp) + '/' + ergV.lpMax);
     await saveDb();
     return res.json({ ok: true, doc });
   }
@@ -9193,7 +9367,7 @@ app.post('/api/musterattack/claim', authMiddleware, async (req, res) => {
     return res.json({ ok: true, noParticipants: true, saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
   }
 
-  if (res_.nest || res_.festung) {
+  if (res_.nest || res_.festung || res_.vorposten) {
     /* Bei einem Nest oder einer Festung gibt claim NUR die Schiffe zurueck. Die eigentliche
        Belohnung liegt anteilig in __pendingRewards (siehe Kommentar im Ergebnis) - sie hier ein
        zweites Mal auszuzahlen waere eine Doppelzahlung fuer dasselbe Ereignis. Bei `verpasst` ist
@@ -9213,7 +9387,8 @@ app.post('/api/musterattack/claim', authMiddleware, async (req, res) => {
     db.shared[joinKey] = JSON.stringify(join);
     const nestSaveVersion = setSaveValue(req.userId, JSON.stringify(save));
     await saveDb();
-    return res.json({ ok: true, nest: !!res_.nest, festung: !!res_.festung, pve: true,
+    return res.json({ ok: true, nest: !!res_.nest, festung: !!res_.festung, vorposten: !!res_.vorposten, pve: true,
+      besitzerName: res_.besitzerName || null, durchschlag: res_.durchschlag || 0,
       verpasst: !!res_.verpasst, grund: res_.grund || null,
       destroyed: !!res_.destroyed, damage: res_.damage || 0, volkName: res_.volkName || null,
       stufeName: res_.stufeName || null, lostShips: verloren,
@@ -13763,6 +13938,15 @@ app.get('/api/admin/konto', authMiddleware, (req, res) => {
       // Die Zahl sagt, ob "alle Sitzungen beenden" hier schon einmal gelaufen ist; sie ist die
       // einzige Spur, die ein Passwort-Reset im Konto hinterlaesst.
       tokenVersion: u.tokenVersion || 0,
+      // Vorgemerkte Loeschung (02.09.2026). `ab` in der Zukunft heisst: laeuft noch, abbrechbar.
+      loeschung: u.loeschungAb ? { ab: u.loeschungAb, seit: u.loeschungSeit || 0, grund: u.loeschungGrund || null } : null,
+      // Anmelde-Forensik (02.09.2026): laufende Fehlversuche seit der letzten erfolgreichen
+      // Anmeldung, wie viele es beim letzten Mal waren, und die eine aktive Sitzung. "Eine" ist
+      // hier keine Vereinfachung - seit dem 25.07.2026 gibt es je Konto genau eine (activeSessionId).
+      anmeldung: { fehlversuche: u.loginFehlversuche || 0, fehlerZuletzt: u.loginFehlerZuletzt || 0,
+                   fehlversucheVorher: u.fehlversucheVorAnmeldung || 0, letzte: u.letzteAnmeldung || 0,
+                   gesamt: u.anmeldungen || 0, sitzungOffen: !!u.activeSessionId, sitzungSeit: u.activeSessionAt || 0 },
+      kampfVerlauf: (u.kampfVerlauf || []).length,
       angemeldet: !!(u.activeSessionId && (jetzt - (u.activeSessionAt || 0)) < 86400000),
       // Aktivitaets-Uhr und Reaktionszeiten (siehe den Block bei aktivVermerken). Die
       // Stundenreihe kommt als Zeichenkette aus 0/1/- - ein Array aus 336 Werten waere in JSON
@@ -14208,6 +14392,192 @@ app.post('/api/admin/konto/reset-link', authMiddleware, async (req, res) => {
   db.resetTokens[token] = { userId: ziel.userId, expires: gueltigBis, durchAdmin: true };
   await saveDb();
   res.json({ ok: true, username: ziel.username, link: PUBLIC_URL + '/?reset=' + token, gueltigBis });
+});
+
+/* --- Konto endgueltig loeschen (02.09.2026) ---
+   Was WIRKLICH verschwindet, steht in der Antwort, damit niemand mehr annehmen muss: Nutzer,
+   Spielstand mit Berichten und Belohnungen, Bestenlisten-Eintrag, Allianz-Rollen, Vorposten und
+   offene Reset-Token. Was NICHT verschwindet, sondern anonymisiert wird, steht ebenfalls dort:
+   Chat-Nachrichten und Feedback tragen danach "Geloeschtes Konto" statt des Namens - beides sind
+   fremde Unterhaltungen, aus denen einzelne Zeilen herauszureissen den Rest unlesbar machte.
+   Der Vorposten wird geloescht und nicht vererbt: Ein PvP-Ziel ohne Besitzer waere unsterblich. */
+function kontoEndgueltigLoeschen(key) {
+  const u = db.users[key];
+  if (!u) return null;
+  const userId = u.userId;
+  const zaehler = { spielstand: false, bestenliste: false, allianzRollen: 0, vorposten: 0, resetToken: 0, chatAnonym: 0, feedbackAnonym: 0 };
+  zaehler.spielstand = db.private[userId] !== undefined;
+  delete db.private[userId];
+  if (db.shared['leaderboard:' + userId] !== undefined) { delete db.shared['leaderboard:' + userId]; zaehler.bestenliste = true; }
+  for (const k of Object.keys(db.shared)) {
+    if (/^alliance:[^:]+:role:/.test(k) && k.endsWith(':' + userId)) { delete db.shared[k]; zaehler.allianzRollen++; continue; }
+    if (k.startsWith('vorposten:')) {
+      try { const d = JSON.parse(db.shared[k]); if (d && d.besitzer === userId) { delete db.shared[k]; zaehler.vorposten++; } } catch (e) {}
+      continue;
+    }
+    if (k.indexOf(':msg:') > 0) {
+      try {
+        const m = JSON.parse(db.shared[k]);
+        if (m && m.authorId === userId) { m.authorName = 'Geloeschtes Konto'; delete m.authorId; db.shared[k] = JSON.stringify(m); zaehler.chatAnonym++; }
+      } catch (e) {}
+    }
+  }
+  for (const t of Object.keys(db.resetTokens || {})) {
+    if (db.resetTokens[t] && db.resetTokens[t].userId === userId) { delete db.resetTokens[t]; zaehler.resetToken++; }
+  }
+  for (const f of (db.feedback || [])) {
+    if (f && f.userId === userId) { f.username = 'Geloeschtes Konto'; delete f.userId; zaehler.feedbackAnonym++; }
+  }
+  delete db.users[key];
+  return zaehler;
+}
+/* Die Frist laeuft hier ab, nicht beim naechsten Kontakt des Betroffenen - der kommt nie wieder.
+   Stuendlich reicht: Die Frist ist sieben Tage lang, eine Stunde Ungenauigkeit am Ende ist keine. */
+async function pruefeLoeschungen() {
+  try {
+    const jetzt = Date.now();
+    let geloescht = 0;
+    for (const key of Object.keys(db.users)) {
+      const u = db.users[key];
+      if (!u || !u.loeschungAb || jetzt < u.loeschungAb) continue;
+      if (key === 'gamegeeeeek') continue;                      // das Betreiberkonto nie
+      const z = kontoEndgueltigLoeschen(key);
+      if (z) { geloescht++; console.log('[loeschung] ' + key + ' entfernt: ' + JSON.stringify(z)); }
+    }
+    if (geloescht) await saveDb();
+  } catch (e) { console.error('pruefeLoeschungen fehlgeschlagen:', e.message); }
+}
+setInterval(pruefeLoeschungen, 60 * 60 * 1000);
+// setImmediate, nicht direkt: Der erste Lauf saehe sonst jede const weiter unten in dieser Datei
+// nicht (temporale Todeszone) - node --check findet das nicht.
+setImmediate(() => { pruefeLoeschungen(); });
+
+app.post('/api/admin/konto/loeschen', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const ziel = kontoNachName(req, 'targetUsername');
+  if (!ziel) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const grund = String((req.body && req.body.grund) || '').trim().slice(0, 200);
+  if (grund.length < 3) return res.status(400).json({ error: 'Bitte kurz begruenden, warum das Konto geloescht wird.' });
+  const devUser = db.users['gamegeeeeek'];
+  if (devUser && ziel.userId === devUser.userId) return res.status(400).json({ error: 'Das Betreiberkonto wird nicht geloescht - isAdmin() haengt an seinem Namen.' });
+  if (ziel.loeschungAb) return res.status(409).json({ error: 'Fuer dieses Konto laeuft bereits eine Loeschfrist.', ab: ziel.loeschungAb });
+  ziel.loeschungAb = Date.now() + LOESCH_FRIST_MS;
+  ziel.loeschungSeit = Date.now();
+  ziel.loeschungGrund = grund;
+  // Sofort aussperren: Ein Konto, das in sieben Tagen verschwindet, soll bis dahin nicht
+  // weiterspielen - sonst gehen Handel, Angriffe und Allianzzusagen ins Leere.
+  ziel.tokenVersion = (ziel.tokenVersion || 0) + 1;
+  delete ziel.activeSessionId;
+  delete ziel.activeSessionAt;
+  await saveDb();
+  res.json({ ok: true, username: ziel.username, ab: ziel.loeschungAb, fristTage: Math.round(LOESCH_FRIST_MS / 86400000) });
+});
+app.post('/api/admin/konto/loeschen-abbrechen', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const ziel = kontoNachName(req, 'targetUsername');
+  if (!ziel) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const lief = !!ziel.loeschungAb;
+  delete ziel.loeschungAb;
+  delete ziel.loeschungSeit;
+  delete ziel.loeschungGrund;
+  await saveDb();
+  // Das Konto ist danach wieder benutzbar, aber abgemeldet: Die Vormerkung hat tokenVersion
+  // erhoeht, und das laesst sich nicht zurueckdrehen, ohne fremde Tokens wiederzubeleben.
+  res.json({ ok: true, username: ziel.username, lief });
+});
+
+// --- Kampfverlauf eines Kontos (02.09.2026) ----------------------------------------------------
+app.get('/api/admin/konto/verlauf', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const ziel = kontoNachName(req, 'targetUsername');
+  if (!ziel) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const liste = (ziel.kampfVerlauf || []).slice(0, KAMPF_VERLAUF_MERKEN);
+  const angriffe = liste.filter(e => e.rolle === 'angriff');
+  res.json({
+    username: ziel.username, verlauf: liste, merken: KAMPF_VERLAUF_MERKEN,
+    // Die zwei Zahlen, wegen derer man hier hinsieht: Wie viele der letzten Angriffe gingen gegen
+    // DENSELBEN Gegner, und wie viele davon in der letzten Stunde? Beides sind die Muster, die eine
+    // Ganking-Meldung meint - gerechnet vom Server, damit niemand im Kopf zaehlen muss.
+    angriffeGesamt: angriffe.length,
+    haeufigstesZiel: (() => {
+      const n = {};
+      for (const e of angriffe) if (e.gegner) n[e.gegner] = (n[e.gegner] || 0) + 1;
+      const best = Object.entries(n).sort((a, b) => b[1] - a[1])[0];
+      return best ? { name: best[0], anzahl: best[1] } : null;
+    })(),
+    letzteStunde: liste.filter(e => Date.now() - (e.zeit || 0) < 3600000).length
+  });
+});
+
+/* --- E-Mail an Spieler (02.09.2026) ---
+   mailer.js liegt seit jeher da (Bestaetigung, Reset, Winback), aber der Betreiber konnte nur
+   pushen - und Push sieht nur, wer sie erlaubt hat. Zwei Routen, beide ueber dieselbe Bauform wie
+   die Winback-Mail: Haus-Vorlage, Klartext-Teil, und die Abmeldung ist die BESTEHENDE Einstellung
+   `wantsPatchnotes`, kein zweiter Schalter. Die Adresse verlaesst den Server nie - die Antwort
+   zaehlt nur, wie viele erreicht wurden und warum die anderen nicht. */
+// Eigener Escaper statt eines Verweises: Der Text des Bedieners landet in einer HTML-Mail, und
+// die Feedback-Mail escaped an ihrer Stelle genauso von Hand (Zeile ~5016) - eine gemeinsame
+// Funktion gab es hier bis heute nicht, und eine einzufuehren waere ein Umbau an fremdem Code.
+function mailEscape(t) { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+const MAIL_BETREFF_MAX = 120;
+const MAIL_TEXT_MAX = 2000;
+const MAIL_ALLE_MAX = 40;      // derselbe Deckel wie WINBACK_MAX_PER_RUN - die Mail-Rate ist dieselbe
+function betreiberMailBauen(username, betreff, text) {
+  const absaetze = String(text).split(/\n\s*\n/).map(a => mailEscape(a.trim()).replace(/\n/g, '<br>')).filter(Boolean);
+  return {
+    html: voidSignalEmail({
+      eyebrow: 'Nachricht vom Betreiber', username, statusLabel: betreff, statusColor: '#7f77dd',
+      bodyHtml: absaetze.join('</p><p style="margin:0 0 14px;">'),
+      ctaLabel: 'Zur Kolonie', ctaUrl: PUBLIC_URL + '/',
+      footerNote: 'Du bekommst diese Nachricht, weil du eine bestaetigte Adresse hinterlegt hast. Nicht mehr erwuenscht? Deaktiviere "Neuigkeiten per E-Mail" in den Einstellungen.'
+    }),
+    text: voidSignalPlainText({ username, statusLabel: betreff, plainBody: String(text), ctaUrl: PUBLIC_URL + '/' })
+  };
+}
+function mailEingabePruefen(body) {
+  const betreff = String((body && body.betreff) || '').trim().slice(0, MAIL_BETREFF_MAX);
+  const text = String((body && body.text) || '').trim().slice(0, MAIL_TEXT_MAX);
+  if (betreff.length < 3) return { fehler: 'Bitte einen Betreff angeben.' };
+  if (text.length < 10) return { fehler: 'Bitte einen Text von mindestens zehn Zeichen schreiben.' };
+  return { betreff, text };
+}
+app.post('/api/admin/mail', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const ziel = kontoNachName(req, 'targetUsername');
+  if (!ziel) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const e = mailEingabePruefen(req.body);
+  if (e.fehler) return res.status(400).json({ error: e.fehler });
+  if (!ziel.email || !ziel.emailVerified) return res.status(400).json({ error: 'Dieses Konto hat keine bestaetigte E-Mail-Adresse.' });
+  const m = betreiberMailBauen(ziel.username, e.betreff, e.text);
+  try {
+    await sendEmail(ziel.email, e.betreff + ' - Kolonie Kepler-7', m.html, m.text);
+  } catch (err) {
+    // Der Grund gehoert in die Antwort: "ging nicht" laesst den Bediener zwischen falscher Adresse
+    // und totem Mail-Dienst raten, und er wiederholt dann den falschen von beiden.
+    return res.status(502).json({ error: 'Der Mail-Dienst hat die Nachricht nicht angenommen: ' + String(err && err.message || err).slice(0, 160) });
+  }
+  res.json({ ok: true, username: ziel.username, empfaenger: emailForm(ziel.email) });
+});
+app.post('/api/admin/mail-alle', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const e = mailEingabePruefen(req.body);
+  if (e.fehler) return res.status(400).json({ error: e.fehler });
+  let gesendet = 0, abgemeldet = 0, ohneAdresse = 0, fehlgeschlagen = 0, uebrig = 0;
+  for (const u of Object.values(db.users)) {
+    if (!u) continue;
+    if (!u.email || !u.emailVerified) { ohneAdresse++; continue; }
+    if (u.wantsPatchnotes === false) { abgemeldet++; continue; }   // dieselbe Abmeldung wie bei Winback
+    if (gesendet >= MAIL_ALLE_MAX) { uebrig++; continue; }
+    const m = betreiberMailBauen(u.username, e.betreff, e.text);
+    try { await sendEmail(u.email, e.betreff + ' - Kolonie Kepler-7', m.html, m.text); gesendet++; }
+    catch (err) { fehlgeschlagen++; console.error('[betreibermail] ' + u.username + ': ' + (err && err.message)); }
+  }
+  // Kein einziger Versand geglueckt, obwohl es Empfaenger gab: Das ist ein Ausfall des Mail-Dienstes
+  // und keine erledigte Aufgabe. Mit 200 zu antworten hiesse, den Ausfall wie Normalbetrieb aussehen
+  // zu lassen - der Bediener haekt ab und niemand erfaehrt je etwas.
+  const status = (gesendet === 0 && fehlgeschlagen > 0) ? 502 : 200;
+  res.status(status).json({ ok: status === 200, gesendet, abgemeldet, ohneAdresse, fehlgeschlagen, uebrig, deckel: MAIL_ALLE_MAX,
+    error: status === 502 ? 'Keine einzige Mail ging raus - der Mail-Dienst nimmt nichts an.' : undefined });
 });
 
 // --- Lage: Wirtschaft und Galaxie (02.09.2026) -------------------------------------------------

@@ -113,7 +113,7 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/kampfrechnung-paritaet.md` | Flottenverteidigung, Klassen-Sets, Raid-Vorschau, sechs Schiffstabellen, Kausalitätsbrecher |
 | `docs/pvp-standorte.md` | `targetPlanet` an `/api/attack`, Standort-Verteidigung |
 | `docs/sicherheit-auth.md` | Passwort-Regeln, Sitzungs-Cookie (Etappen a und b) |
-| `docs/admin.md` | Bonuscodes, Betreiber-Push, Admin-Fähigkeiten, Notaus, Aktivitäts-Uhr und ihre Erweiterungen (Verdacht, Geschenk, abgelehnte Spielstände), Protokoll-Middleware, Sperre mit Frist und Stummschaltung, Spielstand-Rücksicherung aus dem Backup, Allianz-Verwaltung |
+| `docs/admin.md` | Bonuscodes, Betreiber-Push, Admin-Fähigkeiten, Notaus, Aktivitäts-Uhr und ihre Erweiterungen (Verdacht, Geschenk, abgelehnte Spielstände), Protokoll-Middleware, Sperre mit Frist und Stummschaltung, Spielstand-Rücksicherung aus dem Backup, Allianz-Verwaltung, Feedback-Antwort, Wartungsankündigung, Notaus `angriffe`, Support-Werkzeuge (E-Mail, Umbenennen, Reset-Link), Lage |
 | `docs/chat.md` | Bündel-Abruf, Retention |
 | `docs/ki-kampfberichte.md` | Etappe E1a: Prompt-Zuschnitt, Wahrheits-Sperren, Warteschlange, `KAMPFTEXT_AKTIV` |
 

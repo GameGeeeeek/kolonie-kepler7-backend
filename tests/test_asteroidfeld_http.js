@@ -148,6 +148,14 @@ async function starteServer() {
   if (f1.status !== 200) { console.log(s.protokoll().slice(-1500)); console.log('\nFAIL'); process.exit(1); }
   const systeme = f1.body.systeme || [];
   check('1b: 20 Gürtelsysteme', systeme.length === 20, systeme.length);
+  // Eingefroren am 02.09.2026 (siehe astGuertelKandidat): genau dieser Satz, unabhängig davon, wie viele
+  // Wochensysteme inzwischen existieren. Ein Schnappschuss ist hier die Regel - "diese 20, für immer".
+  const EINGEFROREN = ["abyss","kepler","nebel","orion","sys_corvus_weite","sys_halvar_weite","sys_meridian_kern","sys_oort_schleuse","sys_xerxes_zone","sysw_1","sysw_10","sysw_11","sysw_12","sysw_13","sysw_2","sysw_3","sysw_5","sysw_6","sysw_7","tiefsee"];
+  const sortiert = systeme.slice().sort();
+  check('1b2: es sind genau die 20 eingefrorenen Gürtelsysteme (Stand 02.09.2026)',
+    JSON.stringify(sortiert) === JSON.stringify(EINGEFROREN),
+    { fehlt: EINGEFROREN.filter(x => !sortiert.includes(x)), zuviel: sortiert.filter(x => !EINGEFROREN.includes(x)) });
+  check('1b3: kein Startschub-System trägt einen Gürtel', !systeme.some(x => /^syss_/.test(x)), systeme.filter(x => /^syss_/.test(x)));
   const belegt = (felder, sys) => Object.values((felder[sys] || {}).plaetze || {}).filter(p => p && !p.frei).length;
   const zahlen = systeme.map(x => belegt(f1.body.felder, x));
   check('1c: jedes Gürtelsystem trägt 4-6 Vorkommen',
@@ -163,8 +171,14 @@ async function starteServer() {
     JSON.stringify(f2.body.felder) === JSON.stringify(f1.body.felder));
 
   // ---- 3) Entnahme, und der Brocken wird nicht zweimal verkauft ------------------------------
+  // Systeme MIT Festung ausnehmen (02.09.2026): Der Start-Tick des Servers setzt mit 8 % Chance eine
+  // Festung in ein Gürtelsystem, und steht sie zufällig im System mit dem größten Vorkommen, fällt
+  // 3a mit "menge 265.528 statt 590.063, blockade 0.55" - gemessen einmal in vier Läufen. Die
+  // Blockade ist eine eigene Regel (Abschnitt 10120 in server.js), hier wird die Buchführung
+  // gemessen. Ein späterer Spawn ist ausgeschlossen: der nächste galaxyTick liegt 15 Minuten entfernt.
   let zielSys = null, zielPlatz = null, startVorrat = 0;
   for (const x of systeme) for (const [platz, p] of Object.entries(f1.body.felder[x].plaetze)) {
+    if (f1.body.felder[x].festung) continue;
     if (p && !p.frei && p.vorrat > startVorrat) { zielSys = x; zielPlatz = platz; startVorrat = p.vorrat; }
   }
   check('3-0: ein Vorkommen zum Abbauen gefunden', !!zielSys && startVorrat > 0, { zielSys, zielPlatz, startVorrat });

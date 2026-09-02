@@ -2471,7 +2471,7 @@ app.get('/api/storage/:key', authMiddleware, (req, res) => {
   const shared = req.query.shared === 'true';
   const key = req.params.key;
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false) || checkChatKeyPermission(req, key, false) || checkHallOfFamePermission(req, key, false) || checkMoonDefensePermission(req, key, false) || checkWorldBossPermission(req, key, false) || checkMissionsKeyPermission(req, key, false) || checkAsteroidKeyPermission(req, key, false);
+    const denyReason = checkAllianceKeyPermission(req, key, false) || checkPactKeyPermission(req, key, false) || checkChatKeyPermission(req, key, false) || checkHallOfFamePermission(req, key, false) || checkMoonDefensePermission(req, key, false) || checkWorldBossPermission(req, key, false) || checkMissionsKeyPermission(req, key, false) || checkAsteroidKeyPermission(req, key, false) || checkVorpostenKeyPermission(req, key, false);
     if (denyReason) return res.status(403).json({ error: denyReason });
   }
   const store = shared ? db.shared : (db.private[req.userId] || {});
@@ -2509,7 +2509,7 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   const expectedVersion = req.body ? req.body.expectedVersion : undefined;
 
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true) || checkWorldBossPermission(req, key, true) || checkMissionsKeyPermission(req, key, true) || checkAsteroidKeyPermission(req, key, true);
+    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true) || checkWorldBossPermission(req, key, true) || checkMissionsKeyPermission(req, key, true) || checkAsteroidKeyPermission(req, key, true) || checkVorpostenKeyPermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
     // Mengenschutz (siehe MAX_SHARED_VALUE_BYTES oben). Bewusst NACH der Rechteprüfung und VOR jedem
     // Schreibzugriff - und bewusst nur für NEUE Schlüssel, damit die normale Spielschleife
@@ -11470,6 +11470,434 @@ app.post('/api/deploy-webhook', (req, res) => {
   starteDeploy(repoName, ziel.command, ziel.dir);
 });
 
+/* ===== B2: Vorposten (Aussenposten) - spielergebaute PvP-Ziele in db.shared (02.09.2026) ==========
+
+   Auftrag Sascha ("beide umsetzten": A2 UND B2; per Auswahl "Echtes PvP-Ziel (db.shared)" und
+   "alle 4 optionen" beim Nutzen-Kanal). Konzept: docs/vorposten-konzept.md im FRONTEND-Repo,
+   Entscheidungen und Messungen: docs/vorposten.md in DIESEM Repo. Hier nur das Noetigste:
+
+   - EIN Vorposten je System, Schluessel `vorposten:<sysId>` in db.shared. Die generische
+     Storage-Route SCHREIBT ihn nie (checkVorpostenKeyPermission - dieselbe Sperre wie bei den
+     Asteroidenfeldern); gelesen wird ueber GET /api/vorposten, daraus zeichnet das Frontend
+     fremde wie eigene Vorposten.
+   - Der Server ist Autoritaet ueber Stufe (gezaehlte Ausbau-Ereignisse mit Abklingzeit AM OBJEKT),
+     Kern-LP, Garnison und Verteidigung. Der Spielstand bleibt klientenautoritativ und wird hier
+     NIE geschrieben: Verluste des Angreifers reisen als Quote, die Garnison wohnt im Dokument
+     (der Client zieht beim Stationieren genau das ab, was der Server ANGENOMMEN hat).
+   - Die vier Nutzen-Kanaele (Flugzeit, Scan, Produktion, Stationierung) sind Zahlen je Stufe in
+     VORPOSTEN_STUFEN und reisen mit GET /api/vorposten zum Client - KEINE Kopie der Tabelle im
+     Frontend, also keine Kopie-Familie. Der Stationierungs-Kanal wirkt HIER: die Garnison
+     verteidigt den Vorposten (rawFleetPower * VORPOSTEN_GARNISON_FAKTOR). Nur Kampfschiffe
+     (SHIP_ATK_VALUES > 0) werden angenommen - sonst waere die Garnison ein sicherer Hafen fuer
+     Frachter, den kein /api/attack erreicht.
+   - Abklingzeit AM OBJEKT (`doc.schlaege[uid]`), Beitraege AM OBJEKT (`doc.beitraege`); gezaehlt
+     wird der ANGEKOMMENE Schaden (kernVorher - kernNachher), nicht der Wurf - wie beim
+     Festungsschlag. Beim Fall geht die Belohnung anteilig an ALLE Beitragenden ueber
+     pushPendingReward mit eigenem type:'vorposten'; der Besitzer bekommt type:'vorposten-verlust'.
+     Jeder Schlag davor steht als Kampfvermerk IM DOKUMENT (kein Eintrag in seiner Warteschlange -
+     die haelt 20 und verdraengte sonst Wertvolleres, siehe die Boss-Set-Lehre).
+   - Bauschutz VORPOSTEN_SCHUTZ_MS nach dem Bau: Ein frischer Vorposten waere sonst in der Minute
+     nach der Baukolonne schleifbar, bevor der Besitzer eine Garnison hinschicken konnte.
+   - Der Server kennt PLANETS nicht; "nicht im eigenen System" prueft er deshalb nur gegen das
+     Heimatsystem aus dem Bestenlisten-Eintrag (leaderboard:<uid>.homeSystem). Kolonie-Systeme
+     prueft der Client (dort steht die Tabelle) - ein Vorposten im eigenen Kolonie-System waere
+     nutzlos, aber kein Zugriff auf Fremdes.
+
+   VORPOSTEN_AKTIV STEHT AUF false - NOTAUSSCHALTER und Auslieferungs-Riegel (Regel 60): Ein
+   Vorposten ist ein PvP-Ziel mit spielersichtbaren Zahlen, also muss das Backend VOR dem Frontend
+   live sein und der Schalter erst im Fenster des Frontend-PRs kippen (wie A2_SPAWN_AKTIV). Solange
+   er aus ist, antworten alle Vorposten-Endpunkte mit 404/inaktiv und GET /api/vorposten meldet
+   aktiv:false mit leerer Liste. Dazu der Admin-Notaus `vorposten` (db.notAus): er stoppt nur den
+   BAU neuer Vorposten - bestehende bleiben angreifbar, wie bei den Nestern. */
+const VORPOSTEN_AKTIV = false;
+const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
+const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
+const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer, am Objekt
+const VORPOSTEN_AUSBAU_MS = 12 * 3600 * 1000;      // zwischen zwei Ausbauten, am Objekt
+const VORPOSTEN_GARNISON_FAKTOR = 0.5;             // Anteil der rohen Flottenkraft der Garnison, der verteidigt
+const VORPOSTEN_VERLUST = 0.06;                    // Grundverlust des Angreifers je Schlag (Familie Festung/A2)
+const VORPOSTEN_STUFEN = [
+  /* kernLp gegen die gemessenen Schlagkraefte 7.500 / 44.000 / 240.000 je Schlag (Festungs-
+     Kalibrierung, docs/asteroidenfestungen.md):
+       Feldlager    20.000 =  2,7 Einsteiger- / 0,45 Mittelfeld- / 0,08 Endspiel-Schlaege
+       Stuetzpunkt  90.000 = 12   / 2,0  / 0,4
+       Bastion     400.000 = 53   / 9,1  / 1,7
+     Die Struktur verteidigt selbst (`verteidigung`), die Garnison kommt obendrauf. Ohne Garnison ist
+     ein Feldlager fuer sein Publikum ein Ziel von zwei bis drei Schlaegen - eine gehaltene Praesenz,
+     die man verteidigen MUSS, kein Selbstlaeufer. `flug`/`prod`/`scan` sind die drei uebrigen
+     Nutzen-Kanaele (Anteil Flugzeit-Ersparnis, additiver Produktionsbonus, Aufklaerungsstufe); das
+     Frontend liest sie aus GET /api/vorposten. `kampfpunkte`/`xp`/`credits` sind die Beute beim
+     Fall, anteilig - klein und flach, nie aus der Produktion des Besitzers abgeleitet. */
+  { stufe: 1, name: 'Feldlager',  kernLp: 20000,  verteidigung: 2500,  garnisonMax: 300,  flug: 0.06, prod: 0.015, scan: 1, kampfpunkte: 30,  xp: 250,  credits: 1200 },
+  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,  verteidigung: 12000, garnisonMax: 800,  flug: 0.10, prod: 0.03,  scan: 2, kampfpunkte: 80,  xp: 700,  credits: 3500 },
+  { stufe: 3, name: 'Bastion',    kernLp: 400000, verteidigung: 60000, garnisonMax: 2000, flug: 0.15, prod: 0.05,  scan: 3, kampfpunkte: 200, xp: 2000, credits: 9000 }
+];
+
+function vorpostenStufe(n) {
+  const i = Math.min(VORPOSTEN_STUFEN.length, Math.max(1, Math.floor(Number(n) || 1))) - 1;
+  return VORPOSTEN_STUFEN[i];
+}
+function vorpostenSysOk(sys) { return typeof sys === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(sys); }
+function vorpostenKey(sys) { return 'vorposten:' + sys; }
+function vorpostenLies(sys) {
+  const raw = db.shared[vorpostenKey(sys)];
+  if (typeof raw !== 'string') return null;
+  try { const d = JSON.parse(raw); return (d && d.sys === sys && d.besitzer) ? d : null; } catch (e) { return null; }
+}
+function vorpostenSchreib(doc) { db.shared[vorpostenKey(doc.sys)] = JSON.stringify(doc); }
+function vorpostenLoesch(sys) { delete db.shared[vorpostenKey(sys)]; }
+function vorpostenAlle() {
+  const out = [];
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith('vorposten:')) continue;
+    const d = vorpostenLies(k.slice('vorposten:'.length));
+    if (d) out.push(d);
+  }
+  return out;
+}
+function vorpostenGarnisonAnzahl(doc) {
+  return Object.values((doc && doc.garnison) || {}).reduce((a, n) => a + (typeof n === 'number' && n > 0 ? n : 0), 0);
+}
+function vorpostenVerteidigung(doc) {
+  const st = vorpostenStufe(doc.stufe);
+  return Math.round(st.verteidigung + rawFleetPower(doc.garnison || {}, 1, 1, null) * VORPOSTEN_GARNISON_FAKTOR);
+}
+function vorpostenHeimatSystem(userId) {
+  try { return JSON.parse(db.shared['leaderboard:' + userId] || '{}').homeSystem || null; } catch (e) { return null; }
+}
+function vorpostenKampfschiff(typ) {
+  return Object.prototype.hasOwnProperty.call(SHIP_ATK_VALUES, typ) && (SHIP_ATK_VALUES[typ] || 0) > 0;
+}
+// Mission aus dem GESPEICHERTEN Spielstand - kein Kampfparameter kommt aus dem Request (wie
+// /api/festung/angriff): die Zusammensetzung steht in der Mission, die der Client beim Start
+// gespeichert hat.
+function vorpostenFindeMission(save, missionId, typ, sysId) {
+  const flotten = [];
+  if (save && save.fleet) flotten.push(save.fleet);
+  if (save && save.colonies) for (const c of Object.values(save.colonies)) if (c && c.fleet) flotten.push(c.fleet);
+  for (const f of flotten) {
+    for (const m of (f.missions || [])) {
+      if (String(m.id) === String(missionId) && m.type === typ && String(m.targetId) === sysId) return m;
+    }
+  }
+  return null;
+}
+// Gibt bei erlaubtem Zugriff null zurueck, sonst den Fehlertext fuer die 403-Antwort (Muster
+// checkAsteroidKeyPermission): Lesen bleibt fuer jedes angemeldete Konto offen, Schreiben geht nur
+// ueber die Endpunkte - sonst setzte jeder Beliebige einen fremden Kern auf null.
+function checkVorpostenKeyPermission(req, key, isWrite) {
+  if (!key.startsWith('vorposten:')) return null;
+  if (!isWrite) return null;
+  return 'Vorposten werden ausschließlich über die Vorposten-Endpunkte verändert.';
+}
+function vorpostenFuerClient(doc, userId, jetzt) {
+  const st = vorpostenStufe(doc.stufe);
+  const eigener = doc.besitzer === userId;
+  const out = {
+    id: doc.id, sys: doc.sys, besitzer: doc.besitzer, besitzerName: doc.besitzerName || 'Kommandant',
+    seit: doc.seit || 0, stufe: doc.stufe || 1, name: st.name,
+    kern: { lp: Math.max(0, Math.round((doc.kern && doc.kern.lp) || 0)), lpMax: Math.round((doc.kern && doc.kern.lpMax) || st.kernLp) },
+    verteidigung: vorpostenVerteidigung(doc),
+    garnisonAnzahl: vorpostenGarnisonAnzahl(doc),
+    schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
+    ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
+    nutzen: { flug: st.flug, prod: st.prod, scan: st.scan },
+    eigener,
+    meinLetzterSchlag: (doc.schlaege && doc.schlaege[userId]) || 0,
+    letzterKampf: doc.letzterKampf || null
+  };
+  // Zusammensetzung und Verlauf sieht nur der Besitzer; Fremde sehen die Zahl (wie die Eskorte am
+  // Vorkommen ihre Staerke zeigt, ohne dass jemand die Liste braucht).
+  if (eigener) { out.garnison = Object.assign({}, doc.garnison || {}); out.kampfverlauf = (doc.kampfverlauf || []).slice(0, 10); }
+  return out;
+}
+
+/* DER SCHLAG. Gemeinsamer Kern fuer den Einzelangriff (und einen spaeteren Verband, der `beteiligte`
+   gewichtet uebergibt). Die Verteidigung wirkt als DURCHSCHLAG auf den Wurf: kraft / (kraft +
+   verteidigung), gedeckelt auf 15-95 %. Eine starke Garnison laesst also weniger ankommen UND kostet
+   den Angreifer mehr - und sie verliert selbst, serverseitig, weil sie im Dokument wohnt. */
+function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
+  const verteidigung = vorpostenVerteidigung(doc);
+  const durchschlag = Math.max(0.15, Math.min(0.95, kraft / (kraft + verteidigung)));
+  const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4) * durchschlag);
+
+  doc.kern = doc.kern || { lp: vorpostenStufe(doc.stufe).kernLp, lpMax: vorpostenStufe(doc.stufe).kernLp };
+  const lpVorher = Math.max(0, doc.kern.lp || 0);
+  doc.kern.lp = Math.max(0, lpVorher - wurf);
+  const schaden = lpVorher - doc.kern.lp;          // was ANGEKOMMEN ist, nicht der Wurf
+
+  doc.beitraege = doc.beitraege || {};
+  doc.schlaege = doc.schlaege || {};
+  const gewichtSumme = beteiligte.reduce((a, b) => a + (b.gewicht > 0 ? b.gewicht : 0), 0) || 1;
+  for (const t of beteiligte) {
+    const anteil = (t.gewicht > 0 ? t.gewicht : 0) / gewichtSumme;
+    const b = doc.beitraege[t.userId] || { name: t.name || 'Kommandant', schaden: 0 };
+    b.schaden = (b.schaden || 0) + schaden * anteil;
+    b.name = t.name || b.name;
+    doc.beitraege[t.userId] = b;
+    doc.schlaege[t.userId] = jetzt;
+  }
+
+  // Die Garnison verliert serverseitig - sie wohnt im Dokument, nicht in einem Spielstand.
+  const garnQuote = Math.max(0.02, Math.min(0.5, 0.05 + 0.30 * (kraft / (kraft + verteidigung))));
+  const garnisonVerluste = {};
+  for (const [typ, n] of Object.entries(doc.garnison || {})) {
+    if (typeof n !== 'number' || n <= 0) continue;
+    const weg = Math.min(n, Math.round(n * garnQuote));
+    if (weg <= 0) continue;
+    doc.garnison[typ] = n - weg;
+    if (doc.garnison[typ] <= 0) delete doc.garnison[typ];
+    garnisonVerluste[typ] = weg;
+  }
+  // Der Angreifer verliert als QUOTE (der Server schreibt keinen fremden Spielstand); die Garnison
+  // treibt sie hoch, ein leerer Vorposten kostet fast nur den Grundverlust.
+  const quote = Math.max(0.03, Math.min(0.45, VORPOSTEN_VERLUST + 0.20 * (verteidigung / (kraft + verteidigung)) + Math.random() * 0.04));
+
+  const gefallen = doc.kern.lp <= 0;
+  const erster = beteiligte[0] || {};
+  const vermerk = { zeit: jetzt, angreifer: erster.userId || null, angreiferName: erster.name || 'Kommandant',
+    schaden, gefallen, garnisonVerluste, kraft: Math.round(kraft), verteidigung, teilnehmer: beteiligte.length };
+  doc.letzterKampf = vermerk;
+  doc.kampfverlauf = [vermerk].concat(doc.kampfverlauf || []).slice(0, 10);
+
+  const anteile = {};
+  let teilnehmer = 0;
+  if (gefallen) {
+    const st = vorpostenStufe(doc.stufe);
+    const summe = Object.values(doc.beitraege).reduce((a, b) => a + (b.schaden || 0), 0) || 1;
+    for (const [uid, b] of Object.entries(doc.beitraege)) {
+      const anteil = (b.schaden || 0) / summe;
+      if (!(anteil > 0)) continue;
+      teilnehmer++;
+      anteile[uid] = anteil;
+      pushPendingReward(uid, {
+        type: 'vorposten',           // eigener Typ, sonst Bug-Report-Rueckfall im Client
+        system: doc.sys, stufe: doc.stufe, name: st.name, besitzerName: doc.besitzerName || 'Kommandant',
+        anteil: Math.round(anteil * 1000) / 1000,
+        kampfpunkte: Math.max(1, Math.round(st.kampfpunkte * anteil)),
+        xp: Math.max(1, Math.round(st.xp * anteil)),
+        credits: Math.max(1, Math.round(st.credits * anteil)),
+        zeit: jetzt
+      });
+    }
+    // Der Besitzer erfaehrt vom Fall ueber seine Warteschlange - das Dokument, aus dem er sonst
+    // liest, gibt es gleich nicht mehr. Die Restgarnison ist mit dem Vorposten verloren.
+    pushPendingReward(doc.besitzer, {
+      type: 'vorposten-verlust', system: doc.sys, stufe: doc.stufe, name: st.name,
+      angreiferName: vermerk.angreiferName, teilnehmer,
+      garnisonVerloren: Object.assign({}, doc.garnison || {}), zeit: jetzt
+    });
+    vorpostenLoesch(doc.sys);
+  } else {
+    vorpostenSchreib(doc);
+  }
+  return { schaden, gefallen, lp: doc.kern.lp, lpMax: doc.kern.lpMax, verteidigung, durchschlag: Math.round(durchschlag * 100) / 100,
+    quote, garnisonVerluste, anteile, teilnehmer };
+}
+
+app.get('/api/vorposten', authMiddleware, (req, res) => {
+  const jetzt = Date.now();
+  const liste = VORPOSTEN_AKTIV ? vorpostenAlle().map(d => vorpostenFuerClient(d, req.userId, jetzt)) : [];
+  res.json({
+    ok: true, aktiv: VORPOSTEN_AKTIV, bauAktiv: spawnAktiv('vorposten'),
+    maxJeKonto: VORPOSTEN_MAX_JE_KONTO, schutzMs: VORPOSTEN_SCHUTZ_MS, abklingMs: VORPOSTEN_ABKLING_MS,
+    ausbauMs: VORPOSTEN_AUSBAU_MS, garnisonFaktor: VORPOSTEN_GARNISON_FAKTOR,
+    stufen: VORPOSTEN_STUFEN, liste, eigene: liste.filter(x => x.eigener).length
+  });
+});
+
+app.post('/api/vorposten/bauen', authMiddleware, async (req, res) => {
+  const sys = String((req.body && req.body.system) || '');
+  const missionId = (req.body && req.body.missionId) !== undefined ? String(req.body.missionId) : '';
+  if (!vorpostenSysOk(sys) || !missionId) return res.status(400).json({ error: 'System und Mission fehlen.' });
+  // spawnAktiv() statt der blanken Konstante: Der Admin-Notaus `vorposten` stoppt den BAU ohne Deploy.
+  if (!spawnAktiv('vorposten')) return res.status(404).json({ error: 'Vorposten lassen sich derzeit nicht errichten.', inaktiv: true });
+  const save = astLeseSave(req.userId);
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern, dann bauen.' });
+  const mission = vorpostenFindeMission(save, missionId, 'vorposten-bau', sys);
+  if (!mission) return res.status(403).json({ error: 'Zu diesem Bau ist keine Baukolonne im gespeicherten Spielstand unterwegs.' });
+  const jetzt = Date.now();
+  if (mission.endTime && mission.endTime > jetzt) return res.status(400).json({ error: 'Deine Baukolonne ist noch unterwegs.', unterwegs: true });
+  if (vorpostenLies(sys)) return res.status(409).json({ error: 'In diesem System steht bereits ein Vorposten.', belegt: true });
+  const heimat = vorpostenHeimatSystem(req.userId);
+  if (heimat && String(heimat) === sys) return res.status(400).json({ error: 'Im eigenen Heimatsystem braucht es keinen Vorposten.', heimat: true });
+  const eigene = vorpostenAlle().filter(d => d.besitzer === req.userId).length;
+  if (eigene >= VORPOSTEN_MAX_JE_KONTO) {
+    return res.status(400).json({ error: 'Du hältst bereits ' + eigene + ' Vorposten - mehr als ' + VORPOSTEN_MAX_JE_KONTO + ' sind nicht möglich. Gib einen auf, um neu zu bauen.', deckel: true, max: VORPOSTEN_MAX_JE_KONTO });
+  }
+  const st = vorpostenStufe(1);
+  const doc = {
+    id: 'vp_' + crypto.randomUUID(), sys, besitzer: req.userId, besitzerName: req.username || 'Kommandant',
+    seit: jetzt, stufe: 1, kern: { lp: st.kernLp, lpMax: st.kernLp }, garnison: {}, schlaege: {}, beitraege: {},
+    ausbauSeit: jetzt, kampfverlauf: []
+  };
+  vorpostenSchreib(doc);
+  console.log('[vorposten] gebaut userId=' + req.userId + ' sys=' + sys);
+  await saveDb();
+  res.json({ ok: true, vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
+});
+
+app.post('/api/vorposten/ausbauen', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann seinen Vorposten ausbauen.' });
+  if ((doc.stufe || 1) >= VORPOSTEN_STUFEN.length) return res.status(400).json({ error: 'Dieser Vorposten ist bereits voll ausgebaut.', endausbau: true });
+  const jetzt = Date.now();
+  const ausbauAb = (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS;
+  if (jetzt < ausbauAb) {
+    return res.status(400).json({ error: 'Der nächste Ausbau ist in ' + Math.ceil((ausbauAb - jetzt) / 60000) + ' Minuten möglich.', abklingzeit: true, ausbauAb });
+  }
+  const alt = vorpostenStufe(doc.stufe), neu = vorpostenStufe((doc.stufe || 1) + 1);
+  doc.stufe = (doc.stufe || 1) + 1;
+  doc.kern = doc.kern || { lp: alt.kernLp, lpMax: alt.kernLp };
+  // Ein Ausbau HEILT nicht - die LP steigen um dieselbe Differenz wie das Maximum, angerichteter
+  // Schaden bleibt angerichtet (dieselbe Entscheidung wie beim reifenden Nest).
+  doc.kern.lpMax = neu.kernLp;
+  doc.kern.lp = Math.min(neu.kernLp, Math.max(0, doc.kern.lp || 0) + (neu.kernLp - alt.kernLp));
+  doc.ausbauSeit = jetzt;
+  vorpostenSchreib(doc);
+  await saveDb();
+  res.json({ ok: true, vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
+});
+
+/* Stationieren: Der Server nimmt an, was der gespeicherte Spielstand am angegebenen Standort
+   WIRKLICH hat (Deckel: Bestand, freier Platz bis garnisonMax, nur Kampfschiffe) und schreibt es ins
+   Dokument. Er zieht NICHT vom Spielstand ab - der Client bucht genau `angenommen` ab, nachdem die
+   Antwort da ist. Andersherum (Server zieht ab) liefe die Abbuchung gegen den Autosave des Clients. */
+app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  const planetKey = String((req.body && req.body.planetKey) || 'home');
+  const composition = (req.body && req.body.composition) || null;
+  if (!vorpostenSysOk(sys) || !composition || typeof composition !== 'object' || planetKey.length > 64) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann hier stationieren.' });
+  const save = astLeseSave(req.userId);
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand.' });
+  const fleetObj = planetKey === 'home' ? save.fleet : (save.colonies && save.colonies[planetKey] && save.colonies[planetKey].fleet);
+  if (!fleetObj) return res.status(404).json({ error: 'Kein Flottenstandort gefunden.' });
+  const st = vorpostenStufe(doc.stufe);
+  let platz = Math.max(0, st.garnisonMax - vorpostenGarnisonAnzahl(doc));
+  const angenommen = {};
+  doc.garnison = doc.garnison || {};
+  for (const typ of Object.keys(composition)) {
+    if (!vorpostenKampfschiff(typ)) continue;
+    const angefordert = Math.max(0, Math.floor(Number(composition[typ]) || 0));
+    const verfuegbar = Math.max(0, Math.floor(fleetObj[typ] || 0));
+    const n = Math.min(angefordert, verfuegbar, platz);
+    if (n <= 0) continue;
+    angenommen[typ] = n;
+    doc.garnison[typ] = (doc.garnison[typ] || 0) + n;
+    platz -= n;
+  }
+  if (!Object.keys(angenommen).length) {
+    return res.status(400).json({ error: 'Nichts stationiert - keine Kampfschiffe verfügbar oder die Garnison ist voll (' + st.garnisonMax + ' Schiffe).', garnisonMax: st.garnisonMax, frei: platz });
+  }
+  vorpostenSchreib(doc);
+  await saveDb();
+  res.json({ ok: true, angenommen, garnison: doc.garnison, garnisonAnzahl: vorpostenGarnisonAnzahl(doc), verteidigung: vorpostenVerteidigung(doc), garnisonMax: st.garnisonMax });
+});
+
+app.post('/api/vorposten/rueckruf', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann seine Garnison zurückrufen.' });
+  const garnison = Object.assign({}, doc.garnison || {});
+  doc.garnison = {};
+  vorpostenSchreib(doc);
+  await saveDb();
+  res.json({ ok: true, garnison, verteidigung: vorpostenVerteidigung(doc) });
+});
+
+// Aufgeben: keine Rueckerstattung (Konzept §9, Empfehlung a) - der Bau ist eine verbindliche
+// Ortswahl, und ein Abbau-Wiederaufbau-Kreislauf entsteht so gar nicht erst. Die Garnison kommt
+// zurueck (der Client legt dafuer die Rueckflug-Mission an).
+app.post('/api/vorposten/aufgeben', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann seinen Vorposten aufgeben.' });
+  const garnison = Object.assign({}, doc.garnison || {});
+  vorpostenLoesch(sys);
+  console.log('[vorposten] aufgegeben userId=' + req.userId + ' sys=' + sys);
+  await saveDb();
+  res.json({ ok: true, garnison, rueckerstattung: 0 });
+});
+
+app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  const missionId = (req.body && req.body.missionId) !== undefined ? String(req.body.missionId) : '';
+  const vorpostenId = String((req.body && req.body.vorpostenId) || '');
+  if (!vorpostenSysOk(sys) || !missionId) return res.status(400).json({ error: 'System und Mission fehlen.' });
+  const save = astLeseSave(req.userId);
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern, dann angreifen.' });
+  const mission = vorpostenFindeMission(save, missionId, 'vorposten-angriff', sys);
+  if (!mission || !mission.composition) {
+    return res.status(403).json({ error: 'Zu diesem Angriff ist keine Flotte im gespeicherten Spielstand unterwegs.' });
+  }
+  const jetzt = Date.now();
+  if (mission.endTime && mission.endTime > jetzt) return res.status(400).json({ error: 'Deine Flotte ist noch unterwegs.', unterwegs: true });
+
+  const doc = vorpostenLies(sys);
+  // Das Ziel ist weg - geschleift oder aufgegeben. Kein Fehler des Spielers, kostet nichts, aber die
+  // Antwort nennt den Grund (kein stilles ok).
+  if (!doc) {
+    return res.status(200).json({ ok: true, verpasst: true, grund: 'weg',
+      text: 'Bei der Ankunft steht in diesem System kein Vorposten mehr - geschleift oder aufgegeben. Dein Verband kehrt vollzählig zurück.' });
+  }
+  if (vorpostenId && doc.id !== vorpostenId) {
+    return res.status(200).json({ ok: true, verpasst: true, grund: 'ersetzt',
+      text: 'Der Vorposten, gegen den du geflogen bist, steht nicht mehr - an seiner Stelle hat jemand einen neuen errichtet. Dein Verband kehrt vollzählig zurück.' });
+  }
+  if (doc.besitzer === req.userId) return res.status(400).json({ error: 'Den eigenen Vorposten greift man nicht an.' });
+  const schutzBis = (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS;
+  if (jetzt < schutzBis) {
+    return res.status(403).json({ error: 'Dieser Vorposten steht noch unter Bauschutz - angreifbar in ' + Math.ceil((schutzBis - jetzt) / 60000) + ' Minuten.', schutz: true, schutzBis });
+  }
+  doc.schlaege = doc.schlaege || {};
+  const letzter = doc.schlaege[req.userId] || 0;
+  if (letzter && jetzt - letzter < VORPOSTEN_ABKLING_MS) {
+    return res.status(403).json({ error: 'Deine Verbände haben diesen Vorposten erst vor Kurzem angegriffen - der nächste Schlag ist in ' +
+      Math.ceil((letzter + VORPOSTEN_ABKLING_MS - jetzt) / 60000) + ' Minuten möglich.', abklingzeit: true, naechsterSchlagAb: letzter + VORPOSTEN_ABKLING_MS });
+  }
+  const kraft = computeAttackPowerFromComposition(save, mission.composition, 0);
+  if (!(kraft > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
+  const erg = vorpostenSchlagAusfuehren(doc, kraft, mission.composition,
+    [{ userId: req.userId, name: req.username || 'Kommandant', gewicht: 1 }], jetzt);
+
+  // Aus der Quote werden hier - und NUR hier - konkrete Verluste (der Einzelangreifer hat genau eine
+  // Zusammensetzung; ein spaeterer Verband bekaeme die Quote selbst).
+  const eigeneVerluste = {};
+  for (const [typ, n] of Object.entries(mission.composition)) {
+    if (typeof n !== 'number' || n <= 0) continue;
+    const weg = Math.min(n, Math.round(n * erg.quote));
+    if (weg > 0) eigeneVerluste[typ] = weg;
+  }
+  const meinAnteil = erg.anteile[req.userId] || 0;
+  console.log('[vorposten-angriff] userId=' + req.userId + ' sys=' + sys + ' kraft=' + Math.round(kraft) + ' verteidigung=' + erg.verteidigung +
+    ' schaden=' + erg.schaden + ' lp=' + (erg.gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax);
+  await saveDb();
+  res.json({
+    ok: true, schaden: erg.schaden, gefallen: erg.gefallen, lp: erg.lp, lpMax: erg.lpMax,
+    stufe: doc.stufe, besitzerName: doc.besitzerName || 'Kommandant',
+    verteidigung: erg.verteidigung, durchschlag: erg.durchschlag,
+    eigeneVerluste, garnisonVerluste: erg.garnisonVerluste,
+    anteil: erg.gefallen ? Math.round(meinAnteil * 1000) / 1000 : 0,
+    teilnehmer: erg.gefallen ? erg.teilnehmer : Object.keys(doc.beitraege || {}).length,
+    naechsterSchlagAb: jetzt + VORPOSTEN_ABKLING_MS
+  });
+});
+
 // ===== Ko-fi-Spenden: Top-Unterstützer im Spiel anzeigen =====
 // Ko-fi schickt bei jeder Zahlung einen Webhook als application/x-www-form-urlencoded mit einem
 // Feld "data", das JSON als String enthält - braucht deshalb eine eigene, auf diese Route
@@ -12507,7 +12935,8 @@ const NOTAUS_NAMEN = {
   festung:  'Asteroidenfestungen entstehen',
   bauteile: 'Neue Festungen bekommen Schild und Tuerme',
   nester:   'Alien-Nester entstehen, reifen und wandern',
-  konvois:  'Wrackkonvois entstehen, driften und entkommen'
+  konvois:  'Wrackkonvois entstehen, driften und entkommen',
+  vorposten: 'Neue Vorposten werden errichtet'
 };
 function notAusGesetzt(name) {
   return !!(db.notAus && db.notAus[name] && db.notAus[name].aus === true);
@@ -12543,6 +12972,7 @@ function spawnAktivImCode(name) {
   if (name === 'bauteile') return FESTUNG_BAUTEILE_AKTIV;
   if (name === 'nester') return NEST_SPAWN_AKTIV;
   if (name === 'konvois') return A2_SPAWN_AKTIV;
+  if (name === 'vorposten') return VORPOSTEN_AKTIV;
   return false;
 }
 

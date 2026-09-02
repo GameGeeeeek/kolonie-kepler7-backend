@@ -8588,16 +8588,23 @@ function listMusterJoins(tag, musterAttackId) {
   return out;
 }
 
-/* Zielarten des koordinierten Angriffs OHNE Verteidiger: das Alien-Nest (Phase 5) und seit dem
-   01.09.2026 die Asteroidenfestung. Beide haben keine Allianz, keine Basis, kein incomingmuster-
-   Dokument und keinen Schutzschild - und bei beiden darf der Verteidiger-Zweig von `resolve` gar
-   nicht erst betreten werden (siehe den Kommentar dort). EINE Funktion dafuer statt zweier
-   Vergleiche an vier Stellen, damit eine dritte PvE-Zielart nicht eine davon vergisst. */
-function musterIstPveZiel(zielArt) { return zielArt === 'alien-nest' || zielArt === 'festung'; }
+/* Zielarten des koordinierten Angriffs OHNE VERTEIDIGENDE ALLIANZ: Alien-Nest (Phase 5),
+   Asteroidenfestung (01.09.2026) und Vorposten (02.09.2026). Keines von ihnen hat ein targetTag,
+   eine Basis, ein incomingmuster-Dokument oder einen Schutzschild - und bei keinem darf der
+   Verteidiger-Zweig von `resolve` betreten werden (siehe den Kommentar dort).
+
+   DIE FUNKTION HIESS BIS ZUM 02.09.2026 musterIstPveZiel, UND DER NAME WURDE MIT DEM VORPOSTEN
+   FALSCH: Ein Vorposten gehoert einem SPIELER, ist also PvP-Inhalt - er verhaelt sich hier nur
+   deshalb wie ein PvE-Ziel, weil sein Besitzer keine ALLIANZ ist. Genau das ist die Frage, die an
+   allen vier Aufrufstellen zaehlt (targetTag, incomingmuster, allianceRoleOf), und der Name sagt
+   sie jetzt. Ein Name, der das Gegenteil behauptet, waere die naechste falsche Annahme, die
+   jemand uebernimmt. tests/test_muster_festung_http.js liest ihn in seiner Sabotage-Zeile mit. */
+function musterZielOhneAllianz(zielArt) { return zielArt === 'alien-nest' || zielArt === 'festung' || zielArt === 'vorposten'; }
 function musterZielBeschreibung(doc) {
   if (!doc) return '?';
   if (doc.zielArt === 'alien-nest') return 'ein Alien-Nest bei ' + (doc.nestSystem || '?');
   if (doc.zielArt === 'festung') return 'eine Asteroidenfestung bei ' + (doc.festungSystem || '?');
+  if (doc.zielArt === 'vorposten') return 'den Vorposten von ' + (doc.vorpostenBesitzerName || '?') + ' bei ' + (doc.vorpostenSystem || '?');
   return '[' + doc.targetTag + ']';
 }
 app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
@@ -8607,14 +8614,15 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
      Ein Nest hat keine Allianz, keine Basis, kein incomingmuster-Dokument und keinen
      Schutzschild. Was stattdessen geprueft wird, steht im Zweig darunter. */
   const zielArt = String((req.body && req.body.zielArt) || 'allianz');
-  if (!['allianz', 'alien-nest', 'festung'].includes(zielArt)) return res.status(400).json({ error: 'Unbekannte Zielart.' });
+  if (!['allianz', 'alien-nest', 'festung', 'vorposten'].includes(zielArt)) return res.status(400).json({ error: 'Unbekannte Zielart.' });
   const istNest = zielArt === 'alien-nest';
   const istFestung = zielArt === 'festung';
-  const istPve = musterIstPveZiel(zielArt);
-  const targetTag = istPve ? null : String(targetTagRaw || '').trim().toUpperCase();
+  const istVorposten = zielArt === 'vorposten';
+  const istOhneAllianz = musterZielOhneAllianz(zielArt);
+  const targetTag = istOhneAllianz ? null : String(targetTagRaw || '').trim().toUpperCase();
   const gatherOk = ALLIANCE_MUSTER_DURATIONS.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
   if (!tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
-  if (!istPve && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!istOhneAllianz && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   const myRole = allianceRoleOf(tag, req.userId);
   if (myRole !== 'admin' && myRole !== 'officer') return res.status(403).json({ error: 'Nur Admins/Offiziere können einen koordinierten Angriff starten.' });
 
@@ -8657,7 +8665,29 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     if (festungWahl !== 'kern' && !FESTUNG_BAUTEILE[festungWahl]) return res.status(400).json({ error: 'Unbekanntes Bauteil als Ziel.' });
   }
 
-  if (!istPve) {
+  /* VORPOSTEN als Verbandsziel (02.09.2026). Der Grund ist derselbe wie bei der Sternenfeste:
+     Eine Bastion hat 400.000 Kern-LP und 60.000 Verteidigung - bei der gemessenen
+     Einsteiger-Schlagkraft von 7.500 sind das 53 Schlaege bei vier Stunden Abklingzeit, also
+     solo nicht zu schleifen. Genau dafuer gibt es den Verband.
+     ANDERS als Nest und Festung gehoert ein Vorposten einem SPIELER. Zwei Folgen, beide hier:
+     den EIGENEN greift man auch im Verband nicht an (dieselbe Regel wie am Einzelendpunkt), und
+     der Bauschutz gilt auch fuer den Verband - sonst waere der Verband der Weg, ihn zu umgehen. */
+  let vorpostenZiel = null;
+  if (istVorposten) {
+    if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.' });
+    const vpSys = String((req.body && req.body.vorpostenSystem) || '');
+    const vpId = String((req.body && req.body.vorpostenId) || '');
+    if (!vorpostenSysOk(vpSys)) return res.status(400).json({ error: 'Unbekanntes System.' });
+    vorpostenZiel = vorpostenLies(vpSys);
+    if (!vorpostenZiel || (vpId && vorpostenZiel.id !== vpId)) return res.status(404).json({ error: 'Dort steht kein (solcher) Vorposten mehr.' });
+    if (vorpostenZiel.besitzer === req.userId) return res.status(400).json({ error: 'Den eigenen Vorposten greift man nicht an.' });
+    const schutzBis = (vorpostenZiel.seit || 0) + VORPOSTEN_SCHUTZ_MS;
+    if (Date.now() < schutzBis) {
+      return res.status(403).json({ error: 'Dieser Vorposten steht noch unter Bauschutz - angreifbar in ' + Math.ceil((schutzBis - Date.now()) / 60000) + ' Minuten.', schutz: true, schutzBis });
+    }
+  }
+
+  if (!istOhneAllianz) {
   const targetBaseRaw = db.shared['alliance:' + targetTag + ':base'];
   let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
   if (!targetBase || !targetBase.foundedAt) return res.status(404).json({ error: 'Die Allianz [' + targetTag + '] hat keine (auffindbare) Allianzbasis.' });
@@ -8685,6 +8715,11 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     festungStufe: festungZiel ? festungZiel.stufe : null,
     festungStufeName: festungZiel ? ((FESTUNG_STUFEN[festungZiel.stufe] || FESTUNG_STUFEN.schanze).name) : null,
     festungZiel: festungZiel ? festungWahl : null,
+    vorpostenId: vorpostenZiel ? vorpostenZiel.id : null,
+    vorpostenSystem: vorpostenZiel ? vorpostenZiel.sys : null,
+    vorpostenBesitzer: vorpostenZiel ? vorpostenZiel.besitzer : null,
+    vorpostenBesitzerName: vorpostenZiel ? (vorpostenZiel.besitzerName || 'Kommandant') : null,
+    vorpostenStufeName: vorpostenZiel ? vorpostenStufe(vorpostenZiel.stufe).name : null,
     message: String(message || '').replace(/[<>]/g, '').slice(0, 140),
     createdAt: now, museterEndsAt: now + gatherSeconds * 1000,
     phase: 'gathering', dispatch: null, result: null
@@ -8811,12 +8846,13 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
   const myBaseRaw = db.shared['alliance:' + tag + ':base'];
   let myBase = null; try { myBase = myBaseRaw ? JSON.parse(myBaseRaw) : null; } catch (e) {}
   let sameSys;
-  if (musterIstPveZiel(doc.zielArt)) {
+  if (musterZielOhneAllianz(doc.zielArt)) {
     // Dieselbe Regel wie bei einer fremden Basis, nur mit dem SYSTEM des Nestes bzw. der Festung
     // als Gegenstueck: gleicher Sektor = kurzer Anflug. Eine zweite Entfernungsrechnung waere
     // eine zweite Wahrheit.
-    const pveSystem = doc.zielArt === 'festung' ? doc.festungSystem : doc.nestSystem;
-    sameSys = !!(myBase && pveSystem && myBase.sector === pveSystem);
+    const zielSystem = doc.zielArt === 'festung' ? doc.festungSystem
+      : doc.zielArt === 'vorposten' ? doc.vorpostenSystem : doc.nestSystem;
+    sameSys = !!(myBase && zielSystem && myBase.sector === zielSystem);
   } else {
     const targetBaseRaw = db.shared['alliance:' + doc.targetTag + ':base'];
     let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
@@ -8842,7 +8878,7 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
   // Ein Nest oder eine Festung wird nicht gewarnt - es gibt keinen Verteidiger, der ein
   // incomingmuster-Dokument lesen koennte, und ein Eintrag unter `alliance:null:incomingmuster`
   // waere schlicht Muell.
-  if (!musterIstPveZiel(doc.zielArt)) {
+  if (!musterZielOhneAllianz(doc.zielArt)) {
     db.shared['alliance:' + doc.targetTag + ':incomingmuster'] = JSON.stringify({
       attackerTag: tag, musterAttackId: doc.id, phase: 'enroute', dispatchedAt: now,
       arrivalAt: doc.dispatch.arrivalAt, lastAttackAt: now, totalShips, resolvedAt: null
@@ -8874,7 +8910,8 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
      keine Verteidiger-Rolle zu pruefen. */
   const istNestZiel = !!(doc && doc.zielArt === 'alien-nest');
   const istFestungZiel = !!(doc && doc.zielArt === 'festung');
-  const myRoleDefender = (doc && !musterIstPveZiel(doc.zielArt)) ? allianceRoleOf(doc.targetTag, req.userId) : null;
+  const istVorpostenZiel = !!(doc && doc.zielArt === 'vorposten');
+  const myRoleDefender = (doc && !musterZielOhneAllianz(doc.zielArt)) ? allianceRoleOf(doc.targetTag, req.userId) : null;
   if (!myRoleAttacker && !myRoleDefender) return res.status(403).json({ error: 'Nur Mitglieder der angreifenden oder verteidigenden Allianz.' });
 
   if (!doc || doc.phase !== 'enroute' || !doc.dispatch || doc.dispatch.arrivalAt > Date.now()) return res.json({ ok: true, doc });
@@ -8994,6 +9031,90 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
     console.log('[muster-festung] tag=' + tag + ' sys=' + doc.festungSystem + ' teilnehmer=' + beteiligteF.length +
       ' kraft=' + doc.dispatch.totalPower + ' ziel=' + ergF.ziel + ' kernschaden=' + ergF.schaden +
       ' teilschaden=' + ergF.teilSchaden + ' kern=' + (ergF.gefallen ? 'gefallen' : ergF.kern) + '/' + ergF.kernMax);
+    await saveDb();
+    return res.json({ ok: true, doc });
+  }
+
+  if (istVorpostenZiel) {
+    /* Der Verband gegen einen Vorposten (02.09.2026). Ueber DENSELBEN Rechenkern wie der
+       Einzelangriff (vorpostenSchlagAusfuehren) - wie bei Nest und Festung, aus demselben Grund.
+       DREI Dinge sind anders, weil der Vorposten einem SPIELER gehoert:
+       1. Der Bauschutz wird bei der ANKUNFT erneut geprueft. Beim Ausrufen steht er schon im
+          create; ein Verband kann aber laenger sammeln, als der Schutz noch laeuft - und
+          andersherum: Ein Vorposten, der waehrend der Sammelphase NEU gebaut wurde (der alte fiel,
+          jemand baute nach), stuende sonst ohne seinen Schutz da.
+       2. Der BESITZER wird benachrichtigt, genau wie beim Einzelschlag. Ohne diese Zeile waere die
+          Luecke, die am 02.09.2026 geschlossen wurde, ueber den Verbandsweg wieder offen - und
+          zwar fuer den Angriff, der ihn am ehesten kostet.
+       3. Faellt er, bekommt der Besitzer zusaetzlich 'vorposten-verlust' in die Warteschlange -
+          das erledigt der gemeinsame Kern, nicht dieser Zweig. */
+    const jetztV = Date.now();
+    const vp = vorpostenLies(doc.vorpostenSystem);
+    if (!vp || (doc.vorpostenId && vp.id !== doc.vorpostenId)) {
+      doc.phase = 'resolved';
+      doc.result = { vorposten: true, verpasst: true, grund: 'weg', system: doc.vorpostenSystem,
+        stufeName: doc.vorpostenStufeName || null, besitzerName: doc.vorpostenBesitzerName || null,
+        success: false, destroyed: false, damage: 0, defensePower: 0, ownLossPct: 0, resolvedAt: jetztV };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+    const schutzBisV = (vp.seit || 0) + VORPOSTEN_SCHUTZ_MS;
+    if (jetztV < schutzBisV) {
+      doc.phase = 'resolved';
+      doc.result = { vorposten: true, verpasst: true, grund: 'schutz', system: doc.vorpostenSystem,
+        stufeName: vorpostenStufe(vp.stufe).name, besitzerName: vp.besitzerName || null,
+        success: false, destroyed: false, damage: 0, defensePower: 0, ownLossPct: 0, resolvedAt: jetztV };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+    const rohV = doc.dispatch.participants;
+    const beteiligteV = (Array.isArray(rohV) && rohV.length)
+      ? rohV.map(p => ({ userId: p.id, name: p.name || 'Kommandant', gewicht: p.power || 0 }))
+      : (doc.dispatch.participantIds || []).map(id => ({ userId: id, name: 'Kommandant', gewicht: 1 }));
+    if (!beteiligteV.length) {
+      doc.phase = 'resolved';
+      doc.result = { vorposten: true, noParticipants: true, success: false, destroyed: false, damage: 0,
+        defensePower: 0, ownLossPct: 0, resolvedAt: jetztV };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+    const stufeNameV = vorpostenStufe(vp.stufe).name;
+    const besitzerV = vp.besitzer, besitzerNameV = vp.besitzerName || 'Kommandant';
+    const ergV = vorpostenSchlagAusfuehren(vp, doc.dispatch.totalPower, doc.dispatch.totalComposition || {}, beteiligteV, jetztV);
+    doc.phase = 'resolved';
+    doc.result = {
+      vorposten: true, verpasst: false,
+      system: doc.vorpostenSystem, stufeName: stufeNameV, besitzerName: besitzerNameV,
+      damage: ergV.schaden, destroyed: ergV.gefallen, success: ergV.schaden > 0,
+      lp: ergV.lp, lpMax: ergV.lpMax, defensePower: ergV.verteidigung, durchschlag: ergV.durchschlag,
+      garnisonVerluste: ergV.garnisonVerluste || {},
+      ownLossPct: Math.round(ergV.quote * 1000) / 1000,
+      chancePct: null, teilnehmer: ergV.teilnehmer,
+      belohnungUeberPendingRewards: true,
+      resolvedAt: jetztV
+    };
+    setMusterAttackDoc(tag, doc);
+
+    // Den Besitzer benachrichtigen - derselbe Weg wie am Einzelendpunkt (siehe docs/vorposten.md).
+    try {
+      const besUser = besitzerV ? findUserById(besitzerV) : null;
+      if (besUser) {
+        const bPrefs = getNotifPrefs(besUser);
+        if (bPrefs.enabled && bPrefs.attack) {
+          pushNotificationEvent(besitzerV, 'vorposten-angegriffen', {
+            angreiferName: '[' + tag + ']', name: stufeNameV, system: doc.vorpostenSystem, gefallen: ergV.gefallen,
+            kernProzent: ergV.gefallen ? 0 : Math.round(100 * Math.max(0, Math.min(1, (ergV.lp || 0) / Math.max(1, ergV.lpMax || 1))))
+          }, { skipWebPush: !allowAttackPush(besitzerV) });
+        }
+      }
+    } catch (e) { console.warn('[muster-vorposten] Push fehlgeschlagen:', e.message); }
+
+    console.log('[muster-vorposten] tag=' + tag + ' sys=' + doc.vorpostenSystem + ' teilnehmer=' + beteiligteV.length +
+      ' kraft=' + doc.dispatch.totalPower + ' schaden=' + ergV.schaden +
+      ' lp=' + (ergV.gefallen ? 'gefallen' : ergV.lp) + '/' + ergV.lpMax);
     await saveDb();
     return res.json({ ok: true, doc });
   }
@@ -9120,7 +9241,7 @@ app.post('/api/musterattack/claim', authMiddleware, async (req, res) => {
     return res.json({ ok: true, noParticipants: true, saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
   }
 
-  if (res_.nest || res_.festung) {
+  if (res_.nest || res_.festung || res_.vorposten) {
     /* Bei einem Nest oder einer Festung gibt claim NUR die Schiffe zurueck. Die eigentliche
        Belohnung liegt anteilig in __pendingRewards (siehe Kommentar im Ergebnis) - sie hier ein
        zweites Mal auszuzahlen waere eine Doppelzahlung fuer dasselbe Ereignis. Bei `verpasst` ist
@@ -9140,7 +9261,8 @@ app.post('/api/musterattack/claim', authMiddleware, async (req, res) => {
     db.shared[joinKey] = JSON.stringify(join);
     const nestSaveVersion = setSaveValue(req.userId, JSON.stringify(save));
     await saveDb();
-    return res.json({ ok: true, nest: !!res_.nest, festung: !!res_.festung, pve: true,
+    return res.json({ ok: true, nest: !!res_.nest, festung: !!res_.festung, vorposten: !!res_.vorposten, pve: true,
+      besitzerName: res_.besitzerName || null, durchschlag: res_.durchschlag || 0,
       verpasst: !!res_.verpasst, grund: res_.grund || null,
       destroyed: !!res_.destroyed, damage: res_.damage || 0, volkName: res_.volkName || null,
       stufeName: res_.stufeName || null, lostShips: verloren,

@@ -26,15 +26,21 @@
 // VERWORFEN wurde (den Verlauf aus db.private lesen), und 1d faellt - weil der Spieler seine
 // Berichte selbst loeschen kann.
 //
-// PORT 3247: gemessen belegt sind 3195-3246 (Backend, `grep -hoE "3[12][0-9][0-9]" tests/*.js`) und
-// bis 3243 im Frontend-Repo - ein neuer Test nimmt 3248.
+// PORT 3249, urspruenglich 3247. Gemessen (git log je Datei): Dieser Test nahm 3247 um 17:30,
+// test_muster_vorposten_http um 17:57 und test_pvp_mindesteinsatz_http um 18:24 - alle drei mit
+// derselben korrekt ausgefuehrten Messung, jede gegen einen Stand ohne die anderen beiden.
+// DIE REGEL "freien Port messen statt raten" SCHUETZT NICHT GEGEN PARALLELE ZWEIGE: Sie misst den
+// eigenen Checkout, und der kennt fremde, noch nicht gemergte Tests nicht. Wer einen neuen Test
+// anlegt, misst deshalb ein ZWEITES Mal unmittelbar vor dem Push, gegen frisch geholtes
+// origin/master. Ausgewichen ist hier der aelteste der drei, weil das die einzige Aenderung ist,
+// die keine fremde Datei anfasst. Belegt sind damit 3195-3249, ein neuer Test nimmt 3250.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawn } = require('child_process');
 
 const WURZEL = path.resolve(__dirname, '..');
-const PORT = Number(process.env.TEST_PORT || 3247);
+const PORT = Number(process.env.TEST_PORT || 3249);
 
 let fail = false;
 const check = (n, c, x) => { console.log((c ? 'OK  ' : 'FAIL') + ' - ' + n + (x !== undefined ? ' | ' + JSON.stringify(x) : '')); fail = fail || !c; };

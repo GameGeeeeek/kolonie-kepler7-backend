@@ -86,6 +86,41 @@ WERT, dann die Beziehung).
 
 
 
+## Die Anfechtung rechnet die Eskorte MIT dem Spielstand des Halters – und hat eine Vorschau (01.09.2026)
+
+Auftrag Sascha „Alle umsetzen" (Asteroiden-Etappen). Bis hierher stand in `/api/asteroid/contest`
+`weightedFleetDefensePower(vork.eskorte, null) + fleetShieldSum(vork.eskorte, null)` – die Eskorte
+des Halters kämpfte **ohne** seine Werftmarken, Klassenmodule und Kampfforschung, während die Werft
+sie ihm anzeigt. Der Kommentar an der Vorschau des Frontends behauptete das Gegenteil („der Server
+rechnet mit Werftmarken, Modulen des Halters"). Gemessen an einer Eskorte aus 100 Kreuzern und
+20 Schlachtschiffen (Marken 10, Kampfforschung 20/20, ein episches Hüllenmodul der Schweren Linie):
+
+| | Verteidigung | Chance des Angreifers |
+|---|---|---|
+| ohne Halter-Spielstand (alt) | 4.340 | 66 % |
+| mit Halter-Spielstand (neu) | **11.744** | **42 %** |
+
+**`astEskorteVerteidigung(vork)` ist die EINE Stelle**, die den Spielstand des Halters aus
+`db.private` liest (wie `/api/attack` den des Verteidigers) und beide Verteidigungs-Funktionen mit
+`marks` und `save` aufruft. Ein Halter ohne Spielstand fällt auf den alten Wert zurück.
+
+**Die Vorschau (`POST /api/asteroid/anfechtung-vorschau`) rechnet mit GENAU denselben Funktionen**
+– `astEskorteVerteidigung`, `astAnfechtungChance`, `astAnfechtungVerluste` –, deshalb sind die
+drei aus dem Rumpf des Kampfs herausgezogen. Die Zusammensetzung kommt für die Vorschau aus dem
+Request; das ist unkritisch, weil daraus nichts gebucht wird. Der Kampf liest sie weiterhin
+ausschließlich aus der gespeicherten Mission. Die Vorschau nennt die **Spanne** (Wurf 0,85 bis
+1,15) statt einer Zahl, die der Kampf dann „widerlegt". Dieselbe Arbeitsteilung wie
+`GET /api/spieler-standorte`, das die Verteidigung eines fremden Standorts für die Zielwahl nennt.
+
+**Balance-Folge, benannt:** Ein Halter mit Marken, Modulen und Forschung ist im Vergleich zu vorher
+deutlich stärker – gemessen Faktor 2,7 bei Endausbau. Eine Anfechtung gegen einen gut gerüsteten
+Halter ist damit teurer. Das ist der Zustand, den die Werft dem Halter seit jeher verspricht.
+
+Wächter: `tests/test_anfechtung_vorschau_http.js` (Port 3240, 19 Prüfungen). Kern ist das PAAR
+(2a/2b: dieselbe Eskorte ohne und mit Halter-Spielstand) und 3a (die im Kampf gewürfelte Chance
+liegt in der Spanne der Vorschau davor). Gegenprobe `KEPLER_ANF_SABOTAGE=null`: genau 2a und 2b
+fallen, Prüfliste identisch. **Die erste Pflichtliste nannte nur 2a** – gemessen fällt 2b mit; eine
+Pflichtliste ist selbst eine Behauptung, bis die Gegenprobe sie gemessen hat.
 
 ## Gürtelauswahl eingefroren (02.09.2026)
 

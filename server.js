@@ -3810,10 +3810,12 @@ const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, 
 const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130, metamaterialtitan:150, singularitaetsvernichter:280, kausalitaetsbrecher:340, urmateriekoloss:250, paktkorvette:40, bundeskreuzer:110, sternenbanner:240 };
 // marks (31.07.2026): derselbe atk-Markenfaktor wie in rawFleetPower - es ist derselbe
 // Angriffswert, hier nur mit defWeight verrechnet.
-/* save ist OPTIONAL: Die Asteroiden-Anfechtung ruft mit der Eskorte eines FREMDEN Spielers auf und
-   hat dessen Spielstand nicht zur Hand - dort bleibt es (wie schon bei den Marken) beim blanken
-   Flottenwert. Mit save spiegelt die Funktion shipDefenseContribution() im Frontend vollstaendig:
-   Huellen-Module, Traegerhangar und die Kampfforschung. */
+/* save ist OPTIONAL. Die Asteroiden-Anfechtung uebergab bis zum 01.09.2026 null (die Eskorte
+   eines FREMDEN Spielers ohne dessen Spielstand) - seither liest astEskorteVerteidigung() den
+   Spielstand des Halters aus db.private und uebergibt ihn, damit seine Marken, Module und
+   Kampfforschung so zaehlen, wie die Werft sie ihm anzeigt. Mit save spiegelt die Funktion
+   shipDefenseContribution() im Frontend vollstaendig: Huellen-Module, Traegerhangar und die
+   Kampfforschung. Ohne save (Halter ohne Spielstand) bleibt es beim blanken Flottenwert. */
 function weightedFleetDefensePower(f, marks, save) {
   if (!f) return 0;
   const huelle = save ? shipModulKlassenBoni(save, 'hull') : null;
@@ -8499,6 +8501,18 @@ function listMusterJoins(tag, musterAttackId) {
   return out;
 }
 
+/* Zielarten des koordinierten Angriffs OHNE Verteidiger: das Alien-Nest (Phase 5) und seit dem
+   01.09.2026 die Asteroidenfestung. Beide haben keine Allianz, keine Basis, kein incomingmuster-
+   Dokument und keinen Schutzschild - und bei beiden darf der Verteidiger-Zweig von `resolve` gar
+   nicht erst betreten werden (siehe den Kommentar dort). EINE Funktion dafuer statt zweier
+   Vergleiche an vier Stellen, damit eine dritte PvE-Zielart nicht eine davon vergisst. */
+function musterIstPveZiel(zielArt) { return zielArt === 'alien-nest' || zielArt === 'festung'; }
+function musterZielBeschreibung(doc) {
+  if (!doc) return '?';
+  if (doc.zielArt === 'alien-nest') return 'ein Alien-Nest bei ' + (doc.nestSystem || '?');
+  if (doc.zielArt === 'festung') return 'eine Asteroidenfestung bei ' + (doc.festungSystem || '?');
+  return '[' + doc.targetTag + ']';
+}
 app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
   const { tag, targetTag: targetTagRaw, gatherSeconds, message } = req.body || {};
   /* ZIELART (Phase 5). Ohne das Feld ist alles wie bisher - eine fremde Allianzbasis. Mit
@@ -8506,18 +8520,20 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
      Ein Nest hat keine Allianz, keine Basis, kein incomingmuster-Dokument und keinen
      Schutzschild. Was stattdessen geprueft wird, steht im Zweig darunter. */
   const zielArt = String((req.body && req.body.zielArt) || 'allianz');
+  if (!['allianz', 'alien-nest', 'festung'].includes(zielArt)) return res.status(400).json({ error: 'Unbekannte Zielart.' });
   const istNest = zielArt === 'alien-nest';
-  const targetTag = istNest ? null : String(targetTagRaw || '').trim().toUpperCase();
+  const istFestung = zielArt === 'festung';
+  const istPve = musterIstPveZiel(zielArt);
+  const targetTag = istPve ? null : String(targetTagRaw || '').trim().toUpperCase();
   const gatherOk = ALLIANCE_MUSTER_DURATIONS.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
   if (!tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
-  if (!istNest && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!istPve && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   const myRole = allianceRoleOf(tag, req.userId);
   if (myRole !== 'admin' && myRole !== 'officer') return res.status(403).json({ error: 'Nur Admins/Offiziere können einen koordinierten Angriff starten.' });
 
   const mine = getMusterAttackDoc(tag);
   if (mine && (mine.phase === 'gathering' || mine.phase === 'enroute')) {
-    const gegen = mine.zielArt === 'alien-nest' ? 'ein Alien-Nest bei ' + (mine.nestSystem || '?') : '[' + mine.targetTag + ']';
-    return res.status(409).json({ error: 'Es läuft bereits ein koordinierter Angriff eurer Allianz (gegen ' + gegen + ').' });
+    return res.status(409).json({ error: 'Es läuft bereits ein koordinierter Angriff eurer Allianz (gegen ' + musterZielBeschreibung(mine) + ').' });
   }
 
   let nestZiel = null;
@@ -8535,7 +8551,26 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     if (!nestZiel) return res.status(404).json({ error: 'Dieses Alien-Nest gibt es nicht (mehr).' });
   }
 
-  if (!istNest) {
+  /* ASTEROIDENFESTUNG als Ziel (01.09.2026). Eine Sternenfeste braucht fuenf Endspiel-Schlaege bei
+     sechs Stunden Abklingzeit - zwei Tage allein; genau dafuer ist ein Verband gedacht. Dieselbe
+     Bauart wie der Nest-Zweig darueber: der Schalter gilt mit (die Konstante, nicht spawnAktiv -
+     eine Notabschaltung stoppt den Nachschub, enteignet aber niemanden), die Festung wird ueber
+     System UND Kennung gefunden, und die Zielwahl (Kern, Schild, Tuerme) steht im Dokument, weil
+     sie beim Ausrufen eine Entscheidung der ganzen Allianz ist. */
+  let festungZiel = null, festungSystem = null, festungWahl = 'kern';
+  if (istFestung) {
+    if (!FESTUNG_SPAWN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Asteroidenfestungen in der Galaxie.' });
+    festungSystem = String((req.body && req.body.festungSystem) || '');
+    const festungId = String((req.body && req.body.festungId) || '');
+    if (!festungSystem || astGuertelSysteme().indexOf(festungSystem) < 0) return res.status(404).json({ error: 'Dieses System trägt keinen Asteroidengürtel.' });
+    const feldF = astAlleFelder().felder[festungSystem];
+    festungZiel = feldF && feldF.festung;
+    if (!festungZiel || (festungId && festungZiel.id !== festungId)) return res.status(404).json({ error: 'Diese Festung gibt es nicht (mehr).' });
+    festungWahl = String((req.body && req.body.festungZiel) || 'kern');
+    if (festungWahl !== 'kern' && !FESTUNG_BAUTEILE[festungWahl]) return res.status(400).json({ error: 'Unbekanntes Bauteil als Ziel.' });
+  }
+
+  if (!istPve) {
   const targetBaseRaw = db.shared['alliance:' + targetTag + ':base'];
   let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
   if (!targetBase || !targetBase.foundedAt) return res.status(404).json({ error: 'Die Allianz [' + targetTag + '] hat keine (auffindbare) Allianzbasis.' });
@@ -8558,6 +8593,11 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     nestVolk: nestZiel ? nestZiel.volk : null,
     nestVolkName: nestZiel ? ((ALIEN_VOELKER[nestZiel.volk] || {}).name || nestZiel.volk) : null,
     nestStufeName: nestZiel ? nestStufe(nestZiel.stufe).name : null,
+    festungId: festungZiel ? festungZiel.id : null,
+    festungSystem: festungZiel ? festungSystem : null,
+    festungStufe: festungZiel ? festungZiel.stufe : null,
+    festungStufeName: festungZiel ? ((FESTUNG_STUFEN[festungZiel.stufe] || FESTUNG_STUFEN.schanze).name) : null,
+    festungZiel: festungZiel ? festungWahl : null,
     message: String(message || '').replace(/[<>]/g, '').slice(0, 140),
     createdAt: now, museterEndsAt: now + gatherSeconds * 1000,
     phase: 'gathering', dispatch: null, result: null
@@ -8684,10 +8724,12 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
   const myBaseRaw = db.shared['alliance:' + tag + ':base'];
   let myBase = null; try { myBase = myBaseRaw ? JSON.parse(myBaseRaw) : null; } catch (e) {}
   let sameSys;
-  if (doc.zielArt === 'alien-nest') {
-    // Dieselbe Regel wie bei einer fremden Basis, nur mit dem SYSTEM des Nestes als Gegenstueck:
-    // gleicher Sektor = kurzer Anflug. Eine zweite Entfernungsrechnung waere eine zweite Wahrheit.
-    sameSys = !!(myBase && doc.nestSystem && myBase.sector === doc.nestSystem);
+  if (musterIstPveZiel(doc.zielArt)) {
+    // Dieselbe Regel wie bei einer fremden Basis, nur mit dem SYSTEM des Nestes bzw. der Festung
+    // als Gegenstueck: gleicher Sektor = kurzer Anflug. Eine zweite Entfernungsrechnung waere
+    // eine zweite Wahrheit.
+    const pveSystem = doc.zielArt === 'festung' ? doc.festungSystem : doc.nestSystem;
+    sameSys = !!(myBase && pveSystem && myBase.sector === pveSystem);
   } else {
     const targetBaseRaw = db.shared['alliance:' + doc.targetTag + ':base'];
     let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
@@ -8710,9 +8752,10 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
   };
   doc.phase = 'enroute';
   setMusterAttackDoc(tag, doc);
-  // Ein Nest wird nicht gewarnt - es gibt keinen Verteidiger, der ein incomingmuster-Dokument
-  // lesen koennte, und ein Eintrag unter `alliance:null:incomingmuster` waere schlicht Muell.
-  if (doc.zielArt !== 'alien-nest') {
+  // Ein Nest oder eine Festung wird nicht gewarnt - es gibt keinen Verteidiger, der ein
+  // incomingmuster-Dokument lesen koennte, und ein Eintrag unter `alliance:null:incomingmuster`
+  // waere schlicht Muell.
+  if (!musterIstPveZiel(doc.zielArt)) {
     db.shared['alliance:' + doc.targetTag + ':incomingmuster'] = JSON.stringify({
       attackerTag: tag, musterAttackId: doc.id, phase: 'enroute', dispatchedAt: now,
       arrivalAt: doc.dispatch.arrivalAt, lastAttackAt: now, totalShips, resolvedAt: null
@@ -8743,7 +8786,8 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
      Nest-Verbandsangriff aufloesen. Ein Nest hat keinen Verteidiger; also gibt es hier auch
      keine Verteidiger-Rolle zu pruefen. */
   const istNestZiel = !!(doc && doc.zielArt === 'alien-nest');
-  const myRoleDefender = (doc && !istNestZiel) ? allianceRoleOf(doc.targetTag, req.userId) : null;
+  const istFestungZiel = !!(doc && doc.zielArt === 'festung');
+  const myRoleDefender = (doc && !musterIstPveZiel(doc.zielArt)) ? allianceRoleOf(doc.targetTag, req.userId) : null;
   if (!myRoleAttacker && !myRoleDefender) return res.status(403).json({ error: 'Nur Mitglieder der angreifenden oder verteidigenden Allianz.' });
 
   if (!doc || doc.phase !== 'enroute' || !doc.dispatch || doc.dispatch.arrivalAt > Date.now()) return res.json({ ok: true, doc });
@@ -8808,6 +8852,61 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
       ' kraft=' + doc.dispatch.totalPower + ' schaden=' + erg.schaden +
       ' lp=' + (erg.gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax +
       (erg.schwarmGefallen ? ' SCHWARM ZERFALLEN (+' + erg.mitgerissen + ')' : ''));
+    await saveDb();
+    return res.json({ ok: true, doc });
+  }
+
+  if (istFestungZiel) {
+    /* Der Verband gegen eine Asteroidenfestung (01.09.2026). Gebaut nach dem Nest-Zweig darueber
+       und ueber DENSELBEN Rechenkern wie der Einzelangriff (festungSchlagAusfuehren) - eine
+       zweite Kopie der Rechnung waere die uebliche zweite Wahrheit. Marken uebergibt der Verband
+       als null: Werftmarken sind personengebunden, eine Summe aus zehn Flotten hat keine. */
+    const jetzt = Date.now();
+    const { felder } = astAlleFelder();          // reift den Hort auf den Stand dieser Sekunde
+    const feld = felder[doc.festungSystem];
+    const fest = feld && feld.festung;
+    if (!fest || (doc.festungId && fest.id !== doc.festungId)) {
+      doc.phase = 'resolved';
+      doc.result = { festung: true, verpasst: true, grund: 'gefallen', system: doc.festungSystem,
+        stufeName: doc.festungStufeName || null, success: false, destroyed: false, damage: 0,
+        defensePower: 0, ownLossPct: 0, resolvedAt: jetzt };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+    const rohF = doc.dispatch.participants;
+    const beteiligteF = (Array.isArray(rohF) && rohF.length)
+      ? rohF.map(p => ({ userId: p.id, name: p.name || 'Kommandant', gewicht: p.power || 0 }))
+      : (doc.dispatch.participantIds || []).map(id => ({ userId: id, name: 'Kommandant', gewicht: 1 }));
+    if (!beteiligteF.length) {
+      doc.phase = 'resolved';
+      doc.result = { festung: true, noParticipants: true, success: false, destroyed: false, damage: 0,
+        defensePower: 0, ownLossPct: 0, resolvedAt: jetzt };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+    const ergF = festungSchlagAusfuehren(feld, fest, doc.festungSystem, doc.dispatch.totalPower,
+      doc.dispatch.totalComposition || {}, beteiligteF, jetzt, doc.festungZiel || 'kern', null);
+    db.shared[astFeldKey(doc.festungSystem)] = feld;
+    doc.phase = 'resolved';
+    doc.result = {
+      festung: true, verpasst: false,
+      stufeName: ergF.stufeName, system: doc.festungSystem,
+      damage: ergF.schaden, teilSchaden: ergF.teilSchaden, ziel: ergF.ziel, zerstoert: ergF.zerstoert,
+      rollenFaktor: ergF.rollenFaktor,
+      destroyed: ergF.gefallen, success: (ergF.schaden + ergF.teilSchaden) > 0,
+      kern: ergF.kern, kernMax: ergF.kernMax, bauteile: ergF.bauteile,
+      ownLossPct: Math.round(ergF.quote * 1000) / 1000,
+      defensePower: 0, chancePct: null,
+      teilnehmer: ergF.teilnehmer,
+      belohnungUeberPendingRewards: true,
+      resolvedAt: jetzt
+    };
+    setMusterAttackDoc(tag, doc);
+    console.log('[muster-festung] tag=' + tag + ' sys=' + doc.festungSystem + ' teilnehmer=' + beteiligteF.length +
+      ' kraft=' + doc.dispatch.totalPower + ' ziel=' + ergF.ziel + ' kernschaden=' + ergF.schaden +
+      ' teilschaden=' + ergF.teilSchaden + ' kern=' + (ergF.gefallen ? 'gefallen' : ergF.kern) + '/' + ergF.kernMax);
     await saveDb();
     return res.json({ ok: true, doc });
   }
@@ -8934,11 +9033,12 @@ app.post('/api/musterattack/claim', authMiddleware, async (req, res) => {
     return res.json({ ok: true, noParticipants: true, saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
   }
 
-  if (res_.nest) {
-    /* Bei einem Nest gibt claim NUR die Schiffe zurueck. Die eigentliche Belohnung liegt anteilig
-       in __pendingRewards (siehe Kommentar im Ergebnis) - sie hier ein zweites Mal auszuzahlen
-       waere eine Doppelzahlung fuer dasselbe Ereignis. Bei `verpasst` ist die Quote 0, der Verband
-       kommt also vollzaehlig heim: Das Nest war nicht da, das ist kein Fehler des Spielers. */
+  if (res_.nest || res_.festung) {
+    /* Bei einem Nest oder einer Festung gibt claim NUR die Schiffe zurueck. Die eigentliche
+       Belohnung liegt anteilig in __pendingRewards (siehe Kommentar im Ergebnis) - sie hier ein
+       zweites Mal auszuzahlen waere eine Doppelzahlung fuer dasselbe Ereignis. Bei `verpasst` ist
+       die Quote 0, der Verband kommt also vollzaehlig heim: Das Ziel war nicht da, das ist kein
+       Fehler des Spielers. */
     const verloren = {};
     if (fleetObj) {
       for (const [k, sentCount] of Object.entries(join.composition || {})) {
@@ -8953,9 +9053,11 @@ app.post('/api/musterattack/claim', authMiddleware, async (req, res) => {
     db.shared[joinKey] = JSON.stringify(join);
     const nestSaveVersion = setSaveValue(req.userId, JSON.stringify(save));
     await saveDb();
-    return res.json({ ok: true, nest: true, verpasst: !!res_.verpasst, grund: res_.grund || null,
+    return res.json({ ok: true, nest: !!res_.nest, festung: !!res_.festung, pve: true,
+      verpasst: !!res_.verpasst, grund: res_.grund || null,
       destroyed: !!res_.destroyed, damage: res_.damage || 0, volkName: res_.volkName || null,
       stufeName: res_.stufeName || null, lostShips: verloren,
+      teilSchaden: res_.teilSchaden || 0, ziel: res_.ziel || null, zerstoert: res_.zerstoert || null,
       belohnungUeberPendingRewards: true,
       saveVersion: nestSaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
   }
@@ -10535,6 +10637,79 @@ function astFindeAngriffsmission(save, missionId, sysId, platz) {
 // sie - dasselbe Muster wie bei /api/asteroid/mine. Der Halter erfährt seine Verluste über das
 // Felddokument, das ihm der nächste Feld-Abruf liefert. Damit entsteht das Wettrennen zwischen
 // Server-Schreibung und Client-Save gar nicht erst.
+/* Die Verteidigung einer stationierten Eskorte (01.09.2026). Bis hierher stand in der Anfechtung
+   `weightedFleetDefensePower(vork.eskorte, null) + fleetShieldSum(vork.eskorte, null)` - also OHNE
+   den Spielstand des Halters. Seine Werftmarken, seine Klassenmodule und seine Kampfforschung
+   zaehlten damit nicht, waehrend die Werft sie ihm anzeigt; und der Kommentar an der Vorschau des
+   Frontends behauptete das Gegenteil ("der Server rechnet mit Werftmarken, Modulen des Halters").
+   Der Halter hat einen Spielstand, und der liegt in db.private - er wird hier gelesen, genau wie
+   /api/attack den Spielstand des Verteidigers liest. Ein Halter ohne Spielstand (Konto geloescht)
+   faellt auf den alten Wert zurueck.
+   EINE Funktion fuer den Kampf UND die Vorschau (/api/asteroid/anfechtung-vorschau): Die Vorschau
+   darf keine zweite Zahl neben der echten sein (Punkt 6 der Checkliste im Frontend-Repo). */
+function astEskorteVerteidigung(vork) {
+  const eskorte = (vork && vork.eskorte) || {};
+  const halterSave = (vork && vork.halter) ? astLeseSave(vork.halter) : null;
+  const marks = halterSave ? halterSave.shipMarks : null;
+  return weightedFleetDefensePower(eskorte, marks, halterSave) + fleetShieldSum(eskorte, marks, halterSave);
+}
+/* Die Chance einer Anfechtung bei gegebenem Wurf - EINE Formel fuer Kampf und Vorschau. Der Wurf
+   liegt im Kampf zwischen 0,85 und 1,15; die Vorschau nennt deshalb die Spanne an beiden Enden
+   statt einer Zahl, die der Kampf dann "widerlegt". Deckel wie im PvP (AST_CHANCE_MIN/MAX). */
+function astAnfechtungChance(angriff, verteidigung, wurf) {
+  return Math.max(AST_CHANCE_MIN, Math.min(AST_CHANCE_MAX, (angriff * wurf) / (angriff * wurf + Math.max(1, verteidigung))));
+}
+/* Die Verlustanteile derselben Anfechtung - ebenfalls EINE Stelle fuer Kampf und Vorschau. */
+function astAnfechtungVerluste(angriff, verteidigung) {
+  return {
+    sieg: Math.min(0.5, verteidigung / Math.max(1, angriff) * 0.35),
+    niederlage: Math.min(0.85, 0.45 + verteidigung / Math.max(1, angriff) * 0.2),
+    gegnerBeiNiederlage: Math.min(0.6, angriff / Math.max(1, verteidigung) * 0.35)
+  };
+}
+/* Die Vorschau der Anfechtung (01.09.2026, Auftrag Sascha "Alle umsetzen"). Bis hierher zeigte die
+   Flottenwahl der Anfechtung bewusst KEINE Zahl - der Client kennt die Marken und Module des
+   Halters nicht und haette raten muessen. Der Server kennt beide Spielstaende und rechnet hier mit
+   GENAU den Funktionen, die der Kampf benutzt (astEskorteVerteidigung, astAnfechtungChance,
+   astAnfechtungVerluste). Die Zusammensetzung kommt fuer die VORSCHAU aus dem Request - das ist
+   unkritisch, weil daraus nichts gebucht wird; der KAMPF liest sie weiterhin ausschliesslich aus
+   der gespeicherten Mission. Dieselbe Arbeitsteilung wie GET /api/spieler-standorte, das die
+   Verteidigung eines fremden Standorts fuer die Zielwahl nennt. */
+app.post('/api/asteroid/anfechtung-vorschau', authMiddleware, (req, res) => {
+  const sysId = String((req.body && req.body.system) || '');
+  const platz = String((req.body && req.body.platz) !== undefined ? req.body.platz : '');
+  const roh = (req.body && req.body.composition && typeof req.body.composition === 'object') ? req.body.composition : null;
+  if (!sysId || !platz || !roh) return res.status(400).json({ error: 'System, Platz und Flotte fehlen.' });
+  if (astGuertelSysteme().indexOf(sysId) < 0) return res.status(400).json({ error: 'Dieses System trägt keinen Asteroidengürtel.' });
+  const { felder } = astAlleFelder();
+  const feld = felder[sysId];
+  const vork = feld && feld.plaetze && feld.plaetze[platz];
+  if (!vork || vork.frei) return res.status(409).json({ error: 'Dieses Vorkommen ist nicht mehr da.', weg: true });
+  if (!vork.halter) return res.status(409).json({ error: 'Dieses Vorkommen ist gar nicht reserviert - es lässt sich einfach abbauen.' });
+  if (vork.halter === req.userId) return res.status(400).json({ error: 'Das ist dein eigenes Schürfrecht.' });
+  const save = astLeseSave(req.userId);
+  if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern.' });
+  const composition = {};
+  for (const [k, v] of Object.entries(roh)) {
+    const n = Math.floor(Number(v));
+    if (Number.isFinite(n) && n > 0 && SHIP_ATK_VALUES[k] !== undefined) composition[k] = n;
+  }
+  const angriff = rawFleetPower(composition, 1, 1, save.shipMarks);
+  if (!(angriff > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
+  const verteidigung = astEskorteVerteidigung(vork);
+  const verluste = astAnfechtungVerluste(angriff, verteidigung);
+  const wache = Object.values(vork.eskorte || {}).reduce((a, b) => a + (typeof b === 'number' && b > 0 ? b : 0), 0);
+  res.json({
+    ok: true,
+    angriff: Math.round(angriff), verteidigung: Math.round(verteidigung), wache,
+    chanceMin: Math.round(astAnfechtungChance(angriff, verteidigung, 0.85) * 100),
+    chanceMax: Math.round(astAnfechtungChance(angriff, verteidigung, 1.15) * 100),
+    chance: Math.round(astAnfechtungChance(angriff, verteidigung, 1.0) * 100),
+    verlustSieg: Math.round(verluste.sieg * 100),
+    verlustNiederlage: Math.round(verluste.niederlage * 100),
+    schutzBis: vork.schutzBis || 0
+  });
+});
 app.post('/api/asteroid/contest', authMiddleware, async (req, res) => {
   const sysId = String((req.body && req.body.system) || '');
   const platz = String((req.body && req.body.platz) !== undefined ? req.body.platz : '');
@@ -10581,19 +10756,23 @@ app.post('/api/asteroid/contest', authMiddleware, async (req, res) => {
   }
 
   const angriff = rawFleetPower(mission.composition, 1, 1, save.shipMarks);
-  const verteidigung = weightedFleetDefensePower(vork.eskorte || {}, null) + fleetShieldSum(vork.eskorte || {}, null);
+  // MIT dem Spielstand des Halters (Marken, Module, Kampfforschung) - siehe astEskorteVerteidigung.
+  const verteidigung = astEskorteVerteidigung(vork);
   if (!(angriff > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
 
   // Zufallsband wie bei der Mondbelagerung, Deckel wie im PvP: Überzahl gewinnt meist, aber nie
-  // sicher - und ein unterlegener Angriff ist nicht von vornherein sinnlos.
+  // sicher - und ein unterlegener Angriff ist nicht von vornherein sinnlos. Die Formel steht in
+  // astAnfechtungChance, weil die Vorschau dieselbe benutzen muss.
   const wurf = 0.85 + Math.random() * 0.3;
-  const chance = Math.max(AST_CHANCE_MIN, Math.min(AST_CHANCE_MAX, (angriff * wurf) / (angriff * wurf + Math.max(1, verteidigung))));
+  const chance = astAnfechtungChance(angriff, verteidigung, wurf);
   const gewonnen = Math.random() < chance;
 
   // Verluste: der Verlierer trägt schwerer. Anteilig auf beide Seiten, damit auch ein gewonnener
-  // Angriff etwas kostet - sonst wäre eine Übermacht ein Freifahrtschein.
-  const eigenerVerlustAnteil = gewonnen ? Math.min(0.5, verteidigung / Math.max(1, angriff) * 0.35) : Math.min(0.85, 0.45 + verteidigung / Math.max(1, angriff) * 0.2);
-  const gegnerVerlustAnteil = gewonnen ? 1 : Math.min(0.6, angriff / Math.max(1, verteidigung) * 0.35);
+  // Angriff etwas kostet - sonst wäre eine Übermacht ein Freifahrtschein. Eine Stelle fuer Kampf
+  // und Vorschau: astAnfechtungVerluste.
+  const verlustAnteile = astAnfechtungVerluste(angriff, verteidigung);
+  const eigenerVerlustAnteil = gewonnen ? verlustAnteile.sieg : verlustAnteile.niederlage;
+  const gegnerVerlustAnteil = gewonnen ? 1 : verlustAnteile.gegnerBeiNiederlage;
 
   const gegnerVerluste = {};
   const neueEskorte = {};
@@ -11408,29 +11587,80 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Deine Flotte ist noch unterwegs.', unterwegs: true });
   }
 
-  const st = FESTUNG_STUFEN[fest.stufe] || FESTUNG_STUFEN.schanze;
   // Dritter Parameter 0: Der Weltboss-Schwaechenbonus gilt hier nicht - eine Festung hat keinen
   // Archetyp.
   const kraft = computeAttackPowerFromComposition(save, mission.composition, 0);
   if (!(kraft > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
-  const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4));
 
   /* ZIELWAHL (Phase 2). Sie steht in der MISSION, nicht im Request - genau wie der
      Gefechtsvorrat und aus demselben Grund: /api/festung/angriff nimmt keinen einzigen
-     Kampfparameter aus dem Body entgegen, das ist eine Eigenschaft dieses Endpunkts.
-     Ist das gewaehlte Bauteil schon zerstoert (ein Mitstreiter war schneller), geht der Schaden
+     Kampfparameter aus dem Body entgegen, das ist eine Eigenschaft dieses Endpunkts. */
+  const erg = festungSchlagAusfuehren(feld, fest, sysId, kraft, mission.composition,
+    [{ userId: req.userId, name: req.username || 'Kommandant', gewicht: 1 }], jetzt, mission.ziel, save.shipMarks);
+  // Reaktionszeit: nur beim ERSTEN Schlag dieses Kontos auf diese Festung (`letzter` ist dann
+  // 0). Danach misst die Differenz nur noch die Abklingzeit, nicht die Aufmerksamkeit.
+  if (!letzter && fest.seit) reaktionVermerken(findUserById(req.userId), 'festung', (jetzt - fest.seit) / 1000);
+  fest.abgerechnet[missionId] = jetzt;
+
+  // Aus der Quote werden hier - und NUR hier - konkrete Verluste (der Einzelangreifer hat genau
+  // eine Zusammensetzung; der Verband bekommt die Quote selbst, siehe /api/musterattack/resolve).
+  const eigeneVerluste = {};
+  for (const [typ, n] of Object.entries(mission.composition)) {
+    if (typeof n !== 'number' || n <= 0) continue;
+    const weg = Math.min(n, Math.round(n * erg.quote));
+    if (weg > 0) eigeneVerluste[typ] = weg;
+  }
+  db.shared[astFeldKey(sysId)] = feld;
+
+  console.log('[festung-angriff] userId=' + req.userId + ' sys=' + sysId + ' stufe=' + erg.stufeName +
+    ' ziel=' + erg.ziel + ' rolle=' + erg.rollenFaktor.toFixed(2) +
+    ' kernschaden=' + erg.schaden + ' teilschaden=' + erg.teilSchaden + (erg.zerstoert ? ' ZERSTOERT:' + erg.zerstoert : '') +
+    ' kern=' + (erg.gefallen ? 'gefallen' : erg.kern) + '/' + erg.kernMax);
+  await saveDb();
+  res.json({
+    ok: true, schaden: erg.schaden, teilSchaden: erg.teilSchaden, ziel: erg.ziel, zerstoert: erg.zerstoert,
+    rollenFaktor: Math.round(erg.rollenFaktor * 100) / 100,
+    bauteile: erg.bauteile,
+    gefallen: erg.gefallen, eigeneVerluste,
+    kern: erg.kern, kernMax: erg.kernMax,
+    stufe: erg.stufe, stufeName: erg.stufeName,
+    anteil: erg.gefallen ? Math.round((erg.anteile[req.userId] || 0) * 1000) / 1000 : 0,
+    teilnehmer: erg.teilnehmer,
+    naechsterSchlagAb: jetzt + FESTUNG_ABKLING_MS
+  });
+});
+
+/* DER GEMEINSAME KERN EINES FESTUNGSSCHLAGS (01.09.2026). Zwei Wege fuehren hierher: der
+   Einzelangriff (/api/festung/angriff, oben) und der koordinierte Verbandsangriff
+   (/api/musterattack/resolve, zielArt 'festung') - dieselbe Konstruktion wie
+   nestSchlagAusfuehren, und aus demselben Grund: Eine zweite Kopie der Rechnung waere die
+   uebliche zweite Wahrheit.
+   Rein geht die KRAFT (ein Verband hat keinen einen Spielstand), raus kommen die Verluste als
+   QUOTE (der Server schreibt keine fremden Spielstaende). `beteiligte` ist
+   [{ userId, name, gewicht }] - beim Einzelangriff ein Eintrag mit Gewicht 1; beim Verband alle
+   Teilnehmer nach ihrer beim Beitritt gemessenen Kraft, damit der Hortanteil nicht an dem haengt,
+   wer zufaellig ausloest, und ALLE die Abklingzeit bekommen (sonst schlaegt man im Verband zu
+   und danach noch einmal allein). `marks` sind die Werftmarken des Einzelangreifers fuer den
+   Rollenanteil; ein Verband uebergibt null (Marken sind personengebunden).
+   DER EINZELWEG IST BYTE-GLEICH ZU VORHER: Mit einem Beteiligten (Gewicht 1) ist jeder Anteil
+   exakt 1, und jede Zeile steht an derselben Stelle wie im alten Rumpf des Endpunkts -
+   tests/test_festung_http.js und tests/test_festung_bauteile_http.js messen das. */
+function festungSchlagAusfuehren(feld, fest, sysId, kraft, composition, beteiligte, jetzt, zielWunsch, marks) {
+  const st = FESTUNG_STUFEN[fest.stufe] || FESTUNG_STUFEN.schanze;
+  const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4));
+
+  /* Ist das gewaehlte Bauteil schon zerstoert (ein Mitstreiter war schneller), geht der Schaden
      OHNE Rollenfaktor auf den Kern: Die Flotte wird nicht dafuer bestraft, dass jemand anders
      schneller war - aber sie bekommt auch nicht den Bonus fuer ein Ziel, das sie nicht trifft. */
-  let ziel = String(mission.ziel || 'kern');
+  let ziel = String(zielWunsch || 'kern');
   if (ziel !== 'kern' && !festungTeilSteht(fest, ziel)) ziel = 'kern-ersatz';
 
   let schaden = 0, teilSchaden = 0, zerstoert = null, rollenFaktor = 1;
-  const marks = save.shipMarks;
   const kernVorher = fest.kern;
 
   if (ziel === 'schild' || ziel === 'tuerme') {
     const spec = FESTUNG_BAUTEILE[ziel];
-    rollenFaktor = festungRollenFaktor(mission.composition, spec, marks);
+    rollenFaktor = festungRollenFaktor(composition, spec, marks);
     const teil = fest.bauteile[ziel];
     const vorher = teil.lp || 0;
     teil.lp = Math.max(0, vorher - Math.round(wurf * rollenFaktor));
@@ -11438,7 +11668,7 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
     if (teil.lp <= 0 && vorher > 0) zerstoert = ziel;
   } else {
     // Auf den Kern - mit Rollenfaktor, ausser das Ersatzziel greift.
-    rollenFaktor = ziel === 'kern' ? festungRollenFaktor(mission.composition, FESTUNG_KERN_ROLLE, marks) : 1;
+    rollenFaktor = ziel === 'kern' ? festungRollenFaktor(composition, FESTUNG_KERN_ROLLE, marks) : 1;
     // Solange die Schildkuppel steht, kommt nur ein Bruchteil durch. DAS ist ihr Zweck, und
     // deshalb lohnt der Umweg ueber sie (Rechnung im Kommentar bei FESTUNG_BAUTEILE).
     const durchlass = festungTeilSteht(fest, 'schild') ? FESTUNG_BAUTEILE.schild.kernDurchlass : 1;
@@ -11447,37 +11677,32 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
   }
 
   fest.beitraege = fest.beitraege || {};
-  const mein = fest.beitraege[req.userId] || { name: req.username || 'Kommandant', schaden: 0 };
+  fest.schlaege = fest.schlaege || {};
   /* Schaden an Schild und Tuermen zaehlt zu 60 % auf den Hortanteil. Ohne diesen Ausgleich wuerde
      niemand den Schild angreifen - die Arbeit nuetzt dem VERBAND, nicht dem eigenen Zaehler.
      Gewichtet, nicht voll: Wer den Kern zerlegt, hat die Festung gestuerzt; wer den Schild
      gebrochen hat, hat es ermoeglicht. Beides zaehlt, nicht gleich viel. */
-  mein.schaden = (mein.schaden || 0) + schaden + Math.round(teilSchaden * FESTUNG_BAUTEIL_BEITRAG);
-  mein.name = req.username || mein.name;
-  fest.beitraege[req.userId] = mein;
-  // Reaktionszeit: nur beim ERSTEN Schlag dieses Kontos auf diese Festung (`letzter` ist dann
-  // 0). Danach misst die Differenz nur noch die Abklingzeit, nicht die Aufmerksamkeit.
-  if (!letzter && fest.seit) reaktionVermerken(findUserById(req.userId), 'festung', (jetzt - fest.seit) / 1000);
-  fest.schlaege[req.userId] = jetzt;
-  fest.abgerechnet[missionId] = jetzt;
+  const beitrag = schaden + Math.round(teilSchaden * FESTUNG_BAUTEIL_BEITRAG);
+  const gewichtSumme = beteiligte.reduce((a, b) => a + (b.gewicht > 0 ? b.gewicht : 0), 0) || 1;
+  for (const t of beteiligte) {
+    const anteil = (t.gewicht > 0 ? t.gewicht : 0) / gewichtSumme;
+    const b = fest.beitraege[t.userId] || { name: t.name || 'Kommandant', schaden: 0 };
+    b.schaden = (b.schaden || 0) + beitrag * anteil;
+    b.name = t.name || b.name;
+    fest.beitraege[t.userId] = b;
+    fest.schlaege[t.userId] = jetzt;
+  }
 
-  // Die Festung schiesst zurueck. Anteilig auf die LOSGESCHICKTE Zusammensetzung; abgebucht wird
-  // im Client, deshalb steht hier nur die Liste.
-  /* Stehen die Geschuetztuerme, kostet der Anflug ein Vielfaches. Das ist ihr Zweck und der
-     Grund, warum es sich lohnt, sie zuerst zu brechen: Der Wert, den man sich damit erkauft,
-     ist der ganze Sinn der Bauteile. Der 50-%-Deckel bleibt aussen. */
+  // Die Festung schiesst zurueck - als QUOTE. Stehen die Geschuetztuerme, kostet der Anflug ein
+  // Vielfaches. Das ist ihr Zweck und der Grund, warum es sich lohnt, sie zuerst zu brechen: Der
+  // Wert, den man sich damit erkauft, ist der ganze Sinn der Bauteile. Der 50-%-Deckel bleibt aussen.
   const quote = Math.min(0.5, (festungTeilSteht(fest, 'tuerme')
     ? FESTUNG_BAUTEILE.tuerme.verlustQuote
     : st.verlust) + Math.random() * 0.06);
-  const eigeneVerluste = {};
-  for (const [typ, n] of Object.entries(mission.composition)) {
-    if (typeof n !== 'number' || n <= 0) continue;
-    const weg = Math.min(n, Math.round(n * quote));
-    if (weg > 0) eigeneVerluste[typ] = weg;
-  }
 
   const gefallen = fest.kern <= 0;
-  let meinAnteil = 0, teilnehmer = 0;
+  const anteile = {};
+  let teilnehmer = 0;
   if (gefallen) {
     /* Ausschuettung an ALLE Beitragenden - auch an den, der gerade anfragt. Bewusst EIN Weg fuer
        alle statt "die anderen ueber die Warteschlange, ich ueber die Antwort": Zwei Wege waeren
@@ -11493,7 +11718,7 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
       const anteil = (b.schaden || 0) / summe;
       if (!(anteil > 0)) continue;
       teilnehmer++;
-      if (uid === req.userId) meinAnteil = anteil;
+      anteile[uid] = anteil;
       pveKillZaehlen(uid, 'festungen');          // Meilenstein-Emblem, Phase 6
       // Etappe B: ein Boss-Set-Teil kann hier fallen. Der Wurf liegt beim SERVER (wie im Raid),
       // der Client zieht daraus nur den Typ - das Herkunfts-Schloss bleibt damit unberuehrt.
@@ -11515,13 +11740,6 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
       Math.round(FESTUNG_GERAEUMT_MS / 3600000) + ' Stunden lang frei, der Abbau dort um ' +
       Math.round(FESTUNG_GERAEUMT_BONUS * 100) + ' % ergiebiger.');
   }
-  db.shared[astFeldKey(sysId)] = feld;
-
-  console.log('[festung-angriff] userId=' + req.userId + ' sys=' + sysId + ' stufe=' + st.name +
-    ' ziel=' + ziel + ' rolle=' + rollenFaktor.toFixed(2) +
-    ' kernschaden=' + schaden + ' teilschaden=' + teilSchaden + (zerstoert ? ' ZERSTOERT:' + zerstoert : '') +
-    ' kern=' + (gefallen ? 'gefallen' : fest.kern) + '/' + st.kern);
-  await saveDb();
   // Der Zustand der Bauteile reist MIT - das Frontend zeigt daraus die Balken und weiss, welche
   // Ziele es ueberhaupt anbieten darf. Ein Client, der das Feld nicht kennt, ignoriert es.
   const bauteileAus = {};
@@ -11529,18 +11747,14 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
     const t = fest.bauteile && fest.bauteile[k];
     if (t) bauteileAus[k] = { lp: Math.max(0, Math.round(t.lp || 0)), lpMax: t.lpMax || 0 };
   }
-  res.json({
-    ok: true, schaden, teilSchaden, ziel, zerstoert,
-    rollenFaktor: Math.round(rollenFaktor * 100) / 100,
-    bauteile: gefallen ? {} : bauteileAus,
-    gefallen, eigeneVerluste,
+  return {
+    wurf, schaden, teilSchaden, ziel, zerstoert, rollenFaktor, quote, gefallen, anteile,
+    teilnehmer: gefallen ? teilnehmer : Object.keys(fest.beitraege).length,
     kern: gefallen ? 0 : fest.kern, kernMax: st.kern,
     stufe: gefallen ? null : fest.stufe, stufeName: st.name,
-    anteil: gefallen ? Math.round(meinAnteil * 1000) / 1000 : 0,
-    teilnehmer: gefallen ? teilnehmer : Object.keys(fest.beitraege).length,
-    naechsterSchlagAb: jetzt + FESTUNG_ABKLING_MS
-  });
-});
+    bauteile: gefallen ? {} : bauteileAus
+  };
+}
 
 
 function nestFindeMission(save, missionId, nestId) {

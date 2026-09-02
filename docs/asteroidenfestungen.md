@@ -237,3 +237,38 @@ sind **Vergleiche zweier Schläge derselben Flotte**, nicht Blicke auf ein Feld:
 die Wirkung (Frontend-Arbeitsregel 61).
 
 
+
+## Der Verband gegen eine Asteroidenfestung (01.09.2026)
+
+Auftrag Sascha „Alle umsetzen". Der koordinierte Musterangriff kannte als Zielart nur `alien-nest`
+(Phase 5). Eine Sternenfeste braucht fünf Endspiel-Schläge bei sechs Stunden Abklingzeit, also zwei
+Tage allein – genau dafür ist ein Verband gedacht. Seither gibt es `zielArt: 'festung'` mit
+`festungSystem`, `festungId` und `festungZiel` (`kern` | `schild` | `tuerme`) im Request; unbekannte
+Zielarten und Bauteile werden mit 400 abgelehnt.
+
+**`festungSchlagAusfuehren(feld, fest, sysId, kraft, composition, beteiligte, jetzt, zielWunsch, marks)`
+ist seither der gemeinsame Kern** von `/api/festung/angriff` und dem Festungs-Zweig von
+`/api/musterattack/resolve` – dieselbe Konstruktion wie `nestSchlagAusfuehren`. Der Einzelweg ist
+byte-gleich zu vorher: Mit einem Beteiligten (Gewicht 1) ist jeder Anteil exakt 1, und jede Zeile
+steht an derselben Stelle wie im alten Rumpf; `test_festung_http.js` (35) und
+`test_festung_bauteile_http.js` (28) laufen unverändert grün. Der Verband übergibt `marks = null`
+(Werftmarken sind personengebunden, eine Summe aus zehn Flotten hat keine).
+
+**Drei Entscheidungen, alle aus dem Nest-Zweig übernommen:** Bei einer Festung wird der
+Verteidiger-Zweig von `resolve` nicht betreten (`musterIstPveZiel`; ein Nest wie eine Festung hat
+kein `targetTag`, und `allianceRoleOf` verkettet seinen Schlüssel zu `alliance:null:role:<uid>`).
+Kein `incomingmuster`-Dokument (niemand, der gewarnt werden könnte). `claim` gibt nur die Schiffe
+zurück – der Hort liegt anteilig in `__pendingRewards`, ausgezahlt vom Kern an ALLE Beitragenden
+nach ihrer beim Beitritt gemessenen Kraft, und alle bekommen die Abklingzeit.
+
+Wächter: `tests/test_muster_festung_http.js` (Port 3241, 35 Prüfungen). Drei Gegenproben, je mit
+Pflichtliste und identischer Prüfliste: `rechte` → 2c, `gewicht` → 4c und 4d, `claim` → 5a und 5b.
+**Die erste Fassung der Pflichtlisten nannte je nur eine Prüfung** – gemessen fallen bei `gewicht`
+auch die Abklingzeit (4d) und bei `claim` auch die Antwortfelder (5a). Eine Pflichtliste ist selbst
+eine Behauptung, bis die Gegenprobe sie gemessen hat.
+
+**Belegte Testports sind jetzt 3195–3200 und 3210–3241** – ein neuer Test nimmt 3242.
+
+**Die Auslieferungsreihenfolge ist gleichgültig:** Ohne das Frontend schickt niemand
+`zielArt: 'festung'`, und ohne dieses Backend antwortet `create` mit 400 „Unbekannte Zielart" – kein
+Zustand, in dem eine Zahl still falsch würde. Kein Schalter nötig.

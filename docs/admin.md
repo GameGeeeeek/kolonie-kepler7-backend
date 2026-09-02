@@ -592,3 +592,15 @@ Bestandstests ist gemessen: 14 Backend-Tests, die Rate-Limit, Save-Ablehnung, Be
 galaxyTick oder den Admin-Bereich berühren, laufen unverändert grün (`test_pvp_standorte_http` ist
 ein von Hand zu startender Test und zählt hier nicht).
 
+
+### Vierter Notaus-Schalter: `konvois` (02.09.2026)
+
+Beim Umlegen von `A2_SPAWN_AKTIV` gemessen: `A2Tick` las die **blanke Konstante**, nicht
+`spawnAktiv()` – der Admin-Notaus erreichte die Wrackkonvois nicht, obwohl `CLAUDE.md` den Schalter
+als admin-abschaltbar führte. Seither steht `konvois` in `NOTAUS_NAMEN` („Wrackkonvois entstehen,
+driften und entkommen"), `spawnAktivImCode('konvois')` liefert die Konstante, und `A2Tick` läuft
+über `spawnAktiv('konvois')` – der ganze Takt, wie bei `nestTick`; der Angriffs-Endpunkt hängt nicht
+am Schalter, bestehende Ziele bleiben angreifbar. Die Admin-Fläche im Frontend rendert die Liste
+datengetrieben aus `GET /api/admin/schalter`, der vierte Eintrag erscheint dort ohne Frontend-Änderung.
+Wächter: `test_admin_funktionen_http.js` 3a (vier Schalter) und 3d (vier Aufrufstellen).
+Einzelheiten zu A2 in `docs/wrackkonvois.md`.

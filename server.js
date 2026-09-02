@@ -10753,11 +10753,18 @@ function nestTick(g) {
        ist ('findbar'), praesent genug, dass es sich lohnt.
      - A2_VERLUST = 0,08: Grundverlust des Angreifers je Schlag, wie beim Nest.
 
-   A2_SPAWN_AKTIV STEHT AUF false - NOTAUSSCHALTER und Auslieferungs-Riegel (Regel 60): A2 wirft
-   ein Kampf-Modul-Set ab (Beute-Variante 3, PvP-relevant), also muss das Backend vor dem Frontend
-   live sein und der Schalter im Frontend-PR umgelegt werden. Solange er aus ist, kehrt A2Tick in
-   Zeile 1 zurueck und der ganze Abschnitt tut nichts. */
-const A2_SPAWN_AKTIV = false;
+   A2_SPAWN_AKTIV STEHT SEIT DEM 02.09.2026 AUF true - das Frontend ist ausgeliefert (v8.625.0:
+   Kartenknoten, Kartenmenue, Mission konvoi-angriff, Bericht, Belohnungszweig wrackkonvoi, beide
+   Module mit quelle:'konvoi'). Damit ist die Bedingung erfuellt, unter der er auf false stehen
+   musste: A2 wirft ein Kampf-Modul-Set ab (Beute-Variante 3, PvP-relevant), also musste das
+   Backend VOR dem Frontend live sein (Regel 60) und der Schalter erst danach kippen.
+   Der Schalter bleibt trotzdem stehen - als NOTAUSSCHALTER, aus demselben Grund wie
+   FESTUNG_SPAWN_AKTIV und NEST_SPAWN_AKTIV: eine Zeile umzulegen ist schneller und sicherer als
+   ein Merge zurueckzunehmen, Endpunkte und Tests bleiben unangetastet. Steht er aus, kehrt A2Tick
+   in Zeile 1 zurueck und es entsteht kein neues Ziel. test_A2_http.js Abschnitt 9 prueft jetzt,
+   dass er auf true steht - ein Wechsel auf false ist damit eine bewusste Notabschaltung, die
+   auffaellt statt still zu geschehen, und ihr Grund gehoert nach docs/wrackkonvois.md. */
+const A2_SPAWN_AKTIV = true;
 const A2_ART = 'wrackkonvoi';
 const A2_ART_NAME = 'Wrackkonvoi';
 const A2_LP = 40000;
@@ -10834,7 +10841,12 @@ function a2Neu(g, sysId, now) {
    Galaxie (es entsteht, driftet, entkommt), und diese Ereignisse gehoeren in den Weltentakt.
    Drei Zweige; der Endpunkt (Angriff, Fall) ist Task 2 und lebt woanders. */
 function A2Tick(g) {
-  if (!A2_SPAWN_AKTIV) return;
+  // spawnAktiv() statt der blanken Konstante: Damit greift zusaetzlich die Notabschaltung ueber
+  // db.notAus (POST /api/admin/schalter, ohne Deploy) - wie bei nestTick. Sie haelt den GANZEN Takt
+  // an (kein Entstehen, kein Driften, kein Entkommen); bestehende Ziele bleiben ueber den Endpunkt
+  // angreifbar, der nicht am Schalter haengt. Bis zum 02.09.2026 las diese Zeile die Konstante
+  // direkt - der Admin-Notaus erreichte A2 nicht, obwohl CLAUDE.md ihn dafuer fuehrte.
+  if (!spawnAktiv('konvois')) return;
   const now = Date.now();
   const liste = a2Liste(g);
 
@@ -12494,7 +12506,8 @@ app.get('/api/admin/feedback/bild/:id', authMiddleware, (req, res) => {
 const NOTAUS_NAMEN = {
   festung:  'Asteroidenfestungen entstehen',
   bauteile: 'Neue Festungen bekommen Schild und Tuerme',
-  nester:   'Alien-Nester entstehen, reifen und wandern'
+  nester:   'Alien-Nester entstehen, reifen und wandern',
+  konvois:  'Wrackkonvois entstehen, driften und entkommen'
 };
 function notAusGesetzt(name) {
   return !!(db.notAus && db.notAus[name] && db.notAus[name].aus === true);
@@ -12529,6 +12542,7 @@ function spawnAktivImCode(name) {
   if (name === 'festung') return FESTUNG_SPAWN_AKTIV;
   if (name === 'bauteile') return FESTUNG_BAUTEILE_AKTIV;
   if (name === 'nester') return NEST_SPAWN_AKTIV;
+  if (name === 'konvois') return A2_SPAWN_AKTIV;
   return false;
 }
 

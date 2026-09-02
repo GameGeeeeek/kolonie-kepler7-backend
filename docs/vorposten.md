@@ -221,3 +221,37 @@ Wächter: `tests/test_vorposten_http.js` – 1c/1c2/1c3 prüfen die Leiter als *
 streng steigend, Zweige vollständig) statt der alten Momentaufnahme „drei Stufen"; 7e–7h die
 Zweigwahl. Zwei neue Sabotagen mit gemessener Pflichtliste: `zweigwahl` → 7e 7f 7g 7h,
 `zweigwerte` → nur 7g (die Wahl greift, die Multiplikatoren wirken nicht – der stille Fall).
+
+## Etappe 3: Stationsmodule (02.09.2026)
+
+Auftrag Sascha: „Man soll Module finden können, die selten sind – die sind natürlich am besten,
+random natürlich. Und man soll auch Module bauen können, die sind aber weniger gut. Die kann man
+ausbauen, kostet aber eine Kleinigkeit."
+
+**Warum der Server das führt.** Ein Stationsmodul erhöht die **Verteidigung eines PvP-Ziels**. Läge
+der Bestand im klientenautoritativen Spielstand, könnte sich jeder beliebig viele legendäre Module
+ausstellen. Deshalb: Bestand am Nutzerobjekt (`user.vpModule`), eingebaute Module im Dokument
+(`doc.module`), und Fund, Bau, Einbau, Ausbau ausschließlich über Endpunkte.
+
+| | woher | Seltenheit | Kosten |
+|---|---|---|---|
+| **Fund** | Fall von Festung und Nest, gewichtet nach Schwere und eigenem Anteil | bis legendär | – |
+| **Bau** | `POST /api/vorposten/modul/bauen` | nur bis ungewöhnlich | Abklingzeit 6 h je Konto |
+| **Ausbau** | `POST /api/vorposten/modul/ausbauen` | – | 250 Kredite, Modul kommt heil zurück |
+
+Sechs Module (Kernpanzerung, Geschützbank, Hangarerweiterung, Sprungrechner, Umlaufraffinerie,
+Horchposten) wirken ausschließlich auf Kanäle, die es **schon gibt** — Kern, Verteidigung, Garnison,
+Flug, Produktion, Aufklärung. Steckplätze: einer je Stufe ab der Wahlstufe, höchstens fünf. Die
+Steckplätze **sind** der Deckel; ein zusätzlicher Deckel je Kanal wäre doppelt.
+
+**`vorpostenWerte(doc)` ist die eine Stelle**, die Stufe und Module zusammensetzt. Alles, was Werte
+liest (Verteidigung, Garnisonsgrenze, Kern beim Ausbau, Client-Sicht), geht hindurch — sonst wäre
+ein Modul an einer Anzeige wirksam und an der anderen nicht. Zwei Entscheidungen daneben: Der
+**Kern-Ausbau** rechnet **mit** Modulen (sonst schrumpfte das Maximum, sobald eine Kernpanzerung
+steckt), die **Beute beim Fall** rechnet **ohne** (sonst machte sich zur besseren Beute, wer
+ausbaut).
+
+Wächter: `tests/test_vorposten_http.js` Abschnitt 9 (12 Prüfungen) plus zwei Sabotagen mit
+**gemessener** Pflichtliste: `modulbestand` → 9e 9e2 9h, `modulwirkung` → 9f. Die erste Vorhersage
+für `modulbestand` nannte 9d — falsch: Der Einbau gelingt ohne Abbuchung weiter, rot werden nur die
+Prüfungen, die den Bestand selbst lesen.

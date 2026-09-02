@@ -43,7 +43,11 @@ const SAB = process.env.KEPLER_VP_SABOTAGE || '';
 // Zweig-Sabotagen stammen aus dem Lauf vom 02.09.2026: 'zweigwahl' 7e 7f 7g 7h, 'zweigwerte' nur 7g
 // (die Wahl greift dort weiter, nur die Multiplikatoren wirken nicht - genau der stille Fall).
 const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a'], typ: ['5b'], meldung: ['4h', '4h2'],
-  zweigwahl: ['7e', '7f', '7g', '7h'], zweigwerte: ['7g'] };
+  zweigwahl: ['7e', '7f', '7g', '7h'], zweigwerte: ['7g'],
+  // Etappe 3 (Stationsmodule): Die Listen sind gemessen, siehe Abschnitt 9.
+  // GEMESSEN, nicht geschaetzt: Bei 'modulbestand' faellt 9d NICHT - der Einbau gelingt ja weiter,
+  // er bucht nur nichts ab. Rot werden die drei Pruefungen, die den Bestand SELBST lesen.
+  modulbestand: ['9e', '9e2', '9h'], modulwirkung: ['9f'] };
 
 let fail = false;
 const ergebnis = {};
@@ -190,6 +194,10 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     // und die WIRKUNG der Multiplikatoren. Beide zusammen waeren eine Sabotage, die zu viel trifft.
     else if (SAB === 'zweigwahl') geflippt = geflippt.replace('  const brauchtZweig = zielStufe === VORPOSTEN_ZWEIG_AB && !vorpostenZweigOk(doc.zweig);', '  const brauchtZweig = false;');
     else if (SAB === 'zweigwerte') geflippt = geflippt.replace('  if (!z || basis.stufe < VORPOSTEN_ZWEIG_AB) return basis;', '  return basis;');
+    // Stationsmodule (02.09.2026), zwei Haelften: der BESTAND (nimmt der Einbau wirklich eines weg?)
+    // und die WIRKUNG (aendert ein eingebautes Modul die Werte?).
+    else if (SAB === 'modulbestand') geflippt = geflippt.replace('  if (!user || !vpModulNehmen(user, instKey)) return res.status(400)', '  if (!user) return res.status(400)');
+    else if (SAB === 'modulwirkung') geflippt = geflippt.replace('  const b = vpModulBoni(doc);', '  const b = { kern:0, verteidigung:0, garnison:0, flug:0, prod:0, scan:0 };');
     else { console.log('unbekannte Sabotage: ' + SAB); process.exit(2); }
     check('0-sab: die Sabotage "' + SAB + '" hat den Quelltext veraendert', geflippt !== vorher, { veraendert: geflippt !== vorher });
   }
@@ -405,6 +413,64 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
       /vorposten:\s*'Neue Vorposten werden errichtet'/.test(roh) && roh.includes("if (name === 'vorposten') return VORPOSTEN_AKTIV;") && roh.includes("if (!spawnAktiv('vorposten'))"));
     check('8d: BEIDE Rechte-Ketten der Storage-Route kennen checkVorpostenKeyPermission',
       roh.includes('checkVorpostenKeyPermission(req, key, false)') && roh.includes('checkVorpostenKeyPermission(req, key, true)'));
+  }
+
+  // ---- 9) Stationsmodule: Bestand, Bau, Einbau, Ausbau, Wirkung ---------------------------------
+  {
+    const SYS9 = 'vpsys-i';
+    const modKey = get0.body.modulDefs[1].key;          // 'geschuetz' - wirkt auf die Verteidigung
+    const instKey = modKey + ':selten';
+    check('9-anker: der Modulkatalog reist mit (Definitionen, Seltenheiten, was baubar ist)',
+      Array.isArray(get0.body.modulDefs) && get0.body.modulDefs.length >= 4
+      && get0.body.modulSeltenheiten && get0.body.modulSeltenheiten.selten
+      && Array.isArray(get0.body.modulBaubar) && get0.body.modulBaubar.indexOf('legendaer') < 0,
+      { defs: (get0.body.modulDefs||[]).map(d => d.key), baubar: get0.body.modulBaubar });
+    // Ein Vorposten AUF der Wahlstufe, damit es ueberhaupt einen Steckplatz gibt.
+    // Eine Stufe UEBER der Wahlstufe: zwei Steckplaetze. Mit nur einem scheiterte der zweite
+    // Einbau am vollen Vorposten statt am leeren Bestand - die Pruefung 9e2 haette dann etwas
+    // anderes gemessen als ihr Name sagt (erster Entwurf, im Lauf aufgefallen).
+    await aendereDb(d => { const dd = doc(SYS9, ANNA, 'anna'); dd.stufe = get0.body.zweigAb + 1; dd.zweig = 'festung'; schreibDoc(d, dd); });
+    const bau1 = await post(tokA, '/vorposten/modul/bauen', { modul: modKey, seltenheit: 'selten' });
+    check('9a: bauen laesst sich nur bis „ungewoehnlich" - „selten" wird abgelehnt und sagt warum',
+      bau1.status === 400 && bau1.body.nurFund === true && /Festungen, Nestern und Konvois/.test(String(bau1.body.error)), { status: bau1.status, body: bau1.body });
+    const bau2 = await post(tokA, '/vorposten/modul/bauen', { modul: modKey, seltenheit: 'ungewoehnlich' });
+    check('9b: ein baubares Modul landet im Bestand am NUTZEROBJEKT (nicht im Spielstand)',
+      bau2.status === 200 && bau2.body.bestand && bau2.body.bestand[modKey + ':ungewoehnlich'] === 1, bau2.body && bau2.body.bestand);
+    const bau3 = await post(tokA, '/vorposten/modul/bauen', { modul: modKey, seltenheit: 'gewoehnlich' });
+    check('9c: die Schmiede hat eine Abklingzeit - sonst waere der Bau eine Endlosquelle',
+      bau3.status === 400 && bau3.body.abklingzeit === true && bau3.body.bauAb > Date.now(), { status: bau3.status, body: bau3.body });
+
+    // Einbauen: das Modul muss aus dem Bestand VERSCHWINDEN und im Dokument stehen.
+    await aendereDb(d => { d.users.anna.vpModule = { [instKey]: 1 }; });
+    const ein = await post(tokA, '/vorposten/modul/einbauen', { system: SYS9, modul: instKey });
+    check('9d: einbauen steckt das Modul in den Vorposten', ein.status === 200 && (ein.body.vorposten.module || []).indexOf(instKey) === 0,
+      { status: ein.status, module: ein.body.vorposten && ein.body.vorposten.module });
+    check('9e: und nimmt es aus dem Bestand (kein Modul zweimal)', ein.status === 200 && !(ein.body.bestand || {})[instKey], ein.body && ein.body.bestand);
+    const ohne = await post(tokA, '/vorposten/modul/einbauen', { system: SYS9, modul: instKey });
+    check('9e2: ein zweiter Einbau desselben Stuecks scheitert am leeren BESTAND (nicht an den Slots)',
+      ohne.status === 400 && /Bestand/.test(String(ohne.body && ohne.body.error)) && ohne.body.voll !== true,
+      { status: ohne.status, body: ohne.body });
+
+    // Wirkung: die Geschuetzbank hebt die Verteidigung UEBER den Stufenwert.
+    const nurStufe = get0.body.stufen[get0.body.zweigAb].verteidigung;   // eine Stufe ueber der Wahlstufe, siehe oben
+    check('9f: das eingebaute Modul hebt die Verteidigung ueber den reinen Stufenwert',
+      ein.body.vorposten.verteidigung > nurStufe && ein.body.vorposten.modulBoni && ein.body.vorposten.modulBoni.verteidigung > 0,
+      { verteidigung: ein.body.vorposten.verteidigung, nurStufe, boni: ein.body.vorposten.modulBoni });
+    check('9g: die Steckplatzzahl kommt vom Server und waechst mit der Stufe (hier zwei)',
+      ein.body.vorposten.slots === 2, ein.body.vorposten.slots);
+
+    // Ausbauen kostet eine Kleinigkeit - und gibt das Modul heil zurueck.
+    let krediteVorher = 0;
+    await aendereDb(d => { const s = JSON.parse(d.private[ANNA]['kepler7-save-v3']); s.credits = 1000; krediteVorher = s.credits; d.private[ANNA]['kepler7-save-v3'] = JSON.stringify(s); });
+    const raus = await post(tokA, '/vorposten/modul/ausbauen', { system: SYS9, platz: 0 });
+    check('9h: ausbauen gibt das Modul heil in den Bestand zurueck',
+      raus.status === 200 && raus.body.modul === instKey && (raus.body.bestand || {})[instKey] === 1 && (raus.body.vorposten.module || []).length === 0,
+      { status: raus.status, modul: raus.body.modul, bestand: raus.body.bestand });
+    check('9i: und kostet eine Kleinigkeit (Kredite aus dem Spielstand, zurueckgemeldet)',
+      raus.body.kosten === get0.body.modulAusbauKosten && raus.body.newCredits === krediteVorher - get0.body.modulAusbauKosten,
+      { kosten: raus.body.kosten, vorher: krediteVorher, nachher: raus.body.newCredits });
+    const fremd = await post(tokB, '/vorposten/modul/einbauen', { system: SYS9, modul: instKey });
+    check('9j: ein Fremder bestueckt den Vorposten nicht', fremd.status === 403, { status: fremd.status });
   }
 
   await stoppeServer();

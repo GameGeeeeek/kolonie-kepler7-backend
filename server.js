@@ -171,18 +171,23 @@ const globalApiRateLimit = rateLimit(60 * 1000, 240, 'Zu viele Anfragen von dies
 const BACKUP_DIR = path.join(path.dirname(DB_FILE), 'backups');
 const BACKUP_RETENTION = 48; // ca. 1 Tag bei 30-Minuten-Takt
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+// Gibt den Dateinamen der neuen Sicherung zurueck, sonst null (02.09.2026, Codex-Hinweis auf #196):
+// Der Takt-Aufruf ignoriert den Rueckgabewert wie bisher, der Admin-Knopf "Backup jetzt" verlaesst
+// sich darauf - ein Fehlschlag darf dort nicht als Erfolg mit einer aelteren Sicherung erscheinen.
 function backupDb() {
   try {
-    if (!fs.existsSync(DB_FILE)) return; // beim allerersten Start evtl. noch keine DB vorhanden
+    if (!fs.existsSync(DB_FILE)) return null; // beim allerersten Start evtl. noch keine DB vorhanden
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    const dest = path.join(BACKUP_DIR, `db-${ts}.json`);
+    const name = `db-${ts}.json`;
+    const dest = path.join(BACKUP_DIR, name);
     fs.copyFileSync(DB_FILE, dest);
     const files = fs.readdirSync(BACKUP_DIR).filter(f => f.startsWith('db-') && f.endsWith('.json')).sort();
     while (files.length > BACKUP_RETENTION) {
       const oldest = files.shift();
       fs.unlinkSync(path.join(BACKUP_DIR, oldest));
     }
-  } catch (e) { console.error('Backup fehlgeschlagen:', e); }
+    return name;
+  } catch (e) { console.error('Backup fehlgeschlagen:', e); return null; }
 }
 backupDb();
 setInterval(backupDb, 30 * 60 * 1000);
@@ -192,6 +197,9 @@ setInterval(() => { saveDb(); }, 5 * 60 * 1000);
 // bereitstellt. Für alle anderen Routen ändert sich dadurch nichts.
 app.use(express.json({ limit: '2mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use('/api', globalApiRateLimit);
+// Protokoll aller Admin-Handlungen (02.09.2026) - MUSS vor den Routen registriert sein, sonst
+// sieht es keine Antwort. Siehe adminProtokollMiddleware.
+app.use('/api/admin', adminProtokollMiddleware);
 
 // --- Sitzungs-Cookie (Sicherheits-Audit P3, Etappe a: 19.08.2026) ---------------------------
 // Der Token liegt im Frontend in localStorage und ist damit in JS-Reichweite: Die erste
@@ -501,6 +509,194 @@ function verdachtTick(jetzt) {
   return gemeldet;
 }
 
+/* ===== Vier weitere Admin-Faehigkeiten (02.09.2026, Auftrag Sascha "Ideen fuer noch mehr admin
+   Funktionen jeglicher Art") ==========================================================================
+   Gemessen vorher: 23 Admin-Routen, aber keine Wiederherstellung eines einzelnen Spielstands (die
+   Backups alle 30 Minuten liegen nur auf der Platte), keine Sicht auf den Spielstand selbst, eine
+   Sperre als nacktes Ja/Nein ohne Grund und Frist, keine Stummschaltung, kein Protokoll der
+   Admin-Aktionen, Allianzen vom Admin-Bereich aus unsichtbar. Gewaehlt hat Sascha alle vier
+   Vorschlaege. Hier die Helfer; die Routen stehen im Admin-Block vor dem Systemstand.
+
+   --- 1. Das Protokoll ---
+   EINE Middleware ueber alle POST /api/admin/*-Routen statt einem Aufruf je Route: Eine Liste, die
+   man je Route pflegt, findet nur die Routen, an die man beim Schreiben gedacht hat - die naechste
+   neue Route fehlte still (Frontend-Arbeitsregel 40). Der Eintrag entsteht beim ERFOLGREICHEN
+   Antworten (Status < 300); ein abgelehnter Versuch (403, 400) ist keine Handlung. Der Koerper
+   wird gekuerzt mitgeschrieben, Zeichenketten auf 120 Zeichen; Admin-Routen tragen keine
+   Passwoerter oder Schluessel. */
+const ADMIN_PROTOKOLL_MERKEN = 300;
+function adminProtokollDetails(body) {
+  const out = {};
+  for (const [k, v] of Object.entries(body || {})) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'string') out[k] = v.slice(0, 120);
+    else if (typeof v === 'number' || typeof v === 'boolean') out[k] = v;
+    else { try { out[k] = JSON.stringify(v).slice(0, 200); } catch (e) { out[k] = '?'; } }
+  }
+  return out;
+}
+function adminProtokoll(art, von, body) {
+  const b = body || {};
+  const ziel = b.targetUsername || b.tag || b.code || b.name || b.email || null;
+  if (!Array.isArray(db.adminProtokoll)) db.adminProtokoll = [];
+  db.adminProtokoll.unshift({ zeit: Date.now(), art: String(art || '').slice(0, 60), von: von || null,
+    ziel: ziel ? String(ziel).slice(0, 60) : null, details: adminProtokollDetails(b) });
+  if (db.adminProtokoll.length > ADMIN_PROTOKOLL_MERKEN) db.adminProtokoll.length = ADMIN_PROTOKOLL_MERKEN;
+}
+function adminProtokollMiddleware(req, res, next) {
+  if (req.method !== 'POST') return next();
+  const original = res.json.bind(res);
+  res.json = function (body) {
+    if (res.statusCode < 300) {
+      // req.username setzt authMiddleware - die laeuft je Route NACH dieser Middleware, ist beim
+      // Antworten also laengst durch. originalUrl statt req.path: Beim Antworten hat Express den
+      // Pfad laengst wieder auf den vollen Wert gesetzt (gemessen: 'api/admin/set-banned').
+      adminProtokoll(String(req.originalUrl || '').split('?')[0].replace(/^\/api\/admin\//, ''), req.username || null, req.body);
+      // Die Antwort wartet auf das Speichern des Eintrags. Ein nicht abgewartetes saveDb() reihte
+      // sich hinter das der Route und war bei einem harten Stopp kurz nach der Antwort gemessen
+      // noch nicht auf der Platte (Gegenprobe 1d fiel unter Last) - ein Protokoll, das der Admin
+      // als "ok" gesehen hat, muss den Neustart ueberleben.
+      saveDb().catch(() => {}).then(() => original(body));
+      return res;
+    }
+    return original(body);
+  };
+  next();
+}
+
+/* --- 2. Sperre mit Grund und Frist, Stummschaltung ---
+   `banned` bleibt das Feld, das jede bestehende Pruefung liest; dazu kommen bannGrund, bannBis
+   (0 = unbefristet) und bannSeit. Eine abgelaufene Frist hebt die Sperre beim NAECHSTEN Kontakt
+   auf (sperreAktiv), nicht per Cron - dasselbe Muster wie beim Aufraeumen der Uhr. Der Spieler
+   sieht Grund und Frist im Anmeldetext; ein nacktes "gesperrt" war die Meldung, die zu jedem
+   Support-Gespraech gefuehrt hat.
+   Die Stummschaltung ist die mildere Stufe: stummBis sperrt den globalen Chat, den Allianz-Chat
+   und Direktnachrichten, sonst nichts. Spielen geht weiter. */
+function zeitText(ms) {
+  try { return new Date(ms).toLocaleString('de-DE', { timeZone: 'Europe/Berlin', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+  catch (e) { return new Date(ms).toISOString(); }
+}
+function sperreAktiv(user, jetzt) {
+  if (!user || !user.banned) return false;
+  const t = jetzt || Date.now();
+  if (user.bannBis && t > user.bannBis) {
+    user.banned = false; user.bannAbgelaufen = t; user.bannBis = 0;
+    return false;
+  }
+  return true;
+}
+function sperrText(user) {
+  return 'Dieses Konto wurde gesperrt' + (user.bannGrund ? ' – Grund: ' + user.bannGrund : '')
+    + (user.bannBis ? ' – bis ' + zeitText(user.bannBis) + ' Uhr' : '') + '.';
+}
+function stummAktiv(user, jetzt) { return !!(user && user.stummBis && (jetzt || Date.now()) < user.stummBis); }
+function stummText(user) {
+  return 'Du bist bis ' + zeitText(user.stummBis) + ' Uhr stummgeschaltet' + (user.stummGrund ? ' – Grund: ' + user.stummGrund : '') + '.';
+}
+
+/* --- 3. Spielstand-Blatt und Backups ---
+   Der Spielstand ist eine JSON-Zeichenkette; das Blatt zeigt eine ZUSAMMENFASSUNG (Ressourcen,
+   Kredite, Gebaeude- und Forschungsstufen, Flotte, Kolonien), nie den rohen Text - der ist bei
+   grossen Konten mehrere hundert Kilobyte. Dieselbe Zusammenfassung dient fuer den heutigen Stand
+   und fuer einen Stand aus einem Backup, damit der Admin VOR dem Zurueckholen vergleichen kann.
+   Backups sind ganze db.json-Kopien (backupDb, alle 30 Minuten, BACKUP_RETENTION Stueck). Ein
+   Backup wird bei Bedarf gelesen und geparst - synchron, im Admin-Aufruf; bei 13 Konten ein
+   Bruchteil einer Sekunde, und ein Admin-Aufruf ist kein Spielerpfad. Der Dateiname wird gegen
+   ein Muster geprueft, damit "../" nie ein Pfad wird. */
+const SPIELSTAND_RESSOURCEN = ['energie', 'erz', 'kristalle', 'deuterium', 'antimaterie', 'forschungspunkte'];
+function spielstandZusammenfassung(raw) {
+  if (raw === null || raw === undefined) return null;
+  let sv = null;
+  try { sv = JSON.parse(raw); } catch (e) { return { fehler: 'kein gueltiges JSON', groesse: String(raw).length }; }
+  // Gueltiges JSON, aber kein Objekt (null, Zahl, Liste): Die Plausibilitaetspruefung beim Speichern
+  // laesst `null` durch, und ein Zugriff auf sv.fleet wuerfe hier einen TypeError - 500 statt Blatt,
+  // und im async-Handler der Ruecksicherung eine unbehandelte Promise (Codex-Hinweis auf #196).
+  if (!sv || typeof sv !== 'object' || Array.isArray(sv)) return { fehler: 'kein Spielstand-Objekt', groesse: String(raw).length };
+  const zahl = v => (typeof v === 'number' && Number.isFinite(v)) ? Math.round(v) : 0;
+  const stufen = obj => { const o = {}; for (const [k, v] of Object.entries(obj || {})) if (zahl(v) > 0) o[k] = zahl(v); return o; };
+  const flotte = {};
+  for (const [k, v] of Object.entries(sv.fleet || {})) if (k !== 'missions' && zahl(v) > 0) flotte[k] = zahl(v);
+  const res = {};
+  for (const k of SPIELSTAND_RESSOURCEN) res[k] = zahl((sv.resources || {})[k]);
+  return {
+    groesse: String(raw).length,
+    spielerName: sv.player && sv.player.name ? String(sv.player.name).slice(0, 40) : null,
+    lastTick: zahl(sv.lastTick), credits: zahl(sv.credits), xp: zahl(sv.xp), prestige: zahl(sv.prestige),
+    kampfpunkte: zahl(sv.battlePoints), ressourcen: res,
+    gebaeude: stufen(sv.buildings), forschung: stufen(sv.research), flotte,
+    kolonien: Object.keys(sv.colonies || {}).length,
+    missionen: Array.isArray(sv.fleet && sv.fleet.missions) ? sv.fleet.missions.length : 0,
+    bauauftraege: Array.isArray(sv.constructionQueue) ? sv.constructionQueue.length : 0,
+    allianz: sv.player && sv.player.allianceTag ? String(sv.player.allianceTag).slice(0, 12) : null
+  };
+}
+const BACKUP_DATEI_MUSTER = /^db-[0-9A-Za-z-]+\.json$/;
+function backupListe() {
+  let dateien = [];
+  try { dateien = fs.readdirSync(BACKUP_DIR).filter(f => BACKUP_DATEI_MUSTER.test(f)); } catch (e) { return []; }
+  return dateien.sort().reverse().map(f => {
+    let st = null;
+    try { st = fs.statSync(path.join(BACKUP_DIR, f)); } catch (e) {}
+    return { datei: f, zeit: st ? st.mtimeMs : 0, groesse: st ? st.size : 0 };
+  });
+}
+function backupLesen(datei) {
+  if (!BACKUP_DATEI_MUSTER.test(String(datei || ''))) return { fehler: 'Ungueltiger Backup-Name.' };
+  const pfad = path.join(BACKUP_DIR, datei);
+  if (!fs.existsSync(pfad)) return { fehler: 'Dieses Backup gibt es nicht (mehr).' };
+  try { return { db: JSON.parse(fs.readFileSync(pfad, 'utf8')), zeit: fs.statSync(pfad).mtimeMs, zeitDatei: datei }; }
+  catch (e) { return { fehler: 'Backup nicht lesbar: ' + String(e.message).slice(0, 80) }; }
+}
+// Den Spielstand EINES Kontos aus einem Backup holen. Gesucht wird ueber den Kontonamen, nicht
+// ueber die userId: Ein neu angelegtes Konto gleichen Namens traegt eine andere Id, und der
+// Admin fragt nach dem Namen.
+function backupSpielstand(sicherung, kontoName) {
+  const u = sicherung && sicherung.users && sicherung.users[kontoName];
+  if (!u) return { vorhanden: false };
+  const eintrag = sicherung.private && sicherung.private[u.userId] && sicherung.private[u.userId][SAVE_KEY];
+  if (eintrag === undefined) return { vorhanden: false };
+  return { vorhanden: true, value: typeof eintrag === 'string' ? eintrag : eintrag.value };
+}
+
+/* --- 4. Allianzen ---
+   Alles liegt in db.shared unter alliance:<tag>:* - info, role:<userId>, base, applications:<id>.
+   Die Uebersicht liest genau diese Schluessel; Anfuehrer uebertragen und Aufloesen schreiben sie
+   auf demselben Weg wie der Client (disbandAlliance im Frontend: info.disbanded = true, alle
+   aktiven Rollen auf 'left'), damit jeder Mitglieds-Client beim naechsten Laden dasselbe sieht wie
+   nach einer Aufloesung durch den Anfuehrer selbst. */
+function allianzUebersicht() {
+  const tags = [];
+  for (const k of Object.keys(db.shared)) { const m = k.match(/^alliance:([^:]+):info$/); if (m) tags.push(m[1]); }
+  return tags.sort().map(tag => {
+    const info = allianceInfoOf(tag) || {};
+    const rollenPrefix = 'alliance:' + tag + ':role:';
+    const mitglieder = [];
+    for (const k of Object.keys(db.shared)) {
+      if (!k.startsWith(rollenPrefix)) continue;
+      try {
+        const r = JSON.parse(db.shared[k]);
+        if (r.role && r.role !== 'left') {
+          const konto = findUserById(k.slice(rollenPrefix.length));
+          mitglieder.push({ userId: k.slice(rollenPrefix.length), name: r.name || (konto && konto.username) || '?', rolle: r.role,
+            seit: r.joinedAt || 0, letzteSitzung: konto ? (konto.activeSessionAt || 0) : 0, kontoDa: !!konto });
+        }
+      } catch (e) {}
+    }
+    mitglieder.sort((a, b) => (a.rolle === 'admin' ? 0 : a.rolle === 'officer' ? 1 : 2) - (b.rolle === 'admin' ? 0 : b.rolle === 'officer' ? 1 : 2) || a.name.localeCompare(b.name));
+    let basisStufe = null;
+    try { const b = JSON.parse(db.shared['alliance:' + tag + ':base'] || 'null'); if (b && typeof b.level === 'number') basisStufe = b.level; } catch (e) {}
+    let bewerbungen = 0;
+    const appPrefix = 'alliance:' + tag + ':applications:';
+    for (const k of Object.keys(db.shared)) {
+      if (!k.startsWith(appPrefix)) continue;
+      try { if (JSON.parse(db.shared[k]).status === 'pending') bewerbungen++; } catch (e) {}
+    }
+    return { tag, name: info.name || null, gegruendet: info.createdAt || 0, gruender: info.creatorName || null,
+      beitritt: info.joinMode || 'open', aufgeloest: info.disbanded === true, aufgeloestAm: info.disbandedAt || 0,
+      basisStufe, bewerbungen, mitglieder, mitgliederMax: allianceMemberLimitMax(tag) };
+  });
+}
+
 function authMiddleware(req, res, next) {
   // Der Bearer-Header hat VORRANG vor dem Cookie, nicht umgekehrt. Grund: Solange Etappe a und b
   // auseinander liegen, traegt ein Browser beides - und massgeblich muss das sein, was das
@@ -516,7 +712,9 @@ function authMiddleware(req, res, next) {
     // gültig, wird sonst nie serverseitig invalidiert - siehe Kommentar bei /api/login) würde eine
     // Sperrung sonst erst beim nächsten Login-Versuch wirksam werden lassen, nicht sofort.
     const user = findUserById(payload.userId);
-    if (user && user.banned) return res.status(403).json({ error: 'Dieses Konto wurde gesperrt.' });
+    // sperreAktiv hebt eine abgelaufene Frist hier gleich auf (02.09.2026); der Text nennt Grund
+    // und Frist, damit die Sperre nicht mehr jedes Mal ein Support-Gespraech ausloest.
+    if (user && sperreAktiv(user)) return res.status(403).json({ error: sperrText(user), gesperrt: true });
     // Token-Versions-Prüfung: nach einem Passwort-Reset zählt user.tokenVersion hoch, wodurch ältere
     // Tokens (mit kleinerem tv) ungültig werden - ein gestohlenes/geleaktes Token verliert so beim
     // Passwortwechsel sofort seine Gültigkeit, statt bis zu 180 Tage weiterzuleben. Fehlende Felder
@@ -885,6 +1083,8 @@ function checkPactKeyPermission(req, key, isWrite) {
 function checkChatKeyPermission(req, key, isWrite) {
   if (!key.startsWith('globalchat:msg:')) return null;
   if (!isWrite) return null;
+  const sprecher = findUserById(req.userId);
+  if (stummAktiv(sprecher)) return stummText(sprecher);   // Stummschaltung (02.09.2026)
   let submitted = null;
   try { submitted = JSON.parse(req.body && req.body.value); } catch (e) { return 'Ungültiges Format.'; }
   if (!submitted || submitted.authorId !== req.userId) return 'Du kannst nur Nachrichten in deinem eigenen Namen senden.';
@@ -1048,6 +1248,8 @@ function checkAllianceKeyPermission(req, key, isWrite) {
   const myRole = allianceRoleOf(tag, req.userId);
   const isAdmin = myRole === 'admin';
   const isOfficerPlus = myRole === 'admin' || myRole === 'officer';
+  // Allianz-Chat unterliegt derselben Stummschaltung wie der globale (02.09.2026).
+  if (isWrite && rest.startsWith('msg:')) { const sprecher = findUserById(req.userId); if (stummAktiv(sprecher)) return stummText(sprecher); }
 
   if (rest === 'banner') {
     return (isWrite && !isOfficerPlus) ? 'Nur Admins/Offiziere dürfen den Allianz-Banner ändern.' : null;
@@ -2257,7 +2459,7 @@ app.post('/api/login', authRateLimit, async (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unbekannter Name oder falsches Passwort.' });
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) return res.status(401).json({ error: 'Unbekannter Name oder falsches Passwort.' });
-  if (user.banned) return res.status(403).json({ error: 'Dieses Konto wurde gesperrt.' });
+  if (sperreAktiv(user)) return res.status(403).json({ error: sperrText(user), gesperrt: true });
   // Double-Opt-In: neue Konten (emailVerified === false) sind erst nach Klick auf den
   // Bestätigungslink nutzbar. Bestandskonten haben das Feld nicht und sind nicht betroffen.
   if (user.emailVerified === false) {
@@ -4660,6 +4862,7 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
   const { toUserId, text } = req.body || {};
   const cleanText = String(text || '').trim().slice(0, 500);
   if (!toUserId || !cleanText) return res.status(400).json({ error: 'Empfänger und Nachricht erforderlich.' });
+  { const sprecher = findUserById(req.userId); if (stummAktiv(sprecher)) return res.status(403).json({ error: stummText(sprecher), stumm: true }); }
   if (!db.private[toUserId]) db.private[toUserId] = {};
   const list = db.private[toUserId].__messages || [];
   list.unshift({ id: crypto.randomUUID(), time: Date.now(), fromUserId: req.userId, fromName: req.username, text: cleanText });
@@ -4974,13 +5177,38 @@ app.get('/api/admin/reports', authMiddleware, (req, res) => {
 });
 app.post('/api/admin/set-banned', authMiddleware, async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
-  const { targetUsername, banned } = req.body || {};
+  const { targetUsername, banned, grund, tage } = req.body || {};
   const key = String(targetUsername || '').trim().toLowerCase();
   const target = db.users[key];
   if (!target) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const devUser = db.users['gamegeeeeek'];
+  if (devUser && target.userId === devUser.userId) return res.status(400).json({ error: 'Das Betreiberkonto kann sich nicht selbst sperren.' });
   target.banned = !!banned;
+  if (target.banned) {
+    // Grund und Frist (02.09.2026): tage = 0 heisst unbefristet. Der Grund steht im Anmeldetext.
+    const t = Math.max(0, Math.floor(Number(tage) || 0));
+    target.bannGrund = String(grund || '').trim().slice(0, 200);
+    target.bannBis = t > 0 ? Date.now() + t * 86400000 : 0;
+    target.bannSeit = Date.now();
+  } else {
+    target.bannBis = 0;
+  }
   await saveDb();
-  res.json({ ok: true, username: target.username, banned: target.banned });
+  res.json({ ok: true, username: target.username, banned: target.banned, bannGrund: target.bannGrund || '', bannBis: target.bannBis || 0 });
+});
+// Stummschaltung (02.09.2026): stunden = 0 hebt sie auf. Wirkt auf globalen Chat, Allianz-Chat
+// und Direktnachrichten - siehe checkChatKeyPermission, checkAllianceKeyPermission, /api/messages.
+app.post('/api/admin/stumm', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const { targetUsername, stunden, grund } = req.body || {};
+  const key = String(targetUsername || '').trim().toLowerCase();
+  const target = db.users[key];
+  if (!target) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const h = Math.max(0, Math.min(24 * 30, Math.floor(Number(stunden) || 0)));
+  target.stummBis = h > 0 ? Date.now() + h * 3600000 : 0;
+  target.stummGrund = h > 0 ? String(grund || '').trim().slice(0, 200) : '';
+  await saveDb();
+  res.json({ ok: true, username: target.username, stummBis: target.stummBis, stummGrund: target.stummGrund });
 });
 app.post('/api/admin/dismiss-report', authMiddleware, async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
@@ -13096,7 +13324,7 @@ app.get('/api/admin/konto', authMiddleware, (req, res) => {
     const staub = u.staub || {};
     return {
       username: u.username,
-      gesperrt: !!u.banned,
+      gesperrt: sperreAktiv(u, jetzt),
       registriert: u.createdAt || 0,
       emailForm: emailForm(u.email),
       emailBestaetigt: !!u.emailVerified,
@@ -13135,7 +13363,12 @@ app.get('/api/admin/konto', authMiddleware, (req, res) => {
                  letzteZeit: r.letzteZeit || 0, letzterPfad: r.letzterPfad || null }; })(),
       spielstandAbgelehnt: (() => { const a = u.saveAblehnungen || {};
         return { n: a.n || 0, letzteZeit: a.letzteZeit || 0, letzterGrund: a.letzterGrund || null,
-                 letzte: (a.letzte || []).slice(-SAVE_ABLEHNUNG_GRUENDE_MERKEN) }; })()
+                 letzte: (a.letzte || []).slice(-SAVE_ABLEHNUNG_GRUENDE_MERKEN) }; })(),
+      // Sperre mit Grund und Frist, Stummschaltung, Schatten einer Ruecksicherung (02.09.2026).
+      // sperreAktiv() hebt eine abgelaufene Frist beim Ansehen gleich auf.
+      sperre: sperreAktiv(u, jetzt) ? { grund: u.bannGrund || '', bis: u.bannBis || 0, seit: u.bannSeit || 0 } : null,
+      stumm: stummAktiv(u, jetzt) ? { bis: u.stummBis, grund: u.stummGrund || '' } : null,
+      schattenDa: !!(priv.__spielstandSchatten && typeof priv.__spielstandSchatten.value === 'string')
     };
   });
   res.json({ konten, gefunden: Object.keys(db.users).filter(k => k.includes(suche)).length });
@@ -13262,6 +13495,158 @@ app.get('/api/admin/geschenke', authMiddleware, (req, res) => {
     empfaengerGesamt: konten.length,
     empfaenger30Tage: konten.filter(u => (jetzt - (u.activeSessionAt || 0)) <= 30 * 86400000).length
   });
+});
+
+// --- Spielstand-Blatt, Backups, Ruecksicherung (02.09.2026) ------------------------------------
+/* Siehe den Helfer-Block bei spielstandZusammenfassung. Die Ruecksicherung ist der einzige
+   Schreibzugriff auf einen FREMDEN Spielstand im ganzen Server, deshalb dreifach abgesichert:
+   (1) der bisherige Stand bleibt als Schatten erhalten (__spielstandSchatten, ein Eintrag) und
+   laesst sich mit einem Klick zurueckholen; (2) setSaveValue zaehlt die Version hoch; (3) alle
+   Sitzungen des Kontos werden entwertet (derselbe Weg wie "alle Sitzungen beenden"). Ohne (3)
+   schriebe der laufende Client des Spielers seinen alten Stand binnen zehn Sekunden zurueck:
+   Sein Autosave bekaeme wegen (2) einen 409, laedt die Version nach und WIEDERHOLT den Schreib-
+   vorgang mit seinem eigenen Stand (saveGameStateVersioned im Frontend). Der Spieler meldet sich
+   neu an und laedt dann den zurueckgeholten Stand vom Server. */
+function kontoNachName(req, feld) {
+  const key = String((req.body && req.body[feld]) || (req.query && req.query[feld]) || '').trim().toLowerCase();
+  return db.users[key] || null;
+}
+app.get('/api/admin/spielstand', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const u = kontoNachName(req, 'name');
+  if (!u) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const priv = db.private[u.userId] || {};
+  const eintrag = priv[SAVE_KEY];
+  const schatten = priv.__spielstandSchatten || null;
+  res.json({
+    username: u.username, vorhanden: eintrag !== undefined,
+    version: eintrag === undefined ? null : (typeof eintrag === 'string' ? 0 : (eintrag.version || 0)),
+    zusammenfassung: spielstandZusammenfassung(getSaveValue(u.userId)),
+    schatten: schatten ? { zeit: schatten.zeit, quelle: schatten.quelle, zusammenfassung: spielstandZusammenfassung(schatten.value) } : null
+  });
+});
+app.get('/api/admin/backups', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  res.json({ backups: backupListe(), behalt: BACKUP_RETENTION, taktMinuten: 30 });
+});
+app.post('/api/admin/backup-jetzt', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  // Erst den Speicher auf die Platte, dann kopieren - sonst sichert das Backup den Stand von vor
+  // dem letzten Schreibvorgang. saveDb() buendelt; danach ist DB_FILE aktuell.
+  // saveDb() loest auch nach einem Schreibfehler auf, backupDb() faengt seine Fehler selbst -
+  // deshalb wird hier NACHGEZAEHLT: Es muss eine neue Datei geben, und sie muss lesbar und nicht
+  // leer sein. Sonst 500, damit der Knopf nie eine aeltere Sicherung als Erfolg praesentiert
+  // (Codex-Hinweis auf #196).
+  saveDb().then(() => {
+    const vorher = new Set(backupListe().map(b => b.datei));
+    const name = backupDb();
+    const liste = backupListe();
+    const neu = name ? liste.find(b => b.datei === name) : null;
+    if (!neu || vorher.has(name) || !(neu.groesse > 0)) {
+      return res.status(500).json({ error: 'Backup fehlgeschlagen - es ist keine neue Sicherung entstanden. Platz und Rechte im Backup-Verzeichnis pruefen.' });
+    }
+    res.json({ ok: true, neuestes: neu, anzahl: liste.length });
+  }).catch(e => res.status(500).json({ error: 'Backup fehlgeschlagen: ' + String(e.message).slice(0, 80) }));
+});
+app.get('/api/admin/backup-spielstand', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const u = kontoNachName(req, 'name');
+  if (!u) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const b = backupLesen(String(req.query.datei || ''));
+  if (b.fehler) return res.status(400).json({ error: b.fehler });
+  const st = backupSpielstand(b.db, String(req.query.name || '').trim().toLowerCase());
+  res.json({ username: u.username, datei: String(req.query.datei), zeit: b.zeit, vorhanden: st.vorhanden,
+    zusammenfassung: st.vorhanden ? spielstandZusammenfassung(st.value) : null });
+});
+app.post('/api/admin/spielstand-zurueckholen', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const u = kontoNachName(req, 'targetUsername');
+  if (!u) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const b = backupLesen(String((req.body && req.body.datei) || ''));
+  if (b.fehler) return res.status(400).json({ error: b.fehler });
+  const st = backupSpielstand(b.db, String(req.body.targetUsername || '').trim().toLowerCase());
+  if (!st.vorhanden) return res.status(404).json({ error: 'In diesem Backup gibt es fuer das Konto keinen Spielstand.' });
+  const pruefung = spielstandZusammenfassung(st.value);
+  if (!pruefung || pruefung.fehler) return res.status(400).json({ error: 'Der Stand im Backup ist kein gueltiger Spielstand.' });
+  db.private[u.userId] = db.private[u.userId] || {};
+  const bisher = getSaveValue(u.userId);
+  if (bisher !== null) db.private[u.userId].__spielstandSchatten = { zeit: Date.now(), quelle: 'vor Ruecksicherung aus ' + b.zeitDatei, value: bisher };
+  const version = setSaveValue(u.userId, st.value);
+  u.tokenVersion = (u.tokenVersion || 0) + 1;
+  delete u.activeSessionId;
+  delete u.activeSessionAt;
+  console.log('[ruecksicherung] konto=' + u.username + ' datei=' + req.body.datei + ' version=' + version);
+  await saveDb();
+  res.json({ ok: true, username: u.username, version, zusammenfassung: pruefung, schattenDa: bisher !== null });
+});
+// Rueckgaengig: den Schatten wieder einsetzen (und den jetzigen Stand als neuen Schatten behalten).
+app.post('/api/admin/spielstand-schatten-zurueck', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const u = kontoNachName(req, 'targetUsername');
+  if (!u) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const priv = db.private[u.userId] || {};
+  const schatten = priv.__spielstandSchatten;
+  if (!schatten || typeof schatten.value !== 'string') return res.status(404).json({ error: 'Fuer dieses Konto liegt kein Schatten vor.' });
+  const bisher = getSaveValue(u.userId);
+  const version = setSaveValue(u.userId, schatten.value);
+  priv.__spielstandSchatten = bisher !== null ? { zeit: Date.now(), quelle: 'vor Rueckgaengig', value: bisher } : undefined;
+  if (priv.__spielstandSchatten === undefined) delete priv.__spielstandSchatten;
+  u.tokenVersion = (u.tokenVersion || 0) + 1;
+  delete u.activeSessionId;
+  delete u.activeSessionAt;
+  await saveDb();
+  res.json({ ok: true, username: u.username, version, zusammenfassung: spielstandZusammenfassung(schatten.value) });
+});
+
+// --- Protokoll (02.09.2026) -----------------------------------------------------------------------
+app.get('/api/admin/protokoll', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  res.json({ eintraege: (db.adminProtokoll || []).slice(0, ADMIN_PROTOKOLL_MERKEN), behalt: ADMIN_PROTOKOLL_MERKEN });
+});
+
+// --- Allianzen (02.09.2026) -----------------------------------------------------------------------
+app.get('/api/admin/allianzen', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const liste = allianzUebersicht();
+  res.json({ allianzen: liste, gesamt: liste.length, aktiv: liste.filter(a => !a.aufgeloest).length });
+});
+/* Anfuehrer uebertragen: das Ziel muss aktives Mitglied sein. Bisherige Admins werden Offiziere -
+   eine Allianz mit zwei Admins gibt es auf dem Spielerweg nicht, und der bisherige Anfuehrer soll
+   nichts verlieren ausser der Fuehrung. Fuer den Fall "der Anfuehrer ist seit Monaten weg". */
+app.post('/api/admin/allianz/anfuehrer', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const tag = String((req.body && req.body.tag) || '').trim();
+  const ziel = kontoNachName(req, 'targetUsername');
+  if (!tag || !allianceInfoOf(tag)) return res.status(404).json({ error: 'Diese Allianz gibt es nicht.' });
+  if (!ziel) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const rolle = allianceRoleOf(tag, ziel.userId);
+  if (!rolle) return res.status(400).json({ error: ziel.username + ' ist kein aktives Mitglied von [' + tag + '].' });
+  const prefix = 'alliance:' + tag + ':role:';
+  let herabgestuft = 0;
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix) || k === prefix + ziel.userId) continue;
+    try { const r = JSON.parse(db.shared[k]); if (r.role === 'admin') { r.role = 'officer'; db.shared[k] = JSON.stringify(r); herabgestuft++; } } catch (e) {}
+  }
+  try { const r = JSON.parse(db.shared[prefix + ziel.userId]); r.role = 'admin'; db.shared[prefix + ziel.userId] = JSON.stringify(r); } catch (e) { return res.status(500).json({ error: 'Rolleneintrag nicht lesbar.' }); }
+  await saveDb();
+  res.json({ ok: true, tag, anfuehrer: ziel.username, herabgestuft });
+});
+app.post('/api/admin/allianz/aufloesen', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const tag = String((req.body && req.body.tag) || '').trim();
+  const info = allianceInfoOf(tag);
+  if (!tag || !info) return res.status(404).json({ error: 'Diese Allianz gibt es nicht.' });
+  if (info.disbanded) return res.status(409).json({ error: 'Diese Allianz ist bereits aufgeloest.' });
+  info.disbanded = true; info.disbandedAt = Date.now(); info.disbandedByAdmin = true;
+  db.shared['alliance:' + tag + ':info'] = JSON.stringify(info);
+  const prefix = 'alliance:' + tag + ':role:';
+  let entfernt = 0;
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith(prefix)) continue;
+    try { const r = JSON.parse(db.shared[k]); if (r.role && r.role !== 'left') { r.role = 'left'; db.shared[k] = JSON.stringify(r); entfernt++; } } catch (e) {}
+  }
+  await saveDb();
+  res.json({ ok: true, tag, entfernt });
 });
 
 // --- 4. Systemstand ----------------------------------------------------------------------------

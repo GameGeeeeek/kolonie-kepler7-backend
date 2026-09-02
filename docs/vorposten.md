@@ -102,3 +102,39 @@ Repo-Verzeichnis, drei Konten, vier Gegenproben mit „was fallen MUSS"-Liste: `
 Schaden dort, wo der Deckel greift (500 Rest-LP – mit dem vollen Wurf stünde eine fünfstellige Zahl),
 und die Erwartungen der Stufentabelle kommen aus dem QUELLTEXT, nicht aus der API-Antwort (Regel 62).
 `test_admin_funktionen_http.js` 3a zählt seither fünf Schalter, 3d prüft die Bau-Aufrufstelle mit.
+
+## Der Besitzer erfährt vom Angriff – bei jedem Schlag (02.09.2026)
+
+Bis hierher erfuhr der Besitzer eines Vorpostens **nichts**, bis er fiel: Der Kampfvermerk
+(`letzterKampf`) steht nur im Dokument und wird erst sichtbar, wenn er das Kartenmenü öffnet; die
+Warteschlange bekommt allein der Verlust (`vorposten-verlust`). Damit war die Verteidigungs-Zusage
+des Konzepts (§2.6 – „kann mit Stationierung gegenhalten") nicht einlösbar: Wer nie erfährt, dass
+geschossen wird, verstärkt keine Garnison.
+
+`/api/vorposten/angriff` reiht deshalb bei **jedem** Schlag `pushNotificationEvent(besitzer,
+'vorposten-angegriffen', …)` ein – gebaut nach dem Muster der Anfechtung (`asteroid-contested`) und
+mit denselben drei Eigenschaften:
+
+- **Einstellungen des Empfängers** (`getNotifPrefs`, Kategorie `attack`) entscheiden, ob überhaupt.
+- **`allowAttackPush`** drosselt nur den Handy-Versand (30 Minuten); der Postfach-Eintrag kommt
+  immer, damit die Historie vollständig bleibt.
+- **fail-open in einem `try`**: Eine fehlgeschlagene Benachrichtigung darf einen Kampf nie
+  scheitern lassen. Das ist hier richtig, weil es keine Sicherung ist (Hausregel: fail-closed für
+  Sicherungen, fail-open für Benachrichtigungen).
+
+Sie steht **vor** `saveDb()`, damit die eingereihte Meldung mit demselben Schreibvorgang auf die
+Platte geht (Hausregel „db synchron vor saveDb mutieren").
+
+**Der Kernstand steht im Text.** Ohne ihn wüsste der Besitzer nur DASS, nicht WIE DRINGEND – und
+genau das entscheidet, ob er eine Garnison losschickt. Beim Fall nennt der Text stattdessen den
+Verlust der Garnison und verweist aufs Belohnungsfach.
+
+**Zwei Wege, die einander nicht ersetzen:** Die Benachrichtigung meldet sofort (auch aufs Handy, auch
+bei geschlossenem Spiel), `vorposten-verlust` wirkt im Spielstand und schreibt den Bericht. Beim Fall
+kommen beide.
+
+Wächter: `tests/test_vorposten_http.js` 4h und 4h2 (Postfach-Eintrag samt Kernstand, gemessen an
+`db.private[uid].__notificationEvents`), Gegenprobe `KEPLER_VP_SABOTAGE=meldung` – genau 4h und 4h2
+fallen. Der bestehende `tests/test_pushkategorien.js` im Frontend-Repo fand die fehlende
+Postfach-Zeile von selbst und nannte sie beim Namen (2b) – der Frontend-Eintrag in
+`NOTIF_EVENT_INFO` ist damit erzwungen, nicht nur erinnert.

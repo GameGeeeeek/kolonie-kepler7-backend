@@ -4387,9 +4387,75 @@ function grantNewbieShield(userId) {
   db.private[userId].__attackShieldUntil = Math.max(db.private[userId].__attackShieldUntil || 0, Date.now() + NEWBIE_SHIELD_MS);
 }
 
+/* ===== PvP-Mindesteinsatz (03.09.2026, Balance-Entscheidung Sascha) ==========================
+   BEFUND: Kampfkraft und Risiko waren entkoppelt. computeAttackPower rechnet ueber allFleetsOf -
+   die GANZE Reichsflotte -, waehrend die Verluste im Client nur aus der geschickten
+   m.composition gezogen werden. Ein Angriff mit EINEM Jaeger kaempfte also mit voller Reichskraft
+   und riskierte diesen einen Jaeger; er brachte +25 Kampfpunkte, zerstoerte Anlagen und kostete
+   den Verteidiger Flotte. Beute nicht - der Frachtdeckel greift -, aber alles andere schon.
+
+   DIE REGEL: Ein Angriff unter der Schwelle wird NICHT abgelehnt, sondern ERTRAGLOS. Der Kampf
+   laeuft normal, die Siegchance bleibt die Reichsflotte (die Zusage aus v8.634.0 bleibt damit
+   woertlich wahr), Beute nimmt der Angreifer wie bisher mit - aber es gibt keine Kampfpunkte,
+   keinen Anlagenschaden und keinen Flottenverlust beim Ziel.
+   Ablehnen waere die schlechtere Bauform: Der Angreifer hat beim Eintreffen Treibstoff und
+   Flugzeit laengst bezahlt, und seine Flotte kann seit dem Start gewachsen sein - eine Schwelle,
+   die dort NEIN sagt, bestraft ihn fuer etwas, das er nicht mehr aendern kann.
+
+   WARUM missionId UND NICHT DIE FLOTTE IM REQUEST: Der Spielstand ist klientenautoritativ, eine
+   Flottenangabe im Body waere eine PvP-relevante Groesse aus der Hand des Angreifers. Der Server
+   liest die Zusammensetzung deshalb aus dem GESPEICHERTEN Spielstand - dasselbe Muster wie
+   /api/asteroid/contest (astFindeAngriffsmission). Ehrlich bleibt: Wer sich den Request baut,
+   kann eine grosse Mission in seinen Spielstand schreiben. Der Missbrauch wandert damit aus
+   "drei Klicks in der offiziellen Oberflaeche" in die Klasse "Spielstand faelschen" - das ist
+   eine Spielregel, kein Sicherheitsschloss, und so steht es auch im PR.
+
+   GNADENFRIST: Ein Request OHNE missionId bekommt vollen Ertrag. Ein Browser-Tab, der beim
+   Umlegen des Schalters schon offen war, liefert die alte Datei aus und kennt das Feld nicht -
+   er soll nicht stillschweigend leer ausgehen. Faellt weg, sobald das Frontend ausgeliefert ist.
+
+   DIE SCHWELLE IST NOCH GERATEN. 25 % ist ein Startwert; bevor der Schalter umgelegt wird, muss
+   ueber db.private gemessen werden, welchen Anteil der staerkste Standort eines Kontos ueblich
+   an der Reichsflotte haelt. Solange steht PVP_MINDESTEINSATZ_AKTIV auf false. */
+const PVP_MINDESTEINSATZ_AKTIV = false;
+const PVP_MINDESTEINSATZ = 0.25;
+
+/* Der Anteil der geschickten Flotte an der Reichs-Rohkraft. Bewusst NUR der flottenabhaengige
+   Teil von computeAttackPower (rawFleetPower x fleetDiversityMult je Flotte): Alles danach -
+   Forschung, Doktrin, Haltung, Bonusgruppe, Buffs, Aura - ist KONTOWEIT und kuerzt sich im
+   Quotienten heraus. Damit haengt die Schwelle an der Flotte und nicht daran, welche Boni gerade
+   laufen; und die bekannte Altabweichung zwischen der standortabhaengigen und der kontoweiten
+   Bonusrechnung kann den Anteil gar nicht erst verschieben.
+   ssAtkMult/t2AtkMult bleiben DRIN - sie wirken klassenselektiv und kuerzen sich deshalb nicht. */
+function pvpEinsatzAnteil(save, composition) {
+  const ssAtkMult = 1 + shipModuleBonus(save, 'schlachtschiff', 'atk');
+  const t2AtkMult = 1 + shipModuleBonus(save, 'raffiniert', 'atk');
+  const roh = (f) => rawFleetPower(f, ssAtkMult, t2AtkMult, save.shipMarks) * fleetDiversityMult(f);
+  let gesamt = 0;
+  for (const f of allFleetsOf(save)) gesamt += roh(f);
+  // Kein Reich, keine Schwelle: Wer gar keine Kampfschiffe hat, soll nicht durch eine Division
+  // durch null aus dem PvP fallen.
+  if (!(gesamt > 0)) return 1;
+  return Math.min(1, roh(composition) / gesamt);
+}
+
+/* Die Angriffsmission aus dem GESPEICHERTEN Spielstand des Angreifers. Muster wie
+   astFindeAngriffsmission: Der Client nennt nur eine Kennung, gelesen wird beim Server. */
+function pvpFindeAngriffsmission(save, missionId, targetUserId) {
+  for (const f of allFleetsOf(save)) {
+    for (const m of (f.missions || [])) {
+      if (String(m.id) === String(missionId) && m.type === 'attack-player'
+          && String(m.targetId) === String(targetUserId)) return m;
+    }
+  }
+  return null;
+}
+
 app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });   // Notaus 'angriffe' (02.09.2026)
   const { targetUserId, targetPlanet } = req.body || {};
+  // Nur eine KENNUNG aus dem Request - die Flotte dazu liest der Server selbst (siehe oben).
+  const missionId = (req.body && req.body.missionId) !== undefined ? String(req.body.missionId) : '';
   if (!targetUserId || targetUserId === req.userId) return res.status(400).json({ error: 'Ungültiges Ziel.' });
   // Ziel unter Schutzschild? -> Angriff prallt ab (kein Kampf, keine Beute, kein Punktgewinn).
   // Der Schild ist KONTOWEIT und gilt deshalb auch fuer jeden Standort-Angriff - sonst liesse
@@ -4407,6 +4473,19 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   try { attacker = JSON.parse(attackerRaw); target = JSON.parse(targetRaw); }
   catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
 
+  /* Ertragsstufe (PvP-Mindesteinsatz, siehe Kommentarblock ueber /api/attack). 'voll' ist der
+     Altpfad und bleibt es, solange der Schalter aus ist ODER der Client keine missionId schickt
+     (Gnadenfrist) ODER die Mission im gespeicherten Spielstand nicht auffindbar ist. Der Angriff
+     wird nie abgelehnt - nur sein Ertrag faellt weg. */
+  let einsatzAnteil = null, ertragStufe = 'voll';
+  if (PVP_MINDESTEINSATZ_AKTIV && missionId) {
+    const einsatzMission = pvpFindeAngriffsmission(attacker, missionId, targetUserId);
+    if (einsatzMission && einsatzMission.composition) {
+      einsatzAnteil = pvpEinsatzAnteil(attacker, einsatzMission.composition);
+      if (einsatzAnteil < PVP_MINDESTEINSATZ) ertragStufe = 'sockel';
+    }
+  }
+
   /* PvP auf alle Standorte (Etappe 1): `targetPlanet` ist OPTIONAL. Fehlt das Feld (alter
      Client), laeuft exakt der heutige Konto-Kampf - jede Standort-Weiche unten ist ein bedingter
      Zweig, dessen Alt-Seite byte-gleich bleibt. Mit Feld kaempft der Angreifer gegen die
@@ -4415,7 +4494,22 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   let standortKey = null;
   if (targetPlanet !== undefined && targetPlanet !== null) {
     if (typeof targetPlanet !== 'string' || targetPlanet.length > 64) return res.status(400).json({ error: 'Ungültiger Standort.' });
-    if (targetPlanet !== 'home' && !((target.colonies || {})[targetPlanet])) {
+    /* EIGENE Eigenschaft, nicht Wahrheitswert (Sicherheitsbehebung 02.09.2026). Die alte Fassung
+       fragte `!((target.colonies || {})[targetPlanet])` - und ein Objektliteral ERBT die Namen aus
+       Object.prototype. `{}['constructor']` ist die Funktion Object, also wahr; die Schranke liess
+       'constructor', 'toString', 'valueOf', '__proto__' und 'hasOwnProperty' durch, und zwar auch
+       bei einem Ziel ganz OHNE Kolonien. Danach lieferten standortDefGebaeude und standortDefFlotte
+       ihre Null-Wache, kontoDefenseFaktoren ist rein multiplikativ - defensePower 0, und
+       battleWinChance zahlt dafuer die Obergrenze: GEMESSEN 90,0% Siegchance gegen jedes Konto,
+       mit einem einzigen Jaeger, samt Beute (Faktor 0,5), Kampfpunkten und Gebaeudezerstoerung.
+       Ueber die Oberflaeche unerreichbar, per selbstgebautem Request trivial.
+       hasOwnProperty.call statt target.colonies.hasOwnProperty(...): Der Spielstand kommt aus
+       JSON.parse eines klientenautoritativen Saves und kann selbst einen Schluessel
+       "hasOwnProperty" tragen - der Aufruf ueber das Objekt waere dann keine Pruefung mehr.
+       Die Null-Wachen der Verbraucher bleiben, wo sie sind: Sie sind fuer den ehrlichen Weg
+       gedacht (Kolonie zwischen Aufklaerung und Anflug aufgegeben) und ihr Rueckgabewert 0 ist
+       nur DESHALB gefaehrlich, weil er ungeprueft hierher gelangen konnte. */
+    if (targetPlanet !== 'home' && !Object.prototype.hasOwnProperty.call(target.colonies || {}, targetPlanet)) {
       // Eigener Grund statt eines nackten 404: Eine Kolonie kann zwischen Aufklaerung und Anflug
       // aufgegeben worden sein - der Angreifer soll wissen, WARUM sein Ziel weg ist.
       return res.status(404).json({ error: 'Standort nicht gefunden - vielleicht wurde die Kolonie inzwischen aufgegeben.' });
@@ -4538,7 +4632,12 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Standort-Fall: targetPlanet/standortArt/beuteFaktor - hier fuer die beiden ANTWORTEN
     // (beide spreaden kampfDetails); die vier addReport-Aufrufe spreaden standortFelder selbst.
     // Im Altpfad ist das ein leerer Spread und aendert kein Byte.
-    ...standortFelder
+    ...standortFelder,
+    /* PvP-Mindesteinsatz: Anteil und Stufe reisen in BEIDEN Antworten mit (beide spreaden
+       kampfDetails) und damit auch in den Berichten. Im Altpfad ist der Anteil null und die
+       Stufe 'voll' - ein alter Client ignoriert beide Felder. Ohne sie koennte das Frontend dem
+       Spieler nicht erklaeren, warum ein gewonnener Angriff nichts eingebracht hat. */
+    einsatzAnteil, ertragStufe
   });
 
   if (success) {
@@ -4547,7 +4646,9 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Die Variable ist WEITER OBEN deklariert, damit kampfDetails() sie sieht - eine hier
     // deklarierte const laege ausserhalb der Sichtbarkeit dieser Funktion, und `typeof` haette
     // dort still "undefined" geliefert, ohne Fehler und ohne Wirkung.
-    defenderLossPct = Math.round(lootPct * 0.5 * 1000) / 1000;
+    // Sockel: kein Flottenverlust beim Ziel. Der Nadelstich soll nichts anrichten - genau das
+    // war die teuerste Zahl am Ein-Jaeger-Angriff (6-12,5 % der stationierten Flotte, gratis).
+    defenderLossPct = ertragStufe === 'sockel' ? 0 : Math.round(lootPct * 0.5 * 1000) / 1000;
     // Anti-Farming: deutlich stärkere Angreifer bekommen anteilig weniger Beute (nie unter 30%).
     const farmPenalty = farmingPenaltyFor(req.userId, targetUserId);
     // Schildmodule des Ziels senken die Beute (siehe raidlossProtectionMult - vorher wirkungslos im PvP).
@@ -4556,13 +4657,23 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Ressourcen sind KONTOWEIT (ein Pool) - der Faktor bildet ab, dass an einer Kolonie weniger
     // zu holen ist. Im Altpfad ist er 1 und der Term byte-neutral (x*1 ist in IEEE 754 exakt).
     const beuteFaktor = standortKey ? (STANDORT_BEUTE_FAKTOR[standortArtVon(standortKey)] || 1) : 1;
+    /* Sockel: KEINE Beute - und das ist der teuerste Teil der Regel, nicht der kleinste.
+       GEMESSEN am 03.09.2026: Der Server kennt `cargoCapacity` ueberhaupt nicht (null Vorkommen
+       in dieser Datei). Er zog dem Ziel bisher IMMER den vollen Satz ab und schrieb ihn dem
+       Angreifer gut; der Frachtdeckel sitzt allein im Client, der den Spielstand des Angreifers
+       danach ueberschreibt. Ein Angriff mit einem Jaeger pluenderte also ein Viertel des
+       Ressourcenkontos - und der groesste Teil davon wurde schlicht VERNICHTET, weil ihn niemand
+       tragen konnte. Fuer den Angreifer sah es nach "keine Beute" aus, fuer das Opfer nicht.
+       Damit haengt der Ressourcenverlust jetzt an derselben Schwelle wie alles andere. */
     const stolen = {};
-    for (const [r, amt] of Object.entries(target.resources || {})) {
-      const take = Math.floor((amt || 0) * lootPct * farmPenalty * lootProtection * beuteFaktor);
-      if (take > 0) {
-        stolen[r] = take;
-        target.resources[r] = Math.max(0, (target.resources[r] || 0) - take);
-        attacker.resources[r] = (attacker.resources[r] || 0) + take;
+    if (ertragStufe !== 'sockel') {
+      for (const [r, amt] of Object.entries(target.resources || {})) {
+        const take = Math.floor((amt || 0) * lootPct * farmPenalty * lootProtection * beuteFaktor);
+        if (take > 0) {
+          stolen[r] = take;
+          target.resources[r] = Math.max(0, (target.resources[r] || 0) - take);
+          attacker.resources[r] = (attacker.resources[r] || 0) + take;
+        }
       }
     }
     let destroyedBuilding = null, destroyedBuildingCount = 0;
@@ -4570,7 +4681,9 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Angriffsflotte wird ein ZUSÄTZLICHES Verteidigungsgebäude zerstört (max +2, also bis zu 3 statt 1).
     // destroyedBuilding bleibt das ERSTE zerstörte (Abwärtskompatibilität der Berichte), Anzahl separat.
     const hbCount = attackerFleetSummary.hyperbomber || 0;
-    const buildingHits = 1 + Math.min(2, Math.floor(hbCount / 4));
+    // Sockel: keine Anlagenzerstoerung. buildingHits 0 laesst die Schleife unten gar nicht erst
+    // laufen; destroyedBuilding bleibt null und die Berichte melden korrekt "nichts zerstoert".
+    const buildingHits = ertragStufe === 'sockel' ? 0 : 1 + Math.min(2, Math.floor(hbCount / 4));
     for (let hbi = 0; hbi < buildingHits; hbi++) {
       // Standort-Fall: Zerstoert wird nur, was am ANGEGRIFFENEN Standort steht - ein Angriff auf
       // eine Kolonie darf keine Anlage der Heimat treffen.
@@ -4583,7 +4696,9 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
       if (!destroyedBuilding) destroyedBuilding = k;
       destroyedBuildingCount++;
     }
-    attacker.battlePoints = (attacker.battlePoints || 0) + 25;
+    // Sockel: keine Kampfpunkte. Das ist die Groesse, wegen der der Ein-Jaeger-Angriff ueberhaupt
+    // gefahren wurde.
+    if (ertragStufe !== 'sockel') attacker.battlePoints = (attacker.battlePoints || 0) + 25;
 
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     setSaveValue(targetUserId, JSON.stringify(target));
@@ -4605,7 +4720,16 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Die zweite Bedingung ist seit dem Flottenverlust nötig: Ein leergeräumtes Ziel hat keine
     // Beute mehr, wäre ohne sie also ab jetzt unbegrenzt auf reine Schiffszerstörung farmbar -
     // genau das Dauer-Farmen schwächerer Konten, gegen das der Schild eingeführt wurde.
-    if (Object.keys(stolen).length > 0 || defenderLossPct > 0) grantAttackShield(targetUserId);
+    /* Der Schild haengt seit dem 03.09.2026 NICHT mehr am Ertrag. Bis hierher stand hier
+       `if (Object.keys(stolen).length > 0 || defenderLossPct > 0)`; im Siegzweig war
+       defenderLossPct IMMER > 0 (lootPct 12-25 %, halbiert), die Bedingung also byte-neutral
+       wahr - diese Zeile aendert heute nichts.
+       Mit dem Mindesteinsatz waere sie zur Falle geworden: Ein Sockel-Angriff nimmt nichts mit
+       und richtet nichts an, das Opfer haette also seine EINZIGE Angriffs-Abklingzeit verloren -
+       und genau das Dauer-Farmen schwaecherer Konten waere wieder offen, gegen das der Schild
+       eingefuehrt wurde. Wer angegriffen wurde, bekommt den Schild; was der Angreifer davon
+       hatte, ist eine andere Frage. */
+    grantAttackShield(targetUserId);
     // Kopfgeld (#2): Wer den aktuellen Kopfgeld-Träger (Bestenlisten-Erster) schlägt, kassiert die Prämie
     // - nur einmal pro Woche, nicht auf sich selbst.
     {
@@ -4635,7 +4759,9 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     await saveDb();
     return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
   } else {
-    attacker.battlePoints = (attacker.battlePoints || 0) + 3;
+    // Sockel: auch die drei Trostpunkte fallen weg - sonst bliebe der Nadelstich eine, wenn auch
+    // duenne, Punktequelle, und genau die sollte er nicht mehr sein.
+    if (ertragStufe !== 'sockel') attacker.battlePoints = (attacker.battlePoints || 0) + 3;
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
 
     // ===== Der erfolgreiche Verteidiger bekommt endlich etwas (02.08.2026) =====
@@ -8588,16 +8714,23 @@ function listMusterJoins(tag, musterAttackId) {
   return out;
 }
 
-/* Zielarten des koordinierten Angriffs OHNE Verteidiger: das Alien-Nest (Phase 5) und seit dem
-   01.09.2026 die Asteroidenfestung. Beide haben keine Allianz, keine Basis, kein incomingmuster-
-   Dokument und keinen Schutzschild - und bei beiden darf der Verteidiger-Zweig von `resolve` gar
-   nicht erst betreten werden (siehe den Kommentar dort). EINE Funktion dafuer statt zweier
-   Vergleiche an vier Stellen, damit eine dritte PvE-Zielart nicht eine davon vergisst. */
-function musterIstPveZiel(zielArt) { return zielArt === 'alien-nest' || zielArt === 'festung'; }
+/* Zielarten des koordinierten Angriffs OHNE VERTEIDIGENDE ALLIANZ: Alien-Nest (Phase 5),
+   Asteroidenfestung (01.09.2026) und Vorposten (02.09.2026). Keines von ihnen hat ein targetTag,
+   eine Basis, ein incomingmuster-Dokument oder einen Schutzschild - und bei keinem darf der
+   Verteidiger-Zweig von `resolve` betreten werden (siehe den Kommentar dort).
+
+   DIE FUNKTION HIESS BIS ZUM 02.09.2026 musterIstPveZiel, UND DER NAME WURDE MIT DEM VORPOSTEN
+   FALSCH: Ein Vorposten gehoert einem SPIELER, ist also PvP-Inhalt - er verhaelt sich hier nur
+   deshalb wie ein PvE-Ziel, weil sein Besitzer keine ALLIANZ ist. Genau das ist die Frage, die an
+   allen vier Aufrufstellen zaehlt (targetTag, incomingmuster, allianceRoleOf), und der Name sagt
+   sie jetzt. Ein Name, der das Gegenteil behauptet, waere die naechste falsche Annahme, die
+   jemand uebernimmt. tests/test_muster_festung_http.js liest ihn in seiner Sabotage-Zeile mit. */
+function musterZielOhneAllianz(zielArt) { return zielArt === 'alien-nest' || zielArt === 'festung' || zielArt === 'vorposten'; }
 function musterZielBeschreibung(doc) {
   if (!doc) return '?';
   if (doc.zielArt === 'alien-nest') return 'ein Alien-Nest bei ' + (doc.nestSystem || '?');
   if (doc.zielArt === 'festung') return 'eine Asteroidenfestung bei ' + (doc.festungSystem || '?');
+  if (doc.zielArt === 'vorposten') return 'den Vorposten von ' + (doc.vorpostenBesitzerName || '?') + ' bei ' + (doc.vorpostenSystem || '?');
   return '[' + doc.targetTag + ']';
 }
 app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
@@ -8607,14 +8740,15 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
      Ein Nest hat keine Allianz, keine Basis, kein incomingmuster-Dokument und keinen
      Schutzschild. Was stattdessen geprueft wird, steht im Zweig darunter. */
   const zielArt = String((req.body && req.body.zielArt) || 'allianz');
-  if (!['allianz', 'alien-nest', 'festung'].includes(zielArt)) return res.status(400).json({ error: 'Unbekannte Zielart.' });
+  if (!['allianz', 'alien-nest', 'festung', 'vorposten'].includes(zielArt)) return res.status(400).json({ error: 'Unbekannte Zielart.' });
   const istNest = zielArt === 'alien-nest';
   const istFestung = zielArt === 'festung';
-  const istPve = musterIstPveZiel(zielArt);
-  const targetTag = istPve ? null : String(targetTagRaw || '').trim().toUpperCase();
+  const istVorposten = zielArt === 'vorposten';
+  const istOhneAllianz = musterZielOhneAllianz(zielArt);
+  const targetTag = istOhneAllianz ? null : String(targetTagRaw || '').trim().toUpperCase();
   const gatherOk = ALLIANCE_MUSTER_DURATIONS.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
   if (!tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
-  if (!istPve && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  if (!istOhneAllianz && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   const myRole = allianceRoleOf(tag, req.userId);
   if (myRole !== 'admin' && myRole !== 'officer') return res.status(403).json({ error: 'Nur Admins/Offiziere können einen koordinierten Angriff starten.' });
 
@@ -8657,7 +8791,29 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     if (festungWahl !== 'kern' && !FESTUNG_BAUTEILE[festungWahl]) return res.status(400).json({ error: 'Unbekanntes Bauteil als Ziel.' });
   }
 
-  if (!istPve) {
+  /* VORPOSTEN als Verbandsziel (02.09.2026). Der Grund ist derselbe wie bei der Sternenfeste:
+     Eine Bastion hat 400.000 Kern-LP und 60.000 Verteidigung - bei der gemessenen
+     Einsteiger-Schlagkraft von 7.500 sind das 53 Schlaege bei vier Stunden Abklingzeit, also
+     solo nicht zu schleifen. Genau dafuer gibt es den Verband.
+     ANDERS als Nest und Festung gehoert ein Vorposten einem SPIELER. Zwei Folgen, beide hier:
+     den EIGENEN greift man auch im Verband nicht an (dieselbe Regel wie am Einzelendpunkt), und
+     der Bauschutz gilt auch fuer den Verband - sonst waere der Verband der Weg, ihn zu umgehen. */
+  let vorpostenZiel = null;
+  if (istVorposten) {
+    if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.' });
+    const vpSys = String((req.body && req.body.vorpostenSystem) || '');
+    const vpId = String((req.body && req.body.vorpostenId) || '');
+    if (!vorpostenSysOk(vpSys)) return res.status(400).json({ error: 'Unbekanntes System.' });
+    vorpostenZiel = vorpostenLies(vpSys);
+    if (!vorpostenZiel || (vpId && vorpostenZiel.id !== vpId)) return res.status(404).json({ error: 'Dort steht kein (solcher) Vorposten mehr.' });
+    if (vorpostenZiel.besitzer === req.userId) return res.status(400).json({ error: 'Den eigenen Vorposten greift man nicht an.' });
+    const schutzBis = (vorpostenZiel.seit || 0) + VORPOSTEN_SCHUTZ_MS;
+    if (Date.now() < schutzBis) {
+      return res.status(403).json({ error: 'Dieser Vorposten steht noch unter Bauschutz - angreifbar in ' + Math.ceil((schutzBis - Date.now()) / 60000) + ' Minuten.', schutz: true, schutzBis });
+    }
+  }
+
+  if (!istOhneAllianz) {
   const targetBaseRaw = db.shared['alliance:' + targetTag + ':base'];
   let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
   if (!targetBase || !targetBase.foundedAt) return res.status(404).json({ error: 'Die Allianz [' + targetTag + '] hat keine (auffindbare) Allianzbasis.' });
@@ -8685,6 +8841,11 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     festungStufe: festungZiel ? festungZiel.stufe : null,
     festungStufeName: festungZiel ? ((FESTUNG_STUFEN[festungZiel.stufe] || FESTUNG_STUFEN.schanze).name) : null,
     festungZiel: festungZiel ? festungWahl : null,
+    vorpostenId: vorpostenZiel ? vorpostenZiel.id : null,
+    vorpostenSystem: vorpostenZiel ? vorpostenZiel.sys : null,
+    vorpostenBesitzer: vorpostenZiel ? vorpostenZiel.besitzer : null,
+    vorpostenBesitzerName: vorpostenZiel ? (vorpostenZiel.besitzerName || 'Kommandant') : null,
+    vorpostenStufeName: vorpostenZiel ? vorpostenStufe(vorpostenZiel.stufe).name : null,
     message: String(message || '').replace(/[<>]/g, '').slice(0, 140),
     createdAt: now, museterEndsAt: now + gatherSeconds * 1000,
     phase: 'gathering', dispatch: null, result: null
@@ -8811,12 +8972,13 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
   const myBaseRaw = db.shared['alliance:' + tag + ':base'];
   let myBase = null; try { myBase = myBaseRaw ? JSON.parse(myBaseRaw) : null; } catch (e) {}
   let sameSys;
-  if (musterIstPveZiel(doc.zielArt)) {
+  if (musterZielOhneAllianz(doc.zielArt)) {
     // Dieselbe Regel wie bei einer fremden Basis, nur mit dem SYSTEM des Nestes bzw. der Festung
     // als Gegenstueck: gleicher Sektor = kurzer Anflug. Eine zweite Entfernungsrechnung waere
     // eine zweite Wahrheit.
-    const pveSystem = doc.zielArt === 'festung' ? doc.festungSystem : doc.nestSystem;
-    sameSys = !!(myBase && pveSystem && myBase.sector === pveSystem);
+    const zielSystem = doc.zielArt === 'festung' ? doc.festungSystem
+      : doc.zielArt === 'vorposten' ? doc.vorpostenSystem : doc.nestSystem;
+    sameSys = !!(myBase && zielSystem && myBase.sector === zielSystem);
   } else {
     const targetBaseRaw = db.shared['alliance:' + doc.targetTag + ':base'];
     let targetBase = null; try { targetBase = targetBaseRaw ? JSON.parse(targetBaseRaw) : null; } catch (e) {}
@@ -8842,7 +9004,7 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
   // Ein Nest oder eine Festung wird nicht gewarnt - es gibt keinen Verteidiger, der ein
   // incomingmuster-Dokument lesen koennte, und ein Eintrag unter `alliance:null:incomingmuster`
   // waere schlicht Muell.
-  if (!musterIstPveZiel(doc.zielArt)) {
+  if (!musterZielOhneAllianz(doc.zielArt)) {
     db.shared['alliance:' + doc.targetTag + ':incomingmuster'] = JSON.stringify({
       attackerTag: tag, musterAttackId: doc.id, phase: 'enroute', dispatchedAt: now,
       arrivalAt: doc.dispatch.arrivalAt, lastAttackAt: now, totalShips, resolvedAt: null
@@ -8874,7 +9036,8 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
      keine Verteidiger-Rolle zu pruefen. */
   const istNestZiel = !!(doc && doc.zielArt === 'alien-nest');
   const istFestungZiel = !!(doc && doc.zielArt === 'festung');
-  const myRoleDefender = (doc && !musterIstPveZiel(doc.zielArt)) ? allianceRoleOf(doc.targetTag, req.userId) : null;
+  const istVorpostenZiel = !!(doc && doc.zielArt === 'vorposten');
+  const myRoleDefender = (doc && !musterZielOhneAllianz(doc.zielArt)) ? allianceRoleOf(doc.targetTag, req.userId) : null;
   if (!myRoleAttacker && !myRoleDefender) return res.status(403).json({ error: 'Nur Mitglieder der angreifenden oder verteidigenden Allianz.' });
 
   if (!doc || doc.phase !== 'enroute' || !doc.dispatch || doc.dispatch.arrivalAt > Date.now()) return res.json({ ok: true, doc });
@@ -8994,6 +9157,90 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
     console.log('[muster-festung] tag=' + tag + ' sys=' + doc.festungSystem + ' teilnehmer=' + beteiligteF.length +
       ' kraft=' + doc.dispatch.totalPower + ' ziel=' + ergF.ziel + ' kernschaden=' + ergF.schaden +
       ' teilschaden=' + ergF.teilSchaden + ' kern=' + (ergF.gefallen ? 'gefallen' : ergF.kern) + '/' + ergF.kernMax);
+    await saveDb();
+    return res.json({ ok: true, doc });
+  }
+
+  if (istVorpostenZiel) {
+    /* Der Verband gegen einen Vorposten (02.09.2026). Ueber DENSELBEN Rechenkern wie der
+       Einzelangriff (vorpostenSchlagAusfuehren) - wie bei Nest und Festung, aus demselben Grund.
+       DREI Dinge sind anders, weil der Vorposten einem SPIELER gehoert:
+       1. Der Bauschutz wird bei der ANKUNFT erneut geprueft. Beim Ausrufen steht er schon im
+          create; ein Verband kann aber laenger sammeln, als der Schutz noch laeuft - und
+          andersherum: Ein Vorposten, der waehrend der Sammelphase NEU gebaut wurde (der alte fiel,
+          jemand baute nach), stuende sonst ohne seinen Schutz da.
+       2. Der BESITZER wird benachrichtigt, genau wie beim Einzelschlag. Ohne diese Zeile waere die
+          Luecke, die am 02.09.2026 geschlossen wurde, ueber den Verbandsweg wieder offen - und
+          zwar fuer den Angriff, der ihn am ehesten kostet.
+       3. Faellt er, bekommt der Besitzer zusaetzlich 'vorposten-verlust' in die Warteschlange -
+          das erledigt der gemeinsame Kern, nicht dieser Zweig. */
+    const jetztV = Date.now();
+    const vp = vorpostenLies(doc.vorpostenSystem);
+    if (!vp || (doc.vorpostenId && vp.id !== doc.vorpostenId)) {
+      doc.phase = 'resolved';
+      doc.result = { vorposten: true, verpasst: true, grund: 'weg', system: doc.vorpostenSystem,
+        stufeName: doc.vorpostenStufeName || null, besitzerName: doc.vorpostenBesitzerName || null,
+        success: false, destroyed: false, damage: 0, defensePower: 0, ownLossPct: 0, resolvedAt: jetztV };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+    const schutzBisV = (vp.seit || 0) + VORPOSTEN_SCHUTZ_MS;
+    if (jetztV < schutzBisV) {
+      doc.phase = 'resolved';
+      doc.result = { vorposten: true, verpasst: true, grund: 'schutz', system: doc.vorpostenSystem,
+        stufeName: vorpostenStufe(vp.stufe).name, besitzerName: vp.besitzerName || null,
+        success: false, destroyed: false, damage: 0, defensePower: 0, ownLossPct: 0, resolvedAt: jetztV };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+    const rohV = doc.dispatch.participants;
+    const beteiligteV = (Array.isArray(rohV) && rohV.length)
+      ? rohV.map(p => ({ userId: p.id, name: p.name || 'Kommandant', gewicht: p.power || 0 }))
+      : (doc.dispatch.participantIds || []).map(id => ({ userId: id, name: 'Kommandant', gewicht: 1 }));
+    if (!beteiligteV.length) {
+      doc.phase = 'resolved';
+      doc.result = { vorposten: true, noParticipants: true, success: false, destroyed: false, damage: 0,
+        defensePower: 0, ownLossPct: 0, resolvedAt: jetztV };
+      setMusterAttackDoc(tag, doc);
+      await saveDb();
+      return res.json({ ok: true, doc });
+    }
+    const stufeNameV = vorpostenStufe(vp.stufe).name;
+    const besitzerV = vp.besitzer, besitzerNameV = vp.besitzerName || 'Kommandant';
+    const ergV = vorpostenSchlagAusfuehren(vp, doc.dispatch.totalPower, doc.dispatch.totalComposition || {}, beteiligteV, jetztV);
+    doc.phase = 'resolved';
+    doc.result = {
+      vorposten: true, verpasst: false,
+      system: doc.vorpostenSystem, stufeName: stufeNameV, besitzerName: besitzerNameV,
+      damage: ergV.schaden, destroyed: ergV.gefallen, success: ergV.schaden > 0,
+      lp: ergV.lp, lpMax: ergV.lpMax, defensePower: ergV.verteidigung, durchschlag: ergV.durchschlag,
+      garnisonVerluste: ergV.garnisonVerluste || {},
+      ownLossPct: Math.round(ergV.quote * 1000) / 1000,
+      chancePct: null, teilnehmer: ergV.teilnehmer,
+      belohnungUeberPendingRewards: true,
+      resolvedAt: jetztV
+    };
+    setMusterAttackDoc(tag, doc);
+
+    // Den Besitzer benachrichtigen - derselbe Weg wie am Einzelendpunkt (siehe docs/vorposten.md).
+    try {
+      const besUser = besitzerV ? findUserById(besitzerV) : null;
+      if (besUser) {
+        const bPrefs = getNotifPrefs(besUser);
+        if (bPrefs.enabled && bPrefs.attack) {
+          pushNotificationEvent(besitzerV, 'vorposten-angegriffen', {
+            angreiferName: '[' + tag + ']', name: stufeNameV, system: doc.vorpostenSystem, gefallen: ergV.gefallen,
+            kernProzent: ergV.gefallen ? 0 : Math.round(100 * Math.max(0, Math.min(1, (ergV.lp || 0) / Math.max(1, ergV.lpMax || 1))))
+          }, { skipWebPush: !allowAttackPush(besitzerV) });
+        }
+      }
+    } catch (e) { console.warn('[muster-vorposten] Push fehlgeschlagen:', e.message); }
+
+    console.log('[muster-vorposten] tag=' + tag + ' sys=' + doc.vorpostenSystem + ' teilnehmer=' + beteiligteV.length +
+      ' kraft=' + doc.dispatch.totalPower + ' schaden=' + ergV.schaden +
+      ' lp=' + (ergV.gefallen ? 'gefallen' : ergV.lp) + '/' + ergV.lpMax);
     await saveDb();
     return res.json({ ok: true, doc });
   }
@@ -9120,7 +9367,7 @@ app.post('/api/musterattack/claim', authMiddleware, async (req, res) => {
     return res.json({ ok: true, noParticipants: true, saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
   }
 
-  if (res_.nest || res_.festung) {
+  if (res_.nest || res_.festung || res_.vorposten) {
     /* Bei einem Nest oder einer Festung gibt claim NUR die Schiffe zurueck. Die eigentliche
        Belohnung liegt anteilig in __pendingRewards (siehe Kommentar im Ergebnis) - sie hier ein
        zweites Mal auszuzahlen waere eine Doppelzahlung fuer dasselbe Ereignis. Bei `verpasst` ist
@@ -9140,7 +9387,8 @@ app.post('/api/musterattack/claim', authMiddleware, async (req, res) => {
     db.shared[joinKey] = JSON.stringify(join);
     const nestSaveVersion = setSaveValue(req.userId, JSON.stringify(save));
     await saveDb();
-    return res.json({ ok: true, nest: !!res_.nest, festung: !!res_.festung, pve: true,
+    return res.json({ ok: true, nest: !!res_.nest, festung: !!res_.festung, vorposten: !!res_.vorposten, pve: true,
+      besitzerName: res_.besitzerName || null, durchschlag: res_.durchschlag || 0,
       verpasst: !!res_.verpasst, grund: res_.grund || null,
       destroyed: !!res_.destroyed, damage: res_.damage || 0, volkName: res_.volkName || null,
       stufeName: res_.stufeName || null, lostShips: verloren,
@@ -12141,26 +12389,92 @@ const VORPOSTEN_AUSBAU_MS = 12 * 3600 * 1000;      // zwischen zwei Ausbauten, a
 const VORPOSTEN_GARNISON_FAKTOR = 0.5;             // Anteil der rohen Flottenkraft der Garnison, der verteidigt
 const VORPOSTEN_VERLUST = 0.06;                    // Grundverlust des Angreifers je Schlag (Familie Festung/A2)
 const VORPOSTEN_STUFEN = [
-  /* kernLp gegen die gemessenen Schlagkraefte 7.500 / 44.000 / 240.000 je Schlag (Festungs-
-     Kalibrierung, docs/asteroidenfestungen.md):
-       Feldlager    20.000 =  2,7 Einsteiger- / 0,45 Mittelfeld- / 0,08 Endspiel-Schlaege
-       Stuetzpunkt  90.000 = 12   / 2,0  / 0,4
-       Bastion     400.000 = 53   / 9,1  / 1,7
-     Die Struktur verteidigt selbst (`verteidigung`), die Garnison kommt obendrauf. Ohne Garnison ist
-     ein Feldlager fuer sein Publikum ein Ziel von zwei bis drei Schlaegen - eine gehaltene Praesenz,
-     die man verteidigen MUSS, kein Selbstlaeufer. `flug`/`prod`/`scan` sind die drei uebrigen
-     Nutzen-Kanaele (Anteil Flugzeit-Ersparnis, additiver Produktionsbonus, Aufklaerungsstufe); das
-     Frontend liest sie aus GET /api/vorposten. `kampfpunkte`/`xp`/`credits` sind die Beute beim
-     Fall, anteilig - klein und flach, nie aus der Produktion des Besitzers abgeleitet. */
-  { stufe: 1, name: 'Feldlager',  kernLp: 20000,  verteidigung: 2500,  garnisonMax: 300,  flug: 0.06, prod: 0.015, scan: 1, kampfpunkte: 30,  xp: 250,  credits: 1200 },
-  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,  verteidigung: 12000, garnisonMax: 800,  flug: 0.10, prod: 0.03,  scan: 2, kampfpunkte: 80,  xp: 700,  credits: 3500 },
-  { stufe: 3, name: 'Bastion',    kernLp: 400000, verteidigung: 60000, garnisonMax: 2000, flug: 0.15, prod: 0.05,  scan: 3, kampfpunkte: 200, xp: 2000, credits: 9000 }
-];
+  /* DIE LEITER (Auftrag Sascha 02.09.2026: "sehr, sehr viele Ausbaustufen fuer verschiedene
+     Spezialisierungen", Entscheidung "8 Stufen + 3 Spezialisierungen ab Stufe 4").
 
-function vorpostenStufe(n) {
+     kernLp gegen die gemessenen Schlagkraefte 7.500 / 44.000 / 240.000 je Schlag (Festungs-
+     Kalibrierung, docs/asteroidenfestungen.md), Abklingzeit 4 h je Angreifer:
+       Feldlager      20.000 =  2,7 Einsteiger- / 0,45 Mittelfeld- / 0,08 Endspiel-Schlaege
+       Stuetzpunkt    90.000 = 12   / 2,0  / 0,4
+       Bastion       400.000 = 53   / 9,1  / 1,7
+       Stufe 6     2.400.000 =        55   / 10
+       Stufe 8     6.500.000 =       148   / 27   -> allein 4,5 Tage, im Verband ein Abend
+     Die Leiter ist die EINE Zahlenreihe; die Zweige (VORPOSTEN_ZWEIGE) sind Multiplikatoren
+     darauf. So bleibt die Balance an einer Stelle messbar, statt in drei parallelen Tabellen
+     auseinanderzulaufen - dieselbe Ueberlegung wie bei den Festungsstufen.
+
+     `kosten` ist der Preis fuer den Ausbau AUF diese Stufe. Sie steht hier und reist mit
+     GET /api/vorposten zum Client: Die Stufentabelle hatte nie eine Kopie im Frontend, die
+     Kostentabelle aber schon (VORPOSTEN_AUSBAU_KOSTEN, zwei Eintraege) - mit acht Stufen waere
+     daraus eine Kopie-Familie geworden, und genau die hat dieses Projekt schon dreimal erwischt.
+     `flug`/`prod`/`scan` sind die drei Nutzen-Kanaele (Anteil Flugzeit-Ersparnis, additiver
+     Produktionsbonus, Aufklaerungsstufe); alle drei wirken im Frontend bereits.
+     `kampfpunkte`/`xp`/`credits` sind die Beute beim Fall, anteilig - sie haengen bewusst NUR an
+     der Stufe, nicht am Zweig: sonst lohnte es sich, gezielt die wehrhaftesten Ziele zu schleifen. */
+  { stufe: 1, name: 'Feldlager',  kernLp: 20000,   verteidigung: 2500,   garnisonMax: 300,   flug: 0.06, prod: 0.015, scan: 1, kampfpunkte: 30,   xp: 250,   credits: 1200,  kosten: null },
+  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,   verteidigung: 12000,  garnisonMax: 800,   flug: 0.10, prod: 0.03,  scan: 2, kampfpunkte: 80,   xp: 700,   credits: 3500,  kosten: { erz: 200000, kristalle: 130000, deuterium: 80000 } },
+  { stufe: 3, name: 'Bastion',    kernLp: 400000,  verteidigung: 60000,  garnisonMax: 2000,  flug: 0.15, prod: 0.05,  scan: 3, kampfpunkte: 200,  xp: 2000,  credits: 9000,  kosten: { erz: 600000, kristalle: 400000, deuterium: 250000 } },
+  { stufe: 4, name: 'Ausbaustufe 4', kernLp: 800000,  verteidigung: 110000, garnisonMax: 3200,  flug: 0.18, prod: 0.065, scan: 3, kampfpunkte: 320,  xp: 3200,  credits: 15000, kosten: { erz: 1200000, kristalle: 800000,  deuterium: 500000,  nanolegierungen: 400 } },
+  { stufe: 5, name: 'Ausbaustufe 5', kernLp: 1400000, verteidigung: 190000, garnisonMax: 4800,  flug: 0.21, prod: 0.08,  scan: 4, kampfpunkte: 480,  xp: 5000,  credits: 24000, kosten: { erz: 2000000, kristalle: 1400000, deuterium: 900000,  nanolegierungen: 900,  quantenchips: 300 } },
+  { stufe: 6, name: 'Ausbaustufe 6', kernLp: 2400000, verteidigung: 320000, garnisonMax: 7000,  flug: 0.24, prod: 0.095, scan: 4, kampfpunkte: 700,  xp: 7500,  credits: 38000, kosten: { erz: 3400000, kristalle: 2400000, deuterium: 1500000, nanolegierungen: 1800, quantenchips: 800 } },
+  { stufe: 7, name: 'Ausbaustufe 7', kernLp: 4000000, verteidigung: 520000, garnisonMax: 10000, flug: 0.27, prod: 0.11,  scan: 5, kampfpunkte: 1000, xp: 11000, credits: 60000, kosten: { erz: 5500000, kristalle: 4000000, deuterium: 2600000, nanolegierungen: 3200, quantenchips: 1600, metamaterial: 400 } },
+  { stufe: 8, name: 'Ausbaustufe 8', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskerne: 120 } }
+];
+/* DIE DREI SPEZIALISIERUNGEN. Ab Stufe VORPOSTEN_ZWEIG_AB waehlt der Besitzer EINMAL eine
+   Ausrichtung; sie steht danach im Dokument (`doc.zweig`) und ist unveraenderlich - eine
+   Entscheidung, die man zurueckdrehen kann, ist keine.
+
+   Die Zweige sind MULTIPLIKATOREN auf die Leiter, keine eigenen Tabellen (Begruendung oben). Sie
+   differenzieren ausschliesslich ueber Kanaele, die im Frontend HEUTE SCHON WIRKEN - Flugzeit,
+   Produktion, Aufklaerung, Struktur, Garnison. Ein angezeigter Nutzen, der nichts tut, waere eine
+   Luege; neue Kanaele (Werftrabatt, Marktgebuehr, Modul-Steckplaetze, Projekte, Sprungtor) kommen
+   in spaeteren Etappen ZUSAMMEN mit ihrer Wirkung.
+
+   Summe der Faktoren je Zweig ist bewusst ungleich: Der Festungsring zahlt seine Wehrhaftigkeit mit
+   Nutzen, der Handelsknoten seinen Ertrag mit Weichheit. Wer drei Vorposten haelt, kann alle drei
+   Rollen einmal besetzen (VORPOSTEN_MAX_JE_KONTO = 3). */
+const VORPOSTEN_ZWEIG_AB = 4;
+const VORPOSTEN_ZWEIGE = {
+  werft: {
+    key: 'werft', name: 'Werft', kurz: 'Schnelle Flotten: kurze Flugzeiten, solide Struktur.',
+    namen: { 4: 'Werftgerüst', 5: 'Dockring', 6: 'Schiffsschmiede', 7: 'Flottenwerft', 8: 'Sternenwerft' },
+    mult: { kernLp: 0.90, verteidigung: 0.85, garnisonMax: 1.00, flug: 1.50, prod: 0.60, scan: 1.00 }
+  },
+  handel: {
+    key: 'handel', name: 'Handelsknoten', kurz: 'Ertrag und Fernsicht - dafür die dünnste Hülle.',
+    namen: { 4: 'Handelsposten', 5: 'Umschlagring', 6: 'Frachtkreuz', 7: 'Handelsknoten', 8: 'Sternenmarkt' },
+    mult: { kernLp: 0.80, verteidigung: 0.75, garnisonMax: 0.85, flug: 1.00, prod: 1.80, scan: 1.25 }
+  },
+  festung: {
+    key: 'festung', name: 'Festungsring', kurz: 'Hält Systeme: dickster Kern, größte Garnison.',
+    namen: { 4: 'Wehrring', 5: 'Zitadelle', 6: 'Sperrfeuerring', 7: 'Kriegsbastion', 8: 'Sternenfestung' },
+    mult: { kernLp: 1.35, verteidigung: 1.60, garnisonMax: 1.45, flug: 0.70, prod: 0.50, scan: 1.00 }
+  }
+};
+function vorpostenZweigOk(z) { return typeof z === 'string' && Object.prototype.hasOwnProperty.call(VORPOSTEN_ZWEIGE, z); }
+
+/* Die fertige Stufe: Leiter-Eintrag, ab VORPOSTEN_ZWEIG_AB mit den Multiplikatoren des gewaehlten
+   Zweigs und dessen Namen. OHNE Zweig (noch nicht gewaehlt oder unbekannter Schluessel) bleibt die
+   Leiter unveraendert - ein Dokument aus der Zeit vor den Zweigen rechnet damit weiter korrekt.
+   `scan` ist eine STUFE, keine Quote: erst multiplizieren, dann runden, mindestens 1. */
+function vorpostenStufe(n, zweig) {
   const i = Math.min(VORPOSTEN_STUFEN.length, Math.max(1, Math.floor(Number(n) || 1))) - 1;
-  return VORPOSTEN_STUFEN[i];
+  const basis = VORPOSTEN_STUFEN[i];
+  const z = vorpostenZweigOk(zweig) ? VORPOSTEN_ZWEIGE[zweig] : null;
+  if (!z || basis.stufe < VORPOSTEN_ZWEIG_AB) return basis;
+  const m = z.mult;
+  return Object.assign({}, basis, {
+    name: z.namen[basis.stufe] || basis.name,
+    zweig: z.key, zweigName: z.name,
+    kernLp: Math.round(basis.kernLp * m.kernLp),
+    verteidigung: Math.round(basis.verteidigung * m.verteidigung),
+    garnisonMax: Math.round(basis.garnisonMax * m.garnisonMax),
+    flug: Math.round(basis.flug * m.flug * 1000) / 1000,
+    prod: Math.round(basis.prod * m.prod * 1000) / 1000,
+    scan: Math.max(1, Math.round(basis.scan * m.scan))
+  });
 }
+function vorpostenStufeVon(doc) { return vorpostenStufe(doc && doc.stufe, doc && doc.zweig); }
 function vorpostenSysOk(sys) { return typeof sys === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(sys); }
 function vorpostenKey(sys) { return 'vorposten:' + sys; }
 function vorpostenLies(sys) {
@@ -12183,7 +12497,7 @@ function vorpostenGarnisonAnzahl(doc) {
   return Object.values((doc && doc.garnison) || {}).reduce((a, n) => a + (typeof n === 'number' && n > 0 ? n : 0), 0);
 }
 function vorpostenVerteidigung(doc) {
-  const st = vorpostenStufe(doc.stufe);
+  const st = vorpostenStufeVon(doc);
   return Math.round(st.verteidigung + rawFleetPower(doc.garnison || {}, 1, 1, null) * VORPOSTEN_GARNISON_FAKTOR);
 }
 function vorpostenHeimatSystem(userId) {
@@ -12215,14 +12529,21 @@ function checkVorpostenKeyPermission(req, key, isWrite) {
   return 'Vorposten werden ausschließlich über die Vorposten-Endpunkte verändert.';
 }
 function vorpostenFuerClient(doc, userId, jetzt) {
-  const st = vorpostenStufe(doc.stufe);
+  const st = vorpostenStufeVon(doc);
   const eigener = doc.besitzer === userId;
   const out = {
     id: doc.id, sys: doc.sys, besitzer: doc.besitzer, besitzerName: doc.besitzerName || 'Kommandant',
     seit: doc.seit || 0, stufe: doc.stufe || 1, name: st.name,
+    zweig: vorpostenZweigOk(doc.zweig) ? doc.zweig : null,
+    zweigName: vorpostenZweigOk(doc.zweig) ? VORPOSTEN_ZWEIGE[doc.zweig].name : null,
+    maxStufe: VORPOSTEN_STUFEN.length,
     kern: { lp: Math.max(0, Math.round((doc.kern && doc.kern.lp) || 0)), lpMax: Math.round((doc.kern && doc.kern.lpMax) || st.kernLp) },
     verteidigung: vorpostenVerteidigung(doc),
     garnisonAnzahl: vorpostenGarnisonAnzahl(doc),
+    /* garnisonMax gehoert HIERHER und nicht in die Stufentabelle des Clients: Die Tabelle ist die
+       Leiter OHNE Zweig-Multiplikatoren - ein Festungsring haette dort eine um 45 % zu kleine
+       Grenze angezeigt, und der Spieler haette Schiffe geschickt, die der Server ablehnt. */
+    garnisonMax: st.garnisonMax,
     schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
     nutzen: { flug: st.flug, prod: st.prod, scan: st.scan },
@@ -12232,7 +12553,27 @@ function vorpostenFuerClient(doc, userId, jetzt) {
   };
   // Zusammensetzung und Verlauf sieht nur der Besitzer; Fremde sehen die Zahl (wie die Eskorte am
   // Vorkommen ihre Staerke zeigt, ohne dass jemand die Liste braucht).
-  if (eigener) { out.garnison = Object.assign({}, doc.garnison || {}); out.kampfverlauf = (doc.kampfverlauf || []).slice(0, 10); }
+  if (eigener) {
+    out.garnison = Object.assign({}, doc.garnison || {});
+    out.kampfverlauf = (doc.kampfverlauf || []).slice(0, 10);
+    /* Die NAECHSTE Stufe fertig gerechnet - der Client soll den Sprung zeigen koennen, ohne die
+       Multiplikatoren selbst anzuwenden (sonst waere die Zweigtabelle doch wieder eine Kopie).
+       Steht die Zweigwahl an, kommen alle drei Varianten mit; sonst genau eine. */
+    const naechste = (doc.stufe || 1) + 1;
+    if (naechste <= VORPOSTEN_STUFEN.length) {
+      const basis = VORPOSTEN_STUFEN[naechste - 1];
+      const wahlSteht = naechste === VORPOSTEN_ZWEIG_AB && !vorpostenZweigOk(doc.zweig);
+      out.naechsteStufe = {
+        stufe: naechste, kosten: basis.kosten, zweigWahl: wahlSteht,
+        varianten: (wahlSteht ? Object.keys(VORPOSTEN_ZWEIGE) : [doc.zweig]).map(z => {
+          const s = vorpostenStufe(naechste, z);
+          return { zweig: vorpostenZweigOk(z) ? z : null, name: s.name,
+            kernLp: s.kernLp, verteidigung: s.verteidigung, garnisonMax: s.garnisonMax,
+            nutzen: { flug: s.flug, prod: s.prod, scan: s.scan } };
+        })
+      };
+    }
+  }
   return out;
 }
 
@@ -12245,7 +12586,7 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
   const durchschlag = Math.max(0.15, Math.min(0.95, kraft / (kraft + verteidigung)));
   const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4) * durchschlag);
 
-  doc.kern = doc.kern || { lp: vorpostenStufe(doc.stufe).kernLp, lpMax: vorpostenStufe(doc.stufe).kernLp };
+  doc.kern = doc.kern || { lp: vorpostenStufeVon(doc).kernLp, lpMax: vorpostenStufeVon(doc).kernLp };
   const lpVorher = Math.max(0, doc.kern.lp || 0);
   doc.kern.lp = Math.max(0, lpVorher - wurf);
   const schaden = lpVorher - doc.kern.lp;          // was ANGEKOMMEN ist, nicht der Wurf
@@ -12287,7 +12628,7 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
   const anteile = {};
   let teilnehmer = 0;
   if (gefallen) {
-    const st = vorpostenStufe(doc.stufe);
+    const st = vorpostenStufeVon(doc);
     const summe = Object.values(doc.beitraege).reduce((a, b) => a + (b.schaden || 0), 0) || 1;
     for (const [uid, b] of Object.entries(doc.beitraege)) {
       const anteil = (b.schaden || 0) / summe;
@@ -12326,7 +12667,9 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
     ok: true, aktiv: VORPOSTEN_AKTIV, bauAktiv: spawnAktiv('vorposten'),
     maxJeKonto: VORPOSTEN_MAX_JE_KONTO, schutzMs: VORPOSTEN_SCHUTZ_MS, abklingMs: VORPOSTEN_ABKLING_MS,
     ausbauMs: VORPOSTEN_AUSBAU_MS, garnisonFaktor: VORPOSTEN_GARNISON_FAKTOR,
-    stufen: VORPOSTEN_STUFEN, liste, eigene: liste.filter(x => x.eigener).length
+    stufen: VORPOSTEN_STUFEN, zweige: Object.values(VORPOSTEN_ZWEIGE).map(z => ({ key: z.key, name: z.name, kurz: z.kurz, namen: z.namen, mult: z.mult })),
+    zweigAb: VORPOSTEN_ZWEIG_AB, maxStufe: VORPOSTEN_STUFEN.length,
+    liste, eigene: liste.filter(x => x.eigener).length
   });
 });
 
@@ -12369,13 +12712,26 @@ app.post('/api/vorposten/ausbauen', authMiddleware, async (req, res) => {
   if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
   if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann seinen Vorposten ausbauen.' });
   if ((doc.stufe || 1) >= VORPOSTEN_STUFEN.length) return res.status(400).json({ error: 'Dieser Vorposten ist bereits voll ausgebaut.', endausbau: true });
+  /* Die Zweigwahl faellt GENAU beim Sprung auf VORPOSTEN_ZWEIG_AB und nur dort: davor gibt es
+     nichts zu waehlen, danach steht sie im Dokument und ist unveraenderlich. Ein mitgeschickter
+     Zweig zu einem spaeteren Ausbau wird ignoriert, nicht abgelehnt - der Client darf ihn der
+     Einfachheit halber immer mitsenden. */
+  const zielStufe = (doc.stufe || 1) + 1;
+  const brauchtZweig = zielStufe === VORPOSTEN_ZWEIG_AB && !vorpostenZweigOk(doc.zweig);
+  const zweigWunsch = String((req.body && req.body.zweig) || '');
+  if (brauchtZweig && !vorpostenZweigOk(zweigWunsch)) {
+    return res.status(400).json({ error: 'Ab Stufe ' + VORPOSTEN_ZWEIG_AB + ' braucht der Vorposten eine Ausrichtung.', zweigNoetig: true,
+      zweige: Object.values(VORPOSTEN_ZWEIGE).map(z => ({ key: z.key, name: z.name, kurz: z.kurz })) });
+  }
   const jetzt = Date.now();
   const ausbauAb = (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS;
   if (jetzt < ausbauAb) {
     return res.status(400).json({ error: 'Der nächste Ausbau ist in ' + Math.ceil((ausbauAb - jetzt) / 60000) + ' Minuten möglich.', abklingzeit: true, ausbauAb });
   }
-  const alt = vorpostenStufe(doc.stufe), neu = vorpostenStufe((doc.stufe || 1) + 1);
-  doc.stufe = (doc.stufe || 1) + 1;
+  if (brauchtZweig) doc.zweig = zweigWunsch;
+  const alt = vorpostenStufeVon(doc);
+  doc.stufe = zielStufe;
+  const neu = vorpostenStufeVon(doc);
   doc.kern = doc.kern || { lp: alt.kernLp, lpMax: alt.kernLp };
   // Ein Ausbau HEILT nicht - die LP steigen um dieselbe Differenz wie das Maximum, angerichteter
   // Schaden bleibt angerichtet (dieselbe Entscheidung wie beim reifenden Nest).
@@ -12404,7 +12760,7 @@ app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
   if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand.' });
   const fleetObj = planetKey === 'home' ? save.fleet : (save.colonies && save.colonies[planetKey] && save.colonies[planetKey].fleet);
   if (!fleetObj) return res.status(404).json({ error: 'Kein Flottenstandort gefunden.' });
-  const st = vorpostenStufe(doc.stufe);
+  const st = vorpostenStufeVon(doc);
   let platz = Math.max(0, st.garnisonMax - vorpostenGarnisonAnzahl(doc));
   const angenommen = {};
   doc.garnison = doc.garnison || {};
@@ -13585,6 +13941,9 @@ const NOTAUS_NAMEN = {
   nester:   'Alien-Nester entstehen, reifen und wandern',
   konvois:  'Wrackkonvois entstehen, driften und entkommen',
   vorposten: 'Neue Vorposten werden errichtet',
+  // Kein Spawn, sondern eine Ertragsregel: Steht der Schalter aus, bringt JEDER Angriff wieder
+  // vollen Ertrag - der Rueckwaertsgang fuer den Mindesteinsatz, ohne Frontend-Release.
+  mindesteinsatz: 'Kampfpunkte und Schaden nur ab Mindesteinsatz',
   // Sechster Schalter (02.09.2026): KEIN Spawn, sondern die Annahme von Angriffen - PvP, Festung,
   // Nest, Konvoi, Vorposten. Fuer die Dauer einer Ruecksicherung oder db.json-Arbeit: Ein Angriff,
   // der waehrend eines Stopps ankommt, geht sonst auf einen Stand, den es gleich nicht mehr gibt.
@@ -13629,6 +13988,7 @@ function spawnAktivImCode(name) {
   if (name === 'konvois') return A2_SPAWN_AKTIV;
   if (name === 'vorposten') return VORPOSTEN_AKTIV;
   if (name === 'angriffe') return true;
+  if (name === 'mindesteinsatz') return PVP_MINDESTEINSATZ_AKTIV;
   return false;
 }
 

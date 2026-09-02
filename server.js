@@ -11975,7 +11975,7 @@ app.post('/api/deploy-webhook', (req, res) => {
    er aus ist, antworten alle Vorposten-Endpunkte mit 404/inaktiv und GET /api/vorposten meldet
    aktiv:false mit leerer Liste. Dazu der Admin-Notaus `vorposten` (db.notAus): er stoppt nur den
    BAU neuer Vorposten - bestehende bleiben angreifbar, wie bei den Nestern. */
-const VORPOSTEN_AKTIV = false;
+const VORPOSTEN_AKTIV = true;   // umgelegt am 02.09.2026, unmittelbar nach dem Frontend-Merge (Vorposten-Zweig live)
 const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
 const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
 const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer, am Objekt

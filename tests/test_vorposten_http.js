@@ -21,6 +21,7 @@
 // GEGENPROBEN (KEPLER_VP_SABOTAGE, je mit "was fallen MUSS"-Liste, Regel 1/71 - der Lauf exit-0t,
 // wenn GENAU die gelisteten Pruefungen fallen, und meldet WERKZEUGFEHLER, wenn eine gruen bleibt):
 //   schaden  -> 4c  (der volle Wurf statt des angekommenen Schadens; gemessen: genau 4c)
+//   meldung  -> 4h, 4h2 (die Benachrichtigung an den Besitzer entfaellt; gemessen: beide)
 //   abkling  -> 4d  (keine Abklingzeit am Objekt; gemessen: genau 4d)
 //   rechte   -> 1a  (die Storage-Route schreibt vorposten:* wieder; gemessen: 1a, und als FOLGE 1b/2b -
 //                    das per Storage angelegte Dokument fuellt die Liste und macht den Bau zum 409)
@@ -41,7 +42,7 @@ const SAB = process.env.KEPLER_VP_SABOTAGE || '';
 // Was bei welcher Sabotage fallen MUSS - gemessen, nicht geschaetzt (Regel 71). Die Listen der zwei
 // Zweig-Sabotagen stammen aus dem Lauf vom 02.09.2026: 'zweigwahl' 7e 7f 7g 7h, 'zweigwerte' nur 7g
 // (die Wahl greift dort weiter, nur die Multiplikatoren wirken nicht - genau der stille Fall).
-const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a'], typ: ['5b'],
+const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a'], typ: ['5b'], meldung: ['4h', '4h2'],
   zweigwahl: ['7e', '7f', '7g', '7h'], zweigwerte: ['7g'] };
 
 let fail = false;
@@ -184,6 +185,7 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     else if (SAB === 'abkling') geflippt = geflippt.replace('    doc.schlaege[t.userId] = jetzt;', '    /* sabotiert: keine Abklingzeit am Objekt */;');
     else if (SAB === 'rechte') geflippt = geflippt.replace("  return 'Vorposten werden ausschließlich über die Vorposten-Endpunkte verändert.';", '  return null;');
     else if (SAB === 'typ') geflippt = geflippt.replace("        type: 'vorposten',           // eigener Typ", "        type: 'alien-nest',          // eigener Typ");
+    else if (SAB === 'meldung') geflippt = geflippt.replace("        pushNotificationEvent(doc.besitzer, 'vorposten-angegriffen', {", "        if (false) pushNotificationEvent(doc.besitzer, 'vorposten-angegriffen', {");
     // Die zwei Haelften der Spezialisierung (02.09.2026) einzeln sabotierbar: die WAHL beim Ausbau
     // und die WIRKUNG der Multiplikatoren. Beide zusammen waeren eine Sabotage, die zu viel trifft.
     else if (SAB === 'zweigwahl') geflippt = geflippt.replace('  const brauchtZweig = zielStufe === VORPOSTEN_ZWEIG_AB && !vorpostenZweigOk(doc.zweig);', '  const brauchtZweig = false;');
@@ -301,6 +303,23 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     garnNachher < garnVorher && Object.keys(r4.body.garnisonVerluste || {}).length > 0, { vorher: garnVorher, nachher: garnNachher, gemeldet: r4.body.garnisonVerluste });
   check('4g: der Kampfvermerk steht am Objekt (letzterKampf mit Angreifer und Schaden)',
     !!docNach4b.letzterKampf && docNach4b.letzterKampf.angreifer === BEN && docNach4b.letzterKampf.schaden === r4.body.schaden, docNach4b.letzterKampf);
+  /* 4h: DER BESITZER ERFAEHRT ES - bei diesem Schlag, nicht erst beim Fall. Das ist die
+     Verteidigungs-Zusage des Konzepts (§2.6): Er soll mit einer Garnison gegenhalten koennen,
+     und dafuer muss er den ERSTEN Schlag mitbekommen. Der Kampfvermerk (4g) steht nur im
+     Dokument - sichtbar erst, wenn er das Kartenmenue oeffnet.
+     Gemessen wird der Postfach-Eintrag in db.private[uid].__notificationEvents, nicht der
+     Handy-Versand (der ist Feuer-und-Vergessen und in einem Test ohne VAPID-Schluessel ohnehin
+     stumm) - und der TEXT wird mitgeprueft, denn eine Meldung ohne Kernstand nimmt dem Besitzer
+     genau die Zahl, an der er die Dringlichkeit ablesen soll (Regel 28). */
+  const meldungen = (liesDb().private[ANNA] || {}).__notificationEvents || [];
+  const vpMeldung = meldungen.find(m => m.type === 'vorposten-angegriffen');
+  check('4h: der Besitzer bekommt eine Meldung ueber den Angriff - beim Schlag, nicht erst beim Fall',
+    !!vpMeldung && vpMeldung.payload.gefallen === false && vpMeldung.payload.angreiferName === 'ben',
+    { gefunden: !!vpMeldung, payload: vpMeldung && vpMeldung.payload,
+      hinweis: 'ohne sie erfaehrt er erst vom Verlust und kann nie reagieren' });
+  check('4h2: und sie nennt den Kernstand, an dem er die Dringlichkeit ablesen kann',
+    !!vpMeldung && typeof vpMeldung.payload.kernProzent === 'number' && vpMeldung.payload.kernProzent > 0 && vpMeldung.payload.kernProzent < 100,
+    vpMeldung && { kernProzent: vpMeldung.payload.kernProzent, name: vpMeldung.payload.name, system: vpMeldung.payload.system });
   const r4d = await post(tokB, '/vorposten/angriff', { system: SYS1, missionId: 'm2' });
   check('4d: Abklingzeit AM OBJEKT - der zweite Schlag desselben Kontos wird abgewiesen', r4d.status === 403 && r4d.body.abklingzeit === true, { status: r4d.status, body: r4d.body });
   await aendereDb(d => { const sa = liesSave(d, ANNA); sa.fleet.missions = [angriffMission('m9', SYS1)]; schreibSave(d, ANNA, sa); });

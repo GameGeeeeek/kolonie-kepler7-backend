@@ -103,6 +103,84 @@ Schaden dort, wo der Deckel greift (500 Rest-LP – mit dem vollen Wurf stünde 
 und die Erwartungen der Stufentabelle kommen aus dem QUELLTEXT, nicht aus der API-Antwort (Regel 62).
 `test_admin_funktionen_http.js` 3a zählt seither fünf Schalter, 3d prüft die Bau-Aufrufstelle mit.
 
+## Der Besitzer erfährt vom Angriff – bei jedem Schlag (02.09.2026)
+
+Bis hierher erfuhr der Besitzer eines Vorpostens **nichts**, bis er fiel: Der Kampfvermerk
+(`letzterKampf`) steht nur im Dokument und wird erst sichtbar, wenn er das Kartenmenü öffnet; die
+Warteschlange bekommt allein der Verlust (`vorposten-verlust`). Damit war die Verteidigungs-Zusage
+des Konzepts (§2.6 – „kann mit Stationierung gegenhalten") nicht einlösbar: Wer nie erfährt, dass
+geschossen wird, verstärkt keine Garnison.
+
+`/api/vorposten/angriff` reiht deshalb bei **jedem** Schlag `pushNotificationEvent(besitzer,
+'vorposten-angegriffen', …)` ein – gebaut nach dem Muster der Anfechtung (`asteroid-contested`) und
+mit denselben drei Eigenschaften:
+
+- **Einstellungen des Empfängers** (`getNotifPrefs`, Kategorie `attack`) entscheiden, ob überhaupt.
+- **`allowAttackPush`** drosselt nur den Handy-Versand (30 Minuten); der Postfach-Eintrag kommt
+  immer, damit die Historie vollständig bleibt.
+- **fail-open in einem `try`**: Eine fehlgeschlagene Benachrichtigung darf einen Kampf nie
+  scheitern lassen. Das ist hier richtig, weil es keine Sicherung ist (Hausregel: fail-closed für
+  Sicherungen, fail-open für Benachrichtigungen).
+
+Sie steht **vor** `saveDb()`, damit die eingereihte Meldung mit demselben Schreibvorgang auf die
+Platte geht (Hausregel „db synchron vor saveDb mutieren").
+
+**Der Kernstand steht im Text.** Ohne ihn wüsste der Besitzer nur DASS, nicht WIE DRINGEND – und
+genau das entscheidet, ob er eine Garnison losschickt. Beim Fall nennt der Text stattdessen den
+Verlust der Garnison und verweist aufs Belohnungsfach.
+
+**Zwei Wege, die einander nicht ersetzen:** Die Benachrichtigung meldet sofort (auch aufs Handy, auch
+bei geschlossenem Spiel), `vorposten-verlust` wirkt im Spielstand und schreibt den Bericht. Beim Fall
+kommen beide.
+
+Wächter: `tests/test_vorposten_http.js` 4h und 4h2 (Postfach-Eintrag samt Kernstand, gemessen an
+`db.private[uid].__notificationEvents`), Gegenprobe `KEPLER_VP_SABOTAGE=meldung` – genau 4h und 4h2
+fallen. Der bestehende `tests/test_pushkategorien.js` im Frontend-Repo fand die fehlende
+Postfach-Zeile von selbst und nannte sie beim Namen (2b) – der Frontend-Eintrag in
+`NOTIF_EVENT_INFO` ist damit erzwungen, nicht nur erinnert.
+
+## Der Allianz-Verband gegen einen Vorposten (02.09.2026)
+
+Derselbe Grund wie bei der Sternenfeste: Eine **Bastion** hat 400.000 Kern-LP und 60.000
+Verteidigung – bei der gemessenen Einsteiger-Schlagkraft von 7.500 sind das **53 Schläge** bei vier
+Stunden Abklingzeit. Solo ist sie nicht zu schleifen; genau dafür gibt es den Verband.
+`zielArt: 'vorposten'` (mit `vorpostenSystem`, `vorpostenId`) läuft über **denselben Rechenkern**
+wie der Einzelangriff (`vorpostenSchlagAusfuehren`) – wie bei Nest und Festung, aus demselben Grund.
+
+### Der Name der Weiche hat sich geändert
+
+`musterIstPveZiel` heißt jetzt **`musterZielOhneAllianz`**. Der alte Name wurde mit dieser Zielart
+falsch: Ein Vorposten gehört einem **Spieler**, ist also PvP-Inhalt – er verhält sich in `resolve`
+nur deshalb wie ein PvE-Ziel, weil sein Besitzer **keine Allianz** ist. Genau das ist die Frage, die
+an allen vier Aufrufstellen zählt (`targetTag`, `incomingmuster`, `allianceRoleOf`), und der Name
+sagt sie jetzt. `tests/test_muster_festung_http.js` liest ihn in seiner Sabotage-Zeile und wurde
+mitgezogen.
+
+### Drei Dinge, die es bei Nest und Festung nicht gibt
+
+1. **Den eigenen greift man auch im Verband nicht an** – dieselbe Regel wie am Einzelendpunkt,
+   geprüft beim Ausrufen.
+2. **Der Bauschutz gilt auch für den Verband, und zwar zweimal**: beim Ausrufen und noch einmal
+   **bei der Ankunft**. Ohne die zweite Prüfung wäre der Verband der Weg, den Bauschutz zu umgehen –
+   ein Vorposten, der während der Sammelphase neu gebaut wurde (der alte fiel, jemand baute nach),
+   stünde sonst ungeschützt da. Der Verband kommt dann an und richtet nichts an (`verpasst`,
+   Grund `'schutz'`).
+3. **Der Besitzer wird benachrichtigt**, mit dem Allianz-Tag als Angreifer statt eines einzelnen
+   Namens. Ohne diese Zeile wäre die Lücke vom selben Tag über den Verbandsweg wieder offen –
+   ausgerechnet für den Angriff, der ihn am ehesten kostet.
+
+Wächter: `tests/test_muster_vorposten_http.js` (**Port 3247**, 29 Prüfungen). Vier Gegenproben, je
+mit Pflichtliste und identischer Prüfliste: `schutz` → 6a, `gewicht` → 4c und 4d, `meldung` → 4h,
+`eigen` → 1b.
+
+**Eine Lehre aus der Gegenprobe `eigen`:** Sie riss zunächst 18 Prüfungen statt einer. Nicht der
+Code war schuld, sondern der Testablauf – ohne die Sperre entsteht in 1b ein **echter** Angriff, der
+als laufender jeden weiteren `create` mit 409 blockiert. Der Test räumt seither nach 1b immer auf,
+egal ob die Sperre griff. Eine Sabotage, die den Ablauf kaputtmacht statt die Eigenschaft, belegt
+nichts.
+
+**Belegte Testports sind jetzt 3195–3200 und 3210–3247** – ein neuer Test nimmt 3248.
+
 ## Acht Stufen und drei Spezialisierungen (02.09.2026)
 
 Auftrag Sascha: „Ich will, dass der Vorposten ein Highlight des Spiels wird … am liebsten sehr,

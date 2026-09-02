@@ -604,3 +604,74 @@ am Schalter, bestehende Ziele bleiben angreifbar. Die Admin-Fläche im Frontend 
 datengetrieben aus `GET /api/admin/schalter`, der vierte Eintrag erscheint dort ohne Frontend-Änderung.
 Wächter: `test_admin_funktionen_http.js` 3a (vier Schalter) und 3d (vier Aufrufstellen).
 Einzelheiten zu A2 in `docs/wrackkonvois.md`.
+
+## Vier weitere Admin-Fähigkeiten: Protokoll, Sperre mit Frist, Spielstand-Rücksicherung, Allianzen (02.09.2026, Auftrag Sascha)
+
+**Wortlaut:** „Ideen für noch mehr admin Funktionen jeglicher Art?" Gemessen vorher: 23 Admin-Routen,
+aber keine Wiederherstellung eines einzelnen Spielstands (die Backups alle 30 Minuten lagen nur auf
+der Platte), keine Sicht auf den Spielstand selbst, eine Sperre als nacktes Ja/Nein ohne Grund und
+Frist, keine Stummschaltung, kein Protokoll der Admin-Aktionen, Allianzen vom Admin-Bereich aus
+unsichtbar. Gewählt hat Sascha alle vier Vorschläge. Wächter: `tests/test_admin_verwaltung_http.js`
+(33 Prüfungen, sieben Gegenproben mit Pflichtlisten, Port 3244).
+
+### Das Protokoll ist EINE Middleware, kein Aufruf je Route
+
+`app.use('/api/admin', adminProtokollMiddleware)` wickelt `res.json` ein und schreibt bei jeder
+**erfolgreichen** (Status < 300) POST-Antwort einen Eintrag nach `db.adminProtokoll` (300 Stück):
+Zeit, Art (der Pfad hinter `/api/admin/`), wer, Ziel (`targetUsername`/`tag`/`code`), gekürzter
+Körper. Eine Liste je Route hätte nur die Routen erfasst, an die man beim Schreiben gedacht hat –
+die nächste neue Route fehlte still (Frontend-Arbeitsregel 40). Zwei Details aus der Messung:
+die Middleware **muss vor den Routen registriert sein** (1c prüft die Reihenfolge im Quelltext), und
+beim Antworten trägt `req.path` wieder den vollen Pfad – gelesen wird `req.originalUrl`, sonst
+stünde `api/admin/set-banned` im Protokoll. Ein 403 oder 404 ist keine Handlung und steht nicht drin.
+
+### Sperre mit Grund und Frist, Stummschaltung als mildere Stufe
+
+`banned` bleibt das Feld, das jede bestehende Prüfung liest; dazu `bannGrund`, `bannBis` (0 =
+unbefristet), `bannSeit`. `sperreAktiv(user)` hebt eine abgelaufene Frist beim **nächsten Kontakt**
+auf (authMiddleware, Login, Konto-Blatt) – kein Cron, dasselbe Muster wie das Aufräumen der Uhr.
+Der Anmeldetext nennt Grund und Frist („Dieses Konto wurde gesperrt – Grund: … – bis … Uhr."); das
+nackte „gesperrt" war die Meldung, die zu jedem Support-Gespräch geführt hat. Das Betreiberkonto
+kann sich nicht selbst sperren.
+
+`POST /api/admin/stumm { targetUsername, stunden, grund }` setzt `stummBis` (höchstens 30 Tage,
+0 hebt auf). Die Stummschaltung greift an **drei** Stellen: `checkChatKeyPermission` (globaler
+Chat), `checkAllianceKeyPermission` für `msg:`-Schlüssel (Allianz-Chat) und `POST /api/messages`.
+Lesen bleibt erlaubt (3e). Wer eine vierte Schreibstelle für Text baut, hängt sie an `stummAktiv`.
+
+### Spielstand-Blatt, Backups, Rücksicherung – der einzige Schreibzugriff auf einen fremden Spielstand
+
+`GET /api/admin/spielstand?name=` fasst den Stand zusammen (`spielstandZusammenfassung`:
+Ressourcen, Kredite, Gebäude- und Forschungsstufen, Flotte, Kolonien, Bauaufträge, Größe) – nie der
+rohe Text. Dieselbe Zusammenfassung liefert `GET /api/admin/backup-spielstand?name=&datei=` für
+einen Stand aus einer der db.json-Kopien in `BACKUP_DIR`; `GET /api/admin/backups` listet sie,
+`POST /api/admin/backup-jetzt` legt eine an (erst `saveDb()`, dann kopieren – sonst sichert das
+Backup den Stand von vor dem letzten Schreibvorgang). Der Dateiname läuft gegen
+`BACKUP_DATEI_MUSTER`, damit `../` nie ein Pfad wird (4g).
+
+`POST /api/admin/spielstand-zurueckholen { targetUsername, datei }` ist dreifach abgesichert:
+1. Der bisherige Stand bleibt als **Schatten** (`__spielstandSchatten`, ein Eintrag) und lässt sich
+   mit `POST /api/admin/spielstand-schatten-zurueck` wieder einsetzen (4f).
+2. `setSaveValue` zählt die Version hoch.
+3. **Alle Sitzungen des Kontos werden entwertet** (tokenVersion++, derselbe Weg wie „alle Sitzungen
+   beenden"). Ohne diesen Schritt schriebe der laufende Client des Spielers seinen alten Stand
+   binnen zehn Sekunden zurück: Sein Autosave bekommt wegen 2. einen 409, lädt die Version nach und
+   **wiederholt den Schreibvorgang mit seinem eigenen Stand** (`saveGameStateVersioned` im
+   Frontend). Gemessen als PAAR 4d/4e; die Gegenprobe ohne Entwertung fällt an 4e. Der Spieler
+   meldet sich neu an und lädt dann den zurückgeholten Stand (4e2).
+
+Ein Backup wird synchron im Admin-Aufruf gelesen und geparst – bei 13 Konten ein Bruchteil einer
+Sekunde, und ein Admin-Aufruf ist kein Spielerpfad. Wächst die db.json je in den zweistelligen
+Megabyte-Bereich, gehört hier ein Stream hin.
+
+### Allianzen: Übersicht, Anführer übertragen, Auflösen – auf dem Weg des Clients
+
+Alles liegt in `db.shared` unter `alliance:<tag>:*`. `GET /api/admin/allianzen` liest `info`,
+`role:<userId>`, `base`, `applications:*` und liefert je Allianz Mitglieder (Anführer zuerst, mit
+letzter Sitzung und ob das Konto noch existiert), Basisstufe, offene Bewerbungen, Mitgliederlimit.
+`POST /api/admin/allianz/anfuehrer { tag, targetUsername }` verlangt ein aktives Mitglied, macht es
+zum Admin und stuft bisherige Admins zu Offizieren herab (5b/5c). `POST /api/admin/allianz/aufloesen
+{ tag }` tut **genau das, was `disbandAlliance` im Frontend tut**: `info.disbanded = true` (dazu
+`disbandedByAdmin`), alle aktiven Rollen auf `left` – damit jeder Mitglieds-Client beim nächsten
+Laden dasselbe sieht wie nach einer Auflösung durch den Anführer, und der Tag für eine Neugründung
+frei ist (5f). Ein zweites Auflösen gibt 409.

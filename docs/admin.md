@@ -728,3 +728,61 @@ bucht einen 503 wie jeden abgewiesenen Angriff (Flotte kehrt zurück, Bericht oh
 das Blatt – Kredite gesamt/Median/Top 5, Ressourcen, Kampfpunkte, aktiv in 7 Tagen), Markt
 (Preise gegen Basis, Ereignis, Trend), PvE-Ziele (Weltboss, Nester, Festungen aus dem Feld,
 Wrackkonvois, Vorposten) und die gesetzten Notaus-Schalter. Nichts wird gerechnet oder verändert.
+
+## Kampfverlauf, Anmelde-Forensik, E-Mail an Spieler, Konto-Löschung (02.09.2026)
+
+Fünfte Runde (Auftrag „Weitere Ideen für Admin Funktionen", alle vier gewählt). Vorher gemessen:
+41 Admin-Routen, aber kein Weg, ein Konto zu löschen (das einzige `delete db.users[…]` stand in
+`konto/umbenennen`), keine Beweise zu einer Meldung, kein Mailversand durch den Betreiber und kein
+einziger Zähler zu Anmeldungen.
+
+**Kampfverlauf am Nutzerobjekt.** `/api/attack` schreibt bei beiden Ausgängen einen Eintrag an
+Angreifer **und** Verteidiger (`user.kampfVerlauf`, 30 Einträge: Zeit, Rolle, Gegner, Standort,
+Ausgang, beide Kräfte, Zahl der erbeuteten Rohstoffarten). `GET /api/admin/konto/verlauf` liefert
+ihn samt `angriffeGesamt`, `haeufigstesZiel` und `letzteStunde` — die zwei Zahlen, wegen derer man
+hinsieht.
+
+*Warum ein zweiter Speicher neben den Berichten:* Die Berichte in `db.private` gehören dem Spieler.
+Er kann sie einzeln und komplett löschen (`DELETE /api/reports`), und sie rollen ohnehin ab
+(40 Einträge ohne Unterstützer-Rang, 150 mit). Beides zusammen heißt: Genau der Verdächtige kann
+seine Spur wegwischen, bevor eine Meldung geprüft wird. Der Wächter misst das als Paar (1c/1d).
+
+**Anmelde-Forensik.** Ein falsches Passwort erhöht `loginFehlversuche` am Konto, eine gelungene
+Anmeldung setzt den Zähler zurück und hält die Zahl von vorher in `fehlversucheVorAnmeldung` fest
+(„dreimal daneben, dann drin" gegen „vierzigmal daneben, nie drin"). Dazu `letzteAnmeldung`,
+`anmeldungen` und die eine offene Sitzung — eine, weil es seit dem 25.07.2026 je Konto genau eine
+gibt (`activeSessionId`). `authRateLimit` bremst weiterhin je IP; ein verteilter Versuch auf **ein**
+Konto sah dadurch aus wie Normalbetrieb. Gezählt wird nur für ein existierendes Konto: Die Antwort
+für „kein Konto" und „falsches Passwort" bleibt wörtlich dieselbe, sonst wäre der Zähler eine
+Konto-Erkennung (Wächter 2d/2e).
+
+**E-Mail an Spieler.** `POST /api/admin/mail` an ein Konto, `POST /api/admin/mail-alle` an alle mit
+bestätigter Adresse. Beide über die Haus-Vorlage aus `mailer.js` (`voidSignalEmail`), mit dem
+Klartext-Teil und **ohne neuen Abmelde-Schalter**: Es gilt die bestehende Einstellung
+`wantsPatchnotes`, dieselbe wie bei den Winback-Mails. Deckel 40 je Aufruf (wie
+`WINBACK_MAX_PER_RUN`). Die Adresse verlässt den Server nie — die Antwort zählt nur `gesendet`,
+`abgemeldet`, `ohneAdresse`, `fehlgeschlagen`, `uebrig`. Ging **keine einzige** Mail raus, obwohl es
+Empfänger gab, antwortet der Rundlauf mit 502: Ein Ausfall des Mail-Dienstes darf nicht wie eine
+erledigte Aufgabe aussehen.
+
+**Konto endgültig löschen — mit Frist.** Die Löschung ist der einzige Eingriff dieses Bereichs, der
+sich nicht zurücknehmen lässt, deshalb passiert sie nie sofort: `POST /api/admin/konto/loeschen`
+(Begründung Pflicht) merkt sie für sieben Tage vor, meldet das Konto überall ab und sperrt es;
+der Spieler liest beim Anmelden Frist und Grund im Klartext statt „falsches Passwort".
+`POST /api/admin/konto/loeschen-abbrechen` nimmt die Vormerkung folgenlos zurück (nur abgemeldet
+bleibt er — `tokenVersion` lässt sich nicht zurückdrehen, ohne fremde Tokens wiederzubeleben).
+Bewusst **eigene** Felder (`loeschungAb/Seit/Grund`) statt der Sperr-Felder: Wer eine bestehende
+Sperre überschreibt, kann sie beim Abbrechen nicht wiederherstellen.
+
+`pruefeLoeschungen()` läuft stündlich und beim Start (in `setImmediate`, Todeszone). Anders als bei
+der Sperre reicht „beim nächsten Kontakt" hier nicht: Ein gelöschtes Konto meldet sich per
+Definition nie wieder an. Der Lauf entfernt Nutzer, Spielstand (mit Berichten und Belohnungen),
+Bestenlisten-Eintrag, Allianz-Rollen, Vorposten und offene Reset-Token; Chat-Nachrichten und
+Feedback **bleiben stehen und tragen danach „Geloeschtes Konto"** — beides sind fremde
+Unterhaltungen, aus denen einzelne Zeilen herauszureißen den Rest unlesbar machte. Der Vorposten
+wird gelöscht und nicht vererbt: Ein PvP-Ziel ohne Besitzer wäre unsterblich. Das Betreiberkonto ist
+an zwei Stellen ausgenommen (Route und Aufräumlauf), weil `isAdmin()` an seinem Namen hängt.
+
+**Wächter** `tests/test_admin_konto2_http.js` (Port 3247, 36 Prüfungen) mit den Paaren 1c/1d,
+2a/2b, 2d/2e, 3c/3d, 4g/4h und 5a/5a2. Sechs Gegenproben an sabotierten Kopien; die Zuordnung
+Sabotage → fallende Prüfung steht im Kopf der Testdatei.

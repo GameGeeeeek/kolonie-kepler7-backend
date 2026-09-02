@@ -177,7 +177,9 @@ function festung(opt) {
   check('0-kopie: der Schalter ist auffindbar', muster.test(roh), { gefunden: (roh.match(muster) || [])[1] });
   roh = roh.replace(muster, 'const FESTUNG_SPAWN_AKTIV = true;');
   const sab = {
-    rechte: ["(doc && !musterIstPveZiel(doc.zielArt)) ? allianceRoleOf(doc.targetTag, req.userId) : null",
+    // Der Name wurde am 02.09.2026 zu musterZielOhneAllianz - ein Vorposten ist PvP-Inhalt, hat aber
+    // ebenfalls keine verteidigende Allianz; genau das ist die Frage, die hier zaehlt.
+    rechte: ["(doc && !musterZielOhneAllianz(doc.zielArt)) ? allianceRoleOf(doc.targetTag, req.userId) : null",
              "(doc && doc.zielArt !== 'alien-nest') ? allianceRoleOf(doc.targetTag, req.userId) : null"],
     gewicht: ["doc.dispatch.totalComposition || {}, beteiligteF, jetzt, doc.festungZiel || 'kern', null);",
               "doc.dispatch.totalComposition || {}, [beteiligteF.find(b => b.userId === req.userId) || beteiligteF[0]], jetzt, doc.festungZiel || 'kern', null);"],

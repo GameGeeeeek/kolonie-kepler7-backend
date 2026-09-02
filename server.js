@@ -9421,7 +9421,10 @@ const DEPLOY_WEBHOOK_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
 // soll der Webhook den Fehler melden statt einen halben Erfolg zu protokollieren. Alles danach ist
 // einzeln abgesichert - `cp` bricht mit Fehlercode ab, sobald EINE Quelle fehlt, und ohne die
 // Trennung haette ein fehlendes Bild die Auslieferung von robots.txt und manifest.json verhindert.
-const DEPLOY_WEB_COPY = 'cp -f *.html /deploy/web/ && (cp -f *.png /deploy/web/ || true) && (cp -f robots.txt sitemap.xml /deploy/web/ || true) && (cp -f manifest.json service-worker.js /deploy/web/ || true)';
+// version.txt und patchnotes-archiv.json (01.09.2026): der Versions-Check des Clients liest die 20 Byte
+// statt der ganzen Spieldatei, und die Patchnotes-Historie liegt nicht mehr im Spiel. Beide Dateien
+// kommen mit dem Frontend-PR; bis dahin fehlen sie im Repo, und `|| true` laesst den Deploy durch.
+const DEPLOY_WEB_COPY = 'cp -f *.html /deploy/web/ && (cp -f *.png /deploy/web/ || true) && (cp -f robots.txt sitemap.xml /deploy/web/ || true) && (cp -f manifest.json service-worker.js /deploy/web/ || true) && (cp -f version.txt patchnotes-archiv.json /deploy/web/ || true)';
 // Das VERZEICHNIS steht seit der Selbstheilung (28.08.2026) benannt daneben, statt nur im
 // Befehlsstring: deployAufraeumen() arbeitet darin, und ein aus dem String geparster Pfad waere
 // genau die Sorte Ableitung, die beim naechsten Umbau still danebengreift. Der `command` bleibt

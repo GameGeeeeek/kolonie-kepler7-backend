@@ -9800,7 +9800,33 @@ const DEPLOY_WEBHOOK_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
 // version.txt und patchnotes-archiv.json (01.09.2026): der Versions-Check des Clients liest die 20 Byte
 // statt der ganzen Spieldatei, und die Patchnotes-Historie liegt nicht mehr im Spiel. Beide Dateien
 // kommen mit dem Frontend-PR; bis dahin fehlen sie im Repo, und `|| true` laesst den Deploy durch.
-const DEPLOY_WEB_COPY = 'cp -f *.html /deploy/web/ && (cp -f *.png /deploy/web/ || true) && (cp -f robots.txt sitemap.xml /deploy/web/ || true) && (cp -f manifest.json service-worker.js /deploy/web/ || true) && (cp -f version.txt patchnotes-archiv.json /deploy/web/ || true)';
+// Vorkompression fuer nginx (02.09.2026): `gzip_static on` liefert datei.gz, wenn sie neben der
+// Datei liegt - fertig komprimiert, ohne dass der Pi bei JEDEM Aufruf rechnet. Gemessen lohnt es
+// sich deutlich: die Spieldatei 5,87 MB -> 1,74 MB (29 %), alle Textdateien zusammen 8,33 -> 2,57 MB.
+//
+// DIE FALLE, gegen die der Aufbau hier gebaut ist: nginx vergleicht KEINE Zeitstempel. Liegt eine
+// alte datei.gz daneben, liefert es sie weiter aus - der Spieler saehe dauerhaft einen veralteten
+// Stand, und zwar still. Dieselbe Familie wie die frueher mitgeschleppte index.html-Kopie. Deshalb:
+//   - Die Kompression steht im GESCHUETZTEN Teil der Kette (`&&`, kein `|| true`) direkt hinter dem
+//     cp der Seiten. Scheitert sie, meldet der Webhook den Fehler, statt einen halben Erfolg zu
+//     protokollieren - lieber ein sichtbar gescheiterter Deploy als still veralteter Inhalt.
+//   - `-f` ueberschreibt eine vorhandene .gz immer, `-k` behaelt das Original (nginx braucht beide:
+//     das Original fuer Clients ohne gzip und fuer Content-Length/ETag-Fallbacks).
+//   - Komprimiert wird GENAU das, was zuvor kopiert wurde. Wer eine neue Textdatei in die
+//     Kopierliste aufnimmt, nimmt sie hier mit auf; tests/test_deploy_gzip.js faellt sonst.
+// Binaerdateien (*.png, Font) bleiben draussen: schon komprimiert, gzip macht sie nur groesser.
+// Subshell, damit das `cd` das Arbeitsverzeichnis der Kette nicht verschleppt; ihr Exit-Code
+// wandert trotzdem nach aussen, die Kette bricht bei einem echten Fehler also weiterhin ab.
+//
+// Die Schleife unterscheidet ZWEI Faelle, die sonst zusammenfielen: Eine Datei, die es gar nicht
+// gibt, wird uebersprungen (die Kopierschritte oben tragen aus gutem Grund `|| true` - ein
+// fehlendes sitemap.xml soll die Auslieferung nicht reissen). Ein gescheitertes gzip bei
+// VORHANDENER Datei bricht dagegen ab (`exit 1` verlaesst die Subshell), denn dann laege
+// womoeglich eine alte .gz daneben, und die wuerde nginx weiter ausliefern.
+const DEPLOY_WEB_GZIP_DATEIEN = '*.html robots.txt sitemap.xml manifest.json service-worker.js version.txt patchnotes-archiv.json';
+const DEPLOY_WEB_GZIP = '(cd /deploy/web && for f in ' + DEPLOY_WEB_GZIP_DATEIEN +
+  '; do if [ -f "$f" ]; then gzip -9 -kf "$f" || exit 1; fi; done)';
+const DEPLOY_WEB_COPY = 'cp -f *.html /deploy/web/ && (cp -f *.png /deploy/web/ || true) && (cp -f robots.txt sitemap.xml /deploy/web/ || true) && (cp -f manifest.json service-worker.js /deploy/web/ || true) && (cp -f version.txt patchnotes-archiv.json /deploy/web/ || true) && ' + DEPLOY_WEB_GZIP;
 // Das VERZEICHNIS steht seit der Selbstheilung (28.08.2026) benannt daneben, statt nur im
 // Befehlsstring: deployAufraeumen() arbeitet darin, und ein aus dem String geparster Pfad waere
 // genau die Sorte Ableitung, die beim naechsten Umbau still danebengreift. Der `command` bleibt

@@ -69,7 +69,7 @@ Daraus folgt:
 **Tests.**
 - Jeder neue Test braucht eine **Gegenprobe in beide Richtungen** (grün am neuen, rot am alten oder sabotierten Stand), mit einer
   gemessenen „was fallen MUSS"-Liste; Prüfnamen beider Läufe per `diff` vergleichen, nicht zählen (die Schlusszeile `FAIL - …` zählt sonst mit).
-- Freien Port **messen**, nicht aus einer Liste lesen: `grep -hoE "3[12][0-9][0-9]" tests/*.js | sort -un`.
+- Freien Port **messen**, nicht aus einer Liste lesen: `grep -hoE "3[12][0-9][0-9]" tests/*.js | sort -un` – und ein **zweites Mal unmittelbar vor dem Push** gegen frisch geholtes `origin/master`: Die Messung kennt fremde, noch nicht gemergte Tests nicht (drei Tests trafen sich am 02.09.2026 auf 3247).
 - Ein Persistenz-Test stoppt den Server mit **SIGKILL**; SIGTERM flusht die DB und verdeckt einen fehlenden `saveDb()`.
 - Tests, die einen Schalter umlegen, starten eine **Kopie** von `server.js` im Repo-Verzeichnis (`require('./mailer')` löst nur dort auf).
 - Der Spielstand in `db.private` liegt in ZWEI Formen vor (Zeichenkette oder `{ value, version }`); Tests lesen beide.
@@ -113,7 +113,7 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/kampfrechnung-paritaet.md` | Flottenverteidigung, Klassen-Sets, Raid-Vorschau, sechs Schiffstabellen, Kausalitätsbrecher |
 | `docs/pvp-standorte.md` | `targetPlanet` an `/api/attack`, Standort-Verteidigung |
 | `docs/sicherheit-auth.md` | Passwort-Regeln, Sitzungs-Cookie (Etappen a und b) |
-| `docs/admin.md` | Bonuscodes, Betreiber-Push, Admin-Fähigkeiten, Notaus, Aktivitäts-Uhr und ihre Erweiterungen (Verdacht, Geschenk, abgelehnte Spielstände), Protokoll-Middleware, Sperre mit Frist und Stummschaltung, Spielstand-Rücksicherung aus dem Backup, Allianz-Verwaltung, Feedback-Antwort, Wartungsankündigung, Notaus `angriffe`, Support-Werkzeuge (E-Mail, Umbenennen, Reset-Link), Lage, Kampfverlauf als Beweis, Anmelde-Forensik, E-Mail an Spieler, Konto-Löschung mit Frist |
+| `docs/admin.md` | Bonuscodes, Betreiber-Push, Admin-Fähigkeiten, Notaus, Aktivitäts-Uhr und ihre Erweiterungen (Verdacht, Geschenk, abgelehnte Spielstände), Protokoll-Middleware, Sperre mit Frist und Stummschaltung, Spielstand-Rücksicherung aus dem Backup, Allianz-Verwaltung, Feedback-Antwort, Wartungsankündigung, Notaus `angriffe`, Support-Werkzeuge (E-Mail, Umbenennen, Reset-Link), Lage, Kampfverlauf als Beweis, Anmelde-Forensik, E-Mail an Spieler, Konto-Löschung mit Frist, Alarm an den Betreiber, Geschenk je Konto, Galaxie-Eingriff, Chat-Moderation |
 | `docs/chat.md` | Bündel-Abruf, Retention |
 | `docs/ki-kampfberichte.md` | Etappe E1a: Prompt-Zuschnitt, Wahrheits-Sperren, Warteschlange, `KAMPFTEXT_AKTIV` |
 

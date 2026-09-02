@@ -262,3 +262,47 @@ Jede fällt genau und nur in ihrer eigenen Prüfung:
 Befund: Solange die Beute nicht mit unter dem Sockel lag, war `stolen` nicht leer und die alte
 Oder-Bedingung griff über ihren ersten Zweig. Genau daran ist aufgefallen, dass der Server dem
 Opfer die Ressourcen unabhängig vom Frachtraum abzieht.
+
+### Die Schwelle messen, bevor der Schalter umgelegt wird (03.09.2026)
+
+`PVP_MINDESTEINSATZ = 0.25` ist ein **geratener** Startwert. Die Regel greift lautlos — der Angriff
+läuft ja, er bringt nur nichts —, deshalb würde ein zu hoher Wert Spieler mit verteilter Flotte
+dauerhaft und unbemerkt aussperren. Ein Konto mit sechs gleich starken Standorten kommt rechnerisch
+nie über 16,7 %.
+
+`pvp_einsatz_messen.js` beantwortet die Frage an den echten Spielständen:
+
+```bash
+# auf dem Pi, gegen eine KOPIE (die laufende db.json bleibt unberührt)
+docker cp kepler7-backend:/data/db.json /tmp/db-kopie.json
+node pvp_einsatz_messen.js --db /tmp/db-kopie.json --top 20
+rm /tmp/db-kopie.json
+```
+
+Ausgegeben wird die Verteilung der **Obergrenze je Konto** — der Anteil des stärksten Standorts an
+der Reichs-Rohkraft — und für jede Kandidaten-Schwelle, wie viele Konten von *keinem* Standort aus
+den vollen Ertrag erreichen könnten. Brauchbar ist eine Schwelle nur, wenn diese Spalte nahe null
+bleibt.
+
+Zwei Bauentscheidungen, die dort auch im Kopf der Datei stehen:
+
+- **Keine zweite Formel.** Das Skript schneidet `server.js` vor `app.listen` ab und wertet den Kopf
+  in einem `vm`-Kontext aus; gerechnet wird mit dem **ausgelieferten** `pvpEinsatzAnteil`. Eine
+  abgeschriebene Kopie wäre genau die Bauform, die hier schon mehrfach still veraltet ist — sie
+  würde eine plausible Zahl liefern, die zur wirklichen Regel nicht passt.
+- **Ein Selbsttest entscheidet, ob überhaupt gemessen wird.** Fünf von Hand nachgerechnete
+  Erwartungen (Grundtabelle, Mengenabschlag, Aufbau-Bonus, Anteil, Nullwache). Schlägt eine fehl,
+  bricht das Skript mit Exit-Code **2** ab und gibt *keine* Zahlen aus. Gegenprobe: vier Sabotagen
+  an `server.js`-Kopien, jede reißt genau und nur ihre eigene Erwartung — verfälschte
+  `MEGA_FLEET_DIMINISH_RATE` → Erwartung 2, verfälschter `FLEET_BALANCE_MAX_BONUS` → Erwartung 3,
+  entfernte Nullwache → Erwartung 5, fehlender `app.listen`-Anker → Abbruch mit Exit 1.
+
+Das Skript schreibt nichts. Die geladene `server.js` bekommt `DB_FILE`/`SECRET_FILE` in ein
+Wegwerf-Verzeichnis gebogen, damit ihre eigenen Intervalle (`saveDb` alle 5 Minuten, `backupDb` alle
+30) die gemessene Datei gar nicht erreichen können.
+
+**Nebenbefund aus der eigenen Gegenprobe:** Ein *relativer* `SERVER_JS`-Pfad ließ
+`Module.createRequire()` mit `ERR_INVALID_ARG_VALUE` abbrechen — **vor** dem Selbsttest. Drei
+Sabotageläufe sahen dadurch nach „Abbruch, also erkannt" aus und belegten in Wahrheit nichts. Das
+Skript löst den Pfad jetzt selbst auf. Die übertragbare Lehre ist die alte: Eine Gegenprobe, die
+nicht in der *vorher benannten* Prüfung fällt, ist ein Werkzeugfehler und kein Beweis.

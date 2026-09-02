@@ -4305,7 +4305,22 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   let standortKey = null;
   if (targetPlanet !== undefined && targetPlanet !== null) {
     if (typeof targetPlanet !== 'string' || targetPlanet.length > 64) return res.status(400).json({ error: 'Ungültiger Standort.' });
-    if (targetPlanet !== 'home' && !((target.colonies || {})[targetPlanet])) {
+    /* EIGENE Eigenschaft, nicht Wahrheitswert (Sicherheitsbehebung 02.09.2026). Die alte Fassung
+       fragte `!((target.colonies || {})[targetPlanet])` - und ein Objektliteral ERBT die Namen aus
+       Object.prototype. `{}['constructor']` ist die Funktion Object, also wahr; die Schranke liess
+       'constructor', 'toString', 'valueOf', '__proto__' und 'hasOwnProperty' durch, und zwar auch
+       bei einem Ziel ganz OHNE Kolonien. Danach lieferten standortDefGebaeude und standortDefFlotte
+       ihre Null-Wache, kontoDefenseFaktoren ist rein multiplikativ - defensePower 0, und
+       battleWinChance zahlt dafuer die Obergrenze: GEMESSEN 90,0% Siegchance gegen jedes Konto,
+       mit einem einzigen Jaeger, samt Beute (Faktor 0,5), Kampfpunkten und Gebaeudezerstoerung.
+       Ueber die Oberflaeche unerreichbar, per selbstgebautem Request trivial.
+       hasOwnProperty.call statt target.colonies.hasOwnProperty(...): Der Spielstand kommt aus
+       JSON.parse eines klientenautoritativen Saves und kann selbst einen Schluessel
+       "hasOwnProperty" tragen - der Aufruf ueber das Objekt waere dann keine Pruefung mehr.
+       Die Null-Wachen der Verbraucher bleiben, wo sie sind: Sie sind fuer den ehrlichen Weg
+       gedacht (Kolonie zwischen Aufklaerung und Anflug aufgegeben) und ihr Rueckgabewert 0 ist
+       nur DESHALB gefaehrlich, weil er ungeprueft hierher gelangen konnte. */
+    if (targetPlanet !== 'home' && !Object.prototype.hasOwnProperty.call(target.colonies || {}, targetPlanet)) {
       // Eigener Grund statt eines nackten 404: Eine Kolonie kann zwischen Aufklaerung und Anflug
       // aufgegeben worden sein - der Angreifer soll wissen, WARUM sein Ziel weg ist.
       return res.status(404).json({ error: 'Standort nicht gefunden - vielleicht wurde die Kolonie inzwischen aufgegeben.' });

@@ -112,3 +112,63 @@ und fällt weiterhin auf, die beiden Quellen können sich nicht maskieren). Der 
 Formel ist durch die Messung des roten Laufs belegt (232 = 200 + 32).
 
 
+
+## Sicherheitsbehebung 02.09.2026: die Standort-Schranke prüfte den Wahrheitswert
+
+Gefunden bei einer gegnerischen Abnahme des Frontend-PRs, nicht im eigenen Prüflauf – der hätte
+sie auch nicht finden können, weil alle vorhandenen Prüfungen echte Standortschlüssel benutzten.
+
+**Der Fehler.** Die Eingangsprüfung von `/api/attack` lautete:
+
+```js
+if (targetPlanet !== 'home' && !((target.colonies || {})[targetPlanet])) return 404;
+```
+
+Ein Objektliteral erbt die Namen aus `Object.prototype`. `{}['constructor']` ist die Funktion
+`Object` und damit **wahr** – die Schranke ließ `constructor`, `toString`, `valueOf`, `__proto__`
+und `hasOwnProperty` durch, und zwar auch bei einem Ziel **ohne jede Kolonie**.
+
+**Die Wirkung, gemessen statt geschätzt.** Danach greifen die Null-Wachen der Verbraucher:
+`standortDefGebaeude` und `standortDefFlotte` liefern für einen unbekannten Schlüssel `0`, und
+`kontoDefenseFaktoren` ist rein multiplikativ. Ergebnis `defensePower: 0`, und `battleWinChance`
+zahlt dafür die Obergrenze:
+
+| Lage | Siegchance |
+|---|---|
+| Verteidigung 0 (der Exploit) | **90,0 %** |
+| ein einzelner Jäger gegen Verteidigung 0 | **90,0 %** |
+| fair, 50000 gegen 50000 | 50,0 % |
+
+Dazu Beute (Standortart `kolonie`, Faktor 0,5), Kampfpunkte und Gebäudezerstörung beim Opfer. Über
+die Oberfläche unerreichbar, per selbstgebautem Request trivial. Der Gegenprobe-Lauf zeigt sogar,
+dass der Exploit `planetKey: "constructor"` in den Flottenverlust-Bericht des Opfers schrieb.
+
+**Die Behebung.** Prüfung auf **eigene** Eigenschaft:
+
+```js
+if (targetPlanet !== 'home' && !Object.prototype.hasOwnProperty.call(target.colonies || {}, targetPlanet)) return 404;
+```
+
+`Object.prototype.hasOwnProperty.call(...)` und nicht `target.colonies.hasOwnProperty(...)`: Der
+Spielstand kommt aus `JSON.parse` eines klientenautoritativen Saves und kann selbst einen Schlüssel
+`hasOwnProperty` tragen – der Aufruf über das Objekt wäre dann keine Prüfung mehr, sondern ein
+`TypeError` (gemessen: „boese.hasOwnProperty is not a function", also 500 statt Abweisung).
+
+**Der Wächter.** `tests/test_pvp_standorte_http.js` 3d/3e. Geprüft wird der Status **und die
+Wirkung** – `defensePower` und `success` wandern in die Zusatzangabe, damit ein Fehlschlag zeigt,
+was der Angreifer bekommen hätte. Gegenprobe gegen eine Kopie mit der alten Zeile:
+
+```
+3d  {"key":"constructor","status":200,"defensePower":0,"sieg":true}
+3e  {"status":200,"defensePower":0,"sieg":true}     ← Ziel ohne jede Kolonie
+```
+
+Die vier übrigen Schlüssel liefen dort in 403, **weil der erste Angriff bereits gewonnen hatte**
+und den Schutzschild des Opfers setzte. Am behobenen Stand sind alle 34 Prüfungen grün und ohne
+diese Kaskade – ein 404 löst keinen Kampf aus.
+
+**Die übertragbare Lehre.** Eine Wahrheitswert-Prüfung auf einen Schlüssel **aus dem Request** ist
+nie eine Zugehörigkeitsprüfung. Der Nachbar-Zweig `/api/vorposten` (`planetKey`) ist von derselben
+Klasse nur deshalb nicht betroffen, weil er über `.fleet` weiterläuft und dort `undefined` landet –
+also durch Glück, nicht durch Absicht. Wer hier eine neue Route mit einem Ortsschlüssel baut:
+`Object.prototype.hasOwnProperty.call` oder eine Whitelist, nichts dazwischen.

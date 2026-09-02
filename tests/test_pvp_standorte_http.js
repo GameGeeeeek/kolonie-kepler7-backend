@@ -40,7 +40,9 @@
 //   1  Altpfad: ohne targetPlanet traegt weder Antwort noch Bericht ein Standortfeld.
 //   2  home === Konto: zwei identische Opfer, byte-gleiche Kraefte; der home-Angriff traegt
 //      die Standortfelder; GET-verteidigung('home') === Konto-defensePower (Paritaetsanker).
-//   3  Validierung: unbekannter Standort -> 404 MIT GRUND, Nicht-String/ueberlang -> 400.
+//   3  Validierung: unbekannter Standort -> 404 MIT GRUND, Nicht-String/ueberlang -> 400,
+//      und Prototypen-Schluessel ('constructor' & Co.) ebenso - auch gegen ein Ziel OHNE
+//      jede Kolonie (3d/3e, Sicherheitsbehebung 02.09.2026).
 //   4  Die Kolonie verteidigt schwaecher als die Heimat desselben Kontos - und die GET-Route
 //      nennt fuer BEIDE exakt die defensePower, mit der der Kampf danach rechnet (Anker von
 //      ausserhalb der Kampfantwort, Regel 62).
@@ -281,6 +283,30 @@ const OPFER_SAVES = {
   check('3c: ueberlanger Standort -> 400',
     zuLang.status === 400 && /Standort/.test((zuLang.body || {}).error || ''),
     { status: zuLang.status, fehler: (zuLang.body || {}).error });
+
+  /* 3d/3e - Prototypen-Schluessel (Sicherheitsbehebung 02.09.2026). Die Schranke fragte bis hierher
+     `!((target.colonies || {})[targetPlanet])`, also den WAHRHEITSWERT. Ein Objektliteral erbt aber
+     die Namen aus Object.prototype: `{}['constructor']` ist die Funktion Object und damit wahr.
+     Gemessen am alten Stand: Status 200, defensePower 0, success true - also 90% Siegchance (die
+     Obergrenze) gegen JEDES Konto, mit einem einzigen Schiff, samt Beute und Kampfpunkten.
+     Geprueft wird der STATUS UND die Wirkung (defensePower/success wandern in die Zusatzangabe),
+     damit ein Fehlschlag zeigt, was der Angreifer bekommen haette - ein nacktes "erwartet 404,
+     bekam 200" laesst offen, ob das ueberhaupt ausnutzbar war. */
+  const PROTO_SCHLUESSEL = ['constructor', 'toString', 'valueOf', '__proto__', 'hasOwnProperty'];
+  const protoErgebnis = [];
+  for (const k of PROTO_SCHLUESSEL){
+    const r = await angriffAnfrage(A.token, { targetUserId: O.pvopferg.userId, targetPlanet: k });
+    protoErgebnis.push({ key: k, status: r.status, defensePower: (r.body || {}).defensePower, sieg: (r.body || {}).success });
+  }
+  check('3d: Prototypen-Schluessel werden abgewiesen wie jeder andere unbekannte Standort',
+    protoErgebnis.every(r => r.status === 404), protoErgebnis);
+
+  // Der schaerfste Fall: pvopferh hat GAR KEINE Kolonien. Die alte Schranke liess auch hier durch,
+  // weil sie nicht die Kolonien las, sondern den Prototyp des leeren Objekts.
+  const protoOhne = await angriffAnfrage(A.token, { targetUserId: O.pvopferh.userId, targetPlanet: 'constructor' });
+  check('3e: auch ein Ziel OHNE jede Kolonie weist einen Prototypen-Schluessel ab',
+    protoOhne.status === 404,
+    { status: protoOhne.status, defensePower: (protoOhne.body || {}).defensePower, sieg: (protoOhne.body || {}).success });
 
   // ==== 4: Kolonie schwaecher als Heimat, GET === Kampf ======================================
   await frisch('pvopferc1');

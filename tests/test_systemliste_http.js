@@ -96,6 +96,13 @@ async function j(pfad, opt) {
     const a = await j('/faction/attack', { method: 'POST', headers: kopf, body: JSON.stringify({ systemId: 'sys_meridian_kern' }) });
     check('faction/attack lehnt sys_meridian_kern nicht mehr als unbekanntes System ab',
       !(a.status === 400 && /Ungültiges Zielsystem/.test(JSON.stringify(a.body))), { status: a.status, body: a.body });
+    // Startschub (02.09.2026): die 30 fest verorteten Systeme muessen dem Server ebenso bekannt sein -
+    // erstes und letztes der Tabelle, damit ein abgeschnittenes Ende auffiele.
+    for (const sid of ['syss_01', 'syss_30']) {
+      const c = await j('/faction/attack', { method: 'POST', headers: kopf, body: JSON.stringify({ systemId: sid }) });
+      check('Startschub: faction/attack lehnt ' + sid + ' nicht als unbekanntes System ab',
+        !(c.status === 400 && /Ungültiges Zielsystem/.test(JSON.stringify(c.body))), { status: c.status, body: c.body });
+    }
     // Gegenprobe: ein wirklich erfundenes System muss weiterhin abgelehnt werden.
     const b = await j('/faction/attack', { method: 'POST', headers: kopf, body: JSON.stringify({ systemId: 'sys_gibt_es_nicht' }) });
     check('erfundenes System wird weiterhin mit 400 abgelehnt',

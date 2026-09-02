@@ -2046,6 +2046,50 @@ const SYSTEM_COORDS = [
   { id: 'sysn_ophiar', gx: 445.9, gy: 448.9 }
 ];
 const BASE_SYSTEM_COUNT = SYSTEM_COORDS.length;
+// --- Startschub (02.09.2026): 30 fest verortete Systeme in allen acht Sektoren -------------------
+// Auftrag „mehr Systeme" mit der Auflage, sie GUT ZU VERTEILEN statt nur außen anzuhängen: fünf im
+// Kepler-Kern, fünf in den Meridian-Weiten, drei bis vier in jedem anderen Sektor. Die Koordinaten
+// sind einmalig deterministisch erzeugt (Ringe um das Sektorzentrum, goldener Winkel, kleinster
+// Abstand zu jedem bestehenden oder künftigen Wochensystem 33,8 Einheiten) und stehen als feste
+// Tabelle in beiden Repos; test_systemparitaet vergleicht sie zahlengleich. Namen und Planeten
+// kennt nur das Frontend (SCHUB_SYSTEMS in weltraum_kolonie.html).
+//
+// Sie stehen bewusst HINTER BASE_SYSTEM_COUNT: Der Wochenring (WEEKLY_RING) rechnet nur mit den
+// 69 Basissystemen. Zählten die 30 hier mit, verschöbe sich der Ring - und mit ihm die Koordinaten
+// aller schon erzeugten Wochensysteme samt den Kolonien darauf.
+const SCHUB_COORDS = [
+  { id: 'syss_01', gx: 407, gy: 289.2 },
+  { id: 'syss_02', gx: 383.7, gy: 336.8 },
+  { id: 'syss_03', gx: 433.7, gy: 237.2 },
+  { id: 'syss_04', gx: 493.7, gy: 302.1 },
+  { id: 'syss_05', gx: 356.2, gy: 317.1 },
+  { id: 'syss_06', gx: 781.2, gy: 384.1 },
+  { id: 'syss_07', gx: 847.6, gy: 414.3 },
+  { id: 'syss_08', gx: 764.2, gy: 420.5 },
+  { id: 'syss_09', gx: 872.6, gy: 447.3 },
+  { id: 'syss_10', gx: 880.6, gy: 368.1 },
+  { id: 'syss_11', gx: 478.3, gy: 58.2 },
+  { id: 'syss_12', gx: 489.4, gy: 105.2 },
+  { id: 'syss_13', gx: 419.9, gy: 142.1 },
+  { id: 'syss_14', gx: 686.3, gy: 150.8 },
+  { id: 'syss_15', gx: 711.5, gy: 112.7 },
+  { id: 'syss_16', gx: 591.1, gy: 158.7 },
+  { id: 'syss_17', gx: 717.4, gy: 176.2 },
+  { id: 'syss_18', gx: 781.7, gy: 130.4 },
+  { id: 'syss_19', gx: 861.1, gy: 139 },
+  { id: 'syss_20', gx: 877.4, gy: 188.9 },
+  { id: 'syss_21', gx: 607.7, gy: 386 },
+  { id: 'syss_22', gx: 571.5, gy: 419.5 },
+  { id: 'syss_23', gx: 647.5, gy: 302.3 },
+  { id: 'syss_24', gx: 691.8, gy: 311 },
+  { id: 'syss_25', gx: 251.4, gy: 443.3 },
+  { id: 'syss_26', gx: 213.3, gy: 415.4 },
+  { id: 'syss_27', gx: 268.8, gy: 344.7 },
+  { id: 'syss_28', gx: 228, gy: 224.3 },
+  { id: 'syss_29', gx: 262.2, gy: 179.8 },
+  { id: 'syss_30', gx: 189.5, gy: 197.1 }
+];
+for (const s of SCHUB_COORDS) SYSTEM_COORDS.push(s);
 // --- Wöchentlich wachsende Galaxie, serverseitig nachgerechnet ---------------------------------
 // Das Frontend hängt jeden Montag zwei Systeme an (Abschnitt „Wöchentlich wachsende Galaxie" in
 // weltraum_kolonie.html). Die 69 Basissysteme nachzutragen allein hätte die Lücke deshalb nur für
@@ -2060,7 +2104,10 @@ const BASE_SYSTEM_COUNT = SYSTEM_COORDS.length;
 // gefahrlos berechenbar; test_systemparitaet.js vergleicht sie Zahl für Zahl.
 const WEEKLY_SYSTEMS_PER_WEEK = 2;
 const WEEKLY_SYSTEM_EPOCH = Date.UTC(2026, 6, 20);   // Montag, 20.07.2026, 00:00 UTC – wie im Frontend
-const WEEKLY_SYSTEM_MAX = 208;
+// Deckel 178 statt 208 seit dem Startschub (02.09.2026): 69 Basis + 30 Schub + 178 Wochen = 277 Plätze,
+// so viele hält das Spiralfeld der Karte vor (galaxySlotPositions im Frontend) - ein Platz mehr hieße,
+// alle bestehenden Plätze neu zu entspannen.
+const WEEKLY_SYSTEM_MAX = 178;
 const WEEK_MS = 7 * 24 * 3600 * 1000;
 function weeklySystemCount(now) {
   const wochen = Math.floor(((now || Date.now()) - WEEKLY_SYSTEM_EPOCH) / WEEK_MS);
@@ -7287,6 +7334,10 @@ app.post('/api/modulemarket/buy', authMiddleware, async (req, res) => {
 // Verluste/Belohnungen serverseitig an und entfernt die Mission sofort aus der Liste (verhindert
 // Mehrfachauflösung derselben Mission durch Doppelklick, Netzwerk-Retry oder Missbrauch).
 const WORLDBOSS_KEY = 'worldboss:current';
+// Tagessperre des Weltboss-Angriffs (Spiegel der 24 h in sendWorldBossMission im Frontend) und die
+// Toleranz dazu - Begründung im Block "Tagessperre serverseitig" in /api/worldboss/resolve.
+const WELTBOSS_ABKLING_MS = 24 * 60 * 60 * 1000;
+const WELTBOSS_ABKLING_TOLERANZ_MS = 60 * 60 * 1000;
 // Rotierende Weltboss-Schwäche je Level (13.07.2026, Feature-Wunsch: Kontersystem auf mehr Kontexte
 // ausweiten) - identisch zum Frontend (siehe pirateLairWeakness/WORLDBOSS_WEAKNESS dort). +25%
 // Schaden bei passendem Schiffstyp in der Zusammensetzung.
@@ -7366,19 +7417,34 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
 
   fleetObj.missions.splice(missionIdx, 1);
 
-  // 24h-Cooldown serverseitig durchgesetzt (nicht nur clientseitig beim Missionsstart geprüft) - im
-  // eigenen Spielstand gespeichert (nicht am Boss-Objekt), damit die Sperre auch über einen
-  // Boss-Respawn hinweg bestehen bleibt. Ohne diese Prüfung hier könnte man die Sperre umgehen, indem
-  // man eine bereits "angekommene" Mission direkt im Spielstand präpariert und diesen Endpoint beliebig
-  // oft aufruft.
-  const cdLeft = Math.max(0, (save.worldBossLastAttack || 0) + 24 * 60 * 60 * 1000 - Date.now());
+  // Tagessperre serverseitig durchgesetzt (nicht nur clientseitig beim Missionsstart geprüft). Ohne
+  // diese Prüfung könnte man die Sperre umgehen, indem man eine bereits "angekommene" Mission direkt
+  // im Spielstand präpariert und diesen Endpoint beliebig oft aufruft.
+  //
+  // AM NUTZEROBJEKT, nicht im Spielstand (02.09.2026, Spieler-Report Sascha: "mehrmals angegriffen,
+  // an mehreren Tagen, HP sinken nicht"): Bis hierher las der Server `save.worldBossLastAttack` -
+  // denselben Stempel, den das Frontend beim LOSFLIEGEN setzt (sendWorldBossMission) und sofort
+  // speichert. Bei der Ankunft, Minuten später, sah der Server also "vor fünf Minuten angegriffen"
+  // und wertete JEDEN regulären Schlag als Abklingzeit (0 Schaden, 50 Kredite Spesen). Seit die
+  // Prüfung am 04.08.2026 hierher kam, hat kein regulärer Angriff den Boss getroffen; nur die
+  // Testfixture ohne Startstempel (test_geteilter_speicher_http 4b) sah Schaden. Gemessen in
+  // tests/test_weltboss_abklingzeit_http.js.
+  //
+  // Jetzt: `user.weltbossLetzterSchlag`, gesetzt vom Server bei einem GEWERTETEN Schlag (nicht bei
+  // "zu spät" - wer keinen Schaden gemacht hat, hat seinen Tag nicht verbraucht). Der Startstempel
+  // des Clients bleibt dessen Torwächter und wird hier weder gelesen noch geschrieben. Eine Stunde
+  // Toleranz, weil Startstempel (Client) und Ankunftsstempel (Server) eine Flugzeit auseinander
+  // liegen: Der Client lässt den nächsten Start 24 h nach dem letzten Start zu, der Server misst
+  // ab der letzten Ankunft - ohne Toleranz wäre der zweite Tagesschlag um eine Flugzeit zu früh.
+  const user = findUserById(req.userId);
+  const letzterSchlag = (user && user.weltbossLetzterSchlag) || 0;
+  const cdLeft = Math.max(0, letzterSchlag + WELTBOSS_ABKLING_MS - WELTBOSS_ABKLING_TOLERANZ_MS - Date.now());
   if (cdLeft > 0) {
     save.credits = (save.credits || 0) + 50;
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
     await saveDb();
     return res.json({ ok: true, arrivedTooLate: true, onCooldown: true, killed: false, damage: 0, bossHp: null, bossMaxHp: null, lostShips: {}, saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints });
   }
-  save.worldBossLastAttack = Date.now();
 
   const bLevel = mission.bossLevel || 1;
   const composition = mission.composition || {};
@@ -7408,6 +7474,7 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
     bossHpAfter = boss.hp;
     bossMaxHp = boss.maxHp;
     db.shared[WORLDBOSS_KEY] = JSON.stringify(boss);
+    if (user) user.weltbossLetzterSchlag = Date.now(); // der Tag ist verbraucht - siehe Block oben
 
     // Verluste (8+Stufe% bis 15+Stufe%, gedeckelt bei 50%) - Prozentsatz aus der beim Start
     // eingefrorenen Zusammensetzung, angewendet auf die AKTUELLE Flotte am Standort.
@@ -9436,7 +9503,10 @@ const DEPLOY_WEBHOOK_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
 // soll der Webhook den Fehler melden statt einen halben Erfolg zu protokollieren. Alles danach ist
 // einzeln abgesichert - `cp` bricht mit Fehlercode ab, sobald EINE Quelle fehlt, und ohne die
 // Trennung haette ein fehlendes Bild die Auslieferung von robots.txt und manifest.json verhindert.
-const DEPLOY_WEB_COPY = 'cp -f *.html /deploy/web/ && (cp -f *.png /deploy/web/ || true) && (cp -f robots.txt sitemap.xml /deploy/web/ || true) && (cp -f manifest.json service-worker.js /deploy/web/ || true)';
+// version.txt und patchnotes-archiv.json (01.09.2026): der Versions-Check des Clients liest die 20 Byte
+// statt der ganzen Spieldatei, und die Patchnotes-Historie liegt nicht mehr im Spiel. Beide Dateien
+// kommen mit dem Frontend-PR; bis dahin fehlen sie im Repo, und `|| true` laesst den Deploy durch.
+const DEPLOY_WEB_COPY = 'cp -f *.html /deploy/web/ && (cp -f *.png /deploy/web/ || true) && (cp -f robots.txt sitemap.xml /deploy/web/ || true) && (cp -f manifest.json service-worker.js /deploy/web/ || true) && (cp -f version.txt patchnotes-archiv.json /deploy/web/ || true)';
 // Das VERZEICHNIS steht seit der Selbstheilung (28.08.2026) benannt daneben, statt nur im
 // Befehlsstring: deployAufraeumen() arbeitet darin, und ein aus dem String geparster Pfad waere
 // genau die Sorte Ableitung, die beim naechsten Umbau still danebengreift. Der `command` bleibt
@@ -9850,10 +9920,26 @@ function astFeldKey(sysId) { return 'asteroids:' + sysId; }
 // die Gürtel über die ganze Karte verteilt liegen statt in einer Ecke zu klumpen. Sie ist hier NICHT
 // paritätspflichtig (der Client bekommt die Liste vom Server), sondern nur stabil - dieselbe
 // Galaxie soll bei jedem Serverstart dieselben Gürtel haben.
+// EINGEFROREN am 02.09.2026, Entscheidung Sascha. Bis dahin lief das Raster unten über ALLE Systeme,
+// auch die wöchentlich hinzukommenden - und jedes neue Wochensystem verschob die Bounding-Box und
+// damit die Rasterzellen. GEMESSEN mit dieser Formel: von 12 auf 14 Wochensysteme verlor sysn_kelyra
+// den Gürtel, bei 16 wechseln zwei weitere, bis zum Deckel 12 von 20. Ein System, das den Gürtel
+// verliert, nimmt die Schürfrechte und stationierten Eskorten der Spieler mit ins Leere (das Feld
+// bleibt als Waise in db.shared). Kandidaten sind deshalb ab jetzt genau die 69 Basissysteme und die
+// 14 Wochensysteme sysw_0..sysw_13, die am Tag des Einfrierens existierten; Startschub-Systeme
+// (SCHUB_COORDS) und alle späteren Wochensysteme nie. Ergebnis: der heutige Satz von 20, für immer.
+// test_asteroidfeld_http 1b2 hält ihn namentlich fest.
+const AST_GUERTEL_WOCHEN_STAND = 14;
+const SCHUB_IDS = new Set(SCHUB_COORDS.map(s => s.id));
+function astGuertelKandidat(s) {
+  if (SCHUB_IDS.has(s.id)) return false;
+  if (s.id.startsWith('sysw_')) return Number(s.id.slice(5)) < AST_GUERTEL_WOCHEN_STAND;
+  return true;
+}
 let _astGuertelCache = null;
 function astGuertelSysteme() {
   if (_astGuertelCache) return _astGuertelCache;
-  const sys = SYSTEM_COORDS;
+  const sys = SYSTEM_COORDS.filter(astGuertelKandidat);
   const xs = sys.map(s => s.gx), ys = sys.map(s => s.gy);
   const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
   const SPALTEN = 5, ZEILEN = 4;

@@ -121,3 +121,17 @@ Wächter: `tests/test_anfechtung_vorschau_http.js` (Port 3240, 19 Prüfungen). K
 liegt in der Spanne der Vorschau davor). Gegenprobe `KEPLER_ANF_SABOTAGE=null`: genau 2a und 2b
 fallen, Prüfliste identisch. **Die erste Pflichtliste nannte nur 2a** – gemessen fällt 2b mit; eine
 Pflichtliste ist selbst eine Behauptung, bis die Gegenprobe sie gemessen hat.
+
+## Gürtelauswahl eingefroren (02.09.2026)
+
+`astGuertelSysteme` wählt nur noch aus den 69 Basissystemen und `sysw_0` bis `sysw_13`
+(`astGuertelKandidat`, `AST_GUERTEL_WOCHEN_STAND`); Startschub-Systeme (`SCHUB_COORDS`) und
+spätere Wochensysteme nie. Gemessen mit der eigenen Formel: Das 5×4-Raster liegt über der
+Bounding-Box aller Systeme, und jedes Wochensystem verschob die Zellen – 12 → 14 Wochensysteme
+nahm `sysn_kelyra` den Gürtel, bis zum Deckel hätten 12 von 20 gewechselt, jeweils mit den
+Schürfrechten und Eskorten der Spieler im Leeren (das Feld bleibt als Waise unter
+`asteroids:<sysId>` in `db.shared`). Der Satz vom 02.09.2026 (20, siehe
+`test_asteroidfeld_http` 1b2) gilt jetzt für immer. Das Frontend rechnet seit demselben Tag mit
+einer Kopie dieser Formel und übernimmt zusätzlich die Liste aus `/api/asteroid/field` – vorher
+stimmten nur 10 der 20 Systeme überein (anderer Hash, anderer Seed), und zehn Gürtel des Servers
+waren im Spiel unsichtbar. Vollständig: `docs/galaxie-wachstum.md` im Frontend-Repo.

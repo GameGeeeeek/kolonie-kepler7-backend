@@ -171,18 +171,23 @@ const globalApiRateLimit = rateLimit(60 * 1000, 240, 'Zu viele Anfragen von dies
 const BACKUP_DIR = path.join(path.dirname(DB_FILE), 'backups');
 const BACKUP_RETENTION = 48; // ca. 1 Tag bei 30-Minuten-Takt
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+// Gibt den Dateinamen der neuen Sicherung zurueck, sonst null (02.09.2026, Codex-Hinweis auf #196):
+// Der Takt-Aufruf ignoriert den Rueckgabewert wie bisher, der Admin-Knopf "Backup jetzt" verlaesst
+// sich darauf - ein Fehlschlag darf dort nicht als Erfolg mit einer aelteren Sicherung erscheinen.
 function backupDb() {
   try {
-    if (!fs.existsSync(DB_FILE)) return; // beim allerersten Start evtl. noch keine DB vorhanden
+    if (!fs.existsSync(DB_FILE)) return null; // beim allerersten Start evtl. noch keine DB vorhanden
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    const dest = path.join(BACKUP_DIR, `db-${ts}.json`);
+    const name = `db-${ts}.json`;
+    const dest = path.join(BACKUP_DIR, name);
     fs.copyFileSync(DB_FILE, dest);
     const files = fs.readdirSync(BACKUP_DIR).filter(f => f.startsWith('db-') && f.endsWith('.json')).sort();
     while (files.length > BACKUP_RETENTION) {
       const oldest = files.shift();
       fs.unlinkSync(path.join(BACKUP_DIR, oldest));
     }
-  } catch (e) { console.error('Backup fehlgeschlagen:', e); }
+    return name;
+  } catch (e) { console.error('Backup fehlgeschlagen:', e); return null; }
 }
 backupDb();
 setInterval(backupDb, 30 * 60 * 1000);
@@ -544,11 +549,15 @@ function adminProtokollMiddleware(req, res, next) {
   res.json = function (body) {
     if (res.statusCode < 300) {
       // req.username setzt authMiddleware - die laeuft je Route NACH dieser Middleware, ist beim
-      // Antworten also laengst durch. Das saveDb() buendelt sich mit dem der Route.
-      // originalUrl statt req.path: Beim Antworten hat Express den Pfad laengst wieder auf den
-      // vollen Wert gesetzt (gemessen: 'api/admin/set-banned' statt 'set-banned').
+      // Antworten also laengst durch. originalUrl statt req.path: Beim Antworten hat Express den
+      // Pfad laengst wieder auf den vollen Wert gesetzt (gemessen: 'api/admin/set-banned').
       adminProtokoll(String(req.originalUrl || '').split('?')[0].replace(/^\/api\/admin\//, ''), req.username || null, req.body);
-      saveDb();
+      // Die Antwort wartet auf das Speichern des Eintrags. Ein nicht abgewartetes saveDb() reihte
+      // sich hinter das der Route und war bei einem harten Stopp kurz nach der Antwort gemessen
+      // noch nicht auf der Platte (Gegenprobe 1d fiel unter Last) - ein Protokoll, das der Admin
+      // als "ok" gesehen hat, muss den Neustart ueberleben.
+      saveDb().catch(() => {}).then(() => original(body));
+      return res;
     }
     return original(body);
   };
@@ -599,6 +608,10 @@ function spielstandZusammenfassung(raw) {
   if (raw === null || raw === undefined) return null;
   let sv = null;
   try { sv = JSON.parse(raw); } catch (e) { return { fehler: 'kein gueltiges JSON', groesse: String(raw).length }; }
+  // Gueltiges JSON, aber kein Objekt (null, Zahl, Liste): Die Plausibilitaetspruefung beim Speichern
+  // laesst `null` durch, und ein Zugriff auf sv.fleet wuerfe hier einen TypeError - 500 statt Blatt,
+  // und im async-Handler der Ruecksicherung eine unbehandelte Promise (Codex-Hinweis auf #196).
+  if (!sv || typeof sv !== 'object' || Array.isArray(sv)) return { fehler: 'kein Spielstand-Objekt', groesse: String(raw).length };
   const zahl = v => (typeof v === 'number' && Number.isFinite(v)) ? Math.round(v) : 0;
   const stufen = obj => { const o = {}; for (const [k, v] of Object.entries(obj || {})) if (zahl(v) > 0) o[k] = zahl(v); return o; };
   const flotte = {};
@@ -13457,10 +13470,19 @@ app.post('/api/admin/backup-jetzt', authMiddleware, (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
   // Erst den Speicher auf die Platte, dann kopieren - sonst sichert das Backup den Stand von vor
   // dem letzten Schreibvorgang. saveDb() buendelt; danach ist DB_FILE aktuell.
+  // saveDb() loest auch nach einem Schreibfehler auf, backupDb() faengt seine Fehler selbst -
+  // deshalb wird hier NACHGEZAEHLT: Es muss eine neue Datei geben, und sie muss lesbar und nicht
+  // leer sein. Sonst 500, damit der Knopf nie eine aeltere Sicherung als Erfolg praesentiert
+  // (Codex-Hinweis auf #196).
   saveDb().then(() => {
-    backupDb();
+    const vorher = new Set(backupListe().map(b => b.datei));
+    const name = backupDb();
     const liste = backupListe();
-    res.json({ ok: true, neuestes: liste[0] || null, anzahl: liste.length });
+    const neu = name ? liste.find(b => b.datei === name) : null;
+    if (!neu || vorher.has(name) || !(neu.groesse > 0)) {
+      return res.status(500).json({ error: 'Backup fehlgeschlagen - es ist keine neue Sicherung entstanden. Platz und Rechte im Backup-Verzeichnis pruefen.' });
+    }
+    res.json({ ok: true, neuestes: neu, anzahl: liste.length });
   }).catch(e => res.status(500).json({ error: 'Backup fehlgeschlagen: ' + String(e.message).slice(0, 80) }));
 });
 app.get('/api/admin/backup-spielstand', authMiddleware, (req, res) => {

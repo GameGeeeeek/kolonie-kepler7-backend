@@ -12,8 +12,16 @@
 //   4a/4b  die Chat-Nachricht ist weg UND jeder NICHT-Chat-Schluessel wird abgelehnt (die Sperre,
 //          ohne die das hier ein Loeschknopf fuer den ganzen geteilten Speicher waere)
 //
-// GEGENPROBEN (sabotierte Kopien ueber KEPLER_SERVER_JS): siehe die gemessene Liste im Kopf des
-// Gegenprobe-Skripts; jede Sabotage steht dort mit der Pruefung, die sie fallen lassen MUSS.
+// GEGENPROBEN (sabotierte Kopien ueber KEPLER_SERVER_JS, gemessen 02.09.2026 - alle sechs treffen,
+// 0 Werkzeugfehler; links die Sabotage, rechts die Pruefung, die sie fallen laesst):
+//   Alarm ohne Ruhefrist - jeder Lauf meldet erneut                  -> 1b
+//   Die Abfrage nennt die aktuellen Messwerte nicht                  -> 1f
+//   Das Geschenk geht an ALLE statt an das eine Konto                -> 2b
+//   Der Weltboss mit null Lebenspunkten gilt nicht als besiegt       -> 3b
+//   Das Kopfgeld wird ohne Wochenschluessel gesetzt                  -> 3g
+//   Die Chat-Sperre faellt weg - jeder Schluessel ist loeschbar      -> 4b
+// Die letzte ist die wichtigste: Ohne die Sperre loescht dieselbe Route Bestenlisten- und
+// Allianz-Schluessel, und der Test weist das mit zwei echten Fremdschluesseln nach.
 //
 // PORT 3250. Gemessen gegen frisch geholtes origin/master (nicht nur gegen den eigenen Stand -
 // siehe die Begruendung im Kopf von test_admin_konto2_http.js): belegt sind 3195-3249.

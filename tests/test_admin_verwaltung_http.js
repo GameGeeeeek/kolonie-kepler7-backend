@@ -23,6 +23,11 @@
 //   Ruecksicherung ohne Schatten               -> 4d, 4f, 5g
 //   Dateinamen-Muster nicht geprueft           -> 4g
 //   Aufloesen laesst die Rollen stehen         -> 5d, 5e
+//   (Nachbesserung, Codex-Hinweise auf #196:)
+//   Objekt-Pruefung der Zusammenfassung weg    -> 4i, danach STIRBT der Server an der unbehandelten
+//                                                 Promise der Ruecksicherung - genau der gemeldete
+//                                                 Fehler; die Pruefliste bricht dort ab (27 statt 36)
+//   backup-jetzt ohne Nachzaehlung             -> 4b, 4c, 4d, 4e, 4e2, 4f, 4i2, 4j
 //
 // PORT 3244: gemessen belegt sind im Backend 3195-3242, und 3243 nimmt test_sitzungscookie_front
 // im FRONTEND-Repo fuer den Server, den es selbst startet (`grep -hoE "3[12][0-9][0-9]"
@@ -248,7 +253,9 @@ const credits = z => z && z.zusammenfassung ? z.zusammenfassung.credits : null;
   check('4b: "Backup jetzt" legt eine weitere Sicherung an, die Liste fuehrt sie zuoberst',
     r4b.status === 200 && r4b.body.neuestes && /^db-.*\.json$/.test(r4b.body.neuestes.datei) && l4b.backups.length === l4.backups.length + 1 && l4b.backups[0].datei === r4b.body.neuestes.datei && l4b.backups[0].groesse > 1000,
     { vorher: l4.backups.length, nachher: l4b.backups.length, neuestes: r4b.body.neuestes });
-  const datei = r4b.body.neuestes.datei;
+  // Gefasst (Arbeitsregel 34): Liefert "Backup jetzt" keine Datei (Gegenprobe ohne Nachzaehlung),
+  // laeuft der Rest mit leerem Namen weiter und faellt dort - statt hier an einem TypeError zu sterben.
+  const datei = (r4b.body && r4b.body.neuestes && r4b.body.neuestes.datei) || '';
   // anna spielt weiter: 5000 Kredite. Das Backup traegt noch 1000.
   const save4 = await s.j('/storage/kepler7-save-v3', { method: 'PUT', headers: kopf(tok.anna), body: JSON.stringify({ value: JSON.stringify(spielstand(ANNA, 'anna', { credits: 5000 })) }) });
   const z4c = (await s.j('/admin/backup-spielstand?name=anna&datei=' + encodeURIComponent(datei), { headers: kopf(tok.GameGeeeeek) })).body;
@@ -286,6 +293,26 @@ const credits = z => z && z.zusammenfassung ? z.zusammenfassung.credits : null;
   tok.anna = (await s.anmelden('anna')).token;
   const r4h = await s.j('/admin/spielstand?name=anna', { headers: kopf(tok.anna) });
   check('4h: ohne Admin 403', r4h.status === 403, r4h.status);
+  // 4i: ein Spielstand, der gueltiges JSON, aber kein Objekt ist (Codex-Hinweis auf #196). `null`
+  // kommt an der Plausibilitaetspruefung vorbei; das Blatt darf daran nicht mit 500 sterben, und
+  // eine Ruecksicherung eines solchen Backup-Stands wird abgewiesen.
+  await aendereDb(d => { d.private[CARL]['kepler7-save-v3'] = 'null'; });
+  const z4i = await s.j('/admin/spielstand?name=carl', { headers: kopf(tok.GameGeeeeek) });
+  check('4i: ein null-Spielstand gibt 200 mit benanntem Fehler statt 500',
+    z4i.status === 200 && z4i.body.vorhanden === true && z4i.body.zusammenfassung && /kein Spielstand-Objekt/.test(String(z4i.body.zusammenfassung.fehler)),
+    { status: z4i.status, zusammenfassung: z4i.body && z4i.body.zusammenfassung });
+  const r4i2 = await admin('/admin/backup-jetzt', {});
+  const r4i3 = await admin('/admin/spielstand-zurueckholen', { targetUsername: 'carl', datei: r4i2.body && r4i2.body.neuestes && r4i2.body.neuestes.datei });
+  check('4i2: das Zurueckholen eines null-Stands wird mit 400 abgewiesen, nicht mit 500', r4i2.status === 200 && r4i3.status === 400, { backup: r4i2.status, zurueck: r4i3.status, fehler: r4i3.body && r4i3.body.error });
+  // 4j: "Backup jetzt" meldet nur dann Erfolg, wenn WIRKLICH eine neue Datei da ist - die Antwort
+  // nennt sie, sie existiert, sie ist nicht leer und sie ist neuer als alles davor.
+  const vorher4j = (await s.j('/admin/backups', { headers: kopf(tok.GameGeeeeek) })).body.backups.map(b => b.datei);
+  const r4j = await admin('/admin/backup-jetzt', {});
+  const dateien4j = fs.readdirSync(path.join(tmpDir, 'backups'));
+  check('4j: die gemeldete neue Sicherung existiert, ist nicht leer und war vorher nicht da',
+    r4j.status === 200 && r4j.body.neuestes && !vorher4j.includes(r4j.body.neuestes.datei) && dateien4j.includes(r4j.body.neuestes.datei) &&
+    fs.statSync(path.join(tmpDir, 'backups', r4j.body.neuestes.datei)).size > 0 && r4j.body.anzahl === dateien4j.filter(f => /^db-.*\.json$/.test(f)).length,
+    { neuestes: r4j.body && r4j.body.neuestes, anzahl: r4j.body && r4j.body.anzahl, dateien: dateien4j.length });
 
   // ---- 5) Allianzen ------------------------------------------------------------------------------
   await alleAnmelden();

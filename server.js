@@ -1638,6 +1638,10 @@ function pushNotificationText(type, payload) {
     const wieVielte = payload.gesamt ? ' (' + payload.gesamt + '. Kommandant insgesamt)' : '';
     return { title: 'Neuer Spieler hat angefangen', body: (payload.username || 'Ein Kommandant') + ' hat die Kolonie zum ersten Mal geoeffnet' + wieVielte + '.' };
   }
+  if (type === 'feedback-antwort') {
+    // Antwort des Betreibers auf eine Einsendung (02.09.2026). Der Text IST die Nachricht.
+    return { title: 'Antwort auf dein Feedback', body: String(payload.text || '').slice(0, 200) };
+  }
   if (type === 'konto-verdacht') {
     // Betreiber-Meldung der Verdachtsregel (28.08.2026, siehe verdachtTick). Der Text nennt die
     // zwei harmlosen Erklaerungen MIT - eine Push, die nur "Bot?" sagt, macht aus einem Hinweis
@@ -1679,6 +1683,7 @@ function notificationTarget(type, payload) {
     // Der Admin-Bereich ist kein Reiter, sondern ein Einschub - das naechstliegende Ziel ist die
     // Bestenliste, auf der das Konto steht (dieselbe Wahl wie bei 'neuer-spieler').
     case 'konto-verdacht': return 'galaxie:rang';
+    case 'feedback-antwort': return 'berichte';
     case 'raid-incoming': return 'verteidigung';
     case 'spy-detected': return 'verteidigung';
     case 'attack-received': return 'berichte';
@@ -4279,6 +4284,7 @@ function grantNewbieShield(userId) {
 }
 
 app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
+  if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });   // Notaus 'angriffe' (02.09.2026)
   const { targetUserId, targetPlanet } = req.body || {};
   if (!targetUserId || targetUserId === req.userId) return res.status(400).json({ error: 'Ungültiges Ziel.' });
   // Ziel unter Schutzschild? -> Angriff prallt ab (kein Kampf, keine Beute, kein Punktgewinn).
@@ -11424,6 +11430,7 @@ function A2SchlagAusfuehren(g, ziel, kraft, composition, beteiligte, jetzt) {
            lp: gefallen ? 0 : ziel.lp, lpMax: ziel.lpMax };
 }
 app.post('/api/konvoi/angriff', authMiddleware, async (req, res) => {
+  if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });   // Notaus 'angriffe' (02.09.2026)
   const zielId = String((req.body && req.body.zielId) || '');
   const missionId = String((req.body && req.body.missionId) || '');
   if (!zielId || !missionId) return res.status(400).json({ error: 'zielId und missionId erforderlich.' });
@@ -11502,6 +11509,7 @@ function festungFindeMission(save, missionId, sysId) {
   return null;
 }
 app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
+  if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });   // Notaus 'angriffe' (02.09.2026)
   const sysId = String((req.body && req.body.system) || '');
   const missionId = (req.body && req.body.missionId) !== undefined ? String(req.body.missionId) : '';
   const festungId = String((req.body && req.body.festungId) || '');
@@ -11833,6 +11841,7 @@ function nestSchlagAusfuehren(g, nest, kraft, composition, beteiligte, jetzt) {
            lp: gefallen ? 0 : nest.lp, lpMax: nest.lpMax, stufe: gefallen ? null : nest.stufe };
 }
 app.post('/api/alien/nest-angriff', authMiddleware, async (req, res) => {
+  if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });   // Notaus 'angriffe' (02.09.2026)
   const nestId = String((req.body && req.body.nestId) || '');
   const missionId = String((req.body && req.body.missionId) || '');
   if (!nestId || !missionId) return res.status(400).json({ error: 'nestId und missionId erforderlich.' });
@@ -12291,6 +12300,7 @@ app.post('/api/vorposten/aufgeben', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
+  if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });   // Notaus 'angriffe' (02.09.2026)
   if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
   const sys = String((req.body && req.body.system) || '');
   const missionId = (req.body && req.body.missionId) !== undefined ? String(req.body.missionId) : '';
@@ -13322,7 +13332,8 @@ app.get('/api/admin/feedback', authMiddleware, (req, res) => {
       // NICHT der Dateiname, sondern nur ob es eins gibt - abgeholt wird ueber die ID (siehe
       // unten). Damit kann die Route strukturell nicht zum Pfad-Ausbruch missbraucht werden.
       hatBild: !!f.imageFile,
-      erledigt: !!f.erledigt, erledigtAm: f.erledigtAm || 0
+      erledigt: !!f.erledigt, erledigtAm: f.erledigtAm || 0,
+      antwort: f.antwort || null
     })),
     gesamt: alle.length,
     offen: alle.filter(f => !f.erledigt).length,
@@ -13393,8 +13404,15 @@ const NOTAUS_NAMEN = {
   bauteile: 'Neue Festungen bekommen Schild und Tuerme',
   nester:   'Alien-Nester entstehen, reifen und wandern',
   konvois:  'Wrackkonvois entstehen, driften und entkommen',
-  vorposten: 'Neue Vorposten werden errichtet'
+  vorposten: 'Neue Vorposten werden errichtet',
+  // Sechster Schalter (02.09.2026): KEIN Spawn, sondern die Annahme von Angriffen - PvP, Festung,
+  // Nest, Konvoi, Vorposten. Fuer die Dauer einer Ruecksicherung oder db.json-Arbeit: Ein Angriff,
+  // der waehrend eines Stopps ankommt, geht sonst auf einen Stand, den es gleich nicht mehr gibt.
+  // Im Code immer an (spawnAktivImCode), der Admin kann ihn nur AB-schalten - dieselbe Regel wie
+  // bei den fuenf Spawns.
+  angriffe: 'Angriffe werden angenommen (PvP, Festung, Nest, Konvoi, Vorposten)'
 };
+const ANGRIFFE_PAUSE_TEXT = 'Angriffe sind gerade pausiert (Wartung) – bitte in ein paar Minuten noch einmal.';
 function notAusGesetzt(name) {
   return !!(db.notAus && db.notAus[name] && db.notAus[name].aus === true);
 }
@@ -13430,6 +13448,7 @@ function spawnAktivImCode(name) {
   if (name === 'nester') return NEST_SPAWN_AKTIV;
   if (name === 'konvois') return A2_SPAWN_AKTIV;
   if (name === 'vorposten') return VORPOSTEN_AKTIV;
+  if (name === 'angriffe') return true;
   return false;
 }
 
@@ -13813,6 +13832,210 @@ app.post('/api/admin/allianz/aufloesen', authMiddleware, async (req, res) => {
   }
   await saveDb();
   res.json({ ok: true, tag, entfernt });
+});
+
+// --- Feedback beantworten (02.09.2026) ---------------------------------------------------------
+/* Der Haken "erledigt" war nur fuer den Betreiber sichtbar; der Einsender erfuhr nie, was aus seiner
+   Idee oder Fehlermeldung geworden ist. Die Antwort steht am Eintrag UND geht als Postfach-Eintrag
+   an den Einsender (Kategorie 'messages' fuer die Handy-Push - eine Antwort ist eine Nachricht an
+   ihn). Existiert das Konto nicht mehr, bleibt die Antwort am Eintrag und `zugestellt` sagt es. */
+const FEEDBACK_ANTWORT_MAX = 500;
+app.post('/api/admin/feedback/antwort', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const { id, text } = req.body || {};
+  const eintrag = (db.feedback || []).find(f => f && f.id === id);
+  if (!eintrag) return res.status(404).json({ error: 'Diese Einsendung gibt es nicht (mehr).' });
+  const antwort = String(text || '').trim().slice(0, FEEDBACK_ANTWORT_MAX);
+  if (!antwort) return res.status(400).json({ error: 'Bitte einen Antworttext eingeben.' });
+  eintrag.antwort = { text: antwort, zeit: Date.now() };
+  const ziel = findUserById(eintrag.userId);
+  let zugestellt = false;
+  if (ziel) {
+    const prefs = getNotifPrefs(ziel);
+    pushNotificationEvent(ziel.userId, 'feedback-antwort',
+      { text: antwort.slice(0, 300), typ: eintrag.type, auszug: String(eintrag.text || '').slice(0, 80) },
+      { skipWebPush: !(prefs.enabled && prefs.messages) });
+    zugestellt = true;
+  }
+  await saveDb();
+  res.json({ ok: true, zugestellt, antwort: eintrag.antwort });
+});
+
+// --- Wartungsankuendigung (02.09.2026) ----------------------------------------------------------
+/* Das Rundschreiben ist eine Chat-Nachricht und damit nach einer Minute vorbei. Eine Wartung
+   braucht ein BANNER mit Countdown, das jeder Client zeigt, solange sie ansteht oder laeuft. Der
+   Server haelt genau EINE Ankuendigung (db.ankuendigung); GET /api/ankuendigung ist offen, damit
+   auch die Landeseite sie zeigen kann, und liefert nach Ablauf null - der Client muss also nichts
+   selbst wegrechnen. Die Zeiten sind Millisekunden seit Epoche; `jetzt` reist mit, damit ein Client
+   mit schiefer Uhr den Countdown trotzdem richtig rechnet. */
+const ANKUENDIGUNG_TEXT_MAX = 200;
+function ankuendigungAktuell(jetzt) {
+  const a = db.ankuendigung;
+  if (!a || !a.ab) return null;
+  const t = jetzt || Date.now();
+  if (t > a.ab + (a.dauerMinuten || 0) * 60000) return null;
+  return { text: a.text || '', ab: a.ab, dauerMinuten: a.dauerMinuten || 0, gesetzt: a.gesetzt || 0, jetzt: t };
+}
+app.get('/api/ankuendigung', (req, res) => res.json({ ankuendigung: ankuendigungAktuell() }));
+app.post('/api/admin/ankuendigung', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const { text, abInMinuten, dauerMinuten } = req.body || {};
+  const t = String(text || '').trim().slice(0, ANKUENDIGUNG_TEXT_MAX);
+  const ab = Math.max(0, Math.min(7 * 24 * 60, Math.floor(Number(abInMinuten) || 0)));
+  const dauer = Math.max(1, Math.min(24 * 60, Math.floor(Number(dauerMinuten) || 0)));
+  if (!t) return res.status(400).json({ error: 'Bitte einen Text angeben (was passiert, wie lange).' });
+  db.ankuendigung = { text: t, ab: Date.now() + ab * 60000, dauerMinuten: dauer, gesetzt: Date.now() };
+  await saveDb();
+  res.json({ ok: true, ankuendigung: ankuendigungAktuell() });
+});
+app.post('/api/admin/ankuendigung/aufheben', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const gab = !!(db.ankuendigung && db.ankuendigung.ab);
+  delete db.ankuendigung;
+  await saveDb();
+  res.json({ ok: true, aufgehoben: gab });
+});
+
+// --- Support-Werkzeuge am Konto (02.09.2026) ----------------------------------------------------
+/* Drei Faelle, die bis hierher Handarbeit in der db.json brauchten: ein Spieler ohne Zugriff auf
+   seine alte E-Mail, ein Name, der gegen die Regeln verstoesst oder geaendert werden soll, und
+   ein Passwort-Reset ohne funktionierende E-Mail. Dieselben Regeln wie bei Registrierung und
+   Reset (NAME_MUSTER, EMAIL_MUSTER, Token mit einer Stunde Frist); alles laeuft durch das
+   Protokoll, der Reset-Link steht NICHT darin (der Token kommt nicht aus dem Request-Koerper). */
+const NAME_MUSTER = /^[a-zA-Z0-9_\-äöüÄÖÜß]{3,18}$/;
+const EMAIL_MUSTER = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+app.post('/api/admin/konto/email', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const ziel = kontoNachName(req, 'targetUsername');
+  if (!ziel) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const email = String((req.body && req.body.email) || '').trim().toLowerCase();
+  if (!EMAIL_MUSTER.test(email)) return res.status(400).json({ error: 'Das ist keine gueltige E-Mail-Adresse.' });
+  const belegt = Object.values(db.users).some(u => u && u.userId !== ziel.userId && String(u.email || '').toLowerCase() === email);
+  if (belegt) return res.status(409).json({ error: 'Diese E-Mail-Adresse gehoert schon zu einem anderen Konto.' });
+  ziel.email = email;
+  ziel.emailVerified = true;            // der Betreiber buergt - sonst haette der Spieler wieder keinen Zugang
+  ziel.emailGesetztDurchAdmin = Date.now();
+  await saveDb();
+  res.json({ ok: true, username: ziel.username, emailForm: emailForm(email) });
+});
+/* Umbenennen aendert ALLE Stellen, die den Namen fuehren, sonst hiesse der Spieler in der
+   Bestenliste weiter wie vorher: Anmeldename (db.users-Schluessel), user.username, der Name im
+   Spielstand (player.name - der Client uebernimmt data.username nur, wenn sein Name leer ist),
+   der Bestenlisten-Eintrag und die Allianz-Rollen. Der Spielstand wird dafuer serverseitig
+   umgeschrieben und die Version hochgezaehlt; die Sitzungen werden entwertet, damit der laufende
+   Client nicht seinen alten Stand zurueckschreibt (dieselbe Begruendung wie bei der
+   Ruecksicherung). Chat-Verlauf und Meldungen behalten den alten Namen - sie sind Historie. */
+app.post('/api/admin/konto/umbenennen', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const ziel = kontoNachName(req, 'targetUsername');
+  if (!ziel) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const neu = String((req.body && req.body.neuerName) || '').trim();
+  if (!NAME_MUSTER.test(neu)) return res.status(400).json({ error: 'Der Name braucht 3 bis 18 Zeichen: Buchstaben, Ziffern, _ und -.' });
+  const altKey = String(ziel.username || '').toLowerCase();
+  const neuKey = neu.toLowerCase();
+  if (neu === ziel.username) return res.status(400).json({ error: 'Das ist bereits der Name dieses Kontos.' });
+  if (neuKey !== altKey && db.users[neuKey]) return res.status(409).json({ error: 'Diesen Namen hat schon ein anderes Konto.' });
+  const devUser = db.users['gamegeeeeek'];
+  if (devUser && ziel.userId === devUser.userId) return res.status(400).json({ error: 'Das Betreiberkonto wird nicht umbenannt - isAdmin() haengt an seinem Namen.' });
+  const alterName = ziel.username;
+  delete db.users[altKey];
+  db.users[neuKey] = ziel;
+  ziel.username = neu;
+  ziel.umbenanntAm = Date.now();
+  ziel.vorherName = alterName;
+  // Spielstand: player.name - nur wenn er ein Objekt mit player ist; sonst bleibt er unangetastet.
+  let spielstandGeaendert = false;
+  const raw = getSaveValue(ziel.userId);
+  if (typeof raw === 'string') {
+    try {
+      const sv = JSON.parse(raw);
+      if (sv && typeof sv === 'object' && sv.player && typeof sv.player === 'object') {
+        sv.player.name = neu;
+        setSaveValue(ziel.userId, JSON.stringify(sv));
+        spielstandGeaendert = true;
+      }
+    } catch (e) {}
+  }
+  // Bestenliste und Allianz-Rollen
+  try { const lb = JSON.parse(db.shared['leaderboard:' + ziel.userId] || 'null'); if (lb && typeof lb === 'object') { lb.name = neu; db.shared['leaderboard:' + ziel.userId] = JSON.stringify(lb); } } catch (e) {}
+  for (const k of Object.keys(db.shared)) {
+    if (!/^alliance:[^:]+:role:/.test(k) || !k.endsWith(':' + ziel.userId)) continue;
+    try { const r = JSON.parse(db.shared[k]); if (r && typeof r === 'object') { r.name = neu; db.shared[k] = JSON.stringify(r); } } catch (e) {}
+  }
+  ziel.tokenVersion = (ziel.tokenVersion || 0) + 1;
+  delete ziel.activeSessionId;
+  delete ziel.activeSessionAt;
+  await saveDb();
+  res.json({ ok: true, username: neu, alterName, spielstandGeaendert });
+});
+app.post('/api/admin/konto/reset-link', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const ziel = kontoNachName(req, 'targetUsername');
+  if (!ziel) return res.status(404).json({ error: 'Kein Spieler mit diesem Namen gefunden.' });
+  const token = crypto.randomBytes(32).toString('hex');
+  const gueltigBis = Date.now() + 60 * 60 * 1000;
+  db.resetTokens[token] = { userId: ziel.userId, expires: gueltigBis, durchAdmin: true };
+  await saveDb();
+  res.json({ ok: true, username: ziel.username, link: PUBLIC_URL + '/?reset=' + token, gueltigBis });
+});
+
+// --- Lage: Wirtschaft und Galaxie (02.09.2026) -------------------------------------------------
+/* Nur lesen. Die Wirtschaft kommt aus derselben Zusammenfassung wie das Spielstand-Blatt, ueber
+   alle Konten mit Spielstand; die PvE-Ziele aus den Speichern, in denen sie ohnehin liegen. Nichts
+   davon wird hier gerechnet oder veraendert - die Flaeche beantwortet "laeuft die Wirtschaft aus
+   dem Ruder" und "was ist gerade los", ohne db.json. */
+app.get('/api/admin/lage', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const jetzt = Date.now();
+  const konten = [];
+  const ressourcen = {};
+  for (const k of SPIELSTAND_RESSOURCEN) ressourcen[k] = 0;
+  let kampfpunkte = 0;
+  for (const u of Object.values(db.users)) {
+    if (!u) continue;
+    const z = spielstandZusammenfassung(getSaveValue(u.userId));
+    if (!z || z.fehler) continue;
+    konten.push({ username: u.username, credits: z.credits, xp: z.xp, kampfpunkte: z.kampfpunkte, lastTick: z.lastTick });
+    for (const k of SPIELSTAND_RESSOURCEN) ressourcen[k] += z.ressourcen[k] || 0;
+    kampfpunkte += z.kampfpunkte || 0;
+  }
+  const kredite = konten.map(k => k.credits).sort((a, b) => a - b);
+  const median = kredite.length ? kredite[Math.floor(kredite.length / 2)] : 0;
+  const top = konten.slice().sort((a, b) => b.credits - a.credits).slice(0, 5).map(k => ({ username: k.username, credits: k.credits }));
+  const g = loadOrInitGalaxy();
+  let markt = null;
+  try {
+    const m = loadOrInitMarket(g);
+    const preise = {};
+    for (const key of Object.keys(MARKET_RESOURCES)) preise[key] = { preis: m[key], basis: MARKET_RESOURCES[key].basePrice };
+    markt = { preise, ereignis: g.marketEvent ? { label: g.marketEvent.label, ressource: g.marketEvent.resource, art: g.marketEvent.kind, bis: g.marketEvent.until || g.marketEvent.endsAt || 0 } : null, trend: g.marketTrend || null };
+  } catch (e) { markt = null; }
+  let weltboss = null;
+  try { const b = JSON.parse(db.shared[WORLDBOSS_KEY] || 'null'); if (b && typeof b === 'object') weltboss = { level: b.level || 1, hp: b.hp || 0, maxHp: b.maxHp || 0, beteiligte: Object.keys(b.contributions || {}).length }; } catch (e) {}
+  const nester = (Array.isArray(g.alienNester) ? g.alienNester : []).map(n => ({ id: n.id, volk: n.volk, sys: n.sys, stufe: n.stufe || 1, lp: Math.round(n.lp || 0), lpMax: Math.round(n.lpMax || 0), seit: n.seit || 0 }));
+  const konvois = (Array.isArray(g.wrackKonvois) ? g.wrackKonvois : []).map(k => ({ id: k.id, sys: k.sys || k.system || null, stufe: k.stufe || null, lp: Math.round(k.lp || k.kern || 0), lpMax: Math.round(k.lpMax || k.kernMax || 0), seit: k.seit || 0 }));
+  const festungen = [];
+  try {
+    const { felder } = astAlleFelder();
+    for (const sysId of Object.keys(felder || {})) {
+      const f = felder[sysId] && felder[sysId].festung;
+      if (f) festungen.push({ sys: sysId, stufe: f.stufe || 1, sorte: f.sorte || null, kern: Math.round(f.kern || 0), kernMax: Math.round(f.kernMax || 0), seit: f.seit || 0, schild: !!(f.bauteile && f.bauteile.schild && f.bauteile.schild.lp > 0) });
+    }
+  } catch (e) {}
+  const vorposten = [];
+  for (const k of Object.keys(db.shared)) {
+    if (!k.startsWith('vorposten:')) continue;
+    const d = vorpostenLies(k.slice('vorposten:'.length));
+    if (d) vorposten.push({ sys: d.sys, besitzerName: d.besitzerName || 'Kommandant', stufe: d.stufe || 1, kern: Math.round((d.kern && d.kern.lp) || 0), kernMax: Math.round((d.kern && d.kern.lpMax) || 0), seit: d.seit || 0 });
+  }
+  const notAus = Object.keys(NOTAUS_NAMEN).filter(n => notAusGesetzt(n));
+  res.json({
+    jetzt,
+    wirtschaft: { konten: konten.length, kredite: { gesamt: kredite.reduce((a, b) => a + b, 0), median, top }, ressourcen, kampfpunkte,
+      aktiv7Tage: konten.filter(k => jetzt - k.lastTick < 7 * 86400000).length },
+    markt, pve: { weltboss, nester, festungen, konvois, vorposten }, notAus,
+    ankuendigung: ankuendigungAktuell(jetzt)
+  });
 });
 
 // --- 4. Systemstand ----------------------------------------------------------------------------

@@ -12765,14 +12765,18 @@ function vorpostenStufeVon(doc) { return vorpostenStufe(doc && doc.stufe, doc &&
 function vorpostenWerte(doc) {
   const st = vorpostenStufeVon(doc);
   const b = vpModulBoni(doc);
+  // Fertige Projekte wirken auf DIESELBEN Kanaele wie die Module und werden vorher addiert - ein
+  // eigener Rechenweg waere eine zweite Stelle, an der ein Kanal vergessen werden kann.
+  const pr = vpProjektBoni(doc);
   return Object.assign({}, st, {
-    kernLp: Math.round(st.kernLp * (1 + b.kern)),
-    verteidigung: Math.round(st.verteidigung * (1 + b.verteidigung)),
-    garnisonMax: Math.round(st.garnisonMax * (1 + b.garnison)),
-    flug: Math.round(st.flug * (1 + b.flug) * 1000) / 1000,
-    prod: Math.round(st.prod * (1 + b.prod) * 1000) / 1000,
-    scan: st.scan + Math.round(b.scan),
-    modulBoni: b
+    kernLp: Math.round(st.kernLp * (1 + b.kern + pr.kern)),
+    verteidigung: Math.round(st.verteidigung * (1 + b.verteidigung + pr.verteidigung)),
+    garnisonMax: Math.round(st.garnisonMax * (1 + b.garnison + pr.garnison)),
+    flug: Math.round(st.flug * (1 + b.flug + pr.flug) * 1000) / 1000,
+    prod: Math.round(st.prod * (1 + b.prod + pr.prod) * 1000) / 1000,
+    scan: st.scan + Math.round(b.scan) + Math.round(pr.scan),
+    flugDeckel: pr.flugDeckel,
+    modulBoni: b, projektBoni: pr
   });
 }
 function vorpostenSysOk(sys) { return typeof sys === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(sys); }
@@ -12891,6 +12895,81 @@ const VP_MODUL_SELTENHEIT = {
 };
 // Gebaut wird nur bis 'ungewoehnlich' - der Rest kommt aus dem Fall von PvE-Zielen.
 const VP_MODUL_BAUBAR = ['gewoehnlich', 'ungewoehnlich'];
+/* ETAPPE 4: STATIONSPROJEKTE (03.09.2026)
+   Auftrag Sascha: "dass man von dort aus Projekte starten kann, dass man von dort aus vielleicht
+   auch eine Art Ueberraumtor bauen kann. Also auch noch mehr Projekte quasi macht."
+
+   Ein Projekt ist das Gegenstueck zum Modul: EINMALIG je Vorposten, dauerhaft, nicht umsteckbar,
+   und an Stufe und Ausrichtung gebunden. Damit bekommen die drei Zweige endlich etwas, das nur
+   sie koennen - bis hierher unterschieden sie sich nur in Multiplikatoren.
+
+   KEIN Ticken und kein Einsammeln: Ein Projekt ist fertig, sobald `fertigAb` erreicht ist. Es gibt
+   also keinen Zustandsuebergang, der verlorengehen koennte, und kein Schreiben beim Lesen.
+   `doc.projekte` ist die Liste aller je begonnenen Vorhaben; das laufende ist genau das mit
+   `fertigAb > jetzt`, und mehr als eines gleichzeitig gibt es nicht.
+
+   Die KOSTEN zahlt der Client aus seinem Spielstand - wie jede Baukosten-Buchung dieses Spiels und
+   wie die Ausbaukosten der Stufentabelle. Was der Server fuehrt, ist die WIRKUNG: Sie steht im
+   Dokument in db.shared und ist damit fuer den Client unerreichbar. Ein gefaelschter Spielstand
+   spart hoechstens die Rohstoffe, er erfindet keinen staerkeren Vorposten. */
+const VP_PROJEKTE_AKTIV = false;   // Notaus bis zum Frontend-Merge; umgelegt wird er IM Frontend-PR
+const VP_PROJEKT_DEFS = [
+  { key: 'dockring', name: 'Dockring', icon: 'ti-rocket', zweig: 'werft', stufeAb: 5,
+    dauerMs: 8 * 3600 * 1000, wirkung: { garnison: 0.25 },
+    desc: 'Ein zweiter Liegeplatzring um die Werft: die Garnison fasst ein Viertel mehr Schiffe.',
+    kosten: { erz: 900000, kristalle: 700000, deuterium: 400000, nanolegierungen: 400 } },
+  { key: 'handelskammer', name: 'Handelskammer', icon: 'ti-building-bank', zweig: 'handel', stufeAb: 5,
+    dauerMs: 8 * 3600 * 1000, wirkung: { prod: 0.35 },
+    desc: 'Kontore und Lagerhallen am Ring: der Produktionsbonus dieses Vorpostens steigt deutlich.',
+    kosten: { erz: 900000, kristalle: 700000, deuterium: 400000, nanolegierungen: 400 } },
+  { key: 'bollwerk', name: 'Bollwerk', icon: 'ti-building-castle', zweig: 'festung', stufeAb: 5,
+    dauerMs: 8 * 3600 * 1000, wirkung: { kern: 0.20, verteidigung: 0.20 },
+    desc: 'Doppelte Schotten und ein zweiter Geschuetzguertel: Kern und Abwehr wachsen um ein Fuenftel.',
+    kosten: { erz: 900000, kristalle: 700000, deuterium: 400000, nanolegierungen: 400 } },
+  { key: 'tiefenhorchen', name: 'Tiefenhorchposten', icon: 'ti-antenna-bars-5', zweig: null, stufeAb: 6,
+    dauerMs: 12 * 3600 * 1000, wirkung: { scan: 1 },
+    desc: 'Eine ausgefahrene Lauschanlage weit ausserhalb des Rings: eine Aufklaerungsstufe mehr.',
+    kosten: { erz: 1600000, kristalle: 1200000, deuterium: 800000, nanolegierungen: 900, quantenchips: 400 } },
+  /* Das Sprungtor ist bewusst KEIN weiterer Prozentpunkt auf denselben Kanal: Der Flugzeit-Bonus
+     ist im Spiel bei 50 % gedeckelt, und ein Vorposten der Stufe 8 liegt mit Modulen schon daran.
+     Ein Tor, das nur aufaddiert, taete also nichts - genau die Sorte angezeigter Nutzen, die es in
+     diesem Projekt nicht geben soll. Es hebt stattdessen den DECKEL auf 75 %. */
+  { key: 'sprungtor', name: 'Sprungtor', icon: 'ti-atom-2', zweig: null, stufeAb: 7,
+    dauerMs: 24 * 3600 * 1000, wirkung: { flug: 0.20, flugDeckel: 0.75 },
+    desc: 'Ein durchgehend offenes Tor im Orbit: eigene Nicht-PvP-Missionen hierher fliegen bis zu drei Viertel kuerzer statt hoechstens der Haelfte.',
+    kosten: { erz: 6000000, kristalle: 4500000, deuterium: 3000000, nanolegierungen: 3500, quantenchips: 1800, metamaterial: 500, singularitaetskerne: 40 } }
+];
+const VP_FLUG_DECKEL = 0.5;   // ohne Sprungtor; Kopie im Frontend (vorpostenFlugMult)
+function vpProjektDef(key) { return VP_PROJEKT_DEFS.find(d => d.key === key) || null; }
+function vpProjektListe(doc) { return (doc && Array.isArray(doc.projekte)) ? doc.projekte : []; }
+function vpProjektLaeuft(doc, jetzt) {
+  return vpProjektListe(doc).find(p => p && vpProjektDef(p.key) && (p.fertigAb || 0) > (jetzt || Date.now())) || null;
+}
+function vpProjekteFertig(doc, jetzt) {
+  const t = jetzt || Date.now();
+  return vpProjektListe(doc).filter(p => p && vpProjektDef(p.key) && (p.fertigAb || 0) <= t).map(p => p.key);
+}
+/* Die Summe der FERTIGEN Projekte je Kanal. Ein laufendes wirkt nicht - sonst waere die Bauzeit
+   eine Zierde. `flugDeckel` ist kein Anteil, sondern eine Obergrenze: es gilt die hoechste. */
+function vpProjektBoni(doc, jetzt) {
+  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, flugDeckel: VP_FLUG_DECKEL };
+  for (const key of vpProjekteFertig(doc, jetzt)) {
+    const w = (vpProjektDef(key) || {}).wirkung || {};
+    for (const k of Object.keys(w)) {
+      if (k === 'flugDeckel') aus.flugDeckel = Math.max(aus.flugDeckel, w[k]);
+      else aus[k] += w[k];
+    }
+  }
+  return aus;
+}
+// Was an DIESEM Vorposten ueberhaupt in Frage kommt: Stufe erreicht, Ausrichtung passend, noch
+// nicht begonnen. Der Client soll die Liste nicht selbst zusammenrechnen muessen.
+function vpProjektVerfuegbar(doc, jetzt) {
+  const begonnen = vpProjektListe(doc).map(p => p && p.key);
+  return VP_PROJEKT_DEFS.filter(d =>
+    begonnen.indexOf(d.key) < 0 && (doc.stufe || 1) >= d.stufeAb && (!d.zweig || doc.zweig === d.zweig)
+  ).map(d => d.key);
+}
 const VP_MODUL_BAU_ABKLING_MS = 6 * 3600 * 1000;   // je Konto, am Nutzerobjekt
 const VP_MODUL_AUSBAU_KREDITE = 250;               // "kostet eine Kleinigkeit" - der Ausbau, nicht der Einbau
 // Steckplaetze: erst ab der Wahlstufe, dann einer je Stufe bis zur Spitze.
@@ -13010,9 +13089,15 @@ function vorpostenFuerClient(doc, userId, jetzt) {
     slots: vpModulSlots(doc.stufe),
     module: (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlots(doc.stufe)),
     modulBoni: st.modulBoni || null,
+    /* Projekte stehen jedem offen wie die Steckplaetze - ein Bollwerk erklaert dem Angreifer, warum
+       dieser Kern haerter ist als die Stufe verspricht. Das LAUFENDE Vorhaben sieht nur der
+       Besitzer (weiter unten): Es sagt nichts ueber die heutige Staerke, verraet aber, wann diese
+       Station staerker wird - eine Einladung, vorher zuzuschlagen. */
+    projekte: vpProjekteFertig(doc, jetzt),
+    projektBoni: st.projektBoni || null,
     schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
-    nutzen: { flug: st.flug, prod: st.prod, scan: st.scan },
+    nutzen: { flug: st.flug, prod: st.prod, scan: st.scan, flugDeckel: st.flugDeckel },
     eigener,
     /* NUR DER BESITZER sieht den Anflug. Verteidigung, Garnisonszahl und Steckplaetze stehen
        bewusst jedem offen - ein Angreifer soll sehen, worauf er sich einlaesst. Ein ANFLUG ist
@@ -13029,6 +13114,8 @@ function vorpostenFuerClient(doc, userId, jetzt) {
   // Vorkommen ihre Staerke zeigt, ohne dass jemand die Liste braucht).
   if (eigener) {
     out.garnison = Object.assign({}, doc.garnison || {});
+    out.projektLaeuft = vpProjektLaeuft(doc, jetzt);
+    out.projektMoeglich = vpProjektVerfuegbar(doc, jetzt);
     out.kampfverlauf = (doc.kampfverlauf || []).slice(0, 10);
     /* Die NAECHSTE Stufe fertig gerechnet - der Client soll den Sprung zeigen koennen, ohne die
        Multiplikatoren selbst anzuwenden (sonst waere die Zweigtabelle doch wieder eine Kopie).
@@ -13150,6 +13237,8 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
     modulAusbauKosten: VP_MODUL_AUSBAU_KREDITE, modulBauAbklingMs: VP_MODUL_BAU_ABKLING_MS,
     modulBestand: vpModulBestand(findUserById(req.userId) || {}),
     modulBauAb: (findUserById(req.userId) || {}).vpModulBauAb || 0,
+    projektDefs: VP_PROJEKT_DEFS, projekteAktiv: VP_PROJEKTE_AKTIV && !notAusGesetzt('vorposten'),
+    flugDeckel: VP_FLUG_DECKEL,
     zweigAb: VORPOSTEN_ZWEIG_AB, maxStufe: VORPOSTEN_STUFEN.length,
     liste, eigene: liste.filter(x => x.eigener).length
   });
@@ -13231,6 +13320,46 @@ app.post('/api/vorposten/ausbauen', authMiddleware, async (req, res) => {
    WIRKLICH hat (Deckel: Bestand, freier Platz bis garnisonMax, nur Kampfschiffe) und schreibt es ins
    Dokument. Er zieht NICHT vom Spielstand ab - der Client bucht genau `angenommen` ab, nachdem die
    Antwort da ist. Andersherum (Server zieht ab) liefe die Abbuchung gegen den Autosave des Clients. */
+/* PROJEKT STARTEN. Der Server prueft, WAS moeglich ist (Stufe, Ausrichtung, nicht schon begonnen,
+   nichts anderes im Bau) und wann es fertig ist; die Rohstoffe bucht der Client aus seinem
+   Spielstand ab, wie bei jeder Baukosten-Buchung dieses Spiels. Abbrechen gibt es nicht: Ein
+   Vorhaben, das man zuruecknehmen kann, waere ein Zwischenlager fuer Rohstoffe. */
+app.post('/api/vorposten/projekt/starten', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  if (!VP_PROJEKTE_AKTIV || notAusGesetzt('vorposten')) {
+    return res.status(404).json({ error: 'Stationsprojekte sind derzeit nicht verfügbar.', inaktiv: true });
+  }
+  const sys = String((req.body && req.body.system) || '');
+  const key = String((req.body && req.body.projekt) || '');
+  const def = vpProjektDef(key);
+  if (!vorpostenSysOk(sys) || !def) return res.status(400).json({ error: 'System und Projekt erforderlich.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer startet Projekte an seinem Vorposten.' });
+  const jetzt = Date.now();
+  const laeuft = vpProjektLaeuft(doc, jetzt);
+  if (laeuft) {
+    return res.status(400).json({ error: 'An dieser Station läuft bereits „' + (vpProjektDef(laeuft.key) || {}).name +
+      '" - fertig in ' + Math.ceil((laeuft.fertigAb - jetzt) / 60000) + ' Minuten.', belegt: true, laeuft });
+  }
+  if (vpProjektListe(doc).some(p => p && p.key === key)) {
+    return res.status(400).json({ error: '„' + def.name + '" steht an dieser Station bereits.', schonDa: true });
+  }
+  if ((doc.stufe || 1) < def.stufeAb) {
+    return res.status(400).json({ error: '„' + def.name + '" braucht Stufe ' + def.stufeAb + '.', stufeFehlt: true, stufeAb: def.stufeAb });
+  }
+  if (def.zweig && doc.zweig !== def.zweig) {
+    return res.status(400).json({ error: '„' + def.name + '" baut nur ' + ((VORPOSTEN_ZWEIGE[def.zweig] || {}).name || def.zweig) + '.',
+      zweigFehlt: true, zweig: def.zweig });
+  }
+  if (!Array.isArray(doc.projekte)) doc.projekte = [];
+  doc.projekte.push({ key, start: jetzt, fertigAb: jetzt + def.dauerMs });
+  vorpostenSchreib(doc);
+  await saveDb();
+  res.json({ ok: true, projekt: key, fertigAb: jetzt + def.dauerMs, kosten: def.kosten,
+    vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
+});
+
 /* MODUL BAUEN. Verlaesslich, aber nur bis 'ungewoehnlich' - der Boden des Systems. Die Kosten
    zahlt der Client aus seinem Spielstand (wie jede Baukosten-Buchung dieses Spiels; der Server
    kann sie bauartbedingt nicht nachrechnen). Was der Server DOCH kontrolliert, ist die Menge:

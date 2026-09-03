@@ -328,3 +328,57 @@ deshalb das **übergebene** Objekt; der Aufrufer schreibt, wenn er sonst nicht s
 Test: `tests/test_vorposten_anflug_http.js` (Port 3252), Gegenproben `offen`, `bleibt`, `verfall`.
 Bei `bleibt` fällt **nur** `3a`, nicht auch `4a` – gemessen: `4a` prüft, dass der fremde Vermerk
 bleibt, und das tut er auch, wenn gar nichts geräumt wird. Erst das Paar pinnt das Verhalten fest.
+
+## Etappe 4: Stationsprojekte und das Sprungtor (03.09.2026)
+
+Auftrag Sascha: „dass man von dort aus Projekte starten kann, dass man von dort aus vielleicht auch
+eine Art Überraumtor bauen kann. Also auch noch mehr Projekte quasi macht."
+
+**Ein Projekt ist das Gegenstück zum Modul:** einmalig je Vorposten, dauerhaft, nicht umsteckbar,
+und an **Stufe und Ausrichtung** gebunden. Damit bekommen die drei Zweige endlich etwas, das nur
+sie können — bis hierher unterschieden sie sich nur in Multiplikatoren.
+
+| Projekt | Zweig | ab Stufe | Dauer | Wirkung |
+|---|---|---|---|---|
+| **Dockring** | Werft | 5 | 8 h | Garnison +25 % |
+| **Handelskammer** | Handel | 5 | 8 h | Produktionsbonus +35 % |
+| **Bollwerk** | Festung | 5 | 8 h | Kern +20 %, Verteidigung +20 % |
+| **Tiefenhorchposten** | alle | 6 | 12 h | +1 Aufklärungsstufe |
+| **Sprungtor** | alle | 7 | 24 h | Flug +20 % **und Flugzeit-Deckel 50 % → 75 %** |
+
+**Warum das Sprungtor den Deckel hebt statt aufzuaddieren.** Der Flugzeit-Bonus ist im Frontend bei
+`VP_FLUG_DECKEL` (0,5) gedeckelt, und ein Vorposten der Stufe 8 liegt mit Modulen schon daran. Ein
+Tor, das nur weitere Prozentpunkte gäbe, täte also **nichts** — genau die Sorte angezeigten Nutzens,
+die es in diesem Projekt nicht geben soll. Der Deckel reist mit `nutzen.flugDeckel` zum Client; die
+Kopie im Frontend (`vorpostenFlugMult`) liest ihn statt der harten 0,5.
+
+**Kein Ticken und kein Einsammeln.** Ein Projekt ist fertig, sobald `fertigAb` erreicht ist. Es gibt
+also keinen Zustandsübergang, der verlorengehen könnte, und kein Schreiben beim Lesen.
+`doc.projekte` ist die Liste aller je begonnenen Vorhaben; das laufende ist genau das mit
+`fertigAb > jetzt`, und mehr als eines gleichzeitig gibt es nicht. **Abbrechen gibt es nicht** — ein
+Vorhaben, das man zurücknehmen kann, wäre ein Zwischenlager für Rohstoffe.
+
+**Sichtbarkeit.** Fertige Projekte sieht **jeder** (wie die Steckplätze): Ein Bollwerk erklärt dem
+Angreifer, warum dieser Kern härter ist als die Stufe verspricht. Das **laufende** Vorhaben sieht
+nur der Besitzer — es sagt nichts über die heutige Stärke, verrät aber, wann diese Station stärker
+wird, und das wäre eine Einladung, vorher zuzuschlagen.
+
+**Der Schalter** `VP_PROJEKTE_AKTIV` steht ausgeliefert auf `false` und wird im **Frontend-PR**
+umgelegt; der Admin-Notaus `vorposten` schaltet ihn zusätzlich ab.
+
+Wächter: `tests/test_vorposten_http.js` Abschnitt 11 (11a–11i), gefahren an einer Kopie mit
+umgelegtem Schalter (`0-kopie2`) — sonst wäre die ganze Etappe bis zum Frontend-Merge ungeprüft.
+Zwei Sabotagen mit gemessener Pflichtliste: `projektwirkung` (ein fertiges Vorhaben ändert nichts)
+→ genau `11f`, `11h`; `projektzeit` (ein laufendes wirkt schon) → genau `11d`.
+
+### Die Auswertung der Gegenproben misst jetzt beide Richtungen
+
+Bis zum 03.09.2026 prüfte der Auswerteblock nur, ob die Pflichtliste **gefallen ist** — und meldete
+danach „genau […] gefallen", wobei er die **Erwartung** ausdruckte, nicht die Messung. Eine
+Sabotage, die zehn weitere Prüfungen mitreißt, kam damit als „korrekt" durch, und die Pflichtliste
+blieb eine unbelegte Behauptung. Aufgefallen an `projektwirkung`: Die Liste war noch leer, `11f` und
+`11h` fielen — gemeldet wurde „genau [] gefallen", Exit 0.
+
+Der Lauf zählt jetzt nach, **was** gefallen ist, vergleicht in beide Richtungen (fehlt etwas aus der
+Liste? ist etwas außerhalb gefallen?) und druckt die **Messung**. Das ist dieselbe Regel, die
+CLAUDE.md für Prüfnamen fordert („per `diff` vergleichen, nicht zählen"), nur im Werkzeug selbst.

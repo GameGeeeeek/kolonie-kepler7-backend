@@ -13103,6 +13103,15 @@ const VP_LAGER_ANTEILE = { erz: 0.225, kristalle: 0.075, deuterium: 0.06 };
    Etappe a: Verbuendete duerfen GARNISON beisteuern und nur ihre eigenen Schiffe zurueckrufen.
    Etappe b: Verbuendete nutzen den Flugzeit-Bonus mit (`verbuendet` im Client-Dokument). */
 const VP_ALLIANZ_AKTIV = false;
+/* ETAPPE V6: die Endprojekte. Der Schalter deckt alle drei ab - sie kommen zusammen, weil sie
+   zusammen die Entscheidung sind, welchen Zweig man auf der Endstufe haelt.
+   DAS STERNENDOCK TICKT NICHT (wie das Lager): Was bereitliegt, wird beim Abholen aus der
+   verstrichenen Zeit gerechnet. Ein Kreuzer je 24 Stunden, hoechstens sieben gestapelt - dieselbe
+   Groessenordnung wie beim Lager, also eine Beigabe und kein Ersatz fuer die eigene Werft. */
+const VP_ENDPROJEKTE_AKTIV = false;
+const VP_DOCK_STUNDEN = 24;
+const VP_DOCK_MAX = 7;
+const VP_DOCK_SCHIFF = 'cruisers';
 const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
 const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
 const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer, am Objekt
@@ -13276,6 +13285,23 @@ function vorpostenLagerStand(doc, jetzt, werte) {
   for (const k of Object.keys(rate)) aus[k] = Math.floor(rate[k] * stunden);
   return aus;
 }
+/* V6: WAS AM STERNENDOCK BEREITLIEGT. Gerechnet wie das Lager, aus `doc.dockSeit` - kein Ticken,
+   kein Zustandsuebergang, der verlorengehen koennte. `dockSeit` faellt auf die Fertigstellung des
+   Projekts zurueck, nicht auf `doc.seit`: Sonst haette eine alte Station am Tag der Fertigstellung
+   sofort den vollen Stapel. */
+function vorpostenDockAb(doc) {
+  const p = vpProjektListe(doc).find(x => x && x.key === 'sternendock');
+  return (doc && doc.dockSeit) || (p && p.fertigAb) || 0;
+}
+function vorpostenDockStand(doc, jetzt, werte) {
+  if (!VP_ENDPROJEKTE_AKTIV) return 0;
+  const st = werte || vorpostenWerte(doc);
+  if (!((st.projektBoni || {}).werftSchiff > 0)) return 0;
+  const ab = vorpostenDockAb(doc);
+  if (!ab) return 0;
+  const stunden = Math.max(0, ((jetzt || Date.now()) - ab) / 3600000);
+  return Math.max(0, Math.min(VP_DOCK_MAX, Math.floor(stunden / VP_DOCK_STUNDEN)));
+}
 function vorpostenLagerVoll(doc) {
   const seit = (doc && doc.lagerSeit) || (doc && doc.seit) || Date.now();
   return seit + VP_LAGER_STUNDEN * 3600000;
@@ -13295,7 +13321,14 @@ function vorpostenMarktBonus(userId) {
     summe += vorpostenWerte(d).markt || 0;
   }
   const anteil = Math.min(VP_MARKT_DECKEL, Math.round(summe * 1000) / 1000);
-  return { anteil, extraAngebote: Math.min(VP_MARKT_SLOTS_MAX, Math.floor(anteil / VP_MARKT_SLOT_SCHRITT)) };
+  /* V6: Der Sternenmarkt gibt seine Plaetze ZUSAETZLICH und ausserhalb des Deckels - das ist der
+     Sinn eines Endprojekts: Es hebt eine Grenze, statt sie weiter auszureizen. */
+  let ausProjekt = 0;
+  for (const d of vorpostenAlle()) {
+    if (d.besitzer !== userId) continue;
+    ausProjekt += (vorpostenWerte(d).projektBoni || {}).marktPlaetze || 0;
+  }
+  return { anteil, extraAngebote: Math.min(VP_MARKT_SLOTS_MAX, Math.floor(anteil / VP_MARKT_SLOT_SCHRITT)) + Math.round(ausProjekt) };
 }
 function vorpostenAlle() {
   const out = [];
@@ -13486,6 +13519,23 @@ const VP_PROJEKT_DEFS = [
      ist im Spiel bei 50 % gedeckelt, und ein Vorposten der Stufe 8 liegt mit Modulen schon daran.
      Ein Tor, das nur aufaddiert, taete also nichts - genau die Sorte angezeigter Nutzen, die es in
      diesem Projekt nicht geben soll. Es hebt stattdessen den DECKEL auf 75 %. */
+  /* ETAPPE V6: DIE ENDPROJEKTE (03.09.2026). Ab Stufe 7 gab es nichts mehr zu entscheiden - die
+     drei Zweige unterschieden sich in Multiplikatoren und je einem Projekt der Stufe 5. Jetzt hat
+     jeder Zweig auf der Endstufe etwas, das NUR er kann, und jedes davon ist eine andere ART von
+     Wirkung: Die Werft PRODUZIERT, der Handel ERWEITERT eine Grenze, die Festung KOSTET den
+     Angreifer. Drei Prozentpunkte mehr waeren keine Entscheidung gewesen. */
+  { key: 'sternendock', name: 'Sternendock', icon: 'ti-rocket', zweig: 'werft', stufeAb: 8,
+    dauerMs: 36 * 3600 * 1000, wirkung: { werftSchiff: 1 },
+    desc: 'Eine eigene Helling im Orbit: Die Werft baut ohne Auftrag weiter und legt regelmäßig einen Kreuzer zum Abholen bereit.',
+    kosten: { erz: 7000000, kristalle: 5000000, deuterium: 3200000, nanolegierungen: 4000, quantenchips: 2000, metamaterial: 600, singularitaetskerne: 60 } },
+  { key: 'sternenmarkt', name: 'Sternenmarkt', icon: 'ti-building-bank', zweig: 'handel', stufeAb: 8,
+    dauerMs: 36 * 3600 * 1000, wirkung: { marktPlaetze: 2 },
+    desc: 'Ein offener Handelsplatz am Ring: zwei zusätzliche Angebotsplätze an der Modulbörse, über die übliche Grenze hinaus.',
+    kosten: { erz: 7000000, kristalle: 5000000, deuterium: 3200000, nanolegierungen: 4000, quantenchips: 2000, metamaterial: 600, singularitaetskerne: 60 } },
+  { key: 'sperrfeuer', name: 'Sperrfeuerleitstand', icon: 'ti-target', zweig: 'festung', stufeAb: 8,
+    dauerMs: 36 * 3600 * 1000, wirkung: { verlust: 0.08 },
+    desc: 'Vorgehaltenes Sperrfeuer über dem gesamten Anflugkorridor: Jeder Angriff auf diese Station kostet den Angreifer deutlich mehr Schiffe.',
+    kosten: { erz: 7000000, kristalle: 5000000, deuterium: 3200000, nanolegierungen: 4000, quantenchips: 2000, metamaterial: 600, singularitaetskerne: 60 } },
   { key: 'sprungtor', name: 'Sprungtor', icon: 'ti-atom-2', zweig: null, stufeAb: 7,
     dauerMs: 24 * 3600 * 1000, wirkung: { flug: 0.20, flugDeckel: 0.75 },
     desc: 'Ein durchgehend offenes Tor im Orbit: eigene Nicht-PvP-Missionen hierher fliegen bis zu drei Viertel kuerzer statt hoechstens der Haelfte.',
@@ -13504,8 +13554,13 @@ function vpProjekteFertig(doc, jetzt) {
 /* Die Summe der FERTIGEN Projekte je Kanal. Ein laufendes wirkt nicht - sonst waere die Bauzeit
    eine Zierde. `flugDeckel` ist kein Anteil, sondern eine Obergrenze: es gilt die hoechste. */
 function vpProjektBoni(doc, jetzt) {
-  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0, markt: 0, flugDeckel: VP_FLUG_DECKEL };
+  // Ein Endprojekt wirkt erst, wenn sein Schalter an ist - sonst waere die Wirkung da, bevor das
+  // Frontend sie erklaeren kann. Der Filter steht HIER und nicht bei jedem Verbraucher einzeln.
+  const zaehlt = (key) => VP_ENDPROJEKTE_AKTIV || !vpIstEndprojekt(key);
+  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0, markt: 0,
+    werftSchiff: 0, marktPlaetze: 0, verlust: 0, flugDeckel: VP_FLUG_DECKEL };
   for (const key of vpProjekteFertig(doc, jetzt)) {
+    if (!zaehlt(key)) continue;
     const w = (vpProjektDef(key) || {}).wirkung || {};
     for (const k of Object.keys(w)) {
       if (k === 'flugDeckel') aus.flugDeckel = Math.max(aus.flugDeckel, w[k]);
@@ -13516,9 +13571,12 @@ function vpProjektBoni(doc, jetzt) {
 }
 // Was an DIESEM Vorposten ueberhaupt in Frage kommt: Stufe erreicht, Ausrichtung passend, noch
 // nicht begonnen. Der Client soll die Liste nicht selbst zusammenrechnen muessen.
+const VP_ENDPROJEKTE = ['sternendock', 'sternenmarkt', 'sperrfeuer'];
+function vpIstEndprojekt(key) { return VP_ENDPROJEKTE.indexOf(key) >= 0; }
 function vpProjektVerfuegbar(doc, jetzt) {
   const begonnen = vpProjektListe(doc).map(p => p && p.key);
   return VP_PROJEKT_DEFS.filter(d =>
+    (VP_ENDPROJEKTE_AKTIV || !vpIstEndprojekt(d.key)) &&
     begonnen.indexOf(d.key) < 0 && (doc.stufe || 1) >= d.stufeAb && (!d.zweig || doc.zweig === d.zweig)
   ).map(d => d.key);
 }
@@ -13664,6 +13722,13 @@ function vorpostenFuerClient(doc, userId, jetzt) {
     lager: vorpostenLagerStand(doc, jetzt, st),
     lagerRate: vorpostenLagerRate(doc, st),
     lagerVollAb: vorpostenLagerVoll(doc),
+    /* V6: Was am Sternendock bereitliegt, und die Dominanz. `dominiert` ist bewusst ABGELEITET und
+       kein neuer Zustand: Wer die Endstufe haelt, dominiert das System - sichtbar fuer alle. In
+       `db.galaxy.controlledSystems` gehoert das NICHT; dort haengt die Eroberungsmechanik samt
+       NPC-Rueckeroberung, und ein Vorposten haette dort nichts zu suchen. */
+    dockBereit: vorpostenDockStand(doc, jetzt, st),
+    dockSchiff: VP_DOCK_SCHIFF,
+    dominiert: (doc.stufe || 1) >= VORPOSTEN_STUFEN.length,
     abbauAb: vorpostenAbbauLaeuft(doc) || null,
     schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
@@ -13748,7 +13813,10 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
   Object.assign(garnisonVerluste, vorpostenGarnisonVerlust(doc, garnQuote));
   // Der Angreifer verliert als QUOTE (der Server schreibt keinen fremden Spielstand); die Garnison
   // treibt sie hoch, ein leerer Vorposten kostet fast nur den Grundverlust.
-  const quote = Math.max(0.03, Math.min(0.45, VORPOSTEN_VERLUST + 0.20 * (verteidigung / (kraft + verteidigung)) + Math.random() * 0.04));
+  /* V6: Der Sperrfeuerleitstand schlaegt auf die Verlustquote des Angreifers auf - VOR dem Deckel,
+     nicht daneben: Auch eine Endstufe soll einen Angriff nicht unbezahlbar machen. */
+  const sperrfeuer = (vorpostenWerte(doc).projektBoni || {}).verlust || 0;
+  const quote = Math.max(0.03, Math.min(0.45, VORPOSTEN_VERLUST + sperrfeuer + 0.20 * (verteidigung / (kraft + verteidigung)) + Math.random() * 0.04));
 
   const gefallen = doc.kern.lp <= 0;
   const erster = beteiligte[0] || {};
@@ -13836,6 +13904,8 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
     werftDeckel: VP_WERFT_DECKEL, werftAktiv: VP_WERFT_AKTIV,
     marktAktiv: VP_MARKT_AKTIV, marktDeckel: VP_MARKT_DECKEL,
     lagerAktiv: VP_LAGER_AKTIV, lagerStunden: VP_LAGER_STUNDEN,
+    allianzAktiv: VP_ALLIANZ_AKTIV,
+    endprojekteAktiv: VP_ENDPROJEKTE_AKTIV, dockStunden: VP_DOCK_STUNDEN, dockMax: VP_DOCK_MAX, dockSchiff: VP_DOCK_SCHIFF,
     projektDefs: VP_PROJEKT_DEFS, projekteAktiv: VP_PROJEKTE_AKTIV && !notAusGesetzt('vorposten'),
     flugDeckel: VP_FLUG_DECKEL,
     zweigAb: VORPOSTEN_ZWEIG_AB, maxStufe: VORPOSTEN_STUFEN.length,
@@ -14218,14 +14288,22 @@ app.post('/api/vorposten/lager/holen', authMiddleware, async (req, res) => {
   if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann hier abholen.' });
   const jetzt = Date.now();
   const stand = vorpostenLagerStand(doc, jetzt);
-  if (vorpostenLagerLeer(stand)) return res.status(400).json({ error: 'Im Lager liegt noch nichts.', leer: true });
+  /* V6: Am selben Griff haengt, was am Sternendock bereitliegt. EIN Abholen fuer alles, was der
+     Vorposten bereithaelt - zwei Endpunkte fuer denselben Handgriff waeren zwei Stellen, an denen
+     man den Zeitstempel vergessen kann. Leer ist die Anfrage nur, wenn BEIDES leer ist. */
+  const schiffe = vorpostenDockStand(doc, jetzt);
+  if (vorpostenLagerLeer(stand) && !schiffe) {
+    return res.status(400).json({ error: 'Hier liegt noch nichts bereit.', leer: true });
+  }
   // db synchron vor saveDb() mutieren, nie im await-Rueckruf.
   doc.lagerSeit = jetzt;
+  if (schiffe) doc.dockSeit = jetzt;
   vorpostenSchreib(doc);
   pushPendingReward(req.userId, Object.assign({ type: 'vorposten-lager', system: sys,
-    name: vorpostenWerte(doc).name, zeit: jetzt }, stand));
+    name: vorpostenWerte(doc).name, zeit: jetzt,
+    schiffe: schiffe ? { [VP_DOCK_SCHIFF]: schiffe } : null }, stand));
   await saveDb();
-  res.json({ ok: true, geholt: stand, vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
+  res.json({ ok: true, geholt: stand, schiffe, vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
 });
 
 app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {

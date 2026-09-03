@@ -633,3 +633,40 @@ aus wie ein bestandener Test.
 Punkt (c) der Allianz-Frage — ein Vorposten, den mehrere gemeinsam bezahlen — ist bewusst **nicht**
 Teil dieser Etappe. Er ändert das Eigentumsmodell (heute genau ein `besitzer`) und braucht eine
 Treuhand für Baubeiträge in `db.shared`. Das ist eine eigene Etappe, keine Zeile mehr an dieser.
+
+## Etappe V6: Die Endprojekte und die Dominanz (03.09.2026)
+
+Ab Stufe 7 gab es nichts mehr zu entscheiden: Die drei Zweige unterschieden sich in Multiplikatoren
+und je einem Projekt der Stufe 5. Jetzt hat jeder Zweig auf der **Endstufe** etwas, das nur er kann —
+und jedes ist eine andere **Art** von Wirkung, nicht ein weiterer Prozentpunkt. Drei Prozentpunkte
+mehr wären keine Entscheidung gewesen.
+
+| Projekt | Zweig | Art | Wirkung |
+|---|---|---|---|
+| **Sternendock** | Werft | produziert | ein Kreuzer je 24 h, höchstens sieben gestapelt |
+| **Sternenmarkt** | Handel | erweitert | zwei Angebotsplätze **über** dem Deckel |
+| **Sperrfeuerleitstand** | Festung | kostet | jeder Angriff kostet den Angreifer 8 Punkte mehr Verluste |
+
+**Das Sternendock tickt nicht** — wie das Lager wird beim Abholen aus der verstrichenen Zeit
+gerechnet. `doc.dockSeit` fällt auf die *Fertigstellung des Projekts* zurück, nicht auf `doc.seit`:
+Sonst hätte eine alte Station am Tag der Fertigstellung sofort den vollen Stapel. Abgeholt wird an
+**demselben Griff** wie das Lager — zwei Endpunkte für denselben Handgriff wären zwei Stellen, an
+denen man den Zeitstempel vergessen kann.
+
+**Der Sternenmarkt hebt eine Grenze, statt sie auszureizen.** Seine zwei Plätze kommen *zusätzlich*
+und außerhalb von `VP_MARKT_SLOTS_MAX` — das ist der Sinn eines Endprojekts.
+
+**Das Sperrfeuer schlägt vor dem Deckel auf**, nicht daneben: Auch eine Endstufe soll einen Angriff
+nicht unbezahlbar machen.
+
+**Die Dominanz ist abgeleitet, nicht gespeichert.** `dominiert` ist wahr, sobald die Endstufe steht —
+sichtbar für alle. In `db.galaxy.controlledSystems` gehört das ausdrücklich **nicht**: Dort hängt die
+Eroberungsmechanik samt NPC-Rückeroberung, und ein Vorposten hätte dort nichts zu suchen. Kein neuer
+Zustand, keine Verflechtung zweier Systeme.
+
+Der Schalter `VP_ENDPROJEKTE_AKTIV` deckt alle drei ab — sie kommen zusammen, weil sie zusammen die
+Entscheidung sind, welchen Zweig man auf der Endstufe hält. Er gattert **beides**: die Wahl
+(`vpProjektVerfuegbar`) und die **Wirkung** (`vpProjektBoni`), damit ein bereits gebautes Endprojekt
+nicht wirkt, bevor das Frontend es erklären kann.
+
+Wächter: `tests/test_vorposten_endprojekte_http.js` (Port 3259).

@@ -13280,6 +13280,10 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
     modulAusbauKosten: VP_MODUL_AUSBAU_KREDITE, modulBauAbklingMs: VP_MODUL_BAU_ABKLING_MS,
     modulBestand: vpModulBestand(findUserById(req.userId) || {}),
     modulBauAb: (findUserById(req.userId) || {}).vpModulBauAb || 0,
+    /* Die Abbaudauer reist mit, damit das Spiel sie nicht als eigene Zahl fuehren muss - dieselbe
+       Entscheidung wie bei den Ausbaukosten und der Modul-Abklingzeit. Eine 24 im Frontend waere
+       eine Kopie-Familie mit genau der Konstante, die hier steht. */
+    abbauMs: VORPOSTEN_ABBAU_MS, abbauAktiv: VORPOSTEN_ABBAU_AKTIV,
     projektDefs: VP_PROJEKT_DEFS, projekteAktiv: VP_PROJEKTE_AKTIV && !notAusGesetzt('vorposten'),
     flugDeckel: VP_FLUG_DECKEL,
     zweigAb: VORPOSTEN_ZWEIG_AB, maxStufe: VORPOSTEN_STUFEN.length,

@@ -287,6 +287,48 @@ eine stille Falschangabe — sein echtes Dach sind 20.000, er fiele beim ersten 
 Vorrichtung hebt jetzt die **Stufe** (3, Bastion, 400.000) und fragt den Ausgangswert **beim
 Server** ab, statt ihn aus der eigenen Annahme zu lesen.
 
+## Die Vorwarnung beim Anflug (03.09.2026)
+
+Das Konzept sagt dem Besitzer zu, er könne mit einer Garnison gegenhalten. Einlösbar war das nicht:
+Er erfuhr von einem Verband erst beim **ersten Schlag** – also nach der Ankunft. Da ist Verstärken
+zu spät. Seit dem 02.09.2026 gibt es die Meldung beim Schlag; jetzt kommt die Vorwarnung während
+des Anflugs dazu.
+
+**Wo sie wohnt.** Ein Vorposten gehört einem *Spieler*, nicht einer Allianz – der Weg über
+`alliance:<tag>:incomingmuster` steht also nicht offen. Der Vermerk hängt deshalb am
+Vorposten-Dokument selbst (`doc.anflug`) und wird in `vorpostenFuerClient` ausgespielt, das ohnehin
+je Nutzer entscheidet, was es zeigt.
+
+**Eine Liste, kein einzelnes Feld.** Zwei Allianzen können denselben Vorposten anfliegen. Wer
+zuerst ankommt, würde beim Aufräumen sonst die Warnung des anderen mitlöschen, und der Besitzer
+sähe den zweiten Verband nicht mehr kommen. Jeder Eintrag trägt seine `musterId` und wird nur von
+*seiner* Auflösung entfernt.
+
+**Nur der Besitzer sieht sie.** Verteidigung, Garnisonszahl und Steckplätze stehen bewusst jedem
+offen – ein Angreifer soll sehen, worauf er sich einlässt. Ein Anflug ist etwas anderes: Er verrät
+den Plan eines Dritten. Wer ihn allen zeigte, machte aus der Vorwarnung ein Werkzeug für
+Nachzügler, die die geschwächte Station abräumen. Das wäre eine eigene Spielentscheidung, keine
+Nebenwirkung – deshalb hier eng gefasst und leicht zu öffnen, falls gewünscht.
+
+**Einzelangriffe stehen nicht drin.** Der Server erfährt von ihnen erst bei der Ankunft (der Client
+fliegt und ruft dann den Endpunkt). Es gibt nichts vorzuwarnen. Nur der Verband hat einen Versand,
+den der Server kennt – eine Eigenschaft der Mechanik, keine Auslassung.
+
+**Verfall.** Ein Verband, dessen `resolve` nie kommt, würde sonst ewig warnen. Einträge, deren
+Ankunft länger als `VORPOSTEN_ANFLUG_GNADE` (2 h) zurückliegt, gelten beim *Lesen* als erledigt –
+so muss ein Serverneustart nichts reparieren.
+
+**Ein Fallstrick, gemessen.** Das Aufräumen darf das Dokument **nicht neu einlesen**. Die Auflösung
+hält ihr Vorposten-Objekt bereits in der Hand und schreibt es nach dem Kampf zurück
+(`vorpostenSchlagAusfuehren` ruft `vorpostenSchreib`). Ein Helfer, der selbst liest und schreibt,
+wird von genau diesem Rückschreiben überholt – der Vermerk stünde wieder da, und der Besitzer sähe
+eine Dauerwarnung vor einem Verband, der längst angekommen ist. `vorpostenAnflugEntfernen` ändert
+deshalb das **übergebene** Objekt; der Aufrufer schreibt, wenn er sonst nicht schreibt.
+
+Test: `tests/test_vorposten_anflug_http.js` (Port 3252), Gegenproben `offen`, `bleibt`, `verfall`.
+Bei `bleibt` fällt **nur** `3a`, nicht auch `4a` – gemessen: `4a` prüft, dass der fremde Vermerk
+bleibt, und das tut er auch, wenn gar nichts geräumt wird. Erst das Paar pinnt das Verhalten fest.
+
 ## Etappe 4: Stationsprojekte und das Sprungtor (03.09.2026)
 
 Auftrag Sascha: „dass man von dort aus Projekte starten kann, dass man von dort aus vielleicht auch

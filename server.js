@@ -9219,9 +9219,17 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
   };
   doc.phase = 'enroute';
   setMusterAttackDoc(tag, doc);
-  // Ein Nest oder eine Festung wird nicht gewarnt - es gibt keinen Verteidiger, der ein
-  // incomingmuster-Dokument lesen koennte, und ein Eintrag unter `alliance:null:incomingmuster`
-  // waere schlicht Muell.
+  /* Ein Nest oder eine Festung wird nicht gewarnt - es gibt keinen Verteidiger, der ein
+     incomingmuster-Dokument lesen koennte, und ein Eintrag unter `alliance:null:incomingmuster`
+     waere schlicht Muell.
+     Der VORPOSTEN ist der Sonderfall darunter: Er hat keine Allianz, aber sehr wohl einen
+     Verteidiger - einen einzelnen Spieler. Seine Warnung haengt deshalb am Vorposten-Dokument
+     selbst (vorpostenAnflugSetzen) und nicht im Allianz-Namensraum. */
+  if (doc.zielArt === 'vorposten' && doc.vorpostenSystem) {
+    vorpostenAnflugSetzen(doc.vorpostenSystem, {
+      musterId: doc.id, tag, ankunftAt: doc.dispatch.arrivalAt, schiffe: totalShips, seit: now
+    });
+  }
   if (!musterZielOhneAllianz(doc.zielArt)) {
     db.shared['alliance:' + doc.targetTag + ':incomingmuster'] = JSON.stringify({
       attackerTag: tag, musterAttackId: doc.id, phase: 'enroute', dispatchedAt: now,
@@ -9403,6 +9411,13 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
       await saveDb();
       return res.json({ ok: true, doc });
     }
+    /* Ab hier steht fest, dass DIESER Vorposten gemeint ist (vp existiert, die id passt). Jeder
+       Ausgang von hier an raeumt den eigenen Anflug-Vermerk - sonst warnte er weiter vor einem
+       Verband, der laengst da war. Nur den EIGENEN: ein zweiter Verband, der noch unterwegs ist,
+       behaelt seinen Eintrag. Der Ausgang "weg" darueber raeumt bewusst NICHT - dort ist das
+       Dokument entweder geloescht (der Vermerk ging mit) oder es steht ein NEUER Vorposten, dem
+       dieser Anflug nie galt. */
+    if (vorpostenAnflugEntfernen(vp, doc.id)) vorpostenSchreib(vp);
     const schutzBisV = (vp.seit || 0) + VORPOSTEN_SCHUTZ_MS;
     if (jetztV < schutzBisV) {
       doc.phase = 'resolved';
@@ -12791,6 +12806,51 @@ function vorpostenAlle() {
   }
   return out;
 }
+/* DER ANFLUG-VERMERK AM VORPOSTEN (03.09.2026)
+   ---------------------------------------------
+   Das Konzept sagt dem Besitzer zu, er koenne mit einer Garnison gegenhalten. Einloesbar ist das
+   nur, wenn er den Verband KOMMEN sieht: Bisher erfuhr er erst beim ersten Schlag davon, also nach
+   der Ankunft - da ist Verstaerken zu spaet.
+
+   EINE LISTE, kein einzelnes Feld. Zwei Allianzen koennen denselben Vorposten anfliegen; wer zuerst
+   ankommt, wuerde beim Aufraeumen sonst die Warnung des anderen mitloeschen, und der Besitzer saehe
+   den zweiten Verband nicht mehr kommen. Jeder Eintrag traegt deshalb seine musterId und wird nur
+   von SEINER Aufloesung entfernt.
+
+   EINZELANGRIFFE STEHEN HIER NICHT. Der Server erfaehrt von ihnen erst bei der Ankunft (der Client
+   fliegt und ruft dann den Endpunkt) - es gibt nichts vorzuwarnen. Nur der Verband hat einen
+   Versand, den der Server kennt. Das ist eine Eigenschaft der Mechanik, keine Auslassung.
+
+   VERFALL. Ein Verband, dessen resolve nie kommt (Client weg, Fehler), wuerde sonst ewig warnen.
+   Eintraege, deren Ankunft laenger als VORPOSTEN_ANFLUG_GNADE zurueckliegt, gelten als erledigt -
+   gefiltert beim LESEN, damit ein Neustart des Servers nichts reparieren muss. */
+const VORPOSTEN_ANFLUG_GNADE = 2 * 60 * 60 * 1000;
+function vorpostenAnflugAktiv(doc, jetzt) {
+  const liste = Array.isArray(doc && doc.anflug) ? doc.anflug : [];
+  return liste.filter(a => a && typeof a.ankunftAt === 'number' && (jetzt - a.ankunftAt) < VORPOSTEN_ANFLUG_GNADE);
+}
+function vorpostenAnflugSetzen(sys, eintrag) {
+  const doc = vorpostenLies(sys);
+  if (!doc) return false;
+  const jetzt = Date.now();
+  const rest = vorpostenAnflugAktiv(doc, jetzt).filter(a => a.musterId !== eintrag.musterId);
+  doc.anflug = rest.concat([eintrag]).slice(-8);
+  vorpostenSchreib(doc);
+  return true;
+}
+/* Aendert das UEBERGEBENE Dokument, liest es nicht neu ein. Der Grund ist gemessen: Die
+   Aufloesung haelt ihr Vorposten-Objekt bereits in der Hand und schreibt es nach dem Kampf zurueck
+   (vorpostenSchlagAusfuehren ruft vorpostenSchreib). Ein Helfer, der selbst liest und schreibt,
+   wuerde von genau diesem Rueckschreiben ueberholt - der Vermerk stuende wieder da, und der
+   Besitzer saehe eine Dauerwarnung vor einem Verband, der laengst angekommen ist. Eine zweite
+   Quelle desselben Dokuments, also. Der Aufrufer schreibt, wenn er sonst nicht schreibt. */
+function vorpostenAnflugEntfernen(doc, musterId) {
+  if (!doc || !Array.isArray(doc.anflug) || !doc.anflug.length) return false;
+  const rest = doc.anflug.filter(a => a && a.musterId !== musterId);
+  if (rest.length === doc.anflug.length) return false;
+  doc.anflug = rest;
+  return true;
+}
 function vorpostenGarnisonAnzahl(doc) {
   return Object.values((doc && doc.garnison) || {}).reduce((a, n) => a + (typeof n === 'number' && n > 0 ? n : 0), 0);
 }
@@ -13039,6 +13099,14 @@ function vorpostenFuerClient(doc, userId, jetzt) {
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
     nutzen: { flug: st.flug, prod: st.prod, scan: st.scan, flugDeckel: st.flugDeckel },
     eigener,
+    /* NUR DER BESITZER sieht den Anflug. Verteidigung, Garnisonszahl und Steckplaetze stehen
+       bewusst jedem offen - ein Angreifer soll sehen, worauf er sich einlaesst. Ein ANFLUG ist
+       etwas anderes: Er verraet den Plan eines Dritten. Wer ihn allen zeigte, machte aus der
+       Vorwarnung ein Werkzeug fuer Nachzuegler, die die geschwaechte Station abraeumen. Das waere
+       eine eigene Spielentscheidung, keine Nebenwirkung dieser Zeile - deshalb hier eng. */
+    anflug: eigener ? vorpostenAnflugAktiv(doc, jetzt).map(a => ({
+      tag: a.tag || null, ankunftAt: a.ankunftAt, schiffe: a.schiffe || 0
+    })).sort((x, y) => x.ankunftAt - y.ankunftAt) : [],
     meinLetzterSchlag: (doc.schlaege && doc.schlaege[userId]) || 0,
     letzterKampf: doc.letzterKampf || null
   };

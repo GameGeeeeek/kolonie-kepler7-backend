@@ -43,6 +43,7 @@ const SAB = process.env.KEPLER_VP_SABOTAGE || '';
 // Zweig-Sabotagen stammen aus dem Lauf vom 02.09.2026: 'zweigwahl' 7e 7f 7g 7h, 'zweigwerte' nur 7g
 // (die Wahl greift dort weiter, nur die Multiplikatoren wirken nicht - genau der stille Fall).
 const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a'], typ: ['5b'], meldung: ['4h', '4h2'],
+  kerndach: ['10a'], kerndachab: ['10c'],
   zweigwahl: ['7e', '7f', '7g', '7h'], zweigwerte: ['7g'],
   // Etappe 3 (Stationsmodule): Die Listen sind gemessen, siehe Abschnitt 9.
   // GEMESSEN, nicht geschaetzt: Bei 'modulbestand' faellt 9d NICHT - der Einbau gelingt ja weiter,
@@ -198,6 +199,12 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     // und die WIRKUNG (aendert ein eingebautes Modul die Werte?).
     else if (SAB === 'modulbestand') geflippt = geflippt.replace('  if (!user || !vpModulNehmen(user, instKey)) return res.status(400)', '  if (!user) return res.status(400)');
     else if (SAB === 'modulwirkung') geflippt = geflippt.replace('  const b = vpModulBoni(doc);', '  const b = { kern:0, verteidigung:0, garnison:0, flug:0, prod:0, scan:0 };');
+    /* Das Kern-Dach (03.09.2026): zurueck auf den gespeicherten Wert statt der Rechnung - genau
+       der Stand, an dem eine eingebaute Kernpanzerung bis zum naechsten Ausbau wirkungslos blieb. */
+    else if (SAB === 'kerndach') geflippt = geflippt.replace('function vorpostenKernMax(doc) { return vorpostenWerte(doc).kernLp; }', 'function vorpostenKernMax(doc) { return Math.round((doc && doc.kern && doc.kern.lpMax) || vorpostenWerte(doc).kernLp); }');
+    /* Die Gegenrichtung: das Dach steigt beim Einbau, sinkt beim Ausbau aber nie wieder (Ratsche).
+       Das waere der lohnende Fehler - Panzerung einbauen, Dach behalten, Modul anderswo verwenden. */
+    else if (SAB === 'kerndachab') geflippt = geflippt.replace('function vorpostenKernMax(doc) { return vorpostenWerte(doc).kernLp; }', 'function vorpostenKernMax(doc) { return Math.max(vorpostenWerte(doc).kernLp, Math.round((doc && doc.kern && doc.kern.lpMax) || 0)); }');
     else { console.log('unbekannte Sabotage: ' + SAB); process.exit(2); }
     check('0-sab: die Sabotage "' + SAB + '" hat den Quelltext veraendert', geflippt !== vorher, { veraendert: geflippt !== vorher });
   }
@@ -293,13 +300,24 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
   const schutz = await post(tokB, '/vorposten/angriff', { system: SYS1, missionId: 'm1' });
   check('4a: unter Bauschutz kein Angriff (403, schutzBis genannt)', schutz.status === 403 && schutz.body.schutz === true && schutz.body.schutzBis > Date.now(), { status: schutz.status, body: schutz.body });
   let garnVorher = 0, lpVorher4b = 0;
+  /* Die STUFE traegt den Kern, nicht ein von Hand ins Dokument geschriebenes Dach: Seit dem
+     03.09.2026 rechnet der Server `lpMax` aus Stufe, Zweig und Modulen und kappt beim Schreiben,
+     was darueber liegt. Ein Stufe-1-Vorposten mit 900.000 eingetragenen Punkten war vorher eine
+     stille Falschangabe - er faellt jetzt beim ersten Schlag, weil sein echtes Dach 20.000 ist.
+     Stufe 3 (Bastion) traegt 400.000 und uebersteht 4b sicher. Der Ausgangswert wird ausserdem
+     beim SERVER erfragt statt aus der Vorrichtung gelesen - so misst 4b2 die Rechnung des
+     Servers und nicht die eigene Annahme. */
   await aendereDb(d => {
     const dd = liesDoc(d, SYS1); dd.seit = Date.now() - 13 * 3600 * 1000;
-    dd.kern = { lp: 900000, lpMax: 900000 };                        // faellt in 4b sicher NICHT
+    dd.stufe = 3;
+    dd.kern = { lp: 400000, lpMax: 400000 };                        // faellt in 4b sicher NICHT
     garnVorher = Object.values(dd.garnison).reduce((a, n) => a + n, 0);
-    lpVorher4b = dd.kern.lp;
     schreibDoc(d, dd);
   });
+  {
+    const vor4 = await s.j('/vorposten', { headers: kopf(tokB) });
+    lpVorher4b = (((vor4.body.liste || []).find(x => x.sys === SYS1) || {}).kern || {}).lp;
+  }
   const r4 = await post(tokB, '/vorposten/angriff', { system: SYS1, missionId: 'm1' });
   check('4b: der Schlag wird angenommen, richtet Schaden an und nennt eigene Verluste',
     r4.status === 200 && r4.body.ok === true && r4.body.schaden > 0 && r4.body.gefallen === false && Object.keys(r4.body.eigeneVerluste || {}).length > 0,
@@ -471,6 +489,45 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
       { kosten: raus.body.kosten, vorher: krediteVorher, nachher: raus.body.newCredits });
     const fremd = await post(tokB, '/vorposten/modul/einbauen', { system: SYS9, modul: instKey });
     check('9j: ein Fremder bestueckt den Vorposten nicht', fremd.status === 403, { status: fremd.status });
+  }
+
+  // ---- 10) Das Kern-Dach folgt der Panzerung ----------------------------------------------------
+  /* Bis zum 03.09.2026 stand `lpMax` im Dokument und wurde NUR bei Bau und Ausbau geschrieben. Eine
+     eingebaute Kernpanzerung hob damit zwar vorpostenWerte().kernLp, aber der Kern las das nie: Das
+     Modul war bis zum naechsten Ausbau wirkungslos - und danach haette sein Ausbau das Dach nicht
+     wieder gesenkt. Gemessen wird deshalb die REGEL: Das Dach folgt der Panzerung in beide
+     Richtungen, ein Einbau heilt nicht, und Ein- plus Ausbau ist keine Reparatur. */
+  {
+    const SYS10 = 'vpsys-j';
+    const kernKey = get0.body.modulDefs.find(d => d.wirkung === 'kern').key;
+    const inst10 = kernKey + ':episch';
+    await aendereDb(d => {
+      const dd = doc(SYS10, ANNA, 'anna');
+      dd.stufe = get0.body.zweigAb + 1; dd.zweig = 'festung';
+      schreibDoc(d, dd);
+      d.users.anna.vpModule = { [inst10]: 1 };
+    });
+    const vor10 = await s.j('/vorposten', { headers: kopf(tokA) });
+    const v10a = (vor10.body.liste || []).find(x => x.sys === SYS10) || { kern: {} };
+    const dachOhne = v10a.kern.lpMax;
+    // Der Kern wird auf die Haelfte gesetzt: So ist sichtbar, ob ein Einbau HEILT (das darf er nicht).
+    const lpVorher = Math.round(dachOhne / 2);
+    await aendereDb(d => { const dd = liesDoc(d, SYS10); dd.kern.lp = lpVorher; schreibDoc(d, dd); });
+    const ein10 = await post(tokA, '/vorposten/modul/einbauen', { system: SYS10, modul: inst10 });
+    check('10a: die Kernpanzerung hebt das Dach SOFORT, nicht erst beim naechsten Ausbau',
+      ein10.status === 200 && ein10.body.vorposten.kern.lpMax > dachOhne,
+      { ohne: dachOhne, mit: ein10.body.vorposten && ein10.body.vorposten.kern });
+    check('10b: und sie heilt dabei nicht - die Lebenspunkte bleiben, wo sie waren',
+      ein10.status === 200 && ein10.body.vorposten.kern.lp === lpVorher,
+      { lpVorher, lpNachher: ein10.body.vorposten && ein10.body.vorposten.kern.lp });
+    await aendereDb(d => { const s2 = liesSave(d, ANNA); s2.credits = 1000; schreibSave(d, ANNA, s2); });
+    const raus10 = await post(tokA, '/vorposten/modul/ausbauen', { system: SYS10, platz: 0 });
+    check('10c: der Ausbau senkt das Dach wieder auf den Stufenwert',
+      raus10.status === 200 && raus10.body.vorposten.kern.lpMax === dachOhne,
+      { ohne: dachOhne, nachAusbau: raus10.body.vorposten && raus10.body.vorposten.kern.lpMax });
+    check('10d: Ein- und Ausbauen ist keine Reparatur (die Lebenspunkte stehen wie vorher)',
+      raus10.status === 200 && raus10.body.vorposten.kern.lp === lpVorher,
+      { lpVorher, lpNachher: raus10.body.vorposten && raus10.body.vorposten.kern.lp });
   }
 
   await stoppeServer();

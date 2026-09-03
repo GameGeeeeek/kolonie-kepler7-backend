@@ -255,3 +255,34 @@ Wächter: `tests/test_vorposten_http.js` Abschnitt 9 (12 Prüfungen) plus zwei S
 **gemessener** Pflichtliste: `modulbestand` → 9e 9e2 9h, `modulwirkung` → 9f. Die erste Vorhersage
 für `modulbestand` nannte 9d — falsch: Der Einbau gelingt ohne Abbuchung weiter, rot werden nur die
 Prüfungen, die den Bestand selbst lesen.
+
+## Das Kern-Dach ist abgeleitet, nicht gespeichert (03.09.2026)
+
+`doc.kern.lpMax` stand im Dokument und wurde **nur bei Bau und Ausbau** geschrieben. Eine
+eingebaute **Kernpanzerung** hob damit zwar `vorpostenWerte().kernLp`, aber niemand las das für den
+Kern: Das Modul war bis zum nächsten Ausbau **wirkungslos** — und nach einem Ausbau hätte sein
+Ausbau das Dach nicht wieder gesenkt. Beschrieben war es als „mehr Lebenspunkte, bevor sie fällt";
+geliefert wurde nichts. Gefunden beim Entwurf von Etappe 4, ausgeliefert war der Fehler seit
+Etappe 3.
+
+`vorpostenKernMax(doc)` rechnet jetzt (Stufe × Zweig × Module) und ist die **eine Quelle**;
+`vorpostenKernLp(doc)` kappt die gespeicherten Lebenspunkte darunter. Gelesen wird `lpMax` nirgends
+mehr — `vorpostenSchreib()` zieht es nur noch mit, damit Sicherungen und die Admin-Lage aus älteren
+Ständen nichts Sinnloses zeigen. Bestehende Vorposten heilen sich damit ohne Migration.
+
+**Zwei Regeln halten das Ein- und Ausbauen ehrlich:**
+- Ein Einbau **heilt nicht** — das Dach steigt, die Lebenspunkte bleiben stehen (dieselbe Regel wie
+  beim Ausbau der Stufe, nur ohne dessen bewussten Zuschlag).
+- Ein Ausbau **kappt** nur, was über dem neuen Dach liegt. Ein- und Ausbauen ist damit keine
+  Reparatur; ohne diese Symmetrie wäre eine Kernpanzerung für 250 Kredite eine Heilung gewesen.
+
+Wächter: `tests/test_vorposten_http.js` Abschnitt 10 (10a–10d) mit **zwei** Sabotagen und
+gemessener Pflichtliste — `kerndach` (Dach folgt der Panzerung gar nicht) → genau `10a`;
+`kerndachab` (Dach steigt, sinkt aber nie wieder — die lohnende Ratsche) → genau `10c`. Prüfnamen
+beider Läufe per `diff` gegen den grünen Lauf verglichen: identisch, 64 Prüfungen.
+
+**Ein Nebenbefund in der Test-Vorrichtung:** Abschnitt 4 gab einem **Stufe-1**-Vorposten von Hand
+`kern.lpMax = 900.000`, damit er den Probeschlag übersteht. Mit der abgeleiteten Rechnung ist das
+eine stille Falschangabe — sein echtes Dach sind 20.000, er fiele beim ersten Schlag. Die
+Vorrichtung hebt jetzt die **Stufe** (3, Bastion, 400.000) und fragt den Ausgangswert **beim
+Server** ab, statt ihn aus der eigenen Annahme zu lesen.

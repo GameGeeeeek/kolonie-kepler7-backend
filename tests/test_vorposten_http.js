@@ -23,9 +23,9 @@
 //   schaden  -> 4c  (der volle Wurf statt des angekommenen Schadens; gemessen: genau 4c)
 //   meldung  -> 4h, 4h2 (die Benachrichtigung an den Besitzer entfaellt; gemessen: beide)
 //   abkling  -> 4d  (keine Abklingzeit am Objekt; gemessen: genau 4d)
-//   rechte   -> 1a  (die Storage-Route schreibt vorposten:* wieder; gemessen: 1a, und als FOLGE 1b/2b -
+//   rechte   -> 1a, 1b, 2b (die Storage-Route schreibt vorposten:* wieder; 1b/2b sind die FOLGE -
 //                    das per Storage angelegte Dokument fuellt die Liste und macht den Bau zum 409)
-//   typ      -> 5b  (die Belohnung traegt einen fremden Typ; gemessen: 5b, und als FOLGE 5c)
+//   typ      -> 5b, 5c (die Belohnung traegt einen fremden Typ; 5c ist die Folge - der Anteil fehlt)
 //   Alle vier mit identischer Pruefliste (40 Pruefungen + 0-sab), per diff verglichen - eine
 //   Pflichtliste ist selbst eine Behauptung, bis die Gegenprobe sie gemessen hat.
 //
@@ -42,13 +42,17 @@ const SAB = process.env.KEPLER_VP_SABOTAGE || '';
 // Was bei welcher Sabotage fallen MUSS - gemessen, nicht geschaetzt (Regel 71). Die Listen der zwei
 // Zweig-Sabotagen stammen aus dem Lauf vom 02.09.2026: 'zweigwahl' 7e 7f 7g 7h, 'zweigwerte' nur 7g
 // (die Wahl greift dort weiter, nur die Multiplikatoren wirken nicht - genau der stille Fall).
-const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a'], typ: ['5b'], meldung: ['4h', '4h2'],
+/* Die Listen fuehren die FOLGEN mit, nicht nur den Kern der Sabotage. Bis zum 03.09.2026 stand die
+   Folge bei `rechte` und `typ` nur im Kommentar ("und als FOLGE 1b/2b") - die Auswertung pruefte
+   damals nur, ob das Erwartete faellt, also fiel es nicht auf. Seit sie beide Richtungen misst,
+   gehoert jede gemessene Folge in die Liste. */
+const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a', '1b', '2b'], typ: ['5b', '5c'], meldung: ['4h', '4h2'],
   kerndach: ['10a'], kerndachab: ['10c'], projektwirkung: ['11f', '11h'], projektzeit: ['11d'],
   zweigwahl: ['7e', '7f', '7g', '7h'], zweigwerte: ['7g'],
   // Etappe 3 (Stationsmodule): Die Listen sind gemessen, siehe Abschnitt 9.
   // GEMESSEN, nicht geschaetzt: Bei 'modulbestand' faellt 9d NICHT - der Einbau gelingt ja weiter,
   // er bucht nur nichts ab. Rot werden die drei Pruefungen, die den Bestand SELBST lesen.
-  modulbestand: ['9e', '9e2', '9h'], modulwirkung: ['9f'] };
+  modulbestand: ['9e', '9e2', '9h'], modulwirkung: ['9f', '10a'] };
 
 let fail = false;
 const ergebnis = {};
@@ -202,7 +206,8 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     else if (SAB === 'zweigwahl') geflippt = geflippt.replace('  const brauchtZweig = zielStufe === VORPOSTEN_ZWEIG_AB && !vorpostenZweigOk(doc.zweig);', '  const brauchtZweig = false;');
     else if (SAB === 'zweigwerte') geflippt = geflippt.replace('  if (!z || basis.stufe < VORPOSTEN_ZWEIG_AB) return basis;', '  return basis;');
     // Stationsmodule (02.09.2026), zwei Haelften: der BESTAND (nimmt der Einbau wirklich eines weg?)
-    // und die WIRKUNG (aendert ein eingebautes Modul die Werte?).
+    // und die WIRKUNG (aendert ein eingebautes Modul die Werte?). Letztere reisst seit dem
+    // 03.09.2026 auch 10a mit: Ohne Modulwirkung hebt die Kernpanzerung auch das Kern-Dach nicht.
     else if (SAB === 'modulbestand') geflippt = geflippt.replace('  if (!user || !vpModulNehmen(user, instKey)) return res.status(400)', '  if (!user) return res.status(400)');
     else if (SAB === 'modulwirkung') geflippt = geflippt.replace('  const b = vpModulBoni(doc);', '  const b = { kern:0, verteidigung:0, garnison:0, flug:0, prod:0, scan:0 };');
     /* Das Kern-Dach (03.09.2026): zurueck auf den gespeicherten Wert statt der Rechnung - genau

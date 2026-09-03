@@ -43,7 +43,7 @@ const SAB = process.env.KEPLER_VP_SABOTAGE || '';
 // Zweig-Sabotagen stammen aus dem Lauf vom 02.09.2026: 'zweigwahl' 7e 7f 7g 7h, 'zweigwerte' nur 7g
 // (die Wahl greift dort weiter, nur die Multiplikatoren wirken nicht - genau der stille Fall).
 const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a'], typ: ['5b'], meldung: ['4h', '4h2'],
-  kerndach: ['10a'], kerndachab: ['10c'],
+  kerndach: ['10a'], kerndachab: ['10c'], projektwirkung: ['11f', '11h'], projektzeit: ['11d'],
   zweigwahl: ['7e', '7f', '7g', '7h'], zweigwerte: ['7g'],
   // Etappe 3 (Stationsmodule): Die Listen sind gemessen, siehe Abschnitt 9.
   // GEMESSEN, nicht geschaetzt: Bei 'modulbestand' faellt 9d NICHT - der Einbau gelingt ja weiter,
@@ -175,6 +175,12 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
   let geflippt = roh.replace(/const VORPOSTEN_AKTIV = (true|false);/, 'const VORPOSTEN_AKTIV = true;');
   check('0-kopie: der Schalter liess sich in der Kopie umlegen',
     /const VORPOSTEN_AKTIV = true;/.test(geflippt), { gefunden: /const VORPOSTEN_AKTIV = (true|false);/.test(roh) });
+  /* Derselbe Weg fuer den Projekt-Schalter (Etappe 4): Ausgeliefert steht er auf false, bis das
+     Frontend die Projekte kennt - geprueft wird die LOGIK trotzdem, an einer Kopie mit
+     umgelegtem Schalter. Ohne das waere Etappe 4 bis zum Frontend-Merge voellig ungeprueft. */
+  geflippt = geflippt.replace(/const VP_PROJEKTE_AKTIV = (true|false);/, 'const VP_PROJEKTE_AKTIV = true;');
+  check('0-kopie2: auch der Projekt-Schalter liess sich in der Kopie umlegen',
+    /const VP_PROJEKTE_AKTIV = true;/.test(geflippt), { gefunden: /const VP_PROJEKTE_AKTIV = (true|false);/.test(roh) });
   // Unabhaengige Anker fuer die Erwartungen (nicht aus der API-Antwort selbst, Regel 62): die
   // Stufentabelle aus dem QUELLTEXT.
   const kernLps = [...roh.matchAll(/kernLp:\s*(\d+)/g)].map(m => Number(m[1]));
@@ -205,6 +211,11 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     /* Die Gegenrichtung: das Dach steigt beim Einbau, sinkt beim Ausbau aber nie wieder (Ratsche).
        Das waere der lohnende Fehler - Panzerung einbauen, Dach behalten, Modul anderswo verwenden. */
     else if (SAB === 'kerndachab') geflippt = geflippt.replace('function vorpostenKernMax(doc) { return vorpostenWerte(doc).kernLp; }', 'function vorpostenKernMax(doc) { return Math.max(vorpostenWerte(doc).kernLp, Math.round((doc && doc.kern && doc.kern.lpMax) || 0)); }');
+    /* Stationsprojekte (03.09.2026), zwei Haelften: die WIRKUNG (aendert ein fertiges Vorhaben die
+       Werte?) und die BAUZEIT (wirkt ein noch laufendes schon?). Beide zusammen waeren eine
+       Sabotage, die zu viel trifft. */
+    else if (SAB === 'projektwirkung') geflippt = geflippt.replace('  const pr = vpProjektBoni(doc);', '  const pr = { kern:0, verteidigung:0, garnison:0, flug:0, prod:0, scan:0, flugDeckel: VP_FLUG_DECKEL };');
+    else if (SAB === 'projektzeit') geflippt = geflippt.replace('  return vpProjektListe(doc).filter(p => p && vpProjektDef(p.key) && (p.fertigAb || 0) <= t).map(p => p.key);', '  return vpProjektListe(doc).filter(p => p && vpProjektDef(p.key)).map(p => p.key);');
     else { console.log('unbekannte Sabotage: ' + SAB); process.exit(2); }
     check('0-sab: die Sabotage "' + SAB + '" hat den Quelltext veraendert', geflippt !== vorher, { veraendert: geflippt !== vorher });
   }
@@ -530,20 +541,100 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
       { lpVorher, lpNachher: raus10.body.vorposten && raus10.body.vorposten.kern.lp });
   }
 
+  // ---- 11) Stationsprojekte: Freischaltung, Bauzeit, Wirkung, Sprungtor -------------------------
+  /* Etappe 4 (03.09.2026). Ausgeliefert steht VP_PROJEKTE_AKTIV auf false; hier laeuft die Kopie
+     mit umgelegtem Schalter (0-kopie2), sonst waere die ganze Etappe bis zum Frontend ungeprueft. */
+  {
+    const SYS11 = 'vpsys-k';
+    const defs = get0.body.projektDefs || [];
+    const dock = defs.find(d => d.zweig === 'werft');
+    const tor = defs.find(d => d.key === 'sprungtor');
+    check('11-anker: der Projektkatalog reist mit (mit Zweig, Stufe, Dauer und Kosten)',
+      defs.length >= 4 && !!dock && !!tor && dock.stufeAb > 0 && dock.dauerMs > 0 && !!dock.kosten && tor.stufeAb > dock.stufeAb,
+      { keys: defs.map(d => d.key), dockAb: dock && dock.stufeAb, torAb: tor && tor.stufeAb });
+
+    // Zu niedrige Stufe: eine Stufe UNTER der Anforderung, richtiger Zweig.
+    await aendereDb(d => { const dd = doc(SYS11, ANNA, 'anna'); dd.stufe = dock.stufeAb - 1; dd.zweig = 'werft'; schreibDoc(d, dd); });
+    const zuKlein = await post(tokA, '/vorposten/projekt/starten', { system: SYS11, projekt: dock.key });
+    check('11a: unter der geforderten Stufe geht nichts - und die Antwort nennt die Stufe',
+      zuKlein.status === 400 && zuKlein.body.stufeFehlt === true && zuKlein.body.stufeAb === dock.stufeAb,
+      { status: zuKlein.status, body: zuKlein.body });
+
+    // Richtige Stufe, FALSCHER Zweig: das Zweig-Projekt bleibt zu.
+    await aendereDb(d => { const dd = liesDoc(d, SYS11); dd.stufe = dock.stufeAb; dd.zweig = 'festung'; schreibDoc(d, dd); });
+    const falscherZweig = await post(tokA, '/vorposten/projekt/starten', { system: SYS11, projekt: dock.key });
+    check('11b: ein Zweig-Projekt baut nur seine Ausrichtung - sonst waeren die Zweige beliebig',
+      falscherZweig.status === 400 && falscherZweig.body.zweigFehlt === true, { status: falscherZweig.status, body: falscherZweig.body });
+
+    // Passend: das Vorhaben laeuft an.
+    await aendereDb(d => { const dd = liesDoc(d, SYS11); dd.zweig = 'werft'; schreibDoc(d, dd); });
+    const vorStart = await s.j('/vorposten', { headers: kopf(tokA) });
+    const garnVor = ((vorStart.body.liste || []).find(x => x.sys === SYS11) || {}).garnisonMax;
+    const start = await post(tokA, '/vorposten/projekt/starten', { system: SYS11, projekt: dock.key });
+    check('11c: passend gestartet - mit Fertigzeit in der Zukunft und den Kosten, die der Client bucht',
+      start.status === 200 && start.body.fertigAb > Date.now() && !!start.body.kosten
+      && (start.body.vorposten.projektLaeuft || {}).key === dock.key,
+      { status: start.status, fertigAb: start.body.fertigAb, laeuft: start.body.vorposten && start.body.vorposten.projektLaeuft });
+    check('11d: waehrend es laeuft, wirkt es NICHT - sonst waere die Bauzeit eine Zierde',
+      start.status === 200 && start.body.vorposten.garnisonMax === garnVor
+      && (start.body.vorposten.projekte || []).length === 0,
+      { vorher: garnVor, waehrend: start.body.vorposten && start.body.vorposten.garnisonMax });
+    const zweites = await post(tokA, '/vorposten/projekt/starten', { system: SYS11, projekt: dock.key });
+    check('11e: eine Station baut hoechstens ein Vorhaben gleichzeitig',
+      zweites.status === 400 && zweites.body.belegt === true, { status: zweites.status, body: zweites.body });
+
+    // Fertig: die Zeit vorziehen, dann muss die Wirkung da sein.
+    await aendereDb(d => { const dd = liesDoc(d, SYS11); dd.projekte[0].fertigAb = Date.now() - 1000; schreibDoc(d, dd); });
+    const nachher = await s.j('/vorposten', { headers: kopf(tokA) });
+    const v11 = (nachher.body.liste || []).find(x => x.sys === SYS11) || {};
+    check('11f: fertig wirkt es - die Garnisonsgrenze steht ueber dem reinen Stufenwert',
+      v11.garnisonMax > garnVor && (v11.projekte || []).indexOf(dock.key) >= 0 && !v11.projektLaeuft,
+      { vorher: garnVor, nachher: v11.garnisonMax, projekte: v11.projekte });
+    const nochmal = await post(tokA, '/vorposten/projekt/starten', { system: SYS11, projekt: dock.key });
+    check('11g: dasselbe Vorhaben gibt es kein zweites Mal',
+      nochmal.status === 400 && nochmal.body.schonDa === true, { status: nochmal.status, body: nochmal.body });
+
+    /* Das Sprungtor hebt den DECKEL, es addiert nicht nur. Genau das ist sein Sinn: Der
+       Flugzeit-Bonus ist im Spiel bei VP_FLUG_DECKEL gedeckelt, eine hohe Stufe liegt mit Modulen
+       schon daran - ein Tor, das nur aufaddiert, taete nichts. */
+    check('11h-anker: ohne Tor gilt der normale Flugzeit-Deckel',
+      v11.nutzen && v11.nutzen.flugDeckel === get0.body.flugDeckel, { deckel: v11.nutzen && v11.nutzen.flugDeckel, normal: get0.body.flugDeckel });
+    await aendereDb(d => {
+      const dd = liesDoc(d, SYS11); dd.stufe = tor.stufeAb;
+      dd.projekte.push({ key: tor.key, start: Date.now() - 2000, fertigAb: Date.now() - 1000 });
+      schreibDoc(d, dd);
+    });
+    const mitTor = await s.j('/vorposten', { headers: kopf(tokA) });
+    const v11t = (mitTor.body.liste || []).find(x => x.sys === SYS11) || {};
+    check('11h: das Sprungtor hebt den Flugzeit-Deckel ueber den normalen',
+      v11t.nutzen && v11t.nutzen.flugDeckel > get0.body.flugDeckel,
+      { mitTor: v11t.nutzen && v11t.nutzen.flugDeckel, normal: get0.body.flugDeckel });
+    const fremd11 = await post(tokB, '/vorposten/projekt/starten', { system: SYS11, projekt: tor.key });
+    check('11i: ein Fremder startet an fremden Stationen nichts', fremd11.status === 403, { status: fremd11.status });
+  }
+
   await stoppeServer();
 
   // ---- Auswertung: Gruen-Lauf ODER Gegenprobe (Regel 71) --------------------------------------
   if (SAB) {
+    /* BEIDE Richtungen, gemessen (03.09.2026): Bis hierher prueft die Auswertung nur, ob das
+       Erwartete gefallen IST - und meldete danach "genau [...] gefallen", wobei sie die ERWARTUNG
+       ausdruckte, nicht die Messung. Eine Sabotage, die zehn weitere Pruefungen mitreisst, kam so
+       als "korrekt" durch, und die Pflichtliste blieb eine unbelegte Behauptung. Aufgefallen an
+       `projektwirkung`: Die Liste war noch leer, 11f und 11h fielen - gemeldet wurde
+       "genau [] gefallen", Exit 0. Jetzt zaehlt der Lauf nach, WAS gefallen ist, und vergleicht
+       in beide Richtungen. */
     const soll = MUSS_FALLEN[SAB] || [];
-    const nichtGefallen = soll.filter(kurz => {
-      const treffer = Object.keys(ergebnis).filter(n => n === kurz || n.startsWith(kurz + ':'));
-      return !treffer.some(n => ergebnis[n] === false);
-    });
-    if (nichtGefallen.length) {
-      console.log('\nWERKZEUGFEHLER - diese Pruefung(en) haetten bei Sabotage "' + SAB + '" fallen MUESSEN, blieben aber gruen: ' + JSON.stringify(nichtGefallen));
+    const gefallen = [...new Set(Object.keys(ergebnis).filter(n => ergebnis[n] === false)
+      .map(n => String(n).split(':')[0]))].sort();
+    const nichtGefallen = soll.filter(k => gefallen.indexOf(k) < 0);
+    const unerwartet = gefallen.filter(k => soll.indexOf(k) < 0);
+    if (nichtGefallen.length || unerwartet.length) {
+      if (nichtGefallen.length) console.log('\nWERKZEUGFEHLER - diese Pruefung(en) haetten bei Sabotage "' + SAB + '" fallen MUESSEN, blieben aber gruen: ' + JSON.stringify(nichtGefallen));
+      if (unerwartet.length) console.log('\nWERKZEUGFEHLER - Sabotage "' + SAB + '" hat AUSSERDEM gerissen: ' + JSON.stringify(unerwartet) + ' - entweder trifft sie zu viel, oder die Pflichtliste ist unvollstaendig.');
       process.exit(1);
     }
-    console.log('\nGegenprobe "' + SAB + '" korrekt: genau ' + JSON.stringify(soll) + ' gefallen.');
+    console.log('\nGegenprobe "' + SAB + '" korrekt: gemessen gefallen ' + JSON.stringify(gefallen) + '.');
     process.exit(0);
   }
   console.log(fail ? '\nFEHLGESCHLAGEN' : '\nAlles gruen.');

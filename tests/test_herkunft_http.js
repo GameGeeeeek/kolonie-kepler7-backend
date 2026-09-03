@@ -19,6 +19,19 @@
 // WAS DIESER TEST NICHT KANN: pruefen, ob der Browser die UTM-Parameter wirklich einsammelt. Das
 // ist die Frontend-Haelfte und hat dort ihren eigenen Waechter (test_herkunft.js). Hier wird
 // ausschliesslich gemessen, was der Server aus dem entgegengenommenen Feld macht.
+//
+// GEGENPROBE gegen den Stand ohne die Aenderung, beide Richtungen gefahren, Pruefnamen per `diff`
+// verglichen (identische Liste): neu EXIT=0, alt EXIT=1, 17 von 26 fallen. Die NEUN, die auch am
+// alten Stand gruen bleiben, sind kein Mangel - sie gehoeren aber benannt, sonst haelt der naechste
+// Leser die Gegenprobe fuer unvollstaendig:
+//   * 0-bau / 2a-bau / 3a-bau / 4a-bau - die Registrierungen gehen am alten Stand genauso durch.
+//     Das IST die Zusage: Die Aenderung ist rein additiv, ein Client ohne das Feld merkt nichts.
+//   * 2b / 4a / 4b - "steht nicht im Spielstand", "ohne Angabe kein Feld": am alten Stand gibt es
+//     gar kein Feld, also trivial erfuellt. Sie messen die Gegenrichtung und muessen gruen bleiben.
+//   * 6a / 6b - "nennt keine Namen": am alten Stand antwortet die Route mit 404, und ein
+//     Fehlerobjekt enthaelt naturgemaess keine Spielernamen.
+// Wer eine dieser neun spaeter verschaerfen will, prueft zuerst, ob sie am Vergleichsstand
+// ueberhaupt fallen KANN - sonst misst er nur, dass ein Feld fehlt.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');

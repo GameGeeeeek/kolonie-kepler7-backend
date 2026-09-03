@@ -2500,7 +2500,7 @@ function passwortProblem(passwort, username) {
 
 // --- Registrierung (E-Mail optional, aber nötig für Passwort-Reset) ---
 app.post('/api/register', authRateLimit, async (req, res) => {
-  const { username, password, email, herkunft } = req.body || {};
+  const { username, password, email, besucherquelle } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Name und Passwort erforderlich.' });
   const cleanName = String(username).trim();
   if (!/^[a-zA-Z0-9_\-äöüÄÖÜß]{3,18}$/.test(cleanName)) {
@@ -2527,8 +2527,8 @@ app.post('/api/register', authRateLimit, async (req, res) => {
   // Herkunft nur anlegen, wenn wirklich etwas ankam - ein `herkunft: null` an jedem Konto waere ein
   // Feld, das aussieht wie eine Messung und keine ist. Ein alter Client schickt nichts; dann bleibt
   // das Konto ohne Feld, und die Auswertung zaehlt es als "unbekannt" statt als "direkt".
-  const herkunftSauber = herkunftSaeubern(herkunft);
-  if (herkunftSauber) db.users[key].herkunft = herkunftSauber;
+  const quelleSauber = besucherquelleSaeubern(besucherquelle);
+  if (quelleSauber) db.users[key].besucherquelle = quelleSauber;
   grantNewbieShield(userId); // 4 Tage Anfängerschutz ab Registrierung
   recordAnalyticsEvent(userId, 'funnel:register'); // Onboarding-Trichter: Konto angelegt
 
@@ -5366,11 +5366,11 @@ function pruneOldAnalytics() {
    NICHT GESPEICHERT wird die volle verweisende Adresse - nur ihr Hostname, und den bildet das
    Frontend. Der Pfad einer fremden Seite kann Suchbegriffe oder Konto-Kennungen enthalten; fuer
    die Frage "welcher Kanal bringt Spieler" reicht die Domain vollstaendig aus. */
-const HERKUNFT_FELDER = ['quelle', 'medium', 'kampagne', 'verweis'];
-function herkunftSaeubern(roh) {
+const BESUCHERQUELLE_FELDER = ['quelle', 'medium', 'kampagne', 'verweis'];
+function besucherquelleSaeubern(roh) {
   if (!roh || typeof roh !== 'object') return null;
   const sauber = {};
-  for (const feld of HERKUNFT_FELDER) {
+  for (const feld of BESUCHERQUELLE_FELDER) {
     const wert = String(roh[feld] || '').slice(0, 40).replace(/[^a-zA-Z0-9_:.-]/g, '');
     if (wert) sauber[feld] = wert;
   }
@@ -15072,13 +15072,13 @@ const GESCHENKE_MERKEN = 20;
    (keine zweite Zaehlweise daneben). `belastbar` dort verlangt 24 beobachtete Stunden; ein Konto
    von heute Morgen gilt deshalb noch nicht als "inaktiv", sondern als `zuJung` - sonst saehe jede
    frische Kampagne in den ersten Stunden aus wie ein Totalausfall. */
-app.get('/api/admin/herkunft', authMiddleware, (req, res) => {
+app.get('/api/admin/besucherquelle', authMiddleware, (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
   const jetzt = Date.now();
   const nach = {};
   for (const u of Object.values(db.users)) {
     if (!u) continue;
-    const h = u.herkunft || null;
+    const h = u.besucherquelle || null;
     // Ohne Feld ist die Herkunft UNBEKANNT, nicht "direkt": Alle Konten von vor dieser Aenderung
     // landen hier, und die als Direktzugriffe zu zaehlen waere eine erfundene Zahl.
     const schluessel = h ? [h.quelle || '?', h.medium || '?', h.kampagne || '?'].join(' / ') : '(unbekannt)';

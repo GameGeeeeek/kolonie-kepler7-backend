@@ -17,7 +17,7 @@
 // tragen soll.
 //
 // WAS DIESER TEST NICHT KANN: pruefen, ob der Browser die UTM-Parameter wirklich einsammelt. Das
-// ist die Frontend-Haelfte und hat dort ihren eigenen Waechter (test_herkunft.js). Hier wird
+// ist die Frontend-Haelfte und hat dort ihren eigenen Waechter (test_besucherquelle.js). Hier wird
 // ausschliesslich gemessen, was der Server aus dem entgegengenommenen Feld macht.
 //
 // GEGENPROBE gegen den Stand ohne die Aenderung, beide Richtungen gefahren, Pruefnamen per `diff`
@@ -73,7 +73,7 @@ function grunddb() {
   };
 }
 
-const dbPfad = path.join(os.tmpdir(), 'kepler-herkunft-' + process.pid + '.json');
+const dbPfad = path.join(os.tmpdir(), 'kepler-besucherquelle-' + process.pid + '.json');
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kepler-herk-'));
 let srv = null;
 let s = null, tokAdmin = null, tokAnna = null;
@@ -148,9 +148,9 @@ const jsonKopf = { 'Content-Type': 'application/json' };
 // es per bcrypt.hashSync weiter tragen und sich anmelden). Wer das uebersieht, bekommt ein 400 und
 // haelt es fuer einen Fehler der eigenen Aenderung.
 const NEU_PW = 'probelauf-9271';
-async function registriere(name, herkunft) {
+async function registriere(name, besucherquelle) {
   const body = { username: name, password: NEU_PW, email: name + '@example.invalid' };
-  if (herkunft !== undefined) body.herkunft = herkunft;
+  if (besucherquelle !== undefined) body.besucherquelle = besucherquelle;
   return s.j('/register', { method: 'POST', headers: jsonKopf, body: JSON.stringify(body) });
 }
 // Ein fehlendes Konto darf den Testlauf NICHT beenden (Hausregel 34): Ein Absturz beim Aufbau
@@ -166,11 +166,11 @@ const nutzer = (d, name) => (d.users && d.users[name.toLowerCase()]) || {};
   check('0-bau: Admin und Anna sind angemeldet', !!tokAdmin && !!tokAnna, { admin: !!tokAdmin, anna: !!tokAnna });
 
   // --- 1: der Endpunkt gehoert dem Admin --------------------------------------------------
-  const fremd = await s.j('/admin/herkunft', { headers: kopf(tokAnna) });
+  const fremd = await s.j('/admin/besucherquelle', { headers: kopf(tokAnna) });
   check('1a Ein normaler Spieler kommt nicht an die Herkunfts-Auswertung', fremd.status === 403, { status: fremd.status });
-  const ohneToken = await s.j('/admin/herkunft');
+  const ohneToken = await s.j('/admin/besucherquelle');
   check('1b Ohne Anmeldung erst recht nicht', ohneToken.status === 401 || ohneToken.status === 403, { status: ohneToken.status });
-  const alsAdmin = await s.j('/admin/herkunft', { headers: kopf(tokAdmin) });
+  const alsAdmin = await s.j('/admin/besucherquelle', { headers: kopf(tokAdmin) });
   check('1c Der Admin bekommt eine Auswertung', alsAdmin.status === 200 && Array.isArray(alsAdmin.body.quellen), { status: alsAdmin.status });
 
   // --- 2: die Herkunft wird gespeichert, und zwar am richtigen Ort -------------------------
@@ -179,13 +179,13 @@ const nutzer = (d, name) => (d.users && d.users[name.toLowerCase()]) || {};
   await stoppeServer();
   let d = liesDb();
   const u1 = nutzer(d, "tikuser");
-  check('2a Die Herkunft steht am Konto', !!(u1 && u1.herkunft && u1.herkunft.quelle === 'tiktok'),
-        { herkunft: u1 && u1.herkunft });
+  check('2a Die Herkunft steht am Konto', !!(u1 && u1.besucherquelle && u1.besucherquelle.quelle === 'tiktok'),
+        { besucherquelle: u1 && u1.besucherquelle });
   check('2a2 Alle vier Felder sind angekommen',
-        !!(u1 && u1.herkunft && u1.herkunft.medium === 'cpc' && u1.herkunft.kampagne === 'test-a' && u1.herkunft.verweis === 'tiktok.com'),
-        { herkunft: u1 && u1.herkunft });
-  check('2a3 Ein Zeitstempel ist dabei', !!(u1 && u1.herkunft && typeof u1.herkunft.zeit === 'number' && u1.herkunft.zeit > 0),
-        { zeit: u1 && u1.herkunft && u1.herkunft.zeit });
+        !!(u1 && u1.besucherquelle && u1.besucherquelle.medium === 'cpc' && u1.besucherquelle.kampagne === 'test-a' && u1.besucherquelle.verweis === 'tiktok.com'),
+        { besucherquelle: u1 && u1.besucherquelle });
+  check('2a3 Ein Zeitstempel ist dabei', !!(u1 && u1.besucherquelle && typeof u1.besucherquelle.zeit === 'number' && u1.besucherquelle.zeit > 0),
+        { zeit: u1 && u1.besucherquelle && u1.besucherquelle.zeit });
   // DIE Entscheidung dieses Tests: nicht im Spielstand. Dort waere sie beim naechsten Speichern weg.
   const save1 = liesSave(d, u1 && u1.userId);
   const imSave = save1 ? JSON.stringify(save1).toLowerCase().includes('tiktok') : false;
@@ -204,7 +204,7 @@ const nutzer = (d, name) => (d.users && d.users[name.toLowerCase()]) || {};
   await stoppeServer();
   d = liesDb();
   const u2 = nutzer(d, 'boesuser');
-  const h2 = (u2 && u2.herkunft) || {};
+  const h2 = (u2 && u2.besucherquelle) || {};
   check('3a Spitze Klammern und Anfuehrungszeichen sind raus',
         typeof h2.quelle === 'string' && !/[<>"'()/]/.test(h2.quelle), { quelle: h2.quelle });
   check('3b Ueberlange Werte sind gekappt (hoechstens 40 Zeichen)',
@@ -224,14 +224,14 @@ const nutzer = (d, name) => (d.users && d.users[name.toLowerCase()]) || {};
         { leer: r3.status, muell: r4.status });
   await stoppeServer();
   d = liesDb();
-  check('4a Ohne Angabe entsteht gar kein herkunft-Feld', nutzer(d, 'leeruser').herkunft === undefined,
-        { herkunft: nutzer(d, 'leeruser').herkunft });
+  check('4a Ohne Angabe entsteht gar kein besucherquelle-Feld', nutzer(d, 'leeruser').besucherquelle === undefined,
+        { besucherquelle: nutzer(d, 'leeruser').besucherquelle });
   check('4b Bleibt nach dem Saeubern nichts uebrig, entsteht auch kein Feld',
-        nutzer(d, 'muelluser').herkunft === undefined, { herkunft: nutzer(d, 'muelluser').herkunft });
+        nutzer(d, 'muelluser').besucherquelle === undefined, { besucherquelle: nutzer(d, 'muelluser').besucherquelle });
   s = await starteServer();
   tokAdmin = await s.anmelden('GameGeeeeek');
 
-  const aus = await s.j('/admin/herkunft', { headers: kopf(tokAdmin) });
+  const aus = await s.j('/admin/besucherquelle', { headers: kopf(tokAdmin) });
   const q = (aus.body && aus.body.quellen) || [];
   const finde = t => q.find(x => x.quelle === t);
   const unbekannt = finde('(unbekannt)');
@@ -258,7 +258,7 @@ const nutzer = (d, name) => (d.users && d.users[name.toLowerCase()]) || {};
     }
     // schlechtuser bleibt unbestaetigt, ohne Spielstand und ohne Aktivitaet.
   });
-  const aus2 = await s.j('/admin/herkunft', { headers: kopf(tokAdmin) });
+  const aus2 = await s.j('/admin/besucherquelle', { headers: kopf(tokAdmin) });
   const q2 = (aus2.body && aus2.body.quellen) || [];
   const gut = q2.find(x => x.quelle.startsWith('gutkanal'));
   const schlecht = q2.find(x => x.quelle.startsWith('schlechtkanal'));

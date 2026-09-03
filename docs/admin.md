@@ -854,7 +854,7 @@ neuen Test anlegt, misst deshalb ein zweites Mal unmittelbar vor dem Push, gegen
 
 ## Woher ein Konto kam (03.09.2026)
 
-`GET /api/admin/herkunft` — je Quelle der ganze Trichter statt einer Kopfzahl.
+`GET /api/admin/besucherquelle` — je Quelle der ganze Trichter statt einer Kopfzahl.
 
 **Anlass** (Sascha, wörtlich): „macht es sinn auf tiktok werbung zu schalten ?" Die Antwort war
 nein, unter anderem weil im ganzen Spiel **keine** Kampagnen-Messung existierte — gemessen null
@@ -862,13 +862,13 @@ Treffer für `utm_source`, `utm_campaign`, `document.referrer`, `gtag(`, `ttq`, 
 `dataLayer`. Wer für Klicks zahlt und hinterher nicht sagen kann, wie viele davon ein Konto
 angelegt haben, spendet.
 
-**Wo die Herkunft wohnt:** `user.herkunft = { quelle, medium, kampagne, verweis, zeit }`, gesetzt
-**einmal** bei der Registrierung aus dem neuen Feld `herkunft` an `POST /api/register`, danach nie
+**Wo die Herkunft wohnt:** `user.besucherquelle = { quelle, medium, kampagne, verweis, zeit }`, gesetzt
+**einmal** bei der Registrierung aus dem neuen Feld `besucherquelle` an `POST /api/register`, danach nie
 wieder angefasst. Am Nutzerobjekt und nicht im Spielstand — der ist klientenautoritativ und würde
 sie beim nächsten regulären Speichern überschreiben (dieselbe Begründung wie `user.staub`).
 
 **Gesäubert** mit derselben Zeichenklasse wie `cleanEvent`, 40 Zeichen je Feld, kein zweites Muster
-daneben. Bleibt nach dem Säubern nichts übrig, entsteht **gar kein Feld** — ein `herkunft: null` an
+daneben. Bleibt nach dem Säubern nichts übrig, entsteht **gar kein Feld** — ein `besucherquelle: null` an
 jedem Konto sähe aus wie eine Messung und wäre keine.
 
 **Nicht gespeichert wird die volle verweisende Adresse**, nur ihr Hostname, und den bildet das
@@ -889,6 +889,6 @@ der Ansicht, die eine Kaufentscheidung tragen soll.
 bleibt das Konto ohne Herkunft; ein neues Frontend gegen ein altes Backend schickt es, und der
 Server ignoriert es. Kein Schalter nötig.
 
-Wächter: `tests/test_herkunft_http.js` (Port 3253, 26 Prüfungen). Kernprüfung ist 5c/5d — zwei
+Wächter: `tests/test_besucherquelle_http.js` (Port 3253, 26 Prüfungen). Kernprüfung ist 5c/5d — zwei
 Quellen mit **gleicher** Kontozahl und messbar verschiedenem Verlauf; eine Prüfung auf blosse
 Anwesenheit wäre auch von einem Endpunkt erfüllt, der überall dieselbe Zahl schreibt.

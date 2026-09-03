@@ -55,7 +55,7 @@ Daraus folgt:
 - Eine neue Schiffsklasse lebt in **sechs** Tabellen: `grep -c "<schluessel>" server.js` muss 6 sein, jede Auslassung mit Begründung.
 - Ändert ein Backend-Merge eine spielersichtbare Zahl oder liest das Frontend ein neues Feld: **Backend zuerst live**, per `/api/health`
   belegt, dann Frontend. Für Mechaniken, die das Frontend noch nicht kennt, gibt es Notausschalter
-  (`FESTUNG_SPAWN_AKTIV`, `FESTUNG_BAUTEILE_AKTIV`, `NEST_SPAWN_AKTIV`, `A2_SPAWN_AKTIV`, `VORPOSTEN_AKTIV`); umgelegt werden sie im **Frontend-PR**.
+  (`FESTUNG_SPAWN_AKTIV`, `FESTUNG_BAUTEILE_AKTIV`, `NEST_SPAWN_AKTIV`, `A2_SPAWN_AKTIV`, `VORPOSTEN_AKTIV`, `SEKTOR_LAGE_AKTIV`); umgelegt werden sie im **Frontend-PR**.
   Der Admin kann sie zur Laufzeit nur AB-, nie einschalten (`db.notAus`).
 - Ein Refactor, der eine Funktion zusammenführt, die ein Frontend-Test liest, wird im PR-Text benannt.
 
@@ -107,6 +107,7 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/asteroidenfestungen.md` | Festungen Phase 1 und 2 (Kern, Hort, Bauteile, Zielwahl) |
 | `docs/asteroidenfeld.md` | Kampfvermerk am Vorkommen, Urmaterie-Nachsaat und -Boden |
 | `docs/alien-nester.md` | Nester, bewegliche NPC-Stärke, Verbandsangriff, PvE-Embleme (Phase 3–6) |
+| `docs/sektorlage.md` | E5: Druck je Region, relativ zum Galaxieschnitt; Kopie-Familie `SEKTOR_ZENTREN`, Schalter `SEKTOR_LAGE_AKTIV` |
 | `docs/wrackkonvois.md` | A2, die wandernden Beute-Ziele |
 | `docs/vorposten.md` | B2, Vorposten: spielergebaute PvP-Ziele in db.shared, Stufen, Garnison, Schalter |
 | `docs/beute.md` | Boss-Set-Teile ohne Allianz, mythische Stufe |

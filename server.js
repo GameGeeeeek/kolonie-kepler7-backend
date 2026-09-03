@@ -12928,7 +12928,7 @@ const VP_MODUL_BAUBAR = ['gewoehnlich', 'ungewoehnlich'];
    wie die Ausbaukosten der Stufentabelle. Was der Server fuehrt, ist die WIRKUNG: Sie steht im
    Dokument in db.shared und ist damit fuer den Client unerreichbar. Ein gefaelschter Spielstand
    spart hoechstens die Rohstoffe, er erfindet keinen staerkeren Vorposten. */
-const VP_PROJEKTE_AKTIV = false;   // Notaus bis zum Frontend-Merge; umgelegt wird er IM Frontend-PR
+const VP_PROJEKTE_AKTIV = true;   // umgelegt am 03.09.2026, unmittelbar nach dem Frontend-Merge (v8.649.0 live)
 const VP_PROJEKT_DEFS = [
   { key: 'dockring', name: 'Dockring', icon: 'ti-rocket', zweig: 'werft', stufeAb: 5,
     dauerMs: 8 * 3600 * 1000, wirkung: { garnison: 0.25 },

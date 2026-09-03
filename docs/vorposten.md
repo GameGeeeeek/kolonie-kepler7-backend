@@ -382,3 +382,8 @@ blieb eine unbelegte Behauptung. Aufgefallen an `projektwirkung`: Die Liste war 
 Der Lauf zählt jetzt nach, **was** gefallen ist, vergleicht in beide Richtungen (fehlt etwas aus der
 Liste? ist etwas außerhalb gefallen?) und druckt die **Messung**. Das ist dieselbe Regel, die
 CLAUDE.md für Prüfnamen fordert („per `diff` vergleichen, nicht zählen"), nur im Werkzeug selbst.
+
+**Der Projekt-Schalter ist umgelegt (03.09.2026).** `VP_PROJEKTE_AKTIV` stand seit dem Backend-PR
+auf `false`; das Frontend blendete den Menüeintrag über `projekteAktiv` aus. Mit dem Frontend-Merge
+v8.649.0 (live per `version.txt` belegt) steht er auf `true`. Der Admin-Notaus `vorposten` schaltet
+Projekte weiterhin ab — er kann zur Laufzeit nur AB-, nie einschalten.

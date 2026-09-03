@@ -387,3 +387,49 @@ CLAUDE.md für Prüfnamen fordert („per `diff` vergleichen, nicht zählen"), n
 auf `false`; das Frontend blendete den Menüeintrag über `projekteAktiv` aus. Mit dem Frontend-Merge
 v8.649.0 (live per `version.txt` belegt) steht er auf `true`. Der Admin-Notaus `vorposten` schaltet
 Projekte weiterhin ab — er kann zur Laufzeit nur AB-, nie einschalten.
+
+## Aufgeben ist ein Abbau über 24 Stunden (03.09.2026)
+
+Auftrag Sascha: „vorposten sollen auch aufgebar sein allerdings müssen die abgebaut werden dauert
+24 stunden."
+
+**Warum das mehr ist als eine Wartezeit.** Bis hierher verschwand ein Vorposten in dem Moment, in
+dem sein Besitzer es wollte — auch mitten in einem Angriff. Wer sah, dass seine Station fallen
+würde, gab sie auf, und der Angreifer stand vor einem leeren System: keine Beute, kein Kampfpunkt,
+die Flüge umsonst. Mit der Frist bleibt der Vorposten angreifbar, solange er abgebaut wird. Der
+Abbau ist damit ein **Entschluss, keine Fluchttür** — und genau das misst Prüfung 6d.
+
+| | |
+|---|---|
+| `POST /api/vorposten/aufgeben` | setzt `doc.abbauAb = jetzt + VORPOSTEN_ABBAU_MS` (24 h). Ein zweiter Aufruf startet nichts Neues, sondern nennt die Restzeit. |
+| `POST /api/vorposten/abbau/abbrechen` | löscht die Frist. Es gibt nichts zu erstatten — der Abbau kostet keine Rohstoffe, er kostet Zeit. Wer abbricht, hat die Frist umsonst laufen lassen; das ist die ganze Strafe und sie reicht. |
+| `vorpostenAbbauTick()` | schließt fertige Abbauten im `galaxyTick` ab (alle 15 Minuten — ein 24-Stunden-Vorhaben braucht keine feinere Auflösung, und ein eigener Takt wäre ein zweiter Zeitgeber für dieselbe Sache). |
+
+**Der Zustand ist EIN Feld** (`doc.abbauAb`), kein eigener Speicher: Alles, was den Vorposten liest,
+sieht ihn damit automatisch mit. `vorpostenFuerClient` meldet ihn an **jeden**, nicht nur an den
+Besitzer — dieselbe Offenheit wie bei Verteidigung und Garnisonszahl. Eine Station, die in Kürze
+verschwindet, ist für einen Angreifer eine echte Information: Es lohnt sich, vorher zuzuschlagen.
+
+**Was beim Abschluss zurückkommt:**
+- Die **Module** gehen in den Bestand des Besitzers. Ein legendäres Fundstück beim freiwilligen
+  Abbau zu verlieren, wäre eine Strafe fürs Aufräumen. Fällt der Vorposten dagegen im Kampf, bleiben
+  sie verloren — dort hat sie jemand zerstört.
+- Die **Garnison** kommt über `pushPendingReward` mit eigenem `type: 'vorposten-abbau'`, nicht über
+  eine Rückflug-Mission: Der Server schreibt keinen fremden Spielstand, und beim Ablauf der Frist
+  ist der Besitzer üblicherweise gar nicht da.
+- Ein laufendes **Stationsprojekt** ist mit der Station weg. Es hätte nichts, worin es fertig werden
+  könnte.
+
+**Nicht geändert:** Der Vorposten zählt während des Abbaus weiter gegen `VORPOSTEN_MAX_JE_KONTO` —
+sonst wäre ein gestarteter Abbau der Weg, die Drei-pro-Konto-Grenze zu umgehen, ohne je etwas
+aufzugeben.
+
+`VORPOSTEN_ABBAU_AKTIV` steht bis zum Frontend-Merge auf `false`; solange bleibt das ausgelieferte
+Verhalten (sofort weg, Garnison zurück). Wäre der Schalter schon an, klickte ein Spieler „aufgeben"
+und sähe seinen Vorposten weiter stehen.
+
+Wächter: `tests/test_vorposten_http.js` Abschnitt 6 (6a–6g), gefahren an einer Kopie mit umgelegtem
+Schalter **und verkürztem `galaxyTick`** (`0-kopie3`) — so misst 6f den echten Weg über den Tick
+statt einer Abkürzung, die es im Betrieb nicht gibt. Zwei Sabotagen mit gemessener Pflichtliste:
+`abbaufrist` (der Vorposten verschwindet wieder sofort) → `6b 6c 6d 6e`; `abbaumodule` (die Module
+bleiben beim Aufräumen weg) → `6g`.

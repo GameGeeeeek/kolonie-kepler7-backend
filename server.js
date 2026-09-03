@@ -12767,7 +12767,16 @@ function vorpostenLies(sys) {
   if (typeof raw !== 'string') return null;
   try { const d = JSON.parse(raw); return (d && d.sys === sys && d.besitzer) ? d : null; } catch (e) { return null; }
 }
-function vorpostenSchreib(doc) { db.shared[vorpostenKey(doc.sys)] = JSON.stringify(doc); }
+/* Beim Schreiben wird das gespeicherte Kern-Dach nachgezogen und die LP darunter gekappt. Gelesen
+   wird es nirgends mehr (vorpostenKernMax rechnet), aber ein Dokument, das ein anderes Dach
+   behauptet als die Rechnung, waere eine Falle fuer den naechsten Leser - und fuer Sicherungen. */
+function vorpostenSchreib(doc) {
+  if (doc && doc.kern) {
+    doc.kern.lpMax = vorpostenKernMax(doc);
+    doc.kern.lp = Math.max(0, Math.min(doc.kern.lpMax, Math.round(doc.kern.lp || 0)));
+  }
+  db.shared[vorpostenKey(doc.sys)] = JSON.stringify(doc);
+}
 function vorpostenLoesch(sys) { delete db.shared[vorpostenKey(sys)]; }
 function vorpostenAlle() {
   const out = [];
@@ -12875,6 +12884,18 @@ function vpModulBoni(doc) {
   }
   return aus;
 }
+/* Das Kern-Maximum ist ABLEITBAR (Stufe, Zweig, Module) - es stand trotzdem im Dokument und wurde
+   nur bei Bau und Ausbau geschrieben. Eine eingebaute Kernpanzerung erhoehte damit zwar
+   vorpostenWerte().kernLp, aber niemand las das fuer den Kern: Das Modul blieb bis zum naechsten
+   Ausbau wirkungslos, und nach einem Ausbau haette sein Ausbau das Maximum nicht wieder gesenkt.
+   Die Rechnung ist jetzt die eine Quelle. `doc.kern.lpMax` wird weiter mitgeschrieben, damit
+   Sicherungen und die Admin-Lage aus aelteren Staenden nichts Sinnloses zeigen, aber nicht mehr
+   gelesen. Ein Einbau HEILT dabei nicht (die LP bleiben, nur das Dach steigt) und ein Ausbau
+   kappt nur, was ueber dem neuen Dach liegt - sonst waere Ein- und Ausbauen eine Reparatur. */
+function vorpostenKernMax(doc) { return vorpostenWerte(doc).kernLp; }
+function vorpostenKernLp(doc) {
+  return Math.max(0, Math.min(vorpostenKernMax(doc), Math.round((doc && doc.kern && doc.kern.lp) || 0)));
+}
 function vorpostenVerteidigung(doc) {
   const st = vorpostenWerte(doc);
   return Math.round(st.verteidigung + rawFleetPower(doc.garnison || {}, 1, 1, null) * VORPOSTEN_GARNISON_FAKTOR);
@@ -12916,7 +12937,7 @@ function vorpostenFuerClient(doc, userId, jetzt) {
     zweig: vorpostenZweigOk(doc.zweig) ? doc.zweig : null,
     zweigName: vorpostenZweigOk(doc.zweig) ? VORPOSTEN_ZWEIGE[doc.zweig].name : null,
     maxStufe: VORPOSTEN_STUFEN.length,
-    kern: { lp: Math.max(0, Math.round((doc.kern && doc.kern.lp) || 0)), lpMax: Math.round((doc.kern && doc.kern.lpMax) || st.kernLp) },
+    kern: { lp: vorpostenKernLp(doc), lpMax: vorpostenKernMax(doc) },
     verteidigung: vorpostenVerteidigung(doc),
     garnisonAnzahl: vorpostenGarnisonAnzahl(doc),
     /* garnisonMax gehoert HIERHER und nicht in die Stufentabelle des Clients: Die Tabelle ist die
@@ -12971,8 +12992,8 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
   const durchschlag = Math.max(0.15, Math.min(0.95, kraft / (kraft + verteidigung)));
   const wurf = Math.round(kraft * (0.8 + Math.random() * 0.4) * durchschlag);
 
-  doc.kern = doc.kern || { lp: vorpostenWerte(doc).kernLp, lpMax: vorpostenWerte(doc).kernLp };
-  const lpVorher = Math.max(0, doc.kern.lp || 0);
+  doc.kern = doc.kern || { lp: vorpostenKernMax(doc), lpMax: vorpostenKernMax(doc) };
+  const lpVorher = vorpostenKernLp(doc);
   doc.kern.lp = Math.max(0, lpVorher - wurf);
   const schaden = lpVorher - doc.kern.lp;          // was ANGEKOMMEN ist, nicht der Wurf
 
@@ -13043,7 +13064,7 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
   } else {
     vorpostenSchreib(doc);
   }
-  return { schaden, gefallen, lp: doc.kern.lp, lpMax: doc.kern.lpMax, verteidigung, durchschlag: Math.round(durchschlag * 100) / 100,
+  return { schaden, gefallen, lp: doc.kern.lp, lpMax: vorpostenKernMax(doc), verteidigung, durchschlag: Math.round(durchschlag * 100) / 100,
     quote, garnisonVerluste, anteile, teilnehmer };
 }
 
@@ -15610,7 +15631,7 @@ app.get('/api/admin/lage', authMiddleware, (req, res) => {
   for (const k of Object.keys(db.shared)) {
     if (!k.startsWith('vorposten:')) continue;
     const d = vorpostenLies(k.slice('vorposten:'.length));
-    if (d) vorposten.push({ sys: d.sys, besitzerName: d.besitzerName || 'Kommandant', stufe: d.stufe || 1, kern: Math.round((d.kern && d.kern.lp) || 0), kernMax: Math.round((d.kern && d.kern.lpMax) || 0), seit: d.seit || 0 });
+    if (d) vorposten.push({ sys: d.sys, besitzerName: d.besitzerName || 'Kommandant', stufe: d.stufe || 1, kern: Math.round((d.kern && d.kern.lp) || 0), kernMax: vorpostenKernMax(d), seit: d.seit || 0 });
   }
   const notAus = Object.keys(NOTAUS_NAMEN).filter(n => notAusGesetzt(n));
   res.json({

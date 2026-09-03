@@ -5,3 +5,9 @@ jwt-secret.txt
 vapid-public.txt
 vapid-private.txt
 feedback-images/
+
+# Server-Kopie, die test_vorposten_http.js fuer seine Schalter- und Sabotage-Laeufe anlegt.
+# Sie muss im Repo-Verzeichnis liegen (require("./mailer") loest nur dort auf) und wird am Ende
+# weggeraeumt - bei einem abgebrochenen Lauf bleibt sie aber stehen und wanderte schon einmal
+# versehentlich in einen Commit.
+server_vptest_tmp.js

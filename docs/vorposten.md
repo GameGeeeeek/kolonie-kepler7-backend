@@ -588,3 +588,48 @@ Wächter: `tests/test_vorposten_lager_http.js` (Port 3257, 17 Prüfungen). Gegen
    (`werft: 2.20 \}`). Der neue Kanal `lager` dahinter hat sie gebrochen — die Anker fielen laut, die
    *Sabotage* aber still: Sie griff ins Leere, und die Gegenprobe belegte nichts mehr. Beide greifen
    den Wert jetzt innerhalb des `mult`-Objekts, ohne seine Position festzuhalten.
+
+## Etappe V5: Der Verbündete darf etwas (03.09.2026)
+
+Bis hierher stand an **jeder** Vorposten-Route `doc.besitzer !== req.userId` → 403. Ein
+Allianzpartner konnte nichts: nicht beisteuern, nicht mitnutzen, nicht mitbauen. Reines
+Einzeleigentum in einem Allianzspiel.
+
+**Die Mechanik ist eine Datenfrage.** `doc.garnisonVon` schlüsselt auf, **wer** was gestellt hat,
+und ist die Quelle; `doc.garnison` wird daraus nachgezogen — bei jedem `vorpostenSchreib`, wie das
+Kern-Dach. Zwei Zahlen über denselben Bestand wären sonst eine Frage der Zeit. Ein Dokument von vor
+dieser Etappe schreibt seine ganze Garnison dem Besitzer zu (Migration in `vorpostenGarnisonVon`).
+
+**Was der Verbündete darf:** Garnison beisteuern und **nur seine eigenen** Schiffe zurückrufen. Der
+Besitzer kann fremde Schiffe nicht einziehen. Ausbauen, abbauen, Projekte starten und das Lager
+abholen bleiben beim Besitzer.
+
+**Verluste treffen jeden Beitragenden mit derselben Quote**, nicht die Gesamtzahl mit
+anschließender Verteilung. Der Unterschied ist eine Rundung je Konto und Schiffstyp; dafür ist die
+Rechnung nachvollziehbar und niemand verliert Schiffe, die er nie gestellt hat.
+
+**Beim Fall und beim Abbau bekommt jeder seine eigene Meldung** (`alsVerbuendeter`) mit *seinen*
+Schiffen — ohne sie wäre die Garnison eines Verbündeten eines Tages einfach nicht mehr da, ohne dass
+irgendetwas es gesagt hätte. Die Module gehen weiterhin nur an den Besitzer.
+
+**Die Rechteprüfung liest den geteilten Speicher** (`allianceTagOf`, jede aktive Rolle), **nicht**
+`save.player.allianceTag`: Der Spielstand ist klientenautoritativ, und eine Rechteprüfung, die ihn
+glaubt, ist keine. Prüfung 2e misst genau das mit einem Konto, das den Tag im Spielstand trägt und
+keine Rolle im geteilten Speicher hat.
+
+Schalter: `VP_ALLIANZ_AKTIV` (ausgeliefert `false` — dann verhält sich alles wie vorher).
+
+Wächter: `tests/test_vorposten_allianz_http.js` (Port 3258, 14 Prüfungen). Gegenproben `schalter`
+(1a), `rueckruf` (3a, 3b), `spielstand` (2e, 3b) und `nachziehen` (2b, 2c).
+
+**Zwei Sabotagen griffen im ersten Entwurf ins Leere** und sind deshalb erwähnenswert: `schalter`
+setzte den Schalter, den Abschnitt 1 ohnehin selbst schreibt — er muss die *Gatterung* brechen;
+und `nachziehen` entfernte nur das Sicherheitsnetz in `vorpostenSchreib`, während der gemessene Weg
+die zweite, ausdrückliche Stelle im Stationieren benutzt. Eine Sabotage, die nichts trifft, sieht
+aus wie ein bestandener Test.
+
+### Offen aus der Auswahl: der Allianz-Vorposten mit geteilten Kosten
+
+Punkt (c) der Allianz-Frage — ein Vorposten, den mehrere gemeinsam bezahlen — ist bewusst **nicht**
+Teil dieser Etappe. Er ändert das Eigentumsmodell (heute genau ein `besitzer`) und braucht eine
+Treuhand für Baubeiträge in `db.shared`. Das ist eine eigene Etappe, keine Zeile mehr an dieser.

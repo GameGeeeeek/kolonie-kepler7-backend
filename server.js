@@ -1044,6 +1044,21 @@ function allianceTagWhereAdmin(userId) {
   }
   return null;
 }
+/* Der Allianz-Tag eines Kontos - jede aktive Rolle, nicht nur 'admin'. Gelesen wird der GETEILTE
+   Speicher, nicht `save.player.allianceTag`: Der Spielstand ist klientenautoritativ, und eine
+   Rechteprüfung, die ihn glaubt, ist keine. Ein Konto gehoert hoechstens einer Allianz an (siehe
+   allianceTagWhereAdmin). */
+function allianceTagOf(userId) {
+  if (!userId) return null;
+  const suffix = ':role:' + userId;
+  for (const k of Object.keys(db.shared)) {
+    if (!k.endsWith(suffix)) continue;
+    const m = k.match(/^alliance:([^:]+):role:/);
+    if (!m) continue;
+    try { const r = JSON.parse(db.shared[k]); if (r.role && r.role !== 'left') return m[1]; } catch (e) {}
+  }
+  return null;
+}
 // Aktive Mitglieder zählen (jede Rolle außer 'left') - für das Mitgliederlimit.
 function allianceMemberCount(tag) {
   const prefix = 'alliance:' + tag + ':role:';
@@ -13081,6 +13096,13 @@ const VP_MARKT_SLOTS_MAX = 3;
 const VP_LAGER_AKTIV = false;
 const VP_LAGER_STUNDEN = 12;
 const VP_LAGER_ANTEILE = { erz: 0.225, kristalle: 0.075, deuterium: 0.06 };
+/* ETAPPE V5: DER VERBUENDETE DARF ETWAS (03.09.2026). Bis hierher stand an jeder Vorposten-Route
+   `doc.besitzer !== req.userId` -> 403: Ein Allianzpartner konnte nichts. Kein Beisteuern, keine
+   Nutzung, kein Mitbauen - reines Einzeleigentum in einem Allianzspiel.
+
+   Etappe a: Verbuendete duerfen GARNISON beisteuern und nur ihre eigenen Schiffe zurueckrufen.
+   Etappe b: Verbuendete nutzen den Flugzeit-Bonus mit (`verbuendet` im Client-Dokument). */
+const VP_ALLIANZ_AKTIV = false;
 const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
 const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
 const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer, am Objekt
@@ -13217,6 +13239,10 @@ function vorpostenLies(sys) {
    wird es nirgends mehr (vorpostenKernMax rechnet), aber ein Dokument, das ein anderes Dach
    behauptet als die Rechnung, waere eine Falle fuer den naechsten Leser - und fuer Sicherungen. */
 function vorpostenSchreib(doc) {
+  // Die Gesamtzahl wird bei JEDEM Schreiben aus der Aufschluesselung nachgezogen - dieselbe
+  // Vorsicht wie beim Kern-Dach. Wer `doc.garnison` direkt anfasst, verliert seine Aenderung hier;
+  // genau das ist die Absicht (es gibt nur noch EINE Quelle).
+  if (doc) vorpostenGarnisonNachziehen(doc);
   if (doc && doc.kern) {
     doc.kern.lpMax = vorpostenKernMax(doc);
     doc.kern.lp = Math.max(0, Math.min(doc.kern.lpMax, Math.round(doc.kern.lp || 0)));
@@ -13324,6 +13350,58 @@ function vorpostenAnflugEntfernen(doc, musterId) {
   if (rest.length === doc.anflug.length) return false;
   doc.anflug = rest;
   return true;
+}
+/* WER WAS BEIGESTEUERT HAT (Etappe V5). `doc.garnison` bleibt die Gesamtzahl - alles andere im
+   System liest sie, vom Verteidigungswert bis zur Anzeige. `doc.garnisonVon` ist die
+   Aufschluesselung je Konto und die eigentliche QUELLE: Sie entscheidet, wer was zurueckrufen
+   darf. `doc.garnison` wird daraus nachgezogen (wie `kern.lpMax`), damit die beiden nie
+   auseinanderlaufen koennen - zwei Zahlen ueber denselben Bestand sind sonst eine Frage der Zeit. */
+function vorpostenGarnisonVon(doc) {
+  if (!doc.garnisonVon || typeof doc.garnisonVon !== 'object') {
+    // Migration: Alles, was vor dieser Etappe eingeflogen ist, gehoert dem Besitzer.
+    doc.garnisonVon = doc.besitzer ? { [doc.besitzer]: Object.assign({}, doc.garnison || {}) } : {};
+  }
+  return doc.garnisonVon;
+}
+function vorpostenGarnisonNachziehen(doc) {
+  const von = vorpostenGarnisonVon(doc);
+  const summe = {};
+  for (const teil of Object.values(von)) {
+    for (const [typ, n] of Object.entries(teil || {})) {
+      const z = Math.max(0, Math.round(Number(n) || 0));
+      if (z > 0) summe[typ] = (summe[typ] || 0) + z;
+    }
+  }
+  doc.garnison = summe;
+}
+/* Verluste treffen JEDEN Beitragenden mit derselben QUOTE, nicht die Gesamtzahl mit anschliessender
+   Verteilung. Der Unterschied ist eine Rundung je Konto und Schiffstyp; dafuer ist die Rechnung
+   nachvollziehbar und niemand verliert Schiffe, die er nie gestellt hat. */
+function vorpostenGarnisonVerlust(doc, quote) {
+  const von = vorpostenGarnisonVon(doc);
+  const verluste = {};
+  for (const teil of Object.values(von)) {
+    for (const [typ, n] of Object.entries(Object.assign({}, teil))) {
+      const hat = Math.max(0, Math.round(Number(n) || 0));
+      if (hat <= 0) { delete teil[typ]; continue; }
+      const weg = Math.min(hat, Math.round(hat * quote));
+      if (weg <= 0) continue;
+      teil[typ] = hat - weg;
+      if (teil[typ] <= 0) delete teil[typ];
+      verluste[typ] = (verluste[typ] || 0) + weg;
+    }
+  }
+  vorpostenGarnisonNachziehen(doc);
+  return verluste;
+}
+/* Darf dieses Konto an diesem Vorposten mitwirken? Der Besitzer immer; ein Verbuendeter nur, wenn
+   der Schalter an ist UND beide im geteilten Speicher dieselbe aktive Allianz haben. */
+function vorpostenVerbuendet(doc, userId) {
+  if (!doc || !userId) return false;
+  if (doc.besitzer === userId) return true;
+  if (!VP_ALLIANZ_AKTIV) return false;
+  const meiner = allianceTagOf(userId);
+  return !!meiner && meiner === allianceTagOf(doc.besitzer);
 }
 function vorpostenGarnisonAnzahl(doc) {
   return Object.values((doc && doc.garnison) || {}).reduce((a, n) => a + (typeof n === 'number' && n > 0 ? n : 0), 0);
@@ -13591,6 +13669,12 @@ function vorpostenFuerClient(doc, userId, jetzt) {
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
     nutzen: { flug: st.flug, prod: st.prod, scan: st.scan, werft: st.werft, markt: st.markt, flugDeckel: st.flugDeckel, werftDeckel: st.werftDeckel, marktDeckel: VP_MARKT_DECKEL },
     eigener,
+    /* V5: `verbuendet` heisst „darf hier mitwirken, ist aber nicht der Besitzer". Der Client
+       braucht die Unterscheidung, weil ein Verbuendeter stationieren und zurueckrufen darf, aber
+       nicht ausbauen, abbauen oder Projekte starten. `meineGarnison` ist SEIN Anteil - die
+       vollstaendige Aufschluesselung sieht weiterhin nur der Besitzer. */
+    verbuendet: !eigener && vorpostenVerbuendet(doc, userId),
+    meineGarnison: Object.assign({}, (vorpostenGarnisonVon(doc))[userId] || {}),
     /* NUR DER BESITZER sieht den Anflug. Verteidigung, Garnisonszahl und Steckplaetze stehen
        bewusst jedem offen - ein Angreifer soll sehen, worauf er sich einlaesst. Ein ANFLUG ist
        etwas anderes: Er verraet den Plan eines Dritten. Wer ihn allen zeigte, machte aus der
@@ -13659,14 +13743,9 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
   // Die Garnison verliert serverseitig - sie wohnt im Dokument, nicht in einem Spielstand.
   const garnQuote = Math.max(0.02, Math.min(0.5, 0.05 + 0.30 * (kraft / (kraft + verteidigung))));
   const garnisonVerluste = {};
-  for (const [typ, n] of Object.entries(doc.garnison || {})) {
-    if (typeof n !== 'number' || n <= 0) continue;
-    const weg = Math.min(n, Math.round(n * garnQuote));
-    if (weg <= 0) continue;
-    doc.garnison[typ] = n - weg;
-    if (doc.garnison[typ] <= 0) delete doc.garnison[typ];
-    garnisonVerluste[typ] = weg;
-  }
+  // V5: Der Verlust trifft jeden Beitragenden mit derselben Quote (vorpostenGarnisonVerlust) -
+  // vorher wurde die Gesamtzahl gekuerzt, was mit mehreren Beitragenden niemandem zuzuordnen waere.
+  Object.assign(garnisonVerluste, vorpostenGarnisonVerlust(doc, garnQuote));
   // Der Angreifer verliert als QUOTE (der Server schreibt keinen fremden Spielstand); die Garnison
   // treibt sie hoch, ein leerer Vorposten kostet fast nur den Grundverlust.
   const quote = Math.max(0.03, Math.min(0.45, VORPOSTEN_VERLUST + 0.20 * (verteidigung / (kraft + verteidigung)) + Math.random() * 0.04));
@@ -13713,8 +13792,21 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
     pushPendingReward(doc.besitzer, {
       type: 'vorposten-verlust', system: doc.sys, stufe: doc.stufe, name: st.name,
       angreiferName: vermerk.angreiferName, teilnehmer, lagerVerloren: lagerBeimFall,
-      garnisonVerloren: Object.assign({}, doc.garnison || {}), zeit: jetzt
+      alsVerbuendeter: false,
+      garnisonVerloren: Object.assign({}, (vorpostenGarnisonVon(doc))[doc.besitzer] || {}), zeit: jetzt
     });
+    /* V5: Auch VERBUENDETE, die Schiffe gestellt haben, verlieren sie mit dem Vorposten - und
+       erfahren es. Ohne diese Meldung waere ihre Garnison eines Tages einfach nicht mehr da, ohne
+       dass irgendetwas es gesagt haette. Das Lager gehoert dem Besitzer, es steht hier nicht. */
+    for (const [uid, teil] of Object.entries(vorpostenGarnisonVon(doc))) {
+      if (!uid || uid === doc.besitzer || !Object.keys(teil || {}).length) continue;
+      pushPendingReward(uid, {
+        type: 'vorposten-verlust', system: doc.sys, stufe: doc.stufe, name: st.name,
+        angreiferName: vermerk.angreiferName, teilnehmer, lagerVerloren: null,
+        alsVerbuendeter: true, besitzerName: doc.besitzerName || 'Kommandant',
+        garnisonVerloren: Object.assign({}, teil), zeit: jetzt
+      });
+    }
     vorpostenLoesch(doc.sys);
   } else {
     vorpostenSchreib(doc);
@@ -13957,7 +14049,11 @@ app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
   if (!vorpostenSysOk(sys) || !composition || typeof composition !== 'object' || planetKey.length > 64) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   const doc = vorpostenLies(sys);
   if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
-  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann hier stationieren.' });
+  if (!vorpostenVerbuendet(doc, req.userId)) {
+    return res.status(403).json({ error: VP_ALLIANZ_AKTIV
+      ? 'Nur der Besitzer und seine Allianz können hier stationieren.'
+      : 'Nur der Besitzer kann hier stationieren.' });
+  }
   const save = astLeseSave(req.userId);
   if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand.' });
   const fleetObj = planetKey === 'home' ? save.fleet : (save.colonies && save.colonies[planetKey] && save.colonies[planetKey].fleet);
@@ -13965,7 +14061,10 @@ app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
   const st = vorpostenWerte(doc);
   let platz = Math.max(0, st.garnisonMax - vorpostenGarnisonAnzahl(doc));
   const angenommen = {};
-  doc.garnison = doc.garnison || {};
+  // V5: Gebucht wird auf das eigene Konto in der Aufschluesselung; `doc.garnison` zieht
+  // vorpostenSchreib daraus nach.
+  const von = vorpostenGarnisonVon(doc);
+  if (!von[req.userId]) von[req.userId] = {};
   for (const typ of Object.keys(composition)) {
     if (!vorpostenKampfschiff(typ)) continue;
     const angefordert = Math.max(0, Math.floor(Number(composition[typ]) || 0));
@@ -13973,9 +14072,10 @@ app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
     const n = Math.min(angefordert, verfuegbar, platz);
     if (n <= 0) continue;
     angenommen[typ] = n;
-    doc.garnison[typ] = (doc.garnison[typ] || 0) + n;
+    von[req.userId][typ] = (von[req.userId][typ] || 0) + n;
     platz -= n;
   }
+  vorpostenGarnisonNachziehen(doc);
   if (!Object.keys(angenommen).length) {
     return res.status(400).json({ error: 'Nichts stationiert - keine Kampfschiffe verfügbar oder die Garnison ist voll (' + st.garnisonMax + ' Schiffe).', garnisonMax: st.garnisonMax, frei: platz });
   }
@@ -13990,9 +14090,16 @@ app.post('/api/vorposten/rueckruf', authMiddleware, async (req, res) => {
   if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
   const doc = vorpostenLies(sys);
   if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
-  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann seine Garnison zurückrufen.' });
-  const garnison = Object.assign({}, doc.garnison || {});
-  doc.garnison = {};
+  if (!vorpostenVerbuendet(doc, req.userId)) {
+    return res.status(403).json({ error: 'Hier steht nichts von dir.' });
+  }
+  /* V5: Zurueckgerufen wird, was DIESES Konto gestellt hat - nicht die ganze Garnison. Der Besitzer
+     eines Vorpostens, in dem Verbuendete stehen, kann deren Schiffe also nicht einziehen. */
+  const von = vorpostenGarnisonVon(doc);
+  const garnison = Object.assign({}, von[req.userId] || {});
+  if (!Object.keys(garnison).length) return res.status(400).json({ error: 'Hier steht nichts von dir.', leer: true });
+  delete von[req.userId];
+  vorpostenGarnisonNachziehen(doc);
   vorpostenSchreib(doc);
   await saveDb();
   res.json({ ok: true, garnison, verteidigung: vorpostenVerteidigung(doc) });
@@ -14027,10 +14134,20 @@ async function vorpostenAbbauTick() {
     const module = (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlots(doc.stufe));
     if (user) for (const instKey of module) if (vpModulTeile(instKey)) vpModulGeben(user, instKey, 1);
     const st = vorpostenStufeVon(doc);
-    pushPendingReward(doc.besitzer, {
-      type: 'vorposten-abbau', system: doc.sys, stufe: doc.stufe || 1, name: st.name,
-      garnison: Object.assign({}, doc.garnison || {}), module, zeit: jetzt
-    });
+    /* V5: JEDER Beitragende bekommt SEINE Schiffe zurueck, nicht der Besitzer alle. Der Besitzer
+       bekommt seine Meldung auch dann, wenn er nichts stationiert hatte - es ist schliesslich sein
+       Vorposten, der verschwindet, und die Module liegen in seinem Bestand. */
+    const vonAbbau = vorpostenGarnisonVon(doc);
+    const empfaenger = new Set(Object.keys(vonAbbau).concat([doc.besitzer]));
+    for (const uid of empfaenger) {
+      if (!uid) continue;
+      pushPendingReward(uid, {
+        type: 'vorposten-abbau', system: doc.sys, stufe: doc.stufe || 1, name: st.name,
+        garnison: Object.assign({}, vonAbbau[uid] || {}),
+        module: uid === doc.besitzer ? module : [],
+        alsVerbuendeter: uid !== doc.besitzer, zeit: jetzt
+      });
+    }
     vorpostenLoesch(doc.sys);
     fertig++;
     console.log('[vorposten] abbau fertig sys=' + doc.sys + ' userId=' + doc.besitzer +

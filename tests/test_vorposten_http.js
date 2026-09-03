@@ -47,7 +47,7 @@ const SAB = process.env.KEPLER_VP_SABOTAGE || '';
    damals nur, ob das Erwartete faellt, also fiel es nicht auf. Seit sie beide Richtungen misst,
    gehoert jede gemessene Folge in die Liste. */
 const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a', '1b', '2b'], typ: ['5b', '5c'], meldung: ['4h', '4h2'],
-  kerndach: ['10a'], kerndachab: ['10c'], projektwirkung: ['11f', '11h'], projektzeit: ['11d'],
+  kerndach: ['10a'], kerndachab: ['10c'], abbaufrist: ['6b', '6c', '6d', '6e', '6f'], abbaumodule: ['6g'], projektwirkung: ['11f', '11h'], projektzeit: ['11d'],
   zweigwahl: ['7e', '7f', '7g', '7h'], zweigwerte: ['7g'],
   // Etappe 3 (Stationsmodule): Die Listen sind gemessen, siehe Abschnitt 9.
   // GEMESSEN, nicht geschaetzt: Bei 'modulbestand' faellt 9d NICHT - der Einbau gelingt ja weiter,
@@ -185,6 +185,15 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
   geflippt = geflippt.replace(/const VP_PROJEKTE_AKTIV = (true|false);/, 'const VP_PROJEKTE_AKTIV = true;');
   check('0-kopie2: auch der Projekt-Schalter liess sich in der Kopie umlegen',
     /const VP_PROJEKTE_AKTIV = true;/.test(geflippt), { gefunden: /const VP_PROJEKTE_AKTIV = (true|false);/.test(roh) });
+  /* Derselbe Weg fuer den Abbau-Schalter (03.09.2026) - und dazu ein KURZER galaxyTick: Der Abbau
+     wird dort abgeschlossen, und 15 Minuten wartet kein Test ab. Die Kopie taktet stattdessen im
+     Sekundenbereich; gemessen wird damit der ECHTE Weg (der Tick raeumt auf), nicht eine
+     Abkuerzung ueber einen Endpunkt, den es im Betrieb gar nicht gibt. */
+  geflippt = geflippt.replace(/const VORPOSTEN_ABBAU_AKTIV = (true|false);/, 'const VORPOSTEN_ABBAU_AKTIV = true;');
+  geflippt = geflippt.replace(/const GALAXY_TICK_MS = [^;]+;/, 'const GALAXY_TICK_MS = 1500;');
+  check('0-kopie3: Abbau-Schalter umgelegt und der galaxyTick auf Sekunden verkuerzt',
+    /const VORPOSTEN_ABBAU_AKTIV = true;/.test(geflippt) && /const GALAXY_TICK_MS = 1500;/.test(geflippt),
+    { schalter: /const VORPOSTEN_ABBAU_AKTIV = (true|false);/.test(roh), takt: /const GALAXY_TICK_MS = /.test(roh) });
   // Unabhaengige Anker fuer die Erwartungen (nicht aus der API-Antwort selbst, Regel 62): die
   // Stufentabelle aus dem QUELLTEXT.
   const kernLps = [...roh.matchAll(/kernLp:\s*(\d+)/g)].map(m => Number(m[1]));
@@ -221,6 +230,10 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
        Sabotage, die zu viel trifft. */
     else if (SAB === 'projektwirkung') geflippt = geflippt.replace('  const pr = vpProjektBoni(doc);', '  const pr = { kern:0, verteidigung:0, garnison:0, flug:0, prod:0, scan:0, flugDeckel: VP_FLUG_DECKEL };');
     else if (SAB === 'projektzeit') geflippt = geflippt.replace('  return vpProjektListe(doc).filter(p => p && vpProjektDef(p.key) && (p.fertigAb || 0) <= t).map(p => p.key);', '  return vpProjektListe(doc).filter(p => p && vpProjektDef(p.key)).map(p => p.key);');
+    /* Der Abbau (03.09.2026), zwei Haelften: die FRIST (verschwindet der Vorposten wieder sofort?)
+       und die RUECKGABE der Module beim Aufraeumen. */
+    else if (SAB === 'abbaufrist') geflippt = geflippt.replace('  doc.abbauAb = jetzt + VORPOSTEN_ABBAU_MS;', '  doc.abbauAb = jetzt - 1;');
+    else if (SAB === 'abbaumodule') geflippt = geflippt.replace('    if (user) for (const instKey of module) if (vpModulTeile(instKey)) vpModulGeben(user, instKey, 1);', '    /* sabotiert: Module bleiben weg */;');
     else { console.log('unbekannte Sabotage: ' + SAB); process.exit(2); }
     check('0-sab: die Sabotage "' + SAB + '" hat den Quelltext veraendert', geflippt !== vorher, { veraendert: geflippt !== vorher });
   }
@@ -390,16 +403,74 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
   check('5d: der Besitzer erfaehrt vom Verlust (vorposten-verlust mit Restgarnison)',
     !!verlustA && verlustA.system === SYS1 && verlustA.garnisonVerloren && typeof verlustA.garnisonVerloren === 'object', verlustA);
 
-  // ---- 6) Aufgeben -----------------------------------------------------------------------------
+  // ---- 6) Aufgeben ist ein ABBAU ueber 24 Stunden (03.09.2026) ----------------------------------
+  /* Auftrag Sascha: "vorposten sollen auch aufgebar sein allerdings muessen die abgebaut werden
+     dauert 24 stunden". Der Punkt der Frist ist 6d: Bis hierher verschwand der Vorposten in dem
+     Moment, in dem sein Besitzer es wollte - auch mitten im Angriff, und der Angreifer stand vor
+     einem leeren System. Deshalb misst dieser Abschnitt nicht nur, DASS es dauert, sondern dass
+     der Vorposten waehrenddessen angreifbar bleibt. */
   const SYS6 = 'vpsys-f';
-  await aendereDb(d => { schreibDoc(d, doc(SYS6, ANNA, 'anna', { garnison: { cruisers: 40 } })); });
+  const modul6 = get0.body.modulDefs[0].key + ':episch';
+  await aendereDb(d => {
+    schreibDoc(d, doc(SYS6, ANNA, 'anna', { garnison: { cruisers: 40 }, stufe: get0.body.zweigAb + 1,
+      zweig: 'festung', module: [modul6] }));
+    d.users.anna.vpModule = {};
+    const sb = liesSave(d, BEN); sb.fleet.missions = (sb.fleet.missions || []).concat([angriffMission('m6', SYS6)]); schreibSave(d, BEN, sb);
+  });
   const fremdAuf = await post(tokB, '/vorposten/aufgeben', { system: SYS6 });
   check('6a: ein Fremder kann nicht aufgeben', fremdAuf.status === 403, { status: fremdAuf.status });
   const auf = await post(tokA, '/vorposten/aufgeben', { system: SYS6 });
   let nach6 = 'unbekannt';
   await aendereDb(d => { nach6 = liesDoc(d, SYS6); });
-  check('6b: der Besitzer gibt auf - Garnison kommt zurueck, keine Rueckerstattung, Dokument weg',
-    auf.status === 200 && auf.body.garnison && auf.body.garnison.cruisers === 40 && auf.body.rueckerstattung === 0 && nach6 === null, { body: auf.body, docDanach: nach6 });
+  check('6b: Aufgeben startet den Abbau - der Vorposten steht noch, mit Frist in der Zukunft',
+    auf.status === 200 && auf.body.abbau === true && auf.body.abbauAb > Date.now()
+    && auf.body.dauerMs > 0 && nach6 !== null && nach6.abbauAb === auf.body.abbauAb,
+    { body: auf.body && { abbau: auf.body.abbau, abbauAb: auf.body.abbauAb }, stehtNoch: nach6 !== null });
+  const nochmal6 = await post(tokA, '/vorposten/aufgeben', { system: SYS6 });
+  check('6c: ein zweiter Aufruf startet nichts Neues, sondern nennt die Restzeit',
+    nochmal6.status === 400 && nochmal6.body.laeuft === true && nochmal6.body.abbauAb === auf.body.abbauAb,
+    { status: nochmal6.status, body: nochmal6.body });
+  // 6d: DER Punkt der Frist - der Abbau ist keine Fluchttuer aus einem laufenden Angriff.
+  const schlag6 = await post(tokB, '/vorposten/angriff', { system: SYS6, missionId: 'm6' });
+  check('6d: waehrend des Abbaus bleibt der Vorposten angreifbar (sonst waere er eine Fluchttuer)',
+    schlag6.status === 200 && schlag6.body.ok === true && schlag6.body.schaden > 0,
+    { status: schlag6.status, schaden: schlag6.body && schlag6.body.schaden, error: schlag6.body && schlag6.body.error });
+  const abbruch6 = await post(tokA, '/vorposten/abbau/abbrechen', { system: SYS6 });
+  let nachAbbruch = null;
+  await aendereDb(d => { nachAbbruch = liesDoc(d, SYS6); });
+  check('6e: der Abbau laesst sich abbrechen - die Frist ist weg, der Vorposten bleibt',
+    abbruch6.status === 200 && nachAbbruch && !nachAbbruch.abbauAb, { status: abbruch6.status, doc: !!nachAbbruch });
+  // 6f: abgelaufene Frist -> der galaxyTick raeumt auf. Die Kopie taktet im Sekundenbereich.
+  /* Die Garnison wird HIER gemessen, nicht aus der Vorrichtung angenommen: Der Schlag in 6d hat
+     Schiffe gekostet, und die Regel lautet "was noch dasteht, kommt zurueck" - nicht "vierzig".
+     Der erste Entwurf verglich mit der Startzahl und fiel genau daran (gemessen: 37 statt 40). */
+  /* NULL-SICHER: Unter der Sabotage `abbaufrist` ist die Frist sofort abgelaufen, der Tick raeumt
+     den Vorposten also schon vor dieser Zeile weg. Der erste Entwurf griff hier auf `dd.garnison`
+     eines nicht mehr vorhandenen Dokuments zu und STUERZTE AB - damit belegten 6f und 6g unter
+     dieser Sabotage gar nichts, und die Prueflisten beider Laeufe waren verschieden. Genau die
+     Lehre aus test_vorposten_module_ui: Ein Test, der am kaputten Stand abstuerzt statt zu fallen,
+     misst dort nichts. */
+  let garnVorTick = null;
+  await aendereDb(d => {
+    const dd = liesDoc(d, SYS6);
+    if (!dd) return;
+    garnVorTick = Object.assign({}, dd.garnison || {});
+    dd.abbauAb = Date.now() - 1000;
+    schreibDoc(d, dd);
+  });
+  await new Promise(r => setTimeout(r, 4000));
+  let nachTick = 'unbekannt', belohnung6 = null, bestand6 = null;
+  await aendereDb(d => {
+    nachTick = liesDoc(d, SYS6);
+    belohnung6 = (d.private[ANNA].__pendingRewards || []).find(r => r.type === 'vorposten-abbau') || null;
+    bestand6 = d.users.anna.vpModule || {};
+  });
+  check('6f: nach Ablauf raeumt der Tick auf - Dokument weg, Belohnung mit EIGENEM type, Garnison drin',
+    nachTick === null && !!belohnung6 && belohnung6.system === SYS6
+    && JSON.stringify(belohnung6.garnison || {}) === JSON.stringify(garnVorTick),
+    { docDanach: nachTick, zurueck: belohnung6 && belohnung6.garnison, stand: garnVorTick });
+  check('6g: und die eingebauten Module kommen in den Bestand zurueck (kein Fundstueck geht beim Aufraeumen verloren)',
+    bestand6 && bestand6[modul6] === 1, { bestand: bestand6, erwartet: modul6 });
 
   // ---- 7) Ausbau -------------------------------------------------------------------------------
   const SYS7 = 'vpsys-g';

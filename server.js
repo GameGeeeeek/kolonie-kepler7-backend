@@ -6875,6 +6875,9 @@ function galaxyTick() {
   const neueSysteme = syncWeeklySystems(Date.now());
   if (neueSysteme) console.log(`[galaxy] ${neueSysteme} Wochensystem(e) nachgezogen, jetzt ${SYSTEMS.length} Systeme`);
   pruneChatKeys();   // alte Chat-Schlüssel wegräumen - siehe CHAT_KEEP_PER_CHANNEL
+  // Fertige Vorposten-Abbauten abschliessen (03.09.2026). Bewusst hier und nicht in einem eigenen
+  // Takt: 24 Stunden brauchen keine feinere Aufloesung als 15 Minuten.
+  vorpostenAbbauTick().catch(e => console.error('[vorposten] abbauTick:', e && e.message));
   updateHallOfFameServer();
   resolveWeeklyLeagueServer();
   resolveSeasonLeagueServer();
@@ -12680,6 +12683,20 @@ app.post('/api/deploy-webhook', (req, res) => {
    aktiv:false mit leerer Liste. Dazu der Admin-Notaus `vorposten` (db.notAus): er stoppt nur den
    BAU neuer Vorposten - bestehende bleiben angreifbar, wie bei den Nestern. */
 const VORPOSTEN_AKTIV = true;   // umgelegt am 02.09.2026, unmittelbar nach dem Frontend-Merge (Vorposten-Zweig live)
+/* ABBAU STATT SOFORT-AUFGABE (03.09.2026). Auftrag Sascha: "vorposten sollen auch aufgebar sein
+   allerdings muessen die abgebaut werden dauert 24 stunden."
+
+   Der Grund, warum das mehr ist als eine Wartezeit: Bis hierher verschwand ein Vorposten in dem
+   Moment, in dem sein Besitzer es wollte - auch mitten in einem Angriff. Wer sah, dass seine
+   Station fallen wuerde, gab sie auf, und der Angreifer stand vor einem leeren System: keine
+   Beute, kein Kampfpunkt, die Fluege umsonst. Mit der Frist bleibt der Vorposten angreifbar,
+   solange er abgebaut wird - der Abbau ist damit ein Entschluss, keine Fluchttuer.
+
+   Der Schalter bleibt bis zum Frontend-Merge auf false: Das ausgelieferte Spiel erwartet von
+   /api/vorposten/aufgeben eine sofortige Loeschung samt Garnison zurueck. Waere er schon an,
+   klickte ein Spieler "aufgeben" und saehe seinen Vorposten weiter stehen. */
+const VORPOSTEN_ABBAU_AKTIV = false;   // umgelegt wird er IM Frontend-PR
+const VORPOSTEN_ABBAU_MS = 24 * 3600 * 1000;
 const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
 const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
 const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer, am Objekt
@@ -13055,6 +13072,12 @@ function vorpostenVerteidigung(doc) {
   const st = vorpostenWerte(doc);
   return Math.round(st.verteidigung + rawFleetPower(doc.garnison || {}, 1, 1, null) * VORPOSTEN_GARNISON_FAKTOR);
 }
+/* Laeuft der Abbau, und wie lange noch? Der Zustand ist EIN Feld am Dokument (`abbauAb`), kein
+   eigener Speicher: Alles, was den Vorposten liest, sieht ihn damit automatisch mit. */
+function vorpostenAbbauLaeuft(doc) {
+  const ab = (doc && doc.abbauAb) || 0;
+  return ab > 0 ? ab : 0;
+}
 function vorpostenHeimatSystem(userId) {
   try { return JSON.parse(db.shared['leaderboard:' + userId] || '{}').homeSystem || null; } catch (e) { return null; }
 }
@@ -13111,6 +13134,10 @@ function vorpostenFuerClient(doc, userId, jetzt) {
        Station staerker wird - eine Einladung, vorher zuzuschlagen. */
     projekte: vpProjekteFertig(doc, jetzt),
     projektBoni: st.projektBoni || null,
+    /* Der Abbau ist fuer JEDEN sichtbar, nicht nur fuer den Besitzer - wie Verteidigung und
+       Garnisonszahl. Eine Station, die in Kuerze verschwindet, ist fuer einen Angreifer eine
+       echte Information: Es lohnt sich, VORHER zuzuschlagen. Genau das soll die Frist bewirken. */
+    abbauAb: vorpostenAbbauLaeuft(doc) || null,
     schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
     nutzen: { flug: st.flug, prod: st.prod, scan: st.scan, flugDeckel: st.flugDeckel },
@@ -13509,6 +13536,45 @@ app.post('/api/vorposten/rueckruf', authMiddleware, async (req, res) => {
 // Aufgeben: keine Rueckerstattung (Konzept §9, Empfehlung a) - der Bau ist eine verbindliche
 // Ortswahl, und ein Abbau-Wiederaufbau-Kreislauf entsteht so gar nicht erst. Die Garnison kommt
 // zurueck (der Client legt dafuer die Rueckflug-Mission an).
+/* SCHLIESST FERTIGE ABBAUTEN AB. Laeuft im galaxyTick (alle 15 Minuten) - ein 24-Stunden-Vorhaben
+   braucht keine feinere Aufloesung, und ein eigener Takt waere ein zweiter Zeitgeber fuer dieselbe
+   Sache. Bewusst NICHT beim Lesen: Ein GET, der schreibt, ist die Sorte Nebenwirkung, die man beim
+   naechsten Endpunkt vergisst.
+
+   Was zurueckkommt, und warum:
+   - Die MODULE gehen in den Bestand des Besitzers. Ein legendaeres Fundstueck beim freiwilligen
+     Abbau zu verlieren, waere eine Strafe fuer Aufraeumen. Faellt der Vorposten dagegen im Kampf,
+     bleiben sie verloren - dort hat sie jemand zerstoert.
+   - Die GARNISON kommt ueber pushPendingReward mit eigenem type ('vorposten-abbau'), nicht ueber
+     eine Rueckflug-Mission: Der Server schreibt keinen fremden Spielstand, und der Besitzer ist
+     beim Ablauf der Frist ueblicherweise gar nicht da. Der Frontend-Zweig dazu gehoert in denselben
+     Auftrag (CLAUDE.md).
+   - Ein laufendes STATIONSPROJEKT ist mit der Station weg. Es haette nichts, worin es fertig
+     werden koennte. */
+async function vorpostenAbbauTick() {
+  if (!VORPOSTEN_ABBAU_AKTIV) return 0;
+  const jetzt = Date.now();
+  let fertig = 0;
+  for (const doc of vorpostenAlle()) {
+    const ab = vorpostenAbbauLaeuft(doc);
+    if (!ab || ab > jetzt) continue;
+    const user = findUserById(doc.besitzer);
+    const module = (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlots(doc.stufe));
+    if (user) for (const instKey of module) if (vpModulTeile(instKey)) vpModulGeben(user, instKey, 1);
+    const st = vorpostenStufeVon(doc);
+    pushPendingReward(doc.besitzer, {
+      type: 'vorposten-abbau', system: doc.sys, stufe: doc.stufe || 1, name: st.name,
+      garnison: Object.assign({}, doc.garnison || {}), module, zeit: jetzt
+    });
+    vorpostenLoesch(doc.sys);
+    fertig++;
+    console.log('[vorposten] abbau fertig sys=' + doc.sys + ' userId=' + doc.besitzer +
+      ' module=' + module.length);
+  }
+  if (fertig) await saveDb();
+  return fertig;
+}
+
 app.post('/api/vorposten/aufgeben', authMiddleware, async (req, res) => {
   if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
   const sys = String((req.body && req.body.system) || '');
@@ -13516,11 +13582,42 @@ app.post('/api/vorposten/aufgeben', authMiddleware, async (req, res) => {
   const doc = vorpostenLies(sys);
   if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
   if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann seinen Vorposten aufgeben.' });
-  const garnison = Object.assign({}, doc.garnison || {});
-  vorpostenLoesch(sys);
-  console.log('[vorposten] aufgegeben userId=' + req.userId + ' sys=' + sys);
+  // Solange der Schalter aus ist, bleibt das ausgelieferte Verhalten: sofort weg, Garnison zurueck.
+  if (!VORPOSTEN_ABBAU_AKTIV) {
+    const garnison = Object.assign({}, doc.garnison || {});
+    vorpostenLoesch(sys);
+    console.log('[vorposten] aufgegeben userId=' + req.userId + ' sys=' + sys);
+    await saveDb();
+    return res.json({ ok: true, garnison, rueckerstattung: 0 });
+  }
+  const jetzt = Date.now();
+  const laeuft = vorpostenAbbauLaeuft(doc);
+  if (laeuft) {
+    return res.status(400).json({ error: 'Der Abbau läuft bereits - noch ' + Math.ceil((laeuft - jetzt) / 60000) + ' Minuten.',
+      laeuft: true, abbauAb: laeuft });
+  }
+  doc.abbauAb = jetzt + VORPOSTEN_ABBAU_MS;
+  vorpostenSchreib(doc);
+  console.log('[vorposten] abbau gestartet userId=' + req.userId + ' sys=' + sys);
   await saveDb();
-  res.json({ ok: true, garnison, rueckerstattung: 0 });
+  res.json({ ok: true, abbau: true, abbauAb: doc.abbauAb, dauerMs: VORPOSTEN_ABBAU_MS,
+    vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
+});
+
+/* Abbrechen. Es gibt nichts zu erstatten - der Abbau kostet nichts, er kostet Zeit. Wer ihn
+   abbricht, hat die Frist umsonst laufen lassen; das ist die ganze Strafe und sie reicht. */
+app.post('/api/vorposten/abbau/abbrechen', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann den Abbau abbrechen.' });
+  if (!vorpostenAbbauLaeuft(doc)) return res.status(400).json({ error: 'An diesem Vorposten läuft kein Abbau.', keinAbbau: true });
+  delete doc.abbauAb;
+  vorpostenSchreib(doc);
+  await saveDb();
+  res.json({ ok: true, vorposten: vorpostenFuerClient(doc, req.userId, Date.now()) });
 });
 
 app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {

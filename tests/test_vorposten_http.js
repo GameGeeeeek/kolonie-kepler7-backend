@@ -23,9 +23,9 @@
 //   schaden  -> 4c  (der volle Wurf statt des angekommenen Schadens; gemessen: genau 4c)
 //   meldung  -> 4h, 4h2 (die Benachrichtigung an den Besitzer entfaellt; gemessen: beide)
 //   abkling  -> 4d  (keine Abklingzeit am Objekt; gemessen: genau 4d)
-//   rechte   -> 1a  (die Storage-Route schreibt vorposten:* wieder; gemessen: 1a, und als FOLGE 1b/2b -
+//   rechte   -> 1a, 1b, 2b (die Storage-Route schreibt vorposten:* wieder; 1b/2b sind die FOLGE -
 //                    das per Storage angelegte Dokument fuellt die Liste und macht den Bau zum 409)
-//   typ      -> 5b  (die Belohnung traegt einen fremden Typ; gemessen: 5b, und als FOLGE 5c)
+//   typ      -> 5b, 5c (die Belohnung traegt einen fremden Typ; 5c ist die Folge - der Anteil fehlt)
 //   Alle vier mit identischer Pruefliste (40 Pruefungen + 0-sab), per diff verglichen - eine
 //   Pflichtliste ist selbst eine Behauptung, bis die Gegenprobe sie gemessen hat.
 //
@@ -42,13 +42,17 @@ const SAB = process.env.KEPLER_VP_SABOTAGE || '';
 // Was bei welcher Sabotage fallen MUSS - gemessen, nicht geschaetzt (Regel 71). Die Listen der zwei
 // Zweig-Sabotagen stammen aus dem Lauf vom 02.09.2026: 'zweigwahl' 7e 7f 7g 7h, 'zweigwerte' nur 7g
 // (die Wahl greift dort weiter, nur die Multiplikatoren wirken nicht - genau der stille Fall).
-const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a'], typ: ['5b'], meldung: ['4h', '4h2'],
-  kerndach: ['10a'], kerndachab: ['10c'],
+/* Die Listen fuehren die FOLGEN mit, nicht nur den Kern der Sabotage. Bis zum 03.09.2026 stand die
+   Folge bei `rechte` und `typ` nur im Kommentar ("und als FOLGE 1b/2b") - die Auswertung pruefte
+   damals nur, ob das Erwartete faellt, also fiel es nicht auf. Seit sie beide Richtungen misst,
+   gehoert jede gemessene Folge in die Liste. */
+const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a', '1b', '2b'], typ: ['5b', '5c'], meldung: ['4h', '4h2'],
+  kerndach: ['10a'], kerndachab: ['10c'], abbaufrist: ['6b', '6c', '6d', '6e', '6f'], abbaumodule: ['6g'], projektwirkung: ['11f', '11h'], projektzeit: ['11d'],
   zweigwahl: ['7e', '7f', '7g', '7h'], zweigwerte: ['7g'],
   // Etappe 3 (Stationsmodule): Die Listen sind gemessen, siehe Abschnitt 9.
   // GEMESSEN, nicht geschaetzt: Bei 'modulbestand' faellt 9d NICHT - der Einbau gelingt ja weiter,
   // er bucht nur nichts ab. Rot werden die drei Pruefungen, die den Bestand SELBST lesen.
-  modulbestand: ['9e', '9e2', '9h'], modulwirkung: ['9f'] };
+  modulbestand: ['9e', '9e2', '9h'], modulwirkung: ['9f', '10a'] };
 
 let fail = false;
 const ergebnis = {};
@@ -175,6 +179,21 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
   let geflippt = roh.replace(/const VORPOSTEN_AKTIV = (true|false);/, 'const VORPOSTEN_AKTIV = true;');
   check('0-kopie: der Schalter liess sich in der Kopie umlegen',
     /const VORPOSTEN_AKTIV = true;/.test(geflippt), { gefunden: /const VORPOSTEN_AKTIV = (true|false);/.test(roh) });
+  /* Derselbe Weg fuer den Projekt-Schalter (Etappe 4): Ausgeliefert steht er auf false, bis das
+     Frontend die Projekte kennt - geprueft wird die LOGIK trotzdem, an einer Kopie mit
+     umgelegtem Schalter. Ohne das waere Etappe 4 bis zum Frontend-Merge voellig ungeprueft. */
+  geflippt = geflippt.replace(/const VP_PROJEKTE_AKTIV = (true|false);/, 'const VP_PROJEKTE_AKTIV = true;');
+  check('0-kopie2: auch der Projekt-Schalter liess sich in der Kopie umlegen',
+    /const VP_PROJEKTE_AKTIV = true;/.test(geflippt), { gefunden: /const VP_PROJEKTE_AKTIV = (true|false);/.test(roh) });
+  /* Derselbe Weg fuer den Abbau-Schalter (03.09.2026) - und dazu ein KURZER galaxyTick: Der Abbau
+     wird dort abgeschlossen, und 15 Minuten wartet kein Test ab. Die Kopie taktet stattdessen im
+     Sekundenbereich; gemessen wird damit der ECHTE Weg (der Tick raeumt auf), nicht eine
+     Abkuerzung ueber einen Endpunkt, den es im Betrieb gar nicht gibt. */
+  geflippt = geflippt.replace(/const VORPOSTEN_ABBAU_AKTIV = (true|false);/, 'const VORPOSTEN_ABBAU_AKTIV = true;');
+  geflippt = geflippt.replace(/const GALAXY_TICK_MS = [^;]+;/, 'const GALAXY_TICK_MS = 1500;');
+  check('0-kopie3: Abbau-Schalter umgelegt und der galaxyTick auf Sekunden verkuerzt',
+    /const VORPOSTEN_ABBAU_AKTIV = true;/.test(geflippt) && /const GALAXY_TICK_MS = 1500;/.test(geflippt),
+    { schalter: /const VORPOSTEN_ABBAU_AKTIV = (true|false);/.test(roh), takt: /const GALAXY_TICK_MS = /.test(roh) });
   // Unabhaengige Anker fuer die Erwartungen (nicht aus der API-Antwort selbst, Regel 62): die
   // Stufentabelle aus dem QUELLTEXT.
   const kernLps = [...roh.matchAll(/kernLp:\s*(\d+)/g)].map(m => Number(m[1]));
@@ -196,7 +215,8 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     else if (SAB === 'zweigwahl') geflippt = geflippt.replace('  const brauchtZweig = zielStufe === VORPOSTEN_ZWEIG_AB && !vorpostenZweigOk(doc.zweig);', '  const brauchtZweig = false;');
     else if (SAB === 'zweigwerte') geflippt = geflippt.replace('  if (!z || basis.stufe < VORPOSTEN_ZWEIG_AB) return basis;', '  return basis;');
     // Stationsmodule (02.09.2026), zwei Haelften: der BESTAND (nimmt der Einbau wirklich eines weg?)
-    // und die WIRKUNG (aendert ein eingebautes Modul die Werte?).
+    // und die WIRKUNG (aendert ein eingebautes Modul die Werte?). Letztere reisst seit dem
+    // 03.09.2026 auch 10a mit: Ohne Modulwirkung hebt die Kernpanzerung auch das Kern-Dach nicht.
     else if (SAB === 'modulbestand') geflippt = geflippt.replace('  if (!user || !vpModulNehmen(user, instKey)) return res.status(400)', '  if (!user) return res.status(400)');
     else if (SAB === 'modulwirkung') geflippt = geflippt.replace('  const b = vpModulBoni(doc);', '  const b = { kern:0, verteidigung:0, garnison:0, flug:0, prod:0, scan:0 };');
     /* Das Kern-Dach (03.09.2026): zurueck auf den gespeicherten Wert statt der Rechnung - genau
@@ -205,6 +225,15 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     /* Die Gegenrichtung: das Dach steigt beim Einbau, sinkt beim Ausbau aber nie wieder (Ratsche).
        Das waere der lohnende Fehler - Panzerung einbauen, Dach behalten, Modul anderswo verwenden. */
     else if (SAB === 'kerndachab') geflippt = geflippt.replace('function vorpostenKernMax(doc) { return vorpostenWerte(doc).kernLp; }', 'function vorpostenKernMax(doc) { return Math.max(vorpostenWerte(doc).kernLp, Math.round((doc && doc.kern && doc.kern.lpMax) || 0)); }');
+    /* Stationsprojekte (03.09.2026), zwei Haelften: die WIRKUNG (aendert ein fertiges Vorhaben die
+       Werte?) und die BAUZEIT (wirkt ein noch laufendes schon?). Beide zusammen waeren eine
+       Sabotage, die zu viel trifft. */
+    else if (SAB === 'projektwirkung') geflippt = geflippt.replace('  const pr = vpProjektBoni(doc);', '  const pr = { kern:0, verteidigung:0, garnison:0, flug:0, prod:0, scan:0, flugDeckel: VP_FLUG_DECKEL };');
+    else if (SAB === 'projektzeit') geflippt = geflippt.replace('  return vpProjektListe(doc).filter(p => p && vpProjektDef(p.key) && (p.fertigAb || 0) <= t).map(p => p.key);', '  return vpProjektListe(doc).filter(p => p && vpProjektDef(p.key)).map(p => p.key);');
+    /* Der Abbau (03.09.2026), zwei Haelften: die FRIST (verschwindet der Vorposten wieder sofort?)
+       und die RUECKGABE der Module beim Aufraeumen. */
+    else if (SAB === 'abbaufrist') geflippt = geflippt.replace('  doc.abbauAb = jetzt + VORPOSTEN_ABBAU_MS;', '  doc.abbauAb = jetzt - 1;');
+    else if (SAB === 'abbaumodule') geflippt = geflippt.replace('    if (user) for (const instKey of module) if (vpModulTeile(instKey)) vpModulGeben(user, instKey, 1);', '    /* sabotiert: Module bleiben weg */;');
     else { console.log('unbekannte Sabotage: ' + SAB); process.exit(2); }
     check('0-sab: die Sabotage "' + SAB + '" hat den Quelltext veraendert', geflippt !== vorher, { veraendert: geflippt !== vorher });
   }
@@ -374,16 +403,74 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
   check('5d: der Besitzer erfaehrt vom Verlust (vorposten-verlust mit Restgarnison)',
     !!verlustA && verlustA.system === SYS1 && verlustA.garnisonVerloren && typeof verlustA.garnisonVerloren === 'object', verlustA);
 
-  // ---- 6) Aufgeben -----------------------------------------------------------------------------
+  // ---- 6) Aufgeben ist ein ABBAU ueber 24 Stunden (03.09.2026) ----------------------------------
+  /* Auftrag Sascha: "vorposten sollen auch aufgebar sein allerdings muessen die abgebaut werden
+     dauert 24 stunden". Der Punkt der Frist ist 6d: Bis hierher verschwand der Vorposten in dem
+     Moment, in dem sein Besitzer es wollte - auch mitten im Angriff, und der Angreifer stand vor
+     einem leeren System. Deshalb misst dieser Abschnitt nicht nur, DASS es dauert, sondern dass
+     der Vorposten waehrenddessen angreifbar bleibt. */
   const SYS6 = 'vpsys-f';
-  await aendereDb(d => { schreibDoc(d, doc(SYS6, ANNA, 'anna', { garnison: { cruisers: 40 } })); });
+  const modul6 = get0.body.modulDefs[0].key + ':episch';
+  await aendereDb(d => {
+    schreibDoc(d, doc(SYS6, ANNA, 'anna', { garnison: { cruisers: 40 }, stufe: get0.body.zweigAb + 1,
+      zweig: 'festung', module: [modul6] }));
+    d.users.anna.vpModule = {};
+    const sb = liesSave(d, BEN); sb.fleet.missions = (sb.fleet.missions || []).concat([angriffMission('m6', SYS6)]); schreibSave(d, BEN, sb);
+  });
   const fremdAuf = await post(tokB, '/vorposten/aufgeben', { system: SYS6 });
   check('6a: ein Fremder kann nicht aufgeben', fremdAuf.status === 403, { status: fremdAuf.status });
   const auf = await post(tokA, '/vorposten/aufgeben', { system: SYS6 });
   let nach6 = 'unbekannt';
   await aendereDb(d => { nach6 = liesDoc(d, SYS6); });
-  check('6b: der Besitzer gibt auf - Garnison kommt zurueck, keine Rueckerstattung, Dokument weg',
-    auf.status === 200 && auf.body.garnison && auf.body.garnison.cruisers === 40 && auf.body.rueckerstattung === 0 && nach6 === null, { body: auf.body, docDanach: nach6 });
+  check('6b: Aufgeben startet den Abbau - der Vorposten steht noch, mit Frist in der Zukunft',
+    auf.status === 200 && auf.body.abbau === true && auf.body.abbauAb > Date.now()
+    && auf.body.dauerMs > 0 && nach6 !== null && nach6.abbauAb === auf.body.abbauAb,
+    { body: auf.body && { abbau: auf.body.abbau, abbauAb: auf.body.abbauAb }, stehtNoch: nach6 !== null });
+  const nochmal6 = await post(tokA, '/vorposten/aufgeben', { system: SYS6 });
+  check('6c: ein zweiter Aufruf startet nichts Neues, sondern nennt die Restzeit',
+    nochmal6.status === 400 && nochmal6.body.laeuft === true && nochmal6.body.abbauAb === auf.body.abbauAb,
+    { status: nochmal6.status, body: nochmal6.body });
+  // 6d: DER Punkt der Frist - der Abbau ist keine Fluchttuer aus einem laufenden Angriff.
+  const schlag6 = await post(tokB, '/vorposten/angriff', { system: SYS6, missionId: 'm6' });
+  check('6d: waehrend des Abbaus bleibt der Vorposten angreifbar (sonst waere er eine Fluchttuer)',
+    schlag6.status === 200 && schlag6.body.ok === true && schlag6.body.schaden > 0,
+    { status: schlag6.status, schaden: schlag6.body && schlag6.body.schaden, error: schlag6.body && schlag6.body.error });
+  const abbruch6 = await post(tokA, '/vorposten/abbau/abbrechen', { system: SYS6 });
+  let nachAbbruch = null;
+  await aendereDb(d => { nachAbbruch = liesDoc(d, SYS6); });
+  check('6e: der Abbau laesst sich abbrechen - die Frist ist weg, der Vorposten bleibt',
+    abbruch6.status === 200 && nachAbbruch && !nachAbbruch.abbauAb, { status: abbruch6.status, doc: !!nachAbbruch });
+  // 6f: abgelaufene Frist -> der galaxyTick raeumt auf. Die Kopie taktet im Sekundenbereich.
+  /* Die Garnison wird HIER gemessen, nicht aus der Vorrichtung angenommen: Der Schlag in 6d hat
+     Schiffe gekostet, und die Regel lautet "was noch dasteht, kommt zurueck" - nicht "vierzig".
+     Der erste Entwurf verglich mit der Startzahl und fiel genau daran (gemessen: 37 statt 40). */
+  /* NULL-SICHER: Unter der Sabotage `abbaufrist` ist die Frist sofort abgelaufen, der Tick raeumt
+     den Vorposten also schon vor dieser Zeile weg. Der erste Entwurf griff hier auf `dd.garnison`
+     eines nicht mehr vorhandenen Dokuments zu und STUERZTE AB - damit belegten 6f und 6g unter
+     dieser Sabotage gar nichts, und die Prueflisten beider Laeufe waren verschieden. Genau die
+     Lehre aus test_vorposten_module_ui: Ein Test, der am kaputten Stand abstuerzt statt zu fallen,
+     misst dort nichts. */
+  let garnVorTick = null;
+  await aendereDb(d => {
+    const dd = liesDoc(d, SYS6);
+    if (!dd) return;
+    garnVorTick = Object.assign({}, dd.garnison || {});
+    dd.abbauAb = Date.now() - 1000;
+    schreibDoc(d, dd);
+  });
+  await new Promise(r => setTimeout(r, 4000));
+  let nachTick = 'unbekannt', belohnung6 = null, bestand6 = null;
+  await aendereDb(d => {
+    nachTick = liesDoc(d, SYS6);
+    belohnung6 = (d.private[ANNA].__pendingRewards || []).find(r => r.type === 'vorposten-abbau') || null;
+    bestand6 = d.users.anna.vpModule || {};
+  });
+  check('6f: nach Ablauf raeumt der Tick auf - Dokument weg, Belohnung mit EIGENEM type, Garnison drin',
+    nachTick === null && !!belohnung6 && belohnung6.system === SYS6
+    && JSON.stringify(belohnung6.garnison || {}) === JSON.stringify(garnVorTick),
+    { docDanach: nachTick, zurueck: belohnung6 && belohnung6.garnison, stand: garnVorTick });
+  check('6g: und die eingebauten Module kommen in den Bestand zurueck (kein Fundstueck geht beim Aufraeumen verloren)',
+    bestand6 && bestand6[modul6] === 1, { bestand: bestand6, erwartet: modul6 });
 
   // ---- 7) Ausbau -------------------------------------------------------------------------------
   const SYS7 = 'vpsys-g';
@@ -530,20 +617,100 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
       { lpVorher, lpNachher: raus10.body.vorposten && raus10.body.vorposten.kern.lp });
   }
 
+  // ---- 11) Stationsprojekte: Freischaltung, Bauzeit, Wirkung, Sprungtor -------------------------
+  /* Etappe 4 (03.09.2026). Ausgeliefert steht VP_PROJEKTE_AKTIV auf false; hier laeuft die Kopie
+     mit umgelegtem Schalter (0-kopie2), sonst waere die ganze Etappe bis zum Frontend ungeprueft. */
+  {
+    const SYS11 = 'vpsys-k';
+    const defs = get0.body.projektDefs || [];
+    const dock = defs.find(d => d.zweig === 'werft');
+    const tor = defs.find(d => d.key === 'sprungtor');
+    check('11-anker: der Projektkatalog reist mit (mit Zweig, Stufe, Dauer und Kosten)',
+      defs.length >= 4 && !!dock && !!tor && dock.stufeAb > 0 && dock.dauerMs > 0 && !!dock.kosten && tor.stufeAb > dock.stufeAb,
+      { keys: defs.map(d => d.key), dockAb: dock && dock.stufeAb, torAb: tor && tor.stufeAb });
+
+    // Zu niedrige Stufe: eine Stufe UNTER der Anforderung, richtiger Zweig.
+    await aendereDb(d => { const dd = doc(SYS11, ANNA, 'anna'); dd.stufe = dock.stufeAb - 1; dd.zweig = 'werft'; schreibDoc(d, dd); });
+    const zuKlein = await post(tokA, '/vorposten/projekt/starten', { system: SYS11, projekt: dock.key });
+    check('11a: unter der geforderten Stufe geht nichts - und die Antwort nennt die Stufe',
+      zuKlein.status === 400 && zuKlein.body.stufeFehlt === true && zuKlein.body.stufeAb === dock.stufeAb,
+      { status: zuKlein.status, body: zuKlein.body });
+
+    // Richtige Stufe, FALSCHER Zweig: das Zweig-Projekt bleibt zu.
+    await aendereDb(d => { const dd = liesDoc(d, SYS11); dd.stufe = dock.stufeAb; dd.zweig = 'festung'; schreibDoc(d, dd); });
+    const falscherZweig = await post(tokA, '/vorposten/projekt/starten', { system: SYS11, projekt: dock.key });
+    check('11b: ein Zweig-Projekt baut nur seine Ausrichtung - sonst waeren die Zweige beliebig',
+      falscherZweig.status === 400 && falscherZweig.body.zweigFehlt === true, { status: falscherZweig.status, body: falscherZweig.body });
+
+    // Passend: das Vorhaben laeuft an.
+    await aendereDb(d => { const dd = liesDoc(d, SYS11); dd.zweig = 'werft'; schreibDoc(d, dd); });
+    const vorStart = await s.j('/vorposten', { headers: kopf(tokA) });
+    const garnVor = ((vorStart.body.liste || []).find(x => x.sys === SYS11) || {}).garnisonMax;
+    const start = await post(tokA, '/vorposten/projekt/starten', { system: SYS11, projekt: dock.key });
+    check('11c: passend gestartet - mit Fertigzeit in der Zukunft und den Kosten, die der Client bucht',
+      start.status === 200 && start.body.fertigAb > Date.now() && !!start.body.kosten
+      && (start.body.vorposten.projektLaeuft || {}).key === dock.key,
+      { status: start.status, fertigAb: start.body.fertigAb, laeuft: start.body.vorposten && start.body.vorposten.projektLaeuft });
+    check('11d: waehrend es laeuft, wirkt es NICHT - sonst waere die Bauzeit eine Zierde',
+      start.status === 200 && start.body.vorposten.garnisonMax === garnVor
+      && (start.body.vorposten.projekte || []).length === 0,
+      { vorher: garnVor, waehrend: start.body.vorposten && start.body.vorposten.garnisonMax });
+    const zweites = await post(tokA, '/vorposten/projekt/starten', { system: SYS11, projekt: dock.key });
+    check('11e: eine Station baut hoechstens ein Vorhaben gleichzeitig',
+      zweites.status === 400 && zweites.body.belegt === true, { status: zweites.status, body: zweites.body });
+
+    // Fertig: die Zeit vorziehen, dann muss die Wirkung da sein.
+    await aendereDb(d => { const dd = liesDoc(d, SYS11); dd.projekte[0].fertigAb = Date.now() - 1000; schreibDoc(d, dd); });
+    const nachher = await s.j('/vorposten', { headers: kopf(tokA) });
+    const v11 = (nachher.body.liste || []).find(x => x.sys === SYS11) || {};
+    check('11f: fertig wirkt es - die Garnisonsgrenze steht ueber dem reinen Stufenwert',
+      v11.garnisonMax > garnVor && (v11.projekte || []).indexOf(dock.key) >= 0 && !v11.projektLaeuft,
+      { vorher: garnVor, nachher: v11.garnisonMax, projekte: v11.projekte });
+    const nochmal = await post(tokA, '/vorposten/projekt/starten', { system: SYS11, projekt: dock.key });
+    check('11g: dasselbe Vorhaben gibt es kein zweites Mal',
+      nochmal.status === 400 && nochmal.body.schonDa === true, { status: nochmal.status, body: nochmal.body });
+
+    /* Das Sprungtor hebt den DECKEL, es addiert nicht nur. Genau das ist sein Sinn: Der
+       Flugzeit-Bonus ist im Spiel bei VP_FLUG_DECKEL gedeckelt, eine hohe Stufe liegt mit Modulen
+       schon daran - ein Tor, das nur aufaddiert, taete nichts. */
+    check('11h-anker: ohne Tor gilt der normale Flugzeit-Deckel',
+      v11.nutzen && v11.nutzen.flugDeckel === get0.body.flugDeckel, { deckel: v11.nutzen && v11.nutzen.flugDeckel, normal: get0.body.flugDeckel });
+    await aendereDb(d => {
+      const dd = liesDoc(d, SYS11); dd.stufe = tor.stufeAb;
+      dd.projekte.push({ key: tor.key, start: Date.now() - 2000, fertigAb: Date.now() - 1000 });
+      schreibDoc(d, dd);
+    });
+    const mitTor = await s.j('/vorposten', { headers: kopf(tokA) });
+    const v11t = (mitTor.body.liste || []).find(x => x.sys === SYS11) || {};
+    check('11h: das Sprungtor hebt den Flugzeit-Deckel ueber den normalen',
+      v11t.nutzen && v11t.nutzen.flugDeckel > get0.body.flugDeckel,
+      { mitTor: v11t.nutzen && v11t.nutzen.flugDeckel, normal: get0.body.flugDeckel });
+    const fremd11 = await post(tokB, '/vorposten/projekt/starten', { system: SYS11, projekt: tor.key });
+    check('11i: ein Fremder startet an fremden Stationen nichts', fremd11.status === 403, { status: fremd11.status });
+  }
+
   await stoppeServer();
 
   // ---- Auswertung: Gruen-Lauf ODER Gegenprobe (Regel 71) --------------------------------------
   if (SAB) {
+    /* BEIDE Richtungen, gemessen (03.09.2026): Bis hierher prueft die Auswertung nur, ob das
+       Erwartete gefallen IST - und meldete danach "genau [...] gefallen", wobei sie die ERWARTUNG
+       ausdruckte, nicht die Messung. Eine Sabotage, die zehn weitere Pruefungen mitreisst, kam so
+       als "korrekt" durch, und die Pflichtliste blieb eine unbelegte Behauptung. Aufgefallen an
+       `projektwirkung`: Die Liste war noch leer, 11f und 11h fielen - gemeldet wurde
+       "genau [] gefallen", Exit 0. Jetzt zaehlt der Lauf nach, WAS gefallen ist, und vergleicht
+       in beide Richtungen. */
     const soll = MUSS_FALLEN[SAB] || [];
-    const nichtGefallen = soll.filter(kurz => {
-      const treffer = Object.keys(ergebnis).filter(n => n === kurz || n.startsWith(kurz + ':'));
-      return !treffer.some(n => ergebnis[n] === false);
-    });
-    if (nichtGefallen.length) {
-      console.log('\nWERKZEUGFEHLER - diese Pruefung(en) haetten bei Sabotage "' + SAB + '" fallen MUESSEN, blieben aber gruen: ' + JSON.stringify(nichtGefallen));
+    const gefallen = [...new Set(Object.keys(ergebnis).filter(n => ergebnis[n] === false)
+      .map(n => String(n).split(':')[0]))].sort();
+    const nichtGefallen = soll.filter(k => gefallen.indexOf(k) < 0);
+    const unerwartet = gefallen.filter(k => soll.indexOf(k) < 0);
+    if (nichtGefallen.length || unerwartet.length) {
+      if (nichtGefallen.length) console.log('\nWERKZEUGFEHLER - diese Pruefung(en) haetten bei Sabotage "' + SAB + '" fallen MUESSEN, blieben aber gruen: ' + JSON.stringify(nichtGefallen));
+      if (unerwartet.length) console.log('\nWERKZEUGFEHLER - Sabotage "' + SAB + '" hat AUSSERDEM gerissen: ' + JSON.stringify(unerwartet) + ' - entweder trifft sie zu viel, oder die Pflichtliste ist unvollstaendig.');
       process.exit(1);
     }
-    console.log('\nGegenprobe "' + SAB + '" korrekt: genau ' + JSON.stringify(soll) + ' gefallen.');
+    console.log('\nGegenprobe "' + SAB + '" korrekt: gemessen gefallen ' + JSON.stringify(gefallen) + '.');
     process.exit(0);
   }
   console.log(fail ? '\nFEHLGESCHLAGEN' : '\nAlles gruen.');

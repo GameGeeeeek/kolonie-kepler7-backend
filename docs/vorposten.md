@@ -340,3 +340,108 @@ irgendwann" und damit keine Grundlage für die Entscheidung, ob sich eine Garnis
 Der Tiefenlink zeigt auf die **Karte** – dorthin, wo man die Garnison losschickt, nicht in die
 Berichte. Der Frontend-Zweig (`NOTIF_EVENT_INFO`) gehört zwingend in denselben Auftrag; der Wächter
 `test_pushkategorien` fordert ihn ein.
+
+## Etappe 4: Stationsprojekte und das Sprungtor (03.09.2026)
+
+Auftrag Sascha: „dass man von dort aus Projekte starten kann, dass man von dort aus vielleicht auch
+eine Art Überraumtor bauen kann. Also auch noch mehr Projekte quasi macht."
+
+**Ein Projekt ist das Gegenstück zum Modul:** einmalig je Vorposten, dauerhaft, nicht umsteckbar,
+und an **Stufe und Ausrichtung** gebunden. Damit bekommen die drei Zweige endlich etwas, das nur
+sie können — bis hierher unterschieden sie sich nur in Multiplikatoren.
+
+| Projekt | Zweig | ab Stufe | Dauer | Wirkung |
+|---|---|---|---|---|
+| **Dockring** | Werft | 5 | 8 h | Garnison +25 % |
+| **Handelskammer** | Handel | 5 | 8 h | Produktionsbonus +35 % |
+| **Bollwerk** | Festung | 5 | 8 h | Kern +20 %, Verteidigung +20 % |
+| **Tiefenhorchposten** | alle | 6 | 12 h | +1 Aufklärungsstufe |
+| **Sprungtor** | alle | 7 | 24 h | Flug +20 % **und Flugzeit-Deckel 50 % → 75 %** |
+
+**Warum das Sprungtor den Deckel hebt statt aufzuaddieren.** Der Flugzeit-Bonus ist im Frontend bei
+`VP_FLUG_DECKEL` (0,5) gedeckelt, und ein Vorposten der Stufe 8 liegt mit Modulen schon daran. Ein
+Tor, das nur weitere Prozentpunkte gäbe, täte also **nichts** — genau die Sorte angezeigten Nutzens,
+die es in diesem Projekt nicht geben soll. Der Deckel reist mit `nutzen.flugDeckel` zum Client; die
+Kopie im Frontend (`vorpostenFlugMult`) liest ihn statt der harten 0,5.
+
+**Kein Ticken und kein Einsammeln.** Ein Projekt ist fertig, sobald `fertigAb` erreicht ist. Es gibt
+also keinen Zustandsübergang, der verlorengehen könnte, und kein Schreiben beim Lesen.
+`doc.projekte` ist die Liste aller je begonnenen Vorhaben; das laufende ist genau das mit
+`fertigAb > jetzt`, und mehr als eines gleichzeitig gibt es nicht. **Abbrechen gibt es nicht** — ein
+Vorhaben, das man zurücknehmen kann, wäre ein Zwischenlager für Rohstoffe.
+
+**Sichtbarkeit.** Fertige Projekte sieht **jeder** (wie die Steckplätze): Ein Bollwerk erklärt dem
+Angreifer, warum dieser Kern härter ist als die Stufe verspricht. Das **laufende** Vorhaben sieht
+nur der Besitzer — es sagt nichts über die heutige Stärke, verrät aber, wann diese Station stärker
+wird, und das wäre eine Einladung, vorher zuzuschlagen.
+
+**Der Schalter** `VP_PROJEKTE_AKTIV` steht ausgeliefert auf `false` und wird im **Frontend-PR**
+umgelegt; der Admin-Notaus `vorposten` schaltet ihn zusätzlich ab.
+
+Wächter: `tests/test_vorposten_http.js` Abschnitt 11 (11a–11i), gefahren an einer Kopie mit
+umgelegtem Schalter (`0-kopie2`) — sonst wäre die ganze Etappe bis zum Frontend-Merge ungeprüft.
+Zwei Sabotagen mit gemessener Pflichtliste: `projektwirkung` (ein fertiges Vorhaben ändert nichts)
+→ genau `11f`, `11h`; `projektzeit` (ein laufendes wirkt schon) → genau `11d`.
+
+### Die Auswertung der Gegenproben misst jetzt beide Richtungen
+
+Bis zum 03.09.2026 prüfte der Auswerteblock nur, ob die Pflichtliste **gefallen ist** — und meldete
+danach „genau […] gefallen", wobei er die **Erwartung** ausdruckte, nicht die Messung. Eine
+Sabotage, die zehn weitere Prüfungen mitreißt, kam damit als „korrekt" durch, und die Pflichtliste
+blieb eine unbelegte Behauptung. Aufgefallen an `projektwirkung`: Die Liste war noch leer, `11f` und
+`11h` fielen — gemeldet wurde „genau [] gefallen", Exit 0.
+
+Der Lauf zählt jetzt nach, **was** gefallen ist, vergleicht in beide Richtungen (fehlt etwas aus der
+Liste? ist etwas außerhalb gefallen?) und druckt die **Messung**. Das ist dieselbe Regel, die
+CLAUDE.md für Prüfnamen fordert („per `diff` vergleichen, nicht zählen"), nur im Werkzeug selbst.
+
+**Der Projekt-Schalter ist umgelegt (03.09.2026).** `VP_PROJEKTE_AKTIV` stand seit dem Backend-PR
+auf `false`; das Frontend blendete den Menüeintrag über `projekteAktiv` aus. Mit dem Frontend-Merge
+v8.649.0 (live per `version.txt` belegt) steht er auf `true`. Der Admin-Notaus `vorposten` schaltet
+Projekte weiterhin ab — er kann zur Laufzeit nur AB-, nie einschalten.
+
+## Aufgeben ist ein Abbau über 24 Stunden (03.09.2026)
+
+Auftrag Sascha: „vorposten sollen auch aufgebar sein allerdings müssen die abgebaut werden dauert
+24 stunden."
+
+**Warum das mehr ist als eine Wartezeit.** Bis hierher verschwand ein Vorposten in dem Moment, in
+dem sein Besitzer es wollte — auch mitten in einem Angriff. Wer sah, dass seine Station fallen
+würde, gab sie auf, und der Angreifer stand vor einem leeren System: keine Beute, kein Kampfpunkt,
+die Flüge umsonst. Mit der Frist bleibt der Vorposten angreifbar, solange er abgebaut wird. Der
+Abbau ist damit ein **Entschluss, keine Fluchttür** — und genau das misst Prüfung 6d.
+
+| | |
+|---|---|
+| `POST /api/vorposten/aufgeben` | setzt `doc.abbauAb = jetzt + VORPOSTEN_ABBAU_MS` (24 h). Ein zweiter Aufruf startet nichts Neues, sondern nennt die Restzeit. |
+| `POST /api/vorposten/abbau/abbrechen` | löscht die Frist. Es gibt nichts zu erstatten — der Abbau kostet keine Rohstoffe, er kostet Zeit. Wer abbricht, hat die Frist umsonst laufen lassen; das ist die ganze Strafe und sie reicht. |
+| `vorpostenAbbauTick()` | schließt fertige Abbauten im `galaxyTick` ab (alle 15 Minuten — ein 24-Stunden-Vorhaben braucht keine feinere Auflösung, und ein eigener Takt wäre ein zweiter Zeitgeber für dieselbe Sache). |
+
+**Der Zustand ist EIN Feld** (`doc.abbauAb`), kein eigener Speicher: Alles, was den Vorposten liest,
+sieht ihn damit automatisch mit. `vorpostenFuerClient` meldet ihn an **jeden**, nicht nur an den
+Besitzer — dieselbe Offenheit wie bei Verteidigung und Garnisonszahl. Eine Station, die in Kürze
+verschwindet, ist für einen Angreifer eine echte Information: Es lohnt sich, vorher zuzuschlagen.
+
+**Was beim Abschluss zurückkommt:**
+- Die **Module** gehen in den Bestand des Besitzers. Ein legendäres Fundstück beim freiwilligen
+  Abbau zu verlieren, wäre eine Strafe fürs Aufräumen. Fällt der Vorposten dagegen im Kampf, bleiben
+  sie verloren — dort hat sie jemand zerstört.
+- Die **Garnison** kommt über `pushPendingReward` mit eigenem `type: 'vorposten-abbau'`, nicht über
+  eine Rückflug-Mission: Der Server schreibt keinen fremden Spielstand, und beim Ablauf der Frist
+  ist der Besitzer üblicherweise gar nicht da.
+- Ein laufendes **Stationsprojekt** ist mit der Station weg. Es hätte nichts, worin es fertig werden
+  könnte.
+
+**Nicht geändert:** Der Vorposten zählt während des Abbaus weiter gegen `VORPOSTEN_MAX_JE_KONTO` —
+sonst wäre ein gestarteter Abbau der Weg, die Drei-pro-Konto-Grenze zu umgehen, ohne je etwas
+aufzugeben.
+
+`VORPOSTEN_ABBAU_AKTIV` steht bis zum Frontend-Merge auf `false`; solange bleibt das ausgelieferte
+Verhalten (sofort weg, Garnison zurück). Wäre der Schalter schon an, klickte ein Spieler „aufgeben"
+und sähe seinen Vorposten weiter stehen.
+
+Wächter: `tests/test_vorposten_http.js` Abschnitt 6 (6a–6g), gefahren an einer Kopie mit umgelegtem
+Schalter **und verkürztem `galaxyTick`** (`0-kopie3`) — so misst 6f den echten Weg über den Tick
+statt einer Abkürzung, die es im Betrieb nicht gibt. Zwei Sabotagen mit gemessener Pflichtliste:
+`abbaufrist` (der Vorposten verschwindet wieder sofort) → `6b 6c 6d 6e`; `abbaumodule` (die Module
+bleiben beim Aufräumen weg) → `6g`.

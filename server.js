@@ -3998,7 +3998,25 @@ function rawFleetPower(f, ssAtkMult, t2AtkMult, marks) {
     // atk 250). Bewusst OHNE t2M: Der Multiplikator kommt aus der Modulgruppe 'raffiniert', und
     // die fuehrt den Koloss nicht - siehe die ausfuehrliche Begruendung an derselben Zeile in
     // attackPowerRaw des Frontends.
-    dm('urmateriekoloss', f.urmateriekoloss) * 250;
+    dm('urmateriekoloss', f.urmateriekoloss) * 250 +
+    // Kausalitaetsbrecher, Paktkorvette, Bundeskreuzer, Sternenbanner (03.09.2026, Spieler-Befund
+    // Sascha mit Bildschirmfoto: "werden garnicht bei angriffen mit einbezogen"). Die SECHSTE
+    // Wiederholung derselben Luecke - und die erste auf DIESER Seite. Die vier standen in
+    // SHIP_ATK_VALUES, in SHIP_DEF_WEIGHTS und im Frontend in ATTACK_SHIP_KEYS/attackPowerRaw,
+    // fehlten aber in dieser handgeschriebenen Summe. Folge, gemessen: In der VERTEIDIGUNG zaehlten
+    // sie voll mit (weightedFleetDefensePower und fleetShieldSum laufen ueber SHIP_ATK_VALUES), im
+    // ANGRIFF null - ueber PvP, Nester, Festungen, Anfechtungen und Vorposten-Garnisonen hinweg.
+    //
+    // WARUM DER WAECHTER NICHT ANSCHLUG: tests/test_angriffssumme.js im Frontend prueft Abschnitt 3
+    // gegen SHIP_ATK_VALUES - eine Tabelle, die vollstaendig war und die der Kampf gar nicht liest.
+    // Der Test bewachte die falsche Tuer. Er prueft ab sofort zusaetzlich diese Summe hier.
+    //
+    // Multiplikatoren exakt wie im Frontend (attackPowerRaw): Der Kausalitaetsbrecher bekommt t2M
+    // (Modulgruppe 'raffiniert' fuehrt ihn), die drei Allianzschiffe bewusst keinen - ihre Module
+    // erzeugen den Faktor nicht, ihn zu vergeben hiesse einen Bonus zu schenken, den es nicht gibt.
+    dm('kausalitaetsbrecher', f.kausalitaetsbrecher) * 340 * t2M +
+    dm('paktkorvette', f.paktkorvette) * 40 + dm('bundeskreuzer', f.bundeskreuzer) * 110 +
+    dm('sternenbanner', f.sternenbanner) * 240;
 }
 // Verteidigungsspezialisierung (13.07.2026) - defWeight-Gewichte identisch zum Frontend (SHIP_DEFS),
 // wirken NUR hier auf die Verteidigung, nie auf die Angriffskraft. Keine Schilde hier (der Backend-
@@ -6885,6 +6903,9 @@ function galaxyTick() {
   const neueSysteme = syncWeeklySystems(Date.now());
   if (neueSysteme) console.log(`[galaxy] ${neueSysteme} Wochensystem(e) nachgezogen, jetzt ${SYSTEMS.length} Systeme`);
   pruneChatKeys();   // alte Chat-Schlüssel wegräumen - siehe CHAT_KEEP_PER_CHANNEL
+  // Fertige Vorposten-Abbauten abschliessen (03.09.2026). Bewusst hier und nicht in einem eigenen
+  // Takt: 24 Stunden brauchen keine feinere Aufloesung als 15 Minuten.
+  vorpostenAbbauTick().catch(e => console.error('[vorposten] abbauTick:', e && e.message));
   updateHallOfFameServer();
   resolveWeeklyLeagueServer();
   resolveSeasonLeagueServer();
@@ -6993,7 +7014,7 @@ function galaxyTick() {
   }
   // Abgelaufenes Wurmloch schließen.
   if (g.activeWormhole && g.activeWormhole.expiresAt < Date.now()) {
-    pushGalaxyNews('ti-infinity', 'Das Wurmloch nach ' + g.activeWormhole.to + ' hat sich wieder geschlossen.');
+    pushGalaxyNews('ti-infinity', 'Das Wurmloch ' + g.activeWormhole.from + ' ↔ ' + g.activeWormhole.to + ' hat sich wieder geschlossen.');
     g.activeWormhole = null;
   }
   // Abgelaufenen Krieg beilegen - und ihn erstmals ENTSCHEIDEN.
@@ -7037,13 +7058,29 @@ function galaxyTick() {
       pushGalaxyNews('ti-sun', 'Supernova! Das unbesiedelte System ' + target + ' ist kollabiert und für 48 Stunden unzugänglich.');
     }
   }
+  /* BEIDE ENDEN SIND ZUFAELLIG (03.09.2026, Auftrag Sascha: "mal ist kepler mit system x, mal
+     system y fuehrt zu system a"). Bis dahin stand hier fest `from: 'kepler'`, und `to` musste
+     UNbesiedelt sein. Das Wurmloch war damit kein Ort, sondern ein Anhaengsel des Heimatsystems:
+     Gemessen steht es 74 % der Zeit offen (12 h Lebensdauer, danach 6 % je 15-Minuten-Takt, also
+     im Mittel 4,2 h Pause) - ein Ende war praktisch immer die Heimat, das andere ein leeres
+     System, in das ohnehin niemand fliegt. Eine Verbindung, die dauerhaft am selben Punkt haengt,
+     ist keine Passage.
+     Besiedelte Systeme sind jetzt ausdruecklich ERLAUBT: Zoege der Takt weiter nur aus den leeren,
+     verbaende das Wurmloch zwei Orte, an denen niemand ist. Ausgeschlossen bleiben allein
+     kollabierte Systeme (Supernova) - dorthin kommt man 48 Stunden lang gar nicht, ein Tor dahin
+     waere ein Widerspruch. Das war vorher NICHT geprueft; `to` konnte ein kollabiertes System
+     treffen. */
   if (Math.random() < 0.06 && !g.activeWormhole) {
-    const occupiedForWormhole = occupiedSystems();
-    const options = SYSTEMS.filter(s => s !== 'kepler' && !occupiedForWormhole.has(s));
-    if (options.length) {
-      const to = options[Math.floor(Math.random() * options.length)];
-      g.activeWormhole = { from: 'kepler', to, expiresAt: Date.now() + 12 * 3600 * 1000 };
-      pushGalaxyNews('ti-infinity', 'Ein neues Wurmloch ist entstanden: Kepler-System ↔ ' + to + ' (für 12 Stunden geöffnet).');
+    const moeglich = SYSTEMS.filter(s => !g.collapsedSystems[s]);
+    if (moeglich.length >= 2) {
+      // Zwei VERSCHIEDENE gleichverteilt ziehen, ohne Wiederholungsschleife: Der zweite Index
+      // laeuft ueber n-1 Plaetze und ueberspringt den ersten. Eine Schleife "wuerfle neu, bis
+      // ungleich" haette bei zwei Systemen im Grenzfall beliebig lange gedreht.
+      const i = Math.floor(Math.random() * moeglich.length);
+      let j = Math.floor(Math.random() * (moeglich.length - 1));
+      if (j >= i) j++;
+      g.activeWormhole = { from: moeglich[i], to: moeglich[j], expiresAt: Date.now() + 12 * 3600 * 1000 };
+      pushGalaxyNews('ti-infinity', 'Ein neues Wurmloch ist entstanden: ' + moeglich[i] + ' ↔ ' + moeglich[j] + ' (für 12 Stunden geöffnet).');
     }
   }
 
@@ -12693,6 +12730,20 @@ app.post('/api/deploy-webhook', (req, res) => {
    aktiv:false mit leerer Liste. Dazu der Admin-Notaus `vorposten` (db.notAus): er stoppt nur den
    BAU neuer Vorposten - bestehende bleiben angreifbar, wie bei den Nestern. */
 const VORPOSTEN_AKTIV = true;   // umgelegt am 02.09.2026, unmittelbar nach dem Frontend-Merge (Vorposten-Zweig live)
+/* ABBAU STATT SOFORT-AUFGABE (03.09.2026). Auftrag Sascha: "vorposten sollen auch aufgebar sein
+   allerdings muessen die abgebaut werden dauert 24 stunden."
+
+   Der Grund, warum das mehr ist als eine Wartezeit: Bis hierher verschwand ein Vorposten in dem
+   Moment, in dem sein Besitzer es wollte - auch mitten in einem Angriff. Wer sah, dass seine
+   Station fallen wuerde, gab sie auf, und der Angreifer stand vor einem leeren System: keine
+   Beute, kein Kampfpunkt, die Fluege umsonst. Mit der Frist bleibt der Vorposten angreifbar,
+   solange er abgebaut wird - der Abbau ist damit ein Entschluss, keine Fluchttuer.
+
+   Der Schalter bleibt bis zum Frontend-Merge auf false: Das ausgelieferte Spiel erwartet von
+   /api/vorposten/aufgeben eine sofortige Loeschung samt Garnison zurueck. Waere er schon an,
+   klickte ein Spieler "aufgeben" und saehe seinen Vorposten weiter stehen. */
+const VORPOSTEN_ABBAU_AKTIV = false;   // umgelegt wird er IM Frontend-PR
+const VORPOSTEN_ABBAU_MS = 24 * 3600 * 1000;
 const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
 const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
 const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer, am Objekt
@@ -12794,14 +12845,18 @@ function vorpostenStufeVon(doc) { return vorpostenStufe(doc && doc.stufe, doc &&
 function vorpostenWerte(doc) {
   const st = vorpostenStufeVon(doc);
   const b = vpModulBoni(doc);
+  // Fertige Projekte wirken auf DIESELBEN Kanaele wie die Module und werden vorher addiert - ein
+  // eigener Rechenweg waere eine zweite Stelle, an der ein Kanal vergessen werden kann.
+  const pr = vpProjektBoni(doc);
   return Object.assign({}, st, {
-    kernLp: Math.round(st.kernLp * (1 + b.kern)),
-    verteidigung: Math.round(st.verteidigung * (1 + b.verteidigung)),
-    garnisonMax: Math.round(st.garnisonMax * (1 + b.garnison)),
-    flug: Math.round(st.flug * (1 + b.flug) * 1000) / 1000,
-    prod: Math.round(st.prod * (1 + b.prod) * 1000) / 1000,
-    scan: st.scan + Math.round(b.scan),
-    modulBoni: b
+    kernLp: Math.round(st.kernLp * (1 + b.kern + pr.kern)),
+    verteidigung: Math.round(st.verteidigung * (1 + b.verteidigung + pr.verteidigung)),
+    garnisonMax: Math.round(st.garnisonMax * (1 + b.garnison + pr.garnison)),
+    flug: Math.round(st.flug * (1 + b.flug + pr.flug) * 1000) / 1000,
+    prod: Math.round(st.prod * (1 + b.prod + pr.prod) * 1000) / 1000,
+    scan: st.scan + Math.round(b.scan) + Math.round(pr.scan),
+    flugDeckel: pr.flugDeckel,
+    modulBoni: b, projektBoni: pr
   });
 }
 function vorpostenSysOk(sys) { return typeof sys === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(sys); }
@@ -12920,6 +12975,81 @@ const VP_MODUL_SELTENHEIT = {
 };
 // Gebaut wird nur bis 'ungewoehnlich' - der Rest kommt aus dem Fall von PvE-Zielen.
 const VP_MODUL_BAUBAR = ['gewoehnlich', 'ungewoehnlich'];
+/* ETAPPE 4: STATIONSPROJEKTE (03.09.2026)
+   Auftrag Sascha: "dass man von dort aus Projekte starten kann, dass man von dort aus vielleicht
+   auch eine Art Ueberraumtor bauen kann. Also auch noch mehr Projekte quasi macht."
+
+   Ein Projekt ist das Gegenstueck zum Modul: EINMALIG je Vorposten, dauerhaft, nicht umsteckbar,
+   und an Stufe und Ausrichtung gebunden. Damit bekommen die drei Zweige endlich etwas, das nur
+   sie koennen - bis hierher unterschieden sie sich nur in Multiplikatoren.
+
+   KEIN Ticken und kein Einsammeln: Ein Projekt ist fertig, sobald `fertigAb` erreicht ist. Es gibt
+   also keinen Zustandsuebergang, der verlorengehen koennte, und kein Schreiben beim Lesen.
+   `doc.projekte` ist die Liste aller je begonnenen Vorhaben; das laufende ist genau das mit
+   `fertigAb > jetzt`, und mehr als eines gleichzeitig gibt es nicht.
+
+   Die KOSTEN zahlt der Client aus seinem Spielstand - wie jede Baukosten-Buchung dieses Spiels und
+   wie die Ausbaukosten der Stufentabelle. Was der Server fuehrt, ist die WIRKUNG: Sie steht im
+   Dokument in db.shared und ist damit fuer den Client unerreichbar. Ein gefaelschter Spielstand
+   spart hoechstens die Rohstoffe, er erfindet keinen staerkeren Vorposten. */
+const VP_PROJEKTE_AKTIV = true;   // umgelegt am 03.09.2026, unmittelbar nach dem Frontend-Merge (v8.649.0 live)
+const VP_PROJEKT_DEFS = [
+  { key: 'dockring', name: 'Dockring', icon: 'ti-rocket', zweig: 'werft', stufeAb: 5,
+    dauerMs: 8 * 3600 * 1000, wirkung: { garnison: 0.25 },
+    desc: 'Ein zweiter Liegeplatzring um die Werft: die Garnison fasst ein Viertel mehr Schiffe.',
+    kosten: { erz: 900000, kristalle: 700000, deuterium: 400000, nanolegierungen: 400 } },
+  { key: 'handelskammer', name: 'Handelskammer', icon: 'ti-building-bank', zweig: 'handel', stufeAb: 5,
+    dauerMs: 8 * 3600 * 1000, wirkung: { prod: 0.35 },
+    desc: 'Kontore und Lagerhallen am Ring: der Produktionsbonus dieses Vorpostens steigt deutlich.',
+    kosten: { erz: 900000, kristalle: 700000, deuterium: 400000, nanolegierungen: 400 } },
+  { key: 'bollwerk', name: 'Bollwerk', icon: 'ti-building-castle', zweig: 'festung', stufeAb: 5,
+    dauerMs: 8 * 3600 * 1000, wirkung: { kern: 0.20, verteidigung: 0.20 },
+    desc: 'Doppelte Schotten und ein zweiter Geschuetzguertel: Kern und Abwehr wachsen um ein Fuenftel.',
+    kosten: { erz: 900000, kristalle: 700000, deuterium: 400000, nanolegierungen: 400 } },
+  { key: 'tiefenhorchen', name: 'Tiefenhorchposten', icon: 'ti-antenna-bars-5', zweig: null, stufeAb: 6,
+    dauerMs: 12 * 3600 * 1000, wirkung: { scan: 1 },
+    desc: 'Eine ausgefahrene Lauschanlage weit ausserhalb des Rings: eine Aufklaerungsstufe mehr.',
+    kosten: { erz: 1600000, kristalle: 1200000, deuterium: 800000, nanolegierungen: 900, quantenchips: 400 } },
+  /* Das Sprungtor ist bewusst KEIN weiterer Prozentpunkt auf denselben Kanal: Der Flugzeit-Bonus
+     ist im Spiel bei 50 % gedeckelt, und ein Vorposten der Stufe 8 liegt mit Modulen schon daran.
+     Ein Tor, das nur aufaddiert, taete also nichts - genau die Sorte angezeigter Nutzen, die es in
+     diesem Projekt nicht geben soll. Es hebt stattdessen den DECKEL auf 75 %. */
+  { key: 'sprungtor', name: 'Sprungtor', icon: 'ti-atom-2', zweig: null, stufeAb: 7,
+    dauerMs: 24 * 3600 * 1000, wirkung: { flug: 0.20, flugDeckel: 0.75 },
+    desc: 'Ein durchgehend offenes Tor im Orbit: eigene Nicht-PvP-Missionen hierher fliegen bis zu drei Viertel kuerzer statt hoechstens der Haelfte.',
+    kosten: { erz: 6000000, kristalle: 4500000, deuterium: 3000000, nanolegierungen: 3500, quantenchips: 1800, metamaterial: 500, singularitaetskerne: 40 } }
+];
+const VP_FLUG_DECKEL = 0.5;   // ohne Sprungtor; Kopie im Frontend (vorpostenFlugMult)
+function vpProjektDef(key) { return VP_PROJEKT_DEFS.find(d => d.key === key) || null; }
+function vpProjektListe(doc) { return (doc && Array.isArray(doc.projekte)) ? doc.projekte : []; }
+function vpProjektLaeuft(doc, jetzt) {
+  return vpProjektListe(doc).find(p => p && vpProjektDef(p.key) && (p.fertigAb || 0) > (jetzt || Date.now())) || null;
+}
+function vpProjekteFertig(doc, jetzt) {
+  const t = jetzt || Date.now();
+  return vpProjektListe(doc).filter(p => p && vpProjektDef(p.key) && (p.fertigAb || 0) <= t).map(p => p.key);
+}
+/* Die Summe der FERTIGEN Projekte je Kanal. Ein laufendes wirkt nicht - sonst waere die Bauzeit
+   eine Zierde. `flugDeckel` ist kein Anteil, sondern eine Obergrenze: es gilt die hoechste. */
+function vpProjektBoni(doc, jetzt) {
+  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, flugDeckel: VP_FLUG_DECKEL };
+  for (const key of vpProjekteFertig(doc, jetzt)) {
+    const w = (vpProjektDef(key) || {}).wirkung || {};
+    for (const k of Object.keys(w)) {
+      if (k === 'flugDeckel') aus.flugDeckel = Math.max(aus.flugDeckel, w[k]);
+      else aus[k] += w[k];
+    }
+  }
+  return aus;
+}
+// Was an DIESEM Vorposten ueberhaupt in Frage kommt: Stufe erreicht, Ausrichtung passend, noch
+// nicht begonnen. Der Client soll die Liste nicht selbst zusammenrechnen muessen.
+function vpProjektVerfuegbar(doc, jetzt) {
+  const begonnen = vpProjektListe(doc).map(p => p && p.key);
+  return VP_PROJEKT_DEFS.filter(d =>
+    begonnen.indexOf(d.key) < 0 && (doc.stufe || 1) >= d.stufeAb && (!d.zweig || doc.zweig === d.zweig)
+  ).map(d => d.key);
+}
 const VP_MODUL_BAU_ABKLING_MS = 6 * 3600 * 1000;   // je Konto, am Nutzerobjekt
 const VP_MODUL_AUSBAU_KREDITE = 250;               // "kostet eine Kleinigkeit" - der Ausbau, nicht der Einbau
 // Steckplaetze: erst ab der Wahlstufe, dann einer je Stufe bis zur Spitze.
@@ -12989,6 +13119,12 @@ function vorpostenVerteidigung(doc) {
   const st = vorpostenWerte(doc);
   return Math.round(st.verteidigung + rawFleetPower(doc.garnison || {}, 1, 1, null) * VORPOSTEN_GARNISON_FAKTOR);
 }
+/* Laeuft der Abbau, und wie lange noch? Der Zustand ist EIN Feld am Dokument (`abbauAb`), kein
+   eigener Speicher: Alles, was den Vorposten liest, sieht ihn damit automatisch mit. */
+function vorpostenAbbauLaeuft(doc) {
+  const ab = (doc && doc.abbauAb) || 0;
+  return ab > 0 ? ab : 0;
+}
 function vorpostenHeimatSystem(userId) {
   try { return JSON.parse(db.shared['leaderboard:' + userId] || '{}').homeSystem || null; } catch (e) { return null; }
 }
@@ -13039,9 +13175,19 @@ function vorpostenFuerClient(doc, userId, jetzt) {
     slots: vpModulSlots(doc.stufe),
     module: (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlots(doc.stufe)),
     modulBoni: st.modulBoni || null,
+    /* Projekte stehen jedem offen wie die Steckplaetze - ein Bollwerk erklaert dem Angreifer, warum
+       dieser Kern haerter ist als die Stufe verspricht. Das LAUFENDE Vorhaben sieht nur der
+       Besitzer (weiter unten): Es sagt nichts ueber die heutige Staerke, verraet aber, wann diese
+       Station staerker wird - eine Einladung, vorher zuzuschlagen. */
+    projekte: vpProjekteFertig(doc, jetzt),
+    projektBoni: st.projektBoni || null,
+    /* Der Abbau ist fuer JEDEN sichtbar, nicht nur fuer den Besitzer - wie Verteidigung und
+       Garnisonszahl. Eine Station, die in Kuerze verschwindet, ist fuer einen Angreifer eine
+       echte Information: Es lohnt sich, VORHER zuzuschlagen. Genau das soll die Frist bewirken. */
+    abbauAb: vorpostenAbbauLaeuft(doc) || null,
     schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
-    nutzen: { flug: st.flug, prod: st.prod, scan: st.scan },
+    nutzen: { flug: st.flug, prod: st.prod, scan: st.scan, flugDeckel: st.flugDeckel },
     eigener,
     /* NUR DER BESITZER sieht den Anflug. Verteidigung, Garnisonszahl und Steckplaetze stehen
        bewusst jedem offen - ein Angreifer soll sehen, worauf er sich einlaesst. Ein ANFLUG ist
@@ -13058,6 +13204,8 @@ function vorpostenFuerClient(doc, userId, jetzt) {
   // Vorkommen ihre Staerke zeigt, ohne dass jemand die Liste braucht).
   if (eigener) {
     out.garnison = Object.assign({}, doc.garnison || {});
+    out.projektLaeuft = vpProjektLaeuft(doc, jetzt);
+    out.projektMoeglich = vpProjektVerfuegbar(doc, jetzt);
     out.kampfverlauf = (doc.kampfverlauf || []).slice(0, 10);
     /* Die NAECHSTE Stufe fertig gerechnet - der Client soll den Sprung zeigen koennen, ohne die
        Multiplikatoren selbst anzuwenden (sonst waere die Zweigtabelle doch wieder eine Kopie).
@@ -13179,6 +13327,12 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
     modulAusbauKosten: VP_MODUL_AUSBAU_KREDITE, modulBauAbklingMs: VP_MODUL_BAU_ABKLING_MS,
     modulBestand: vpModulBestand(findUserById(req.userId) || {}),
     modulBauAb: (findUserById(req.userId) || {}).vpModulBauAb || 0,
+    /* Die Abbaudauer reist mit, damit das Spiel sie nicht als eigene Zahl fuehren muss - dieselbe
+       Entscheidung wie bei den Ausbaukosten und der Modul-Abklingzeit. Eine 24 im Frontend waere
+       eine Kopie-Familie mit genau der Konstante, die hier steht. */
+    abbauMs: VORPOSTEN_ABBAU_MS, abbauAktiv: VORPOSTEN_ABBAU_AKTIV,
+    projektDefs: VP_PROJEKT_DEFS, projekteAktiv: VP_PROJEKTE_AKTIV && !notAusGesetzt('vorposten'),
+    flugDeckel: VP_FLUG_DECKEL,
     zweigAb: VORPOSTEN_ZWEIG_AB, maxStufe: VORPOSTEN_STUFEN.length,
     liste, eigene: liste.filter(x => x.eigener).length
   });
@@ -13260,6 +13414,46 @@ app.post('/api/vorposten/ausbauen', authMiddleware, async (req, res) => {
    WIRKLICH hat (Deckel: Bestand, freier Platz bis garnisonMax, nur Kampfschiffe) und schreibt es ins
    Dokument. Er zieht NICHT vom Spielstand ab - der Client bucht genau `angenommen` ab, nachdem die
    Antwort da ist. Andersherum (Server zieht ab) liefe die Abbuchung gegen den Autosave des Clients. */
+/* PROJEKT STARTEN. Der Server prueft, WAS moeglich ist (Stufe, Ausrichtung, nicht schon begonnen,
+   nichts anderes im Bau) und wann es fertig ist; die Rohstoffe bucht der Client aus seinem
+   Spielstand ab, wie bei jeder Baukosten-Buchung dieses Spiels. Abbrechen gibt es nicht: Ein
+   Vorhaben, das man zuruecknehmen kann, waere ein Zwischenlager fuer Rohstoffe. */
+app.post('/api/vorposten/projekt/starten', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  if (!VP_PROJEKTE_AKTIV || notAusGesetzt('vorposten')) {
+    return res.status(404).json({ error: 'Stationsprojekte sind derzeit nicht verfügbar.', inaktiv: true });
+  }
+  const sys = String((req.body && req.body.system) || '');
+  const key = String((req.body && req.body.projekt) || '');
+  const def = vpProjektDef(key);
+  if (!vorpostenSysOk(sys) || !def) return res.status(400).json({ error: 'System und Projekt erforderlich.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer startet Projekte an seinem Vorposten.' });
+  const jetzt = Date.now();
+  const laeuft = vpProjektLaeuft(doc, jetzt);
+  if (laeuft) {
+    return res.status(400).json({ error: 'An dieser Station läuft bereits „' + (vpProjektDef(laeuft.key) || {}).name +
+      '" - fertig in ' + Math.ceil((laeuft.fertigAb - jetzt) / 60000) + ' Minuten.', belegt: true, laeuft });
+  }
+  if (vpProjektListe(doc).some(p => p && p.key === key)) {
+    return res.status(400).json({ error: '„' + def.name + '" steht an dieser Station bereits.', schonDa: true });
+  }
+  if ((doc.stufe || 1) < def.stufeAb) {
+    return res.status(400).json({ error: '„' + def.name + '" braucht Stufe ' + def.stufeAb + '.', stufeFehlt: true, stufeAb: def.stufeAb });
+  }
+  if (def.zweig && doc.zweig !== def.zweig) {
+    return res.status(400).json({ error: '„' + def.name + '" baut nur ' + ((VORPOSTEN_ZWEIGE[def.zweig] || {}).name || def.zweig) + '.',
+      zweigFehlt: true, zweig: def.zweig });
+  }
+  if (!Array.isArray(doc.projekte)) doc.projekte = [];
+  doc.projekte.push({ key, start: jetzt, fertigAb: jetzt + def.dauerMs });
+  vorpostenSchreib(doc);
+  await saveDb();
+  res.json({ ok: true, projekt: key, fertigAb: jetzt + def.dauerMs, kosten: def.kosten,
+    vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
+});
+
 /* MODUL BAUEN. Verlaesslich, aber nur bis 'ungewoehnlich' - der Boden des Systems. Die Kosten
    zahlt der Client aus seinem Spielstand (wie jede Baukosten-Buchung dieses Spiels; der Server
    kann sie bauartbedingt nicht nachrechnen). Was der Server DOCH kontrolliert, ist die Menge:
@@ -13393,6 +13587,45 @@ app.post('/api/vorposten/rueckruf', authMiddleware, async (req, res) => {
 // Aufgeben: keine Rueckerstattung (Konzept §9, Empfehlung a) - der Bau ist eine verbindliche
 // Ortswahl, und ein Abbau-Wiederaufbau-Kreislauf entsteht so gar nicht erst. Die Garnison kommt
 // zurueck (der Client legt dafuer die Rueckflug-Mission an).
+/* SCHLIESST FERTIGE ABBAUTEN AB. Laeuft im galaxyTick (alle 15 Minuten) - ein 24-Stunden-Vorhaben
+   braucht keine feinere Aufloesung, und ein eigener Takt waere ein zweiter Zeitgeber fuer dieselbe
+   Sache. Bewusst NICHT beim Lesen: Ein GET, der schreibt, ist die Sorte Nebenwirkung, die man beim
+   naechsten Endpunkt vergisst.
+
+   Was zurueckkommt, und warum:
+   - Die MODULE gehen in den Bestand des Besitzers. Ein legendaeres Fundstueck beim freiwilligen
+     Abbau zu verlieren, waere eine Strafe fuer Aufraeumen. Faellt der Vorposten dagegen im Kampf,
+     bleiben sie verloren - dort hat sie jemand zerstoert.
+   - Die GARNISON kommt ueber pushPendingReward mit eigenem type ('vorposten-abbau'), nicht ueber
+     eine Rueckflug-Mission: Der Server schreibt keinen fremden Spielstand, und der Besitzer ist
+     beim Ablauf der Frist ueblicherweise gar nicht da. Der Frontend-Zweig dazu gehoert in denselben
+     Auftrag (CLAUDE.md).
+   - Ein laufendes STATIONSPROJEKT ist mit der Station weg. Es haette nichts, worin es fertig
+     werden koennte. */
+async function vorpostenAbbauTick() {
+  if (!VORPOSTEN_ABBAU_AKTIV) return 0;
+  const jetzt = Date.now();
+  let fertig = 0;
+  for (const doc of vorpostenAlle()) {
+    const ab = vorpostenAbbauLaeuft(doc);
+    if (!ab || ab > jetzt) continue;
+    const user = findUserById(doc.besitzer);
+    const module = (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlots(doc.stufe));
+    if (user) for (const instKey of module) if (vpModulTeile(instKey)) vpModulGeben(user, instKey, 1);
+    const st = vorpostenStufeVon(doc);
+    pushPendingReward(doc.besitzer, {
+      type: 'vorposten-abbau', system: doc.sys, stufe: doc.stufe || 1, name: st.name,
+      garnison: Object.assign({}, doc.garnison || {}), module, zeit: jetzt
+    });
+    vorpostenLoesch(doc.sys);
+    fertig++;
+    console.log('[vorposten] abbau fertig sys=' + doc.sys + ' userId=' + doc.besitzer +
+      ' module=' + module.length);
+  }
+  if (fertig) await saveDb();
+  return fertig;
+}
+
 app.post('/api/vorposten/aufgeben', authMiddleware, async (req, res) => {
   if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
   const sys = String((req.body && req.body.system) || '');
@@ -13400,11 +13633,42 @@ app.post('/api/vorposten/aufgeben', authMiddleware, async (req, res) => {
   const doc = vorpostenLies(sys);
   if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
   if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann seinen Vorposten aufgeben.' });
-  const garnison = Object.assign({}, doc.garnison || {});
-  vorpostenLoesch(sys);
-  console.log('[vorposten] aufgegeben userId=' + req.userId + ' sys=' + sys);
+  // Solange der Schalter aus ist, bleibt das ausgelieferte Verhalten: sofort weg, Garnison zurueck.
+  if (!VORPOSTEN_ABBAU_AKTIV) {
+    const garnison = Object.assign({}, doc.garnison || {});
+    vorpostenLoesch(sys);
+    console.log('[vorposten] aufgegeben userId=' + req.userId + ' sys=' + sys);
+    await saveDb();
+    return res.json({ ok: true, garnison, rueckerstattung: 0 });
+  }
+  const jetzt = Date.now();
+  const laeuft = vorpostenAbbauLaeuft(doc);
+  if (laeuft) {
+    return res.status(400).json({ error: 'Der Abbau läuft bereits - noch ' + Math.ceil((laeuft - jetzt) / 60000) + ' Minuten.',
+      laeuft: true, abbauAb: laeuft });
+  }
+  doc.abbauAb = jetzt + VORPOSTEN_ABBAU_MS;
+  vorpostenSchreib(doc);
+  console.log('[vorposten] abbau gestartet userId=' + req.userId + ' sys=' + sys);
   await saveDb();
-  res.json({ ok: true, garnison, rueckerstattung: 0 });
+  res.json({ ok: true, abbau: true, abbauAb: doc.abbauAb, dauerMs: VORPOSTEN_ABBAU_MS,
+    vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
+});
+
+/* Abbrechen. Es gibt nichts zu erstatten - der Abbau kostet nichts, er kostet Zeit. Wer ihn
+   abbricht, hat die Frist umsonst laufen lassen; das ist die ganze Strafe und sie reicht. */
+app.post('/api/vorposten/abbau/abbrechen', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann den Abbau abbrechen.' });
+  if (!vorpostenAbbauLaeuft(doc)) return res.status(400).json({ error: 'An diesem Vorposten läuft kein Abbau.', keinAbbau: true });
+  delete doc.abbauAb;
+  vorpostenSchreib(doc);
+  await saveDb();
+  res.json({ ok: true, vorposten: vorpostenFuerClient(doc, req.userId, Date.now()) });
 });
 
 app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {

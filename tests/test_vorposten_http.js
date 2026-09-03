@@ -47,7 +47,7 @@ const SAB = process.env.KEPLER_VP_SABOTAGE || '';
    damals nur, ob das Erwartete faellt, also fiel es nicht auf. Seit sie beide Richtungen misst,
    gehoert jede gemessene Folge in die Liste. */
 const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a', '1b', '2b'], typ: ['5b', '5c'], meldung: ['4h', '4h2'],
-  kerndach: ['10a'], kerndachab: ['10c'], abbaufrist: ['6b', '6c', '6d', '6e'], abbaumodule: ['6g'], projektwirkung: ['11f', '11h'], projektzeit: ['11d'],
+  kerndach: ['10a'], kerndachab: ['10c'], abbaufrist: ['6b', '6c', '6d', '6e', '6f'], abbaumodule: ['6g'], projektwirkung: ['11f', '11h'], projektzeit: ['11d'],
   zweigwahl: ['7e', '7f', '7g', '7h'], zweigwerte: ['7g'],
   // Etappe 3 (Stationsmodule): Die Listen sind gemessen, siehe Abschnitt 9.
   // GEMESSEN, nicht geschaetzt: Bei 'modulbestand' faellt 9d NICHT - der Einbau gelingt ja weiter,
@@ -444,8 +444,20 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
   /* Die Garnison wird HIER gemessen, nicht aus der Vorrichtung angenommen: Der Schlag in 6d hat
      Schiffe gekostet, und die Regel lautet "was noch dasteht, kommt zurueck" - nicht "vierzig".
      Der erste Entwurf verglich mit der Startzahl und fiel genau daran (gemessen: 37 statt 40). */
+  /* NULL-SICHER: Unter der Sabotage `abbaufrist` ist die Frist sofort abgelaufen, der Tick raeumt
+     den Vorposten also schon vor dieser Zeile weg. Der erste Entwurf griff hier auf `dd.garnison`
+     eines nicht mehr vorhandenen Dokuments zu und STUERZTE AB - damit belegten 6f und 6g unter
+     dieser Sabotage gar nichts, und die Prueflisten beider Laeufe waren verschieden. Genau die
+     Lehre aus test_vorposten_module_ui: Ein Test, der am kaputten Stand abstuerzt statt zu fallen,
+     misst dort nichts. */
   let garnVorTick = null;
-  await aendereDb(d => { const dd = liesDoc(d, SYS6); garnVorTick = Object.assign({}, dd.garnison || {}); dd.abbauAb = Date.now() - 1000; schreibDoc(d, dd); });
+  await aendereDb(d => {
+    const dd = liesDoc(d, SYS6);
+    if (!dd) return;
+    garnVorTick = Object.assign({}, dd.garnison || {});
+    dd.abbauAb = Date.now() - 1000;
+    schreibDoc(d, dd);
+  });
   await new Promise(r => setTimeout(r, 4000));
   let nachTick = 'unbekannt', belohnung6 = null, bestand6 = null;
   await aendereDb(d => {

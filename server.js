@@ -6064,6 +6064,11 @@ function loadOrInitGalaxy() {
   // ortlose Format haben - activePirateFaction/unlockedAlienRaces waren zuerst nur Namen ohne Ort).
   if (db.galaxy.npcEmpireStrength === undefined) db.galaxy.npcEmpireStrength = 1.0;
   if (db.galaxy.marketTrend === undefined) db.galaxy.marketTrend = 1.0;
+  // Sektorlage (E5): Ein Bestand ohne dieses Feld ist der Normalfall - es entsteht erst, wenn
+  // SEKTOR_LAGE_AKTIV an ist. Die leere Vorgabe steht hier trotzdem, damit galaxyFuerClient das
+  // Feld immer mitfuehrt und das Frontend nicht zwischen 'noch nie gerechnet' und 'kaputt'
+  // raten muss.
+  if (!db.galaxy.sektorLage) db.galaxy.sektorLage = { sektoren: {}, schnitt: 0, stand: 0 };
   if (typeof db.galaxy.activePirateFaction === 'string') {
     db.galaxy.activePirateFaction = { name: db.galaxy.activePirateFaction, system: pickRandomFreeSystem() };
   } else if (!db.galaxy.activePirateFaction) {
@@ -7244,6 +7249,10 @@ function galaxyTick() {
     const neu = festungSpawn(felder);
     if (neu) { for (const sysId of Object.keys(felder)) db.shared[astFeldKey(sysId)] = felder[sysId]; }
   }
+
+  // Die Sektorlage (E5): derselbe Nestbestand, regional gelesen. Steht SEKTOR_LAGE_AKTIV aus,
+  // kehrt sektorLageTick sofort zurueck - genau wie nestTick und A2Tick.
+  sektorLageTick(g);
 
   checkLeaderboardOvertakes();
   // Verdachtsmeldung an den Betreiber (28.08.2026, siehe verdachtTick) - vor dem saveDb des
@@ -11858,6 +11867,127 @@ function nestStufenSumme(g) {
 }
 function npcStaerkeZiel(g) {
   return Math.min(NPC_STAERKE_DECKEL, NPC_STAERKE_BASIS + NPC_STAERKE_JE_STUFENPUNKT * nestStufenSumme(g));
+}
+/* ===== PHASE 5: die Sektorlage - derselbe Nestbestand, regional gelesen (E5, 03.09.2026) ======
+   Bis hierher kennt die Galaxie genau EINE Schwierigkeitszahl: `npcEmpireStrength`, oben aus der
+   Stufensumme ALLER Nester abgeleitet. Sie sagt, wie es der Galaxie geht - nie, wie es einer
+   Region geht. Auf der Karte ist deshalb jede Region gleich gefaehrlich.
+
+   DER BEFUND, DER DIE FORM DIESER ETAPPE ENTSCHIEDEN HAT: Das Konzept (19.08.2026) ging davon
+   aus, `NEST_STUFEN[*].punkte` existiere AUSSCHLIESSLICH fuer die Sektorlage. Das stimmte, als es
+   geschrieben wurde, und seit Phase 4 nicht mehr - npcStaerkeZiel() liest dasselbe Feld. Ein
+   absoluter Sektorfaktor obendrauf haette dieselben Nester ZWEIMAL gezaehlt: einmal galaxieweit,
+   einmal regional. Gerechnet gegen die heutigen Deckel waere der schlimmste Fall von 2,50x auf
+   3,63x gestiegen - und der Konzeptsatz "die Aenderung kann kein Bestandskonto verschlechtern"
+   waere fuer jeden Sektor mit Nestern falsch gewesen.
+
+   DESHALB MISST DIESE ZAHL DEN ABSTAND ZUM DURCHSCHNITT, NICHT DEN BESTAND (Entscheidung Sascha
+   aus drei vorgelegten Varianten). Eine gleichmaessig belastete Galaxie ergibt in JEDEM Sektor
+   genau 1,00 - also exakt den heutigen Stand. Erst eine BALLUNG macht eine Region haerter, und
+   der absolute Schwierigkeitsgrad bleibt allein Sache von npcEmpireStrength. Nichts wird doppelt
+   gezaehlt, und die Karte beantwortet die Frage, die man an einer Uebersicht wirklich stellt:
+   "ist es hier schlimmer als anderswo?"
+
+   DIE STEIGUNG IST GEGEN DIE ECHTEN DECKEL GERECHNET, nicht geschaetzt. NEST_MAX = 12 Nester,
+   hoechste Stufe 5 Punkte, FESTUNG_MAX_AKTIV = 6 zu je 2 Punkten: der Gesamtdruck der Galaxie
+   liegt damit hoechstens bei 72. Gleichmaessig verteilt traegt jeder der acht Sektoren 9 und
+   steht bei 1,00. Der Deckel ist erreicht, wenn ein Sektor rund das DOPPELTE seines Anteils
+   traegt (Abstand 12,5) - eine Ballung, die es geben kann, aber nicht nebenbei:
+
+     Abstand zum Schnitt    0      2      5      9     >=12,5
+     npcMult             1,00   1,04   1,10   1,18    1,25 (Deckel)
+
+   DIE STUFE WIRD AUS DEMSELBEN ABSTAND ABGELEITET wie der Faktor, nicht aus dem rohen Druck.
+   Sonst stuende an einer Region "belagert" und daneben ein Faktor von 1,00 - eine Beschriftung,
+   die ihrer eigenen Zahl widerspricht.
+
+   AUTORITAET: vollstaendig Server. `g.sektorLage` liegt in `db.galaxy` und ist ueber
+   PUT /api/storage/:key fuer keinen Client erreichbar; es reist ueber galaxyFuerClient mit
+   (Object.assign ueber g), ohne eine Zeile Verdrahtung.
+
+   SCHALTER: Solange SEKTOR_LAGE_AKTIV aus ist, wird gar nichts gerechnet und `g.sektorLage`
+   bleibt leer. Allein ausgeliefert waeren NPCs in einzelnen Regionen bis zu einem Viertel zaeher,
+   ohne dass eine Anzeige den Grund kennt. Umgelegt wird er im Frontend-PR. */
+const SEKTOR_LAGE_AKTIV = false;
+const SEKTOR_DRUCK_JE_FESTUNG = 2;      // eine Festung wiegt wie ein Nest der Stufe 2
+const SEKTOR_LAGE_STEIGUNG = 0.02;      // je Punkt Abstand zum Galaxieschnitt
+const SEKTOR_LAGE_DECKEL = 1.25;
+const SEKTOR_LAGE_UNRUHIG_AB = 1;       // Abstand, ab dem die Region nicht mehr "ruhig" heisst
+const SEKTOR_LAGE_BELAGERT_AB = 6;
+
+/* Die acht Regionsmittelpunkte. KOPIE-FAMILIE mit SEKTOR_DEFS im Frontend (dort mit Name, Farbe,
+   Eigenart und Beschreibung) - hier stehen bewusst NUR Schluessel und Koordinaten, weil der
+   Server von einer Region nichts weiter wissen muss. Beide Seiten bei jeder Aenderung pflegen;
+   tests/test_sektorlage.js vergleicht sie Zeichen fuer Zeichen gegen den Nachbar-Klon. */
+const SEKTOR_ZENTREN = [
+  { key: 'kepler',   cx: 459, cy: 289 },
+  { key: 'wispern',  cx: 441, cy: 89  },
+  { key: 'solmark',  cx: 652, cy: 137 },
+  { key: 'obsidian', cx: 811, cy: 151 },
+  { key: 'meridian', cx: 812, cy: 403 },
+  { key: 'pulsar',   cx: 597, cy: 355 },
+  { key: 'ilyra',    cx: 251, cy: 411 },
+  { key: 'rand',     cx: 227, cy: 192 }
+];
+/* Dieselbe Naechster-Nachbar-Rechnung wie sektorVon() im Frontend - auch in der Reihenfolge:
+   Bei exakt gleichem Abstand gewinnt der ZUERST eingetragene Sektor. Ein `<=` statt `<` waere
+   eine stille Abweichung von der Frontend-Kopie, die nur bei einem Gleichstand auffiele. */
+function sektorVonSystem(sysId) {
+  const c = SYSTEM_COORD_BY_ID[sysId];
+  if (!c) return null;
+  let best = SEKTOR_ZENTREN[0], bd = Infinity;
+  for (const sk of SEKTOR_ZENTREN) {
+    const d = (c.gx - sk.cx) * (c.gx - sk.cx) + (c.gy - sk.cy) * (c.gy - sk.cy);
+    if (d < bd) { bd = d; best = sk; }
+  }
+  return best.key;
+}
+
+/* Der Druck einer Region und daraus der Faktor. Reine Funktion ueber den uebergebenen Bestand -
+   sie liest weder db noch die Uhr, damit der Test sie mit gestellten Lagen fuettern kann, statt
+   einen halben Galaxie-Takt nachzustellen (dasselbe Prinzip wie _build_ask_prompt im AI-Core). */
+function sektorLageAus(nester, festungSysteme) {
+  const lage = {};
+  for (const sk of SEKTOR_ZENTREN) lage[sk.key] = { druck: 0, nester: 0, festungen: 0 };
+  for (const n of nester || []) {
+    const key = n && sektorVonSystem(n.sys);
+    if (!key || !lage[key]) continue;
+    lage[key].druck += (nestStufe(n.stufe).punkte || 0);
+    lage[key].nester += 1;
+  }
+  for (const sysId of festungSysteme || []) {
+    const key = sektorVonSystem(sysId);
+    if (!key || !lage[key]) continue;
+    lage[key].druck += SEKTOR_DRUCK_JE_FESTUNG;
+    lage[key].festungen += 1;
+  }
+  const summe = SEKTOR_ZENTREN.reduce((a, sk) => a + lage[sk.key].druck, 0);
+  const schnitt = summe / SEKTOR_ZENTREN.length;
+  for (const sk of SEKTOR_ZENTREN) {
+    const e = lage[sk.key];
+    // Nur die Ueberlast zaehlt. Unter dem Schnitt wird nichts GESCHENKT: Ein Faktor unter 1 waere
+    // eine Erleichterung, die niemand beantragt hat, und die Untergrenze 1,00 ist die Zusage,
+    // dass diese Etappe kein Bestandskonto verschlechtert UND keines verbilligt.
+    e.ueber = Math.max(0, Math.round((e.druck - schnitt) * 100) / 100);
+    e.npcMult = Math.min(SEKTOR_LAGE_DECKEL, 1 + SEKTOR_LAGE_STEIGUNG * e.ueber);
+    e.npcMult = Math.round(e.npcMult * 1000) / 1000;
+    e.stufe = e.ueber >= SEKTOR_LAGE_BELAGERT_AB ? 'belagert'
+            : e.ueber >= SEKTOR_LAGE_UNRUHIG_AB ? 'unruhig' : 'ruhig';
+  }
+  return { lage, schnitt: Math.round(schnitt * 100) / 100 };
+}
+
+/* Der Takt-Aufruf. Bewusst NACH dem Festungs-Spawn und nicht - wie das Konzept vorschlug - vor
+   der npcEmpireStrength-Zeile: Der Druck soll den Bestand DIESES Takts zaehlen, und Festungen
+   entstehen weiter unten. Vor npcEmpireStrength zu rechnen war im Konzept noetig, weil der
+   Faktor dort noch in dessen Zielwert einfliessen sollte; in der relativen Fassung tut er das
+   nicht mehr. */
+function sektorLageTick(g) {
+  if (!SEKTOR_LAGE_AKTIV) return;
+  const felder = astAlleFelder().felder;
+  const festungSysteme = Object.keys(felder).filter(sysId => felder[sysId] && felder[sysId].festung);
+  const { lage, schnitt } = sektorLageAus(nestListe(g), festungSysteme);
+  g.sektorLage = { sektoren: lage, schnitt: schnitt, stand: Date.now() };
 }                // Grundverlust des Angreifers je Schlag
 
 function nestVolkVonName(name) {

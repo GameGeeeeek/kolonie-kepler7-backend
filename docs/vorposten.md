@@ -459,3 +459,37 @@ ein stiller Rückfall auf `false` sähe wie Normalbetrieb aus: `/api/vorposten` 
 `abbauAktiv:false`, das Frontend beschriftet den Eintrag brav wieder mit „aufgeben", und niemandem
 fällt etwas auf. Gegenprobe gemessen: mit `false` fällt **genau** 8e, die 83 Prüfnamen beider Läufe
 sind per `diff` identisch.
+
+## Etappe V2: Der Werftrabatt (03.09.2026)
+
+Auftrag Sascha: alle Punkte der Vorposten-Auswahl umsetzen. Dieser stand als **Schuld im eigenen
+Quelltext**: Der Kommentar über `VORPOSTEN_ZWEIGE` nennt seit dem 02.09.2026 „Werftrabatt" und
+„Marktgebühr" als Kanäle, die später *zusammen mit ihrer Wirkung* kommen. Steckplätze, Projekte und
+Sprungtor sind seither gebaut — diese beiden nicht. Bis hierher war die „Werft" ein
+Flugzeit-Multiplikator mit dünnerem Kern: Sie baute nichts.
+
+**Der Kanal.** `werft` ist ein Anteil **ersparter Bauzeit** in der Werft. Er steht auf der Leiter
+(0,02 im Feldlager bis 0,16 auf Stufe 8) und bekommt ab der Wahlstufe den Zweig-Multiplikator:
+Werft 2,20, Handel und Festung je 0,50. Eine Sternenwerft kommt damit auf **35,2 %**, ein
+Sternenmarkt oder eine Sternenfestung auf 8 %.
+
+**Der Deckel gilt der Summe, nicht dem einzelnen Vorposten** — genau wie bei `prod`. Drei
+Sternenwerften kämen auf 105 % und damit auf Bauzeit null. Ein Deckel je Vorposten hätte das nicht
+verhindert und wäre zugleich unprüfbar gewesen, weil ihn heute kein einzelner Vorposten erreicht
+(gemessen: 0,352 gegen 0,40). Der Wert reist als `werftDeckel` an jedem Vorposten und im Katalog
+mit, damit im Frontend keine zweite Zahl gepflegt werden muss.
+
+**Global, nicht je System.** Schiffe entstehen zu Hause, nicht am Vorposten — der Rabatt summiert
+sich deshalb über alle eigenen Vorposten wie `prod`, statt am Zielsystem zu hängen wie `flug`.
+
+**Der Schalter.** `VP_WERFT_AKTIV` steht ausgeliefert auf `false`; solange meldet `nutzen.werft`
+eine harte 0. Umgelegt wird er, sobald das Frontend den Kanal liest. Ein gemeldeter Nutzen, der
+nirgends wirkt, wäre eine Lüge — dieselbe Regel, aus der die Zweige von Anfang an nur über Kanäle
+unterschieden wurden, die es schon gibt.
+
+Wächter: `tests/test_vorposten_werft_http.js` (Port 3255, 9 Prüfungen). Er läuft **zweimal**, mit
+umgelegtem und mit aktiv ausgeschaltetem Schalter: Geprüft wird die *Wirkung* des Schalters, nicht
+seine ausgelieferte Stellung — ein Test, der die Auslieferung als Voraussetzung nimmt, fällt bei
+genau der Änderung, die er begleiten soll (Lehre aus `test_hort_meldung_http.js`). Gegenproben
+`zweigmult` (1b), `leiter` (1b, 1c) und `schalter` (2a); die Liste bei `leiter` führt 1b als
+**gemessene** Folge mit, weil die Erwartung dort aus dem unversehrten Quelltext stammt.

@@ -1732,6 +1732,15 @@ function pushNotificationText(type, payload) {
     body: (payload.grund || 'Ohne Angabe') + ' - hol es dir im Spiel ab.' };
   if (type === 'admin-alarm') return { title: 'Alarm: ' + (payload.titel || 'Auffaelligkeit'),
     body: (payload.text || '') + ' (gemessen ' + (payload.wert !== undefined ? payload.wert : '?') + ', Schwelle ' + (payload.schwelle !== undefined ? payload.schwelle : '?') + ')' };
+  /* Die Vorwarnung beim Anflug (03.09.2026). Sie nennt die Schiffszahl und die verbleibende Zeit -
+     ohne beides waere sie ein "irgendwer kommt irgendwann" und damit keine Grundlage fuer die
+     Entscheidung, ob sich eine Garnison ueberhaupt noch lohnt. */
+  if (type === 'vorposten-anflug') {
+    const restMin = Math.max(0, Math.round(((payload.ankunftAt || 0) - Date.now()) / 60000));
+    return { title: 'Verband im Anflug!',
+      body: (payload.angreiferName || 'Eine Allianz') + ' fliegt deinen ' + (payload.name || 'Vorposten') + ' bei ' + (payload.system || '?') +
+        ' mit ' + (payload.schiffe || 0) + ' Schiffen an - Ankunft in ' + restMin + ' Min. Verstaerke die Garnison, solange Zeit ist.' };
+  }
   if (type === 'vorposten-angegriffen') return payload.gefallen
     ? { title: 'Vorposten geschleift!', body: (payload.angreiferName || 'Ein Kommandant') + ' hat deinen ' + (payload.name || 'Vorposten') + ' bei ' + (payload.system || '?') + ' geschleift - die Garnison ist mit ihm verloren.' }
     : { title: 'Vorposten angegriffen!', body: (payload.angreiferName || 'Ein Kommandant') + ' beschiesst deinen ' + (payload.name || 'Vorposten') + ' bei ' + (payload.system || '?') + ' - Kern noch ' + (payload.kernProzent || 0) + '%. Verstärke die Garnison, solange er steht.' };
@@ -1843,6 +1852,7 @@ function notificationTarget(type, payload) {
     // Der Alarm zeigt auf die Bestenliste, wenn er ein Konto meint - dieselbe Wahl wie bei
     // 'konto-verdacht'; ohne Konto (Neustarts) bleibt es das Postfach selbst.
     case 'admin-alarm': return p.konto ? 'galaxie:rang' : 'berichte';
+    case 'vorposten-anflug': return 'karte';
     case 'geschenk-konto': return 'berichte';
     case 'raid-incoming': return 'verteidigung';
     case 'spy-detected': return 'verteidigung';
@@ -6092,9 +6102,15 @@ function systemOwnershipMap(g) {
   }
   return map;
 }
-function pushGalaxyNews(icon, text) {
+// `art` (03.09.2026) ist optional und benennt die SORTE der Meldung. Ohne sie muesste ein Leser
+// am Wortlaut erkennen, worum es geht - genau die zufaellige Momentaufnahme, vor der CLAUDE.md
+// warnt: Eine umformulierte Meldung braeche die Erkennung lautlos. Die bestehenden Aufrufer bleiben
+// unveraendert und liefern kein `art`; nur wer erkannt werden muss, setzt eins.
+function pushGalaxyNews(icon, text, art) {
   const g = loadOrInitGalaxy();
-  g.news.unshift({ id: crypto.randomUUID(), time: Date.now(), icon, text });
+  const eintrag = { id: crypto.randomUUID(), time: Date.now(), icon, text };
+  if (art) eintrag.art = art;
+  g.news.unshift(eintrag);
   g.news = g.news.slice(0, 40);
 }
 // Nie ein System zerstören/besetzen, in dem tatsächlich ein Spieler zuhause ist - gilt für ALLE
@@ -7397,6 +7413,71 @@ function galaxyFuerClient(g, userId) {
 }
 app.get('/api/galaxy', authMiddleware, (req, res) => {
   res.json(galaxyFuerClient(loadOrInitGalaxy(), req.userId));
+});
+
+// ---- Der Hort: der seltenste Expeditionsfund, und die einzige Meldung, die alle sehen ------------
+//
+// WARUM DER SERVER WUERFELT (03.09.2026, Entscheidung Sascha)
+// -----------------------------------------------------------
+// Die Expedition wird im Browser ausgewertet - der Spielstand ist bauartbedingt klientenautoritativ.
+// Fuer den Fund selbst ist das in Ordnung; fuer die MELDUNG AN ALLE ist es das nicht. Ein Banner,
+// das jeder Client ausloesen kann, ist ein Spam-Kanal, und pushGalaxyNews schreibt in die Weltlage,
+// die jeder Spieler sieht. Hier faellt deshalb die eine Entscheidung, die nicht gefaelscht werden
+// darf: ob diese Expedition einen Hort bringt.
+//
+// GEWUERFELT WIRD BEIM START, nicht beim Abschluss - aus zwei Gruenden:
+//   1. Die Fundaufloesung im Client (checkMissions) ist SYNCHRON. Ein await mitten darin waere ein
+//      Eingriff in die Missionsschleife; so liegt die Zusage Minuten vor der Auswertung bereit und
+//      blockiert nichts.
+//   2. Ein Aufruf je Expedition statt je Fund - rund 20 Anfragen je Stunde und Spieler statt 15
+//      zusaetzlicher.
+//
+// OHNE SERVER GIBT ES KEINEN HORT, aber auch keinen Bruch: Der Client bekommt keine Zusage,
+// wuerfelt seine Leiter ohne die oberste Stufe und spielt normal weiter. Das ist der Preis der
+// Entscheidung "der Server wuerfelt", und er war beim Treffen bekannt.
+//
+// DIE CHANCE HIER IST NICHT DIE CHANCE DER LEITER. Beim Start ist noch nicht bekannt, ob die
+// Expedition ueberhaupt einen Ressourcenfund bringt (44% bei Standard, 72% bei der
+// Schuerfexpedition). Diese Baender stehen im Frontend und werden hier bewusst NICHT gespiegelt -
+// eine Kopie-Familie fuer einen einzigen Wurf waere teurer als die Ungenauigkeit, die sie
+// beseitigt. Aus 0,5% beim Start werden dadurch effektiv 0,22% bis 0,36% je Ressourcenfund; das
+// Ziel der Leiter sind 0,3%.
+const HORT_BANNER_AKTIV = true;   // umgelegt am 03.09.2026, im Frontend-PR mit dem Laufschrift-Banner
+const HORT_START_CHANCE = 0.005;
+const HORT_BASIS = 1000000;        // Spitze der Fundleiter im Frontend (Kopie-Familie, s.u.)
+const HORT_STREUUNG = 0.15;        // dieselbe Streuung wie dort
+// Der Beute-Multiplikator kommt vom Client und wird deshalb GEKLEMMT statt geglaubt. Er ist keine
+// Sicherheitsgrenze (der Fund landet ohnehin in einem klientenautoritativen Spielstand), sondern
+// eine Anzeigegrenze: Ohne sie stuende in der Weltlage, die alle sehen, irgendwann eine Zahl mit
+// zwoelf Stellen. Die Spanne deckt den echten Bereich ab (0,6 bei der kurzen Erkundung bis rund 3
+// mit gestapelten Boni) und laesst Luft nach oben.
+const HORT_MULT_MIN = 0.5, HORT_MULT_MAX = 5;
+// Forschungspunkte sind bei der Forschungsexpedition eine Fundressource, werden aber nicht
+// gehandelt und stehen deshalb nicht in MARKET_RES_LABELS. Statt jene Tabelle zu erweitern (sie
+// bedient den Markt und haette dort Nebenwirkungen) steht das eine fehlende Label hier.
+function hortResLabel(key) {
+  if (key === 'forschungspunkte') return 'Forschungspunkte';
+  return MARKET_RES_LABELS[key] || null;
+}
+const hortRateLimit = rateLimit(60 * 60 * 1000, 120, 'Zu viele Expeditionen in kurzer Zeit.');
+app.post('/api/expedition/hort', authMiddleware, hortRateLimit, (req, res) => {
+  // Fail-closed in beide Richtungen: Der Schalter und der Admin-Notaus beenden das hier, BEVOR
+  // gewuerfelt wird. Eine abgeschaltete Mechanik, die noch wuerfelt und nur nicht meldet, waere
+  // eine Abschaltung, die wie Normalbetrieb aussieht.
+  if (!HORT_BANNER_AKTIV || notAusGesetzt('hort')) return res.json({ hort: false });
+  const label = hortResLabel(String((req.body && req.body.res) || ''));
+  if (!label) return res.status(400).json({ error: 'Unbekannte Ressource.' });
+  if (Math.random() >= HORT_START_CHANCE) return res.json({ hort: false });
+  const roh = Number(req.body && req.body.mult);
+  const mult = Number.isFinite(roh) ? Math.min(HORT_MULT_MAX, Math.max(HORT_MULT_MIN, roh)) : 1;
+  const betrag = Math.round(HORT_BASIS * (1 - HORT_STREUUNG + Math.random() * 2 * HORT_STREUUNG) * mult);
+  // db synchron vor saveDb() mutieren - pushGalaxyNews tut genau das und speichert selbst nicht.
+  // Mit `art` und den Einzelteilen: Das Frontend baut daraus seine Laufschrift, ohne den Satz
+  // auseinandernehmen zu muessen - und erkennt die Meldung an der Art statt am Wortlaut.
+  pushGalaxyNews('ti-trophy', 'Seltener Fund: ' + req.username + ' hat auf einer Expedition einen Hort entdeckt – '
+    + betrag.toLocaleString('de-DE') + ' ' + label + '!', 'hort');
+  saveDb();
+  res.json({ hort: true, res: String(req.body.res), betrag });
 });
 
 // Aktuelle Marktpreise abrufen (inkl. Normalpreis, damit das Frontend "teuer/billig" anzeigen kann).
@@ -9263,9 +9344,28 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
      Verteidiger - einen einzelnen Spieler. Seine Warnung haengt deshalb am Vorposten-Dokument
      selbst (vorpostenAnflugSetzen) und nicht im Allianz-Namensraum. */
   if (doc.zielArt === 'vorposten' && doc.vorpostenSystem) {
+    const vpZiel = vorpostenLies(doc.vorpostenSystem);
     vorpostenAnflugSetzen(doc.vorpostenSystem, {
       musterId: doc.id, tag, ankunftAt: doc.dispatch.arrivalAt, schiffe: totalShips, seit: now
     });
+    /* UND EINE MELDUNG. Der Vermerk allein waere eine halbe Zusage: Er steht im Kartenmenue, und
+       wer nicht zufaellig hinsieht, erfaehrt nichts - genau der Fehler, den die Etappe vom
+       02.09.2026 an der Schlag-Meldung behoben hat. Die Vorwarnung ist erst dann eine, wenn sie
+       den Besitzer erreicht, solange er noch Schiffe schicken kann.
+       fail-open im try: Eine ausgefallene Benachrichtigung darf den Versand nicht kippen (Regel:
+       fail-closed nur fuer Sicherungen). VOR saveDb(), damit die Warteschlange mitgeschrieben wird. */
+    try {
+      const bes = vpZiel && vpZiel.besitzer ? findUserById(vpZiel.besitzer) : null;
+      if (bes) {
+        const bp = getNotifPrefs(bes);
+        if (bp.enabled && bp.attack) {
+          pushNotificationEvent(vpZiel.besitzer, 'vorposten-anflug', {
+            angreiferName: '[' + tag + ']', name: vorpostenStufe(vpZiel.stufe).name, system: doc.vorpostenSystem,
+            schiffe: totalShips, ankunftAt: doc.dispatch.arrivalAt
+          }, { skipWebPush: !allowAttackPush(vpZiel.besitzer) });
+        }
+      }
+    } catch (e) { console.warn('[muster-vorposten] Anflug-Meldung fehlgeschlagen:', e.message); }
   }
   if (!musterZielOhneAllianz(doc.zielArt)) {
     db.shared['alliance:' + doc.targetTag + ':incomingmuster'] = JSON.stringify({
@@ -14778,7 +14878,8 @@ const NOTAUS_NAMEN = {
   // der waehrend eines Stopps ankommt, geht sonst auf einen Stand, den es gleich nicht mehr gibt.
   // Im Code immer an (spawnAktivImCode), der Admin kann ihn nur AB-schalten - dieselbe Regel wie
   // bei den fuenf Spawns.
-  angriffe: 'Angriffe werden angenommen (PvP, Festung, Nest, Konvoi, Vorposten)'
+  angriffe: 'Angriffe werden angenommen (PvP, Festung, Nest, Konvoi, Vorposten)',
+  hort: 'Der seltenste Expeditionsfund wird ausgewürfelt und in der Weltlage gemeldet'
 };
 const ANGRIFFE_PAUSE_TEXT = 'Angriffe sind gerade pausiert (Wartung) – bitte in ein paar Minuten noch einmal.';
 function notAusGesetzt(name) {

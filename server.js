@@ -6983,7 +6983,7 @@ function galaxyTick() {
   }
   // Abgelaufenes Wurmloch schließen.
   if (g.activeWormhole && g.activeWormhole.expiresAt < Date.now()) {
-    pushGalaxyNews('ti-infinity', 'Das Wurmloch nach ' + g.activeWormhole.to + ' hat sich wieder geschlossen.');
+    pushGalaxyNews('ti-infinity', 'Das Wurmloch ' + g.activeWormhole.from + ' ↔ ' + g.activeWormhole.to + ' hat sich wieder geschlossen.');
     g.activeWormhole = null;
   }
   // Abgelaufenen Krieg beilegen - und ihn erstmals ENTSCHEIDEN.
@@ -7027,13 +7027,29 @@ function galaxyTick() {
       pushGalaxyNews('ti-sun', 'Supernova! Das unbesiedelte System ' + target + ' ist kollabiert und für 48 Stunden unzugänglich.');
     }
   }
+  /* BEIDE ENDEN SIND ZUFAELLIG (03.09.2026, Auftrag Sascha: "mal ist kepler mit system x, mal
+     system y fuehrt zu system a"). Bis dahin stand hier fest `from: 'kepler'`, und `to` musste
+     UNbesiedelt sein. Das Wurmloch war damit kein Ort, sondern ein Anhaengsel des Heimatsystems:
+     Gemessen steht es 74 % der Zeit offen (12 h Lebensdauer, danach 6 % je 15-Minuten-Takt, also
+     im Mittel 4,2 h Pause) - ein Ende war praktisch immer die Heimat, das andere ein leeres
+     System, in das ohnehin niemand fliegt. Eine Verbindung, die dauerhaft am selben Punkt haengt,
+     ist keine Passage.
+     Besiedelte Systeme sind jetzt ausdruecklich ERLAUBT: Zoege der Takt weiter nur aus den leeren,
+     verbaende das Wurmloch zwei Orte, an denen niemand ist. Ausgeschlossen bleiben allein
+     kollabierte Systeme (Supernova) - dorthin kommt man 48 Stunden lang gar nicht, ein Tor dahin
+     waere ein Widerspruch. Das war vorher NICHT geprueft; `to` konnte ein kollabiertes System
+     treffen. */
   if (Math.random() < 0.06 && !g.activeWormhole) {
-    const occupiedForWormhole = occupiedSystems();
-    const options = SYSTEMS.filter(s => s !== 'kepler' && !occupiedForWormhole.has(s));
-    if (options.length) {
-      const to = options[Math.floor(Math.random() * options.length)];
-      g.activeWormhole = { from: 'kepler', to, expiresAt: Date.now() + 12 * 3600 * 1000 };
-      pushGalaxyNews('ti-infinity', 'Ein neues Wurmloch ist entstanden: Kepler-System ↔ ' + to + ' (für 12 Stunden geöffnet).');
+    const moeglich = SYSTEMS.filter(s => !g.collapsedSystems[s]);
+    if (moeglich.length >= 2) {
+      // Zwei VERSCHIEDENE gleichverteilt ziehen, ohne Wiederholungsschleife: Der zweite Index
+      // laeuft ueber n-1 Plaetze und ueberspringt den ersten. Eine Schleife "wuerfle neu, bis
+      // ungleich" haette bei zwei Systemen im Grenzfall beliebig lange gedreht.
+      const i = Math.floor(Math.random() * moeglich.length);
+      let j = Math.floor(Math.random() * (moeglich.length - 1));
+      if (j >= i) j++;
+      g.activeWormhole = { from: moeglich[i], to: moeglich[j], expiresAt: Date.now() + 12 * 3600 * 1000 };
+      pushGalaxyNews('ti-infinity', 'Ein neues Wurmloch ist entstanden: ' + moeglich[i] + ' ↔ ' + moeglich[j] + ' (für 12 Stunden geöffnet).');
     }
   }
 

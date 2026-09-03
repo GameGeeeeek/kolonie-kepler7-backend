@@ -3310,7 +3310,12 @@ const DEFENSE_VALUES = {
   // Diese beiden haben defVal 0 und aendern die Summe nicht - sie stehen hier, damit die
   // Schluesselmenge beider Seiten deckungsgleich ist und der Paritaetstest sie vergleichen kann.
   // Ohne sie muesste der Test eine Ausnahmeliste pflegen, und genau solche Listen veralten.
-  abhorchposten: 0, mondschild: 0
+  // signaturscanner (03.09.2026, Tarnwert Etappe 1): dritter Nullwert nach derselben Regel. Er
+  // misst Sichtbarkeit, nicht Wehrhaftigkeit - im Verteidigungs-Reiter steht er trotzdem, und
+  // damit greift der Paritaetstest. Bekaeme er spaeter einen echten defVal, waere ohne diesen
+  // Eintrag genau der Fall von resonanzschild oben wieder da: Das Frontend zeigt den Wert an,
+  // der Server summiert ihn mit NULL, und der Angreifer raeumt den Spieler trotzdem ab.
+  abhorchposten: 0, mondschild: 0, signaturscanner: 0
 };
 // Gebäude-Schildanteil: im Frontend trägt jedes Verteidigungsgebäude defVal + round(defVal*0.4) bei
 // (der Schild-Zuschlag). Serverseitig als Faktor 1.4 auf die Gebäude-Summe abgebildet.

@@ -1,7 +1,7 @@
 // Echter HTTP-Test: DIE VORWARNUNG BEIM ANFLUG auf einen Vorposten (03.09.2026).
 //
 //   node tests/test_vorposten_anflug_http.js
-//   KEPLER_VA_SABOTAGE=<offen|bleibt|verfall> node tests/test_vorposten_anflug_http.js
+//   KEPLER_VA_SABOTAGE=<offen|bleibt|meldung|verfall> node tests/test_vorposten_anflug_http.js
 //
 // WARUM ES DIESE ETAPPE GIBT. Das Vorposten-Konzept sagt dem Besitzer zu, er koenne mit einer
 // Garnison gegenhalten. Einloesbar war das nicht: Er erfuhr vom Verband erst beim ERSTEN SCHLAG,
@@ -29,6 +29,7 @@
 // gemessen, nicht geraten):
 //   * offen   : der Besitzer-Vorbehalt in vorpostenFuerClient entfaellt (jeder sieht den Anflug).
 //   * bleibt  : das Aufraeumen bei resolve entfaellt.
+//   * meldung : die Vorwarn-Meldung ans Postfach entfaellt.
 //   * verfall : der Verfallsfilter entfaellt.
 //
 // Port 3252 (belegt bis 3251, gemessen mit grep -hoE "3[12][0-9][0-9]" tests/*.js | sort -un).
@@ -48,7 +49,7 @@ const SAB = process.env.KEPLER_VA_SABOTAGE || '';
    er auch, wenn gar nichts geraeumt wird. 4a allein beweist also nichts; erst zusammen mit 3a
    ("der eigene ist weg") pinnt es das Verhalten fest. Erwartet man hier 4a mit, meldet der Lauf zu
    Recht einen Werkzeugfehler - so gemessen am 03.09.2026. */
-const MUSS_FALLEN = { offen: ['2b'], bleibt: ['3a'], verfall: ['5a'] };
+const MUSS_FALLEN = { offen: ['2b'], bleibt: ['3a'], verfall: ['5a'], meldung: ['1c'] };
 
 let fail = false;
 const ergebnis = {};
@@ -187,6 +188,9 @@ async function aendereDb(fn) {
     // Das Aufraeumen bei der Aufloesung entfaellt.
     bleibt: ['    if (vorpostenAnflugEntfernen(vp, doc.id)) vorpostenSchreib(vp);',
              '    if (false && vorpostenAnflugEntfernen(vp, doc.id)) vorpostenSchreib(vp);'],
+    // Die Vorwarn-Meldung entfaellt - der Vermerk steht nur noch stumm im Kartenmenue.
+    meldung: ["          pushNotificationEvent(vpZiel.besitzer, 'vorposten-anflug', {",
+              "          if (false) pushNotificationEvent(vpZiel.besitzer, 'vorposten-anflug', {"],
     // Der Verfallsfilter entfaellt - abgelaufene Vermerke warnen weiter.
     verfall: ['  return liste.filter(a => a && typeof a.ankunftAt === \'number\' && (jetzt - a.ankunftAt) < VORPOSTEN_ANFLUG_GNADE);',
               '  return liste.filter(a => a && typeof a.ankunftAt === \'number\');']
@@ -234,6 +238,16 @@ async function aendereDb(fn) {
       { anzahl: eintraege.length, tag: a0.tag, inZukunft: a0.ankunftAt > Date.now() });
     check('1b: er nennt die Schiffszahl - ohne sie waere die Warnung ein "irgendwer kommt"',
       typeof a0.schiffe === 'number' && a0.schiffe > 0, { schiffe: a0.schiffe });
+
+    /* 1c: UND EINE MELDUNG. Der Vermerk allein steht nur im Kartenmenue - wer nicht zufaellig
+       hinsieht, erfaehrt nichts, und die Vorwarnung waere so wertlos wie die fehlende Meldung
+       beim ersten Schlag, die am 02.09.2026 behoben wurde. Der Angreifername ist der TAG: Es ist
+       ein Verband, kein einzelner Spieler. */
+    const meldungen = (liesDb().private[DORA] || {}).__notificationEvents || [];
+    const m = meldungen.find(x => x.type === 'vorposten-anflug');
+    check('1c: der Besitzer bekommt die Vorwarnung ins Postfach - mit Tag, Schiffszahl und Ankunft',
+      !!m && m.payload && m.payload.angreiferName === '[' + TAG + ']' && m.payload.schiffe > 0 && typeof m.payload.ankunftAt === 'number',
+      { typen: meldungen.map(x => x.type), payload: m && m.payload });
   }
 
   // ---- 2) Wer ihn sehen darf --------------------------------------------------------------------

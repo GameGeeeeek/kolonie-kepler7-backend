@@ -328,3 +328,15 @@ deshalb das **übergebene** Objekt; der Aufrufer schreibt, wenn er sonst nicht s
 Test: `tests/test_vorposten_anflug_http.js` (Port 3252), Gegenproben `offen`, `bleibt`, `verfall`.
 Bei `bleibt` fällt **nur** `3a`, nicht auch `4a` – gemessen: `4a` prüft, dass der fremde Vermerk
 bleibt, und das tut er auch, wenn gar nichts geräumt wird. Erst das Paar pinnt das Verhalten fest.
+
+### Und eine Meldung, nicht nur ein Vermerk (03.09.2026)
+
+Der Vermerk allein wäre eine halbe Zusage: Er steht im Kartenmenü, und wer nicht zufällig hinsieht,
+erfährt nichts – genau der Fehler, den die Etappe vom 02.09.2026 an der *Schlag*-Meldung behoben
+hat. Beim Versand geht deshalb `vorposten-anflug` ins Postfach des Besitzers, mit Angreifer-Tag,
+Schiffszahl und der verbleibenden Zeit. Ohne die beiden Zahlen wäre es ein „irgendwer kommt
+irgendwann" und damit keine Grundlage für die Entscheidung, ob sich eine Garnison noch lohnt.
+
+Der Tiefenlink zeigt auf die **Karte** – dorthin, wo man die Garnison losschickt, nicht in die
+Berichte. Der Frontend-Zweig (`NOTIF_EVENT_INFO`) gehört zwingend in denselben Auftrag; der Wächter
+`test_pushkategorien` fordert ihn ein.

@@ -1732,6 +1732,15 @@ function pushNotificationText(type, payload) {
     body: (payload.grund || 'Ohne Angabe') + ' - hol es dir im Spiel ab.' };
   if (type === 'admin-alarm') return { title: 'Alarm: ' + (payload.titel || 'Auffaelligkeit'),
     body: (payload.text || '') + ' (gemessen ' + (payload.wert !== undefined ? payload.wert : '?') + ', Schwelle ' + (payload.schwelle !== undefined ? payload.schwelle : '?') + ')' };
+  /* Die Vorwarnung beim Anflug (03.09.2026). Sie nennt die Schiffszahl und die verbleibende Zeit -
+     ohne beides waere sie ein "irgendwer kommt irgendwann" und damit keine Grundlage fuer die
+     Entscheidung, ob sich eine Garnison ueberhaupt noch lohnt. */
+  if (type === 'vorposten-anflug') {
+    const restMin = Math.max(0, Math.round(((payload.ankunftAt || 0) - Date.now()) / 60000));
+    return { title: 'Verband im Anflug!',
+      body: (payload.angreiferName || 'Eine Allianz') + ' fliegt deinen ' + (payload.name || 'Vorposten') + ' bei ' + (payload.system || '?') +
+        ' mit ' + (payload.schiffe || 0) + ' Schiffen an - Ankunft in ' + restMin + ' Min. Verstaerke die Garnison, solange Zeit ist.' };
+  }
   if (type === 'vorposten-angegriffen') return payload.gefallen
     ? { title: 'Vorposten geschleift!', body: (payload.angreiferName || 'Ein Kommandant') + ' hat deinen ' + (payload.name || 'Vorposten') + ' bei ' + (payload.system || '?') + ' geschleift - die Garnison ist mit ihm verloren.' }
     : { title: 'Vorposten angegriffen!', body: (payload.angreiferName || 'Ein Kommandant') + ' beschiesst deinen ' + (payload.name || 'Vorposten') + ' bei ' + (payload.system || '?') + ' - Kern noch ' + (payload.kernProzent || 0) + '%. Verstärke die Garnison, solange er steht.' };
@@ -1843,6 +1852,7 @@ function notificationTarget(type, payload) {
     // Der Alarm zeigt auf die Bestenliste, wenn er ein Konto meint - dieselbe Wahl wie bei
     // 'konto-verdacht'; ohne Konto (Neustarts) bleibt es das Postfach selbst.
     case 'admin-alarm': return p.konto ? 'galaxie:rang' : 'berichte';
+    case 'vorposten-anflug': return 'karte';
     case 'geschenk-konto': return 'berichte';
     case 'raid-incoming': return 'verteidigung';
     case 'spy-detected': return 'verteidigung';
@@ -9226,9 +9236,28 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
      Verteidiger - einen einzelnen Spieler. Seine Warnung haengt deshalb am Vorposten-Dokument
      selbst (vorpostenAnflugSetzen) und nicht im Allianz-Namensraum. */
   if (doc.zielArt === 'vorposten' && doc.vorpostenSystem) {
+    const vpZiel = vorpostenLies(doc.vorpostenSystem);
     vorpostenAnflugSetzen(doc.vorpostenSystem, {
       musterId: doc.id, tag, ankunftAt: doc.dispatch.arrivalAt, schiffe: totalShips, seit: now
     });
+    /* UND EINE MELDUNG. Der Vermerk allein waere eine halbe Zusage: Er steht im Kartenmenue, und
+       wer nicht zufaellig hinsieht, erfaehrt nichts - genau der Fehler, den die Etappe vom
+       02.09.2026 an der Schlag-Meldung behoben hat. Die Vorwarnung ist erst dann eine, wenn sie
+       den Besitzer erreicht, solange er noch Schiffe schicken kann.
+       fail-open im try: Eine ausgefallene Benachrichtigung darf den Versand nicht kippen (Regel:
+       fail-closed nur fuer Sicherungen). VOR saveDb(), damit die Warteschlange mitgeschrieben wird. */
+    try {
+      const bes = vpZiel && vpZiel.besitzer ? findUserById(vpZiel.besitzer) : null;
+      if (bes) {
+        const bp = getNotifPrefs(bes);
+        if (bp.enabled && bp.attack) {
+          pushNotificationEvent(vpZiel.besitzer, 'vorposten-anflug', {
+            angreiferName: '[' + tag + ']', name: vorpostenStufe(vpZiel.stufe).name, system: doc.vorpostenSystem,
+            schiffe: totalShips, ankunftAt: doc.dispatch.arrivalAt
+          }, { skipWebPush: !allowAttackPush(vpZiel.besitzer) });
+        }
+      }
+    } catch (e) { console.warn('[muster-vorposten] Anflug-Meldung fehlgeschlagen:', e.message); }
   }
   if (!musterZielOhneAllianz(doc.zielArt)) {
     db.shared['alliance:' + doc.targetTag + ':incomingmuster'] = JSON.stringify({

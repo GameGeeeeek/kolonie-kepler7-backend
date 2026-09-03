@@ -518,6 +518,13 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
       /vorposten:\s*'Neue Vorposten werden errichtet'/.test(roh) && roh.includes("if (name === 'vorposten') return VORPOSTEN_AKTIV;") && roh.includes("if (!spawnAktiv('vorposten'))"));
     check('8d: BEIDE Rechte-Ketten der Storage-Route kennen checkVorpostenKeyPermission',
       roh.includes('checkVorpostenKeyPermission(req, key, false)') && roh.includes('checkVorpostenKeyPermission(req, key, true)'));
+    /* Der Abbau-Schalter braucht dieselbe Wache. Ohne sie prueft dieser Test nur die KOPIE (die legt
+       ihn selbst um, Zeile 0-kopie3) - der ausgelieferte Stand koennte still auf false zurueckfallen,
+       und das saehe wie Normalbetrieb aus: /api/vorposten meldet abbauAktiv:false, das Frontend
+       beschriftet den Eintrag brav wieder mit "aufgeben", und niemandem faellt etwas auf. */
+    const abbauSchalter = (roh.match(/const VORPOSTEN_ABBAU_AKTIV = (true|false);/) || [])[1];
+    check('8e: auch der Abbau-Schalter steht im AUSGELIEFERTEN Stand auf TRUE (Frontend v8.654.0 liest abbauMs/abbauAktiv)',
+      abbauSchalter === 'true', { steht_auf: abbauSchalter, hinweis: 'umgelegt am 03.09.2026 nach dem Frontend-Merge; false waere eine Notabschaltung mit Grund in docs/vorposten.md' });
   }
 
   // ---- 9) Stationsmodule: Bestand, Bau, Einbau, Ausbau, Wirkung ---------------------------------

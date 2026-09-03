@@ -13001,6 +13001,26 @@ const VORPOSTEN_AKTIV = true;   // umgelegt am 02.09.2026, unmittelbar nach dem 
    diesem Katalog und beschriftet den Eintrag danach - der Schalter ist an. */
 const VORPOSTEN_ABBAU_AKTIV = true;    // an seit Frontend v8.654.0
 const VORPOSTEN_ABBAU_MS = 24 * 3600 * 1000;
+/* ETAPPE V2: DER WERFTRABATT (03.09.2026). Auftrag Sascha: alle Punkte der Vorposten-Auswahl
+   umsetzen. Dieser hier stand als Schuld im Quelltext: Der Kommentar ueber VORPOSTEN_ZWEIGE nennt
+   seit dem 02.09.2026 „Werftrabatt" und „Marktgebuehr" als Kanaele, die spaeter ZUSAMMEN mit ihrer
+   Wirkung kommen. Bis dahin war die „Werft" ein Flugzeit-Multiplikator mit duennerem Kern - sie
+   baute nichts.
+
+   Der Kanal ist ein Anteil ERSPARTER BAUZEIT in der Werft, global (Schiffe entstehen zu Hause,
+   nicht am Vorposten) und ueber alle eigenen Vorposten summiert wie `prod` - nicht je System wie
+   `flug`.
+
+   DER DECKEL GILT DER SUMME, nicht dem einzelnen Vorposten - genau wie bei `prod`. Eine
+   Sternenwerft der Stufe 8 kommt allein auf 35,2 % (0,16 x 2,2); drei davon kaemen auf 105 % und
+   damit auf Bauzeit null. Ein Deckel je Vorposten haette das nicht verhindert und waere zugleich
+   unpruefbar gewesen, weil ihn heute kein einzelner Vorposten erreicht. Der Wert reist als
+   `werftDeckel` zum Client, damit dort keine zweite Zahl gepflegt werden muss.
+
+   Der Schalter steht auf false, bis das Frontend den Kanal liest - er wird im Zuge der
+   Frontend-Auslieferung umgelegt. Ein gemeldeter Nutzen, der nirgends wirkt, waere eine Luege. */
+const VP_WERFT_AKTIV = false;
+const VP_WERFT_DECKEL = 0.40;
 const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
 const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
 const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer, am Objekt
@@ -13030,14 +13050,14 @@ const VORPOSTEN_STUFEN = [
      Produktionsbonus, Aufklaerungsstufe); alle drei wirken im Frontend bereits.
      `kampfpunkte`/`xp`/`credits` sind die Beute beim Fall, anteilig - sie haengen bewusst NUR an
      der Stufe, nicht am Zweig: sonst lohnte es sich, gezielt die wehrhaftesten Ziele zu schleifen. */
-  { stufe: 1, name: 'Feldlager',  kernLp: 20000,   verteidigung: 2500,   garnisonMax: 300,   flug: 0.06, prod: 0.015, scan: 1, kampfpunkte: 30,   xp: 250,   credits: 1200,  kosten: null },
-  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,   verteidigung: 12000,  garnisonMax: 800,   flug: 0.10, prod: 0.03,  scan: 2, kampfpunkte: 80,   xp: 700,   credits: 3500,  kosten: { erz: 200000, kristalle: 130000, deuterium: 80000 } },
-  { stufe: 3, name: 'Bastion',    kernLp: 400000,  verteidigung: 60000,  garnisonMax: 2000,  flug: 0.15, prod: 0.05,  scan: 3, kampfpunkte: 200,  xp: 2000,  credits: 9000,  kosten: { erz: 600000, kristalle: 400000, deuterium: 250000 } },
-  { stufe: 4, name: 'Ausbaustufe 4', kernLp: 800000,  verteidigung: 110000, garnisonMax: 3200,  flug: 0.18, prod: 0.065, scan: 3, kampfpunkte: 320,  xp: 3200,  credits: 15000, kosten: { erz: 1200000, kristalle: 800000,  deuterium: 500000,  nanolegierungen: 400 } },
-  { stufe: 5, name: 'Ausbaustufe 5', kernLp: 1400000, verteidigung: 190000, garnisonMax: 4800,  flug: 0.21, prod: 0.08,  scan: 4, kampfpunkte: 480,  xp: 5000,  credits: 24000, kosten: { erz: 2000000, kristalle: 1400000, deuterium: 900000,  nanolegierungen: 900,  quantenchips: 300 } },
-  { stufe: 6, name: 'Ausbaustufe 6', kernLp: 2400000, verteidigung: 320000, garnisonMax: 7000,  flug: 0.24, prod: 0.095, scan: 4, kampfpunkte: 700,  xp: 7500,  credits: 38000, kosten: { erz: 3400000, kristalle: 2400000, deuterium: 1500000, nanolegierungen: 1800, quantenchips: 800 } },
-  { stufe: 7, name: 'Ausbaustufe 7', kernLp: 4000000, verteidigung: 520000, garnisonMax: 10000, flug: 0.27, prod: 0.11,  scan: 5, kampfpunkte: 1000, xp: 11000, credits: 60000, kosten: { erz: 5500000, kristalle: 4000000, deuterium: 2600000, nanolegierungen: 3200, quantenchips: 1600, metamaterial: 400 } },
-  { stufe: 8, name: 'Ausbaustufe 8', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskerne: 120 } }
+  { stufe: 1, name: 'Feldlager',  kernLp: 20000,   verteidigung: 2500,   garnisonMax: 300,   flug: 0.06, prod: 0.015, scan: 1, werft: 0.02, kampfpunkte: 30,   xp: 250,   credits: 1200,  kosten: null },
+  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,   verteidigung: 12000,  garnisonMax: 800,   flug: 0.10, prod: 0.03,  scan: 2, werft: 0.035, kampfpunkte: 80,   xp: 700,   credits: 3500,  kosten: { erz: 200000, kristalle: 130000, deuterium: 80000 } },
+  { stufe: 3, name: 'Bastion',    kernLp: 400000,  verteidigung: 60000,  garnisonMax: 2000,  flug: 0.15, prod: 0.05,  scan: 3, werft: 0.05, kampfpunkte: 200,  xp: 2000,  credits: 9000,  kosten: { erz: 600000, kristalle: 400000, deuterium: 250000 } },
+  { stufe: 4, name: 'Ausbaustufe 4', kernLp: 800000,  verteidigung: 110000, garnisonMax: 3200,  flug: 0.18, prod: 0.065, scan: 3, werft: 0.07, kampfpunkte: 320,  xp: 3200,  credits: 15000, kosten: { erz: 1200000, kristalle: 800000,  deuterium: 500000,  nanolegierungen: 400 } },
+  { stufe: 5, name: 'Ausbaustufe 5', kernLp: 1400000, verteidigung: 190000, garnisonMax: 4800,  flug: 0.21, prod: 0.08,  scan: 4, werft: 0.09, kampfpunkte: 480,  xp: 5000,  credits: 24000, kosten: { erz: 2000000, kristalle: 1400000, deuterium: 900000,  nanolegierungen: 900,  quantenchips: 300 } },
+  { stufe: 6, name: 'Ausbaustufe 6', kernLp: 2400000, verteidigung: 320000, garnisonMax: 7000,  flug: 0.24, prod: 0.095, scan: 4, werft: 0.11, kampfpunkte: 700,  xp: 7500,  credits: 38000, kosten: { erz: 3400000, kristalle: 2400000, deuterium: 1500000, nanolegierungen: 1800, quantenchips: 800 } },
+  { stufe: 7, name: 'Ausbaustufe 7', kernLp: 4000000, verteidigung: 520000, garnisonMax: 10000, flug: 0.27, prod: 0.11,  scan: 5, werft: 0.135, kampfpunkte: 1000, xp: 11000, credits: 60000, kosten: { erz: 5500000, kristalle: 4000000, deuterium: 2600000, nanolegierungen: 3200, quantenchips: 1600, metamaterial: 400 } },
+  { stufe: 8, name: 'Ausbaustufe 8', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, werft: 0.16, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskerne: 120 } }
 ];
 /* DIE DREI SPEZIALISIERUNGEN. Ab Stufe VORPOSTEN_ZWEIG_AB waehlt der Besitzer EINMAL eine
    Ausrichtung; sie steht danach im Dokument (`doc.zweig`) und ist unveraenderlich - eine
@@ -13057,17 +13077,17 @@ const VORPOSTEN_ZWEIGE = {
   werft: {
     key: 'werft', name: 'Werft', kurz: 'Schnelle Flotten: kurze Flugzeiten, solide Struktur.',
     namen: { 4: 'Werftgerüst', 5: 'Dockring', 6: 'Schiffsschmiede', 7: 'Flottenwerft', 8: 'Sternenwerft' },
-    mult: { kernLp: 0.90, verteidigung: 0.85, garnisonMax: 1.00, flug: 1.50, prod: 0.60, scan: 1.00 }
+    mult: { kernLp: 0.90, verteidigung: 0.85, garnisonMax: 1.00, flug: 1.50, prod: 0.60, scan: 1.00, werft: 2.20 }
   },
   handel: {
     key: 'handel', name: 'Handelsknoten', kurz: 'Ertrag und Fernsicht - dafür die dünnste Hülle.',
     namen: { 4: 'Handelsposten', 5: 'Umschlagring', 6: 'Frachtkreuz', 7: 'Handelsknoten', 8: 'Sternenmarkt' },
-    mult: { kernLp: 0.80, verteidigung: 0.75, garnisonMax: 0.85, flug: 1.00, prod: 1.80, scan: 1.25 }
+    mult: { kernLp: 0.80, verteidigung: 0.75, garnisonMax: 0.85, flug: 1.00, prod: 1.80, scan: 1.25, werft: 0.50 }
   },
   festung: {
     key: 'festung', name: 'Festungsring', kurz: 'Hält Systeme: dickster Kern, größte Garnison.',
     namen: { 4: 'Wehrring', 5: 'Zitadelle', 6: 'Sperrfeuerring', 7: 'Kriegsbastion', 8: 'Sternenfestung' },
-    mult: { kernLp: 1.35, verteidigung: 1.60, garnisonMax: 1.45, flug: 0.70, prod: 0.50, scan: 1.00 }
+    mult: { kernLp: 1.35, verteidigung: 1.60, garnisonMax: 1.45, flug: 0.70, prod: 0.50, scan: 1.00, werft: 0.50 }
   }
 };
 function vorpostenZweigOk(z) { return typeof z === 'string' && Object.prototype.hasOwnProperty.call(VORPOSTEN_ZWEIGE, z); }
@@ -13090,6 +13110,7 @@ function vorpostenStufe(n, zweig) {
     garnisonMax: Math.round(basis.garnisonMax * m.garnisonMax),
     flug: Math.round(basis.flug * m.flug * 1000) / 1000,
     prod: Math.round(basis.prod * m.prod * 1000) / 1000,
+    werft: Math.round((basis.werft || 0) * (m.werft || 0) * 1000) / 1000,
     scan: Math.max(1, Math.round(basis.scan * m.scan))
   });
 }
@@ -13112,6 +13133,11 @@ function vorpostenWerte(doc) {
     flug: Math.round(st.flug * (1 + b.flug + pr.flug) * 1000) / 1000,
     prod: Math.round(st.prod * (1 + b.prod + pr.prod) * 1000) / 1000,
     scan: st.scan + Math.round(b.scan) + Math.round(pr.scan),
+    /* DER WERFTRABATT. Er steht hinter VP_WERFT_AKTIV, weil das Frontend ihn erst mit seiner
+       eigenen Etappe liest: Ein Kanal, der eine Zahl meldet, die nirgends wirkt, waere genau die
+       Sorte angezeigter Nutzen, die es in diesem Projekt nicht geben soll. */
+    werft: VP_WERFT_AKTIV ? Math.round((st.werft || 0) * (1 + b.werft + pr.werft) * 1000) / 1000 : 0,
+    werftDeckel: VP_WERFT_DECKEL,
     flugDeckel: pr.flugDeckel,
     modulBoni: b, projektBoni: pr
   });
@@ -13289,7 +13315,7 @@ function vpProjekteFertig(doc, jetzt) {
 /* Die Summe der FERTIGEN Projekte je Kanal. Ein laufendes wirkt nicht - sonst waere die Bauzeit
    eine Zierde. `flugDeckel` ist kein Anteil, sondern eine Obergrenze: es gilt die hoechste. */
 function vpProjektBoni(doc, jetzt) {
-  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, flugDeckel: VP_FLUG_DECKEL };
+  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0, flugDeckel: VP_FLUG_DECKEL };
   for (const key of vpProjekteFertig(doc, jetzt)) {
     const w = (vpProjektDef(key) || {}).wirkung || {};
     for (const k of Object.keys(w)) {
@@ -13351,7 +13377,7 @@ function vpModulTeile(instKey) {
 /* Die Summe der eingebauten Module je Kanal. Ein Kanal mit zwei Modulen addiert - ein Deckel
    waere hier falsch: die Steckplaetze SIND der Deckel (hoechstens fuenf, und jeder kostet). */
 function vpModulBoni(doc) {
-  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0 };
+  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0 };
   const slots = vpModulSlots(doc && doc.stufe);
   for (const instKey of (doc && Array.isArray(doc.module) ? doc.module : []).slice(0, slots)) {
     const teil = vpModulTeile(instKey);
@@ -13444,7 +13470,7 @@ function vorpostenFuerClient(doc, userId, jetzt) {
     abbauAb: vorpostenAbbauLaeuft(doc) || null,
     schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
-    nutzen: { flug: st.flug, prod: st.prod, scan: st.scan, flugDeckel: st.flugDeckel },
+    nutzen: { flug: st.flug, prod: st.prod, scan: st.scan, werft: st.werft, flugDeckel: st.flugDeckel, werftDeckel: st.werftDeckel },
     eigener,
     /* NUR DER BESITZER sieht den Anflug. Verteidigung, Garnisonszahl und Steckplaetze stehen
        bewusst jedem offen - ein Angreifer soll sehen, worauf er sich einlaesst. Ein ANFLUG ist
@@ -13588,6 +13614,7 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
        Entscheidung wie bei den Ausbaukosten und der Modul-Abklingzeit. Eine 24 im Frontend waere
        eine Kopie-Familie mit genau der Konstante, die hier steht. */
     abbauMs: VORPOSTEN_ABBAU_MS, abbauAktiv: VORPOSTEN_ABBAU_AKTIV,
+    werftDeckel: VP_WERFT_DECKEL, werftAktiv: VP_WERFT_AKTIV,
     projektDefs: VP_PROJEKT_DEFS, projekteAktiv: VP_PROJEKTE_AKTIV && !notAusGesetzt('vorposten'),
     flugDeckel: VP_FLUG_DECKEL,
     zweigAb: VORPOSTEN_ZWEIG_AB, maxStufe: VORPOSTEN_STUFEN.length,

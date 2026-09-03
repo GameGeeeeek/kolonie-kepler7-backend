@@ -7442,7 +7442,7 @@ app.get('/api/galaxy', authMiddleware, (req, res) => {
 // eine Kopie-Familie fuer einen einzigen Wurf waere teurer als die Ungenauigkeit, die sie
 // beseitigt. Aus 0,5% beim Start werden dadurch effektiv 0,22% bis 0,36% je Ressourcenfund; das
 // Ziel der Leiter sind 0,3%.
-const HORT_BANNER_AKTIV = false;   // wird im Frontend-PR umgelegt, sobald das Banner dort steht
+const HORT_BANNER_AKTIV = true;   // umgelegt am 03.09.2026, im Frontend-PR mit dem Laufschrift-Banner
 const HORT_START_CHANCE = 0.005;
 const HORT_BASIS = 1000000;        // Spitze der Fundleiter im Frontend (Kopie-Familie, s.u.)
 const HORT_STREUUNG = 0.15;        // dieselbe Streuung wie dort

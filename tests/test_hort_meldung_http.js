@@ -88,7 +88,7 @@ async function starteServer() {
   // Der ausgelieferte Schalter steht auf false; der Test legt ihn in seiner KOPIE um. Ohne diese
   // Pruefung koennte er unbemerkt schon live sein - dann pruefte der Test nicht mehr, was live steht.
   const schalter = /const HORT_BANNER_AKTIV = (true|false);/;
-  check('0-kopie: der Schalter ist auffindbar', schalter.test(roh), { gefunden: (roh.match(schalter) || [])[1] });
+  check('0-kopie: der Schalter ist auffindbar', schalter.test(roh), { ausgeliefert: (roh.match(schalter) || [])[1] });
   roh = roh.replace(schalter, 'const HORT_BANNER_AKTIV = true;');
 
   // Die Chance auf 1 setzen: Ein Test, der auf 0,5% wartet, misst Geduld statt Verhalten.
@@ -202,7 +202,13 @@ async function starteServer() {
   // die Mechanik live, bevor das Frontend sie kennt.
   srv.kill('SIGTERM');
   await warte(600);
-  let roh2 = fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8').replace(chance, 'const HORT_START_CHANCE = 1;');
+  // Den Schalter AKTIV ausschalten, statt sich auf den ausgelieferten Zustand zu verlassen: Der
+  // steht seit dem Frontend-Merge auf true, und ein Test, der die Auslieferung als Voraussetzung
+  // nimmt, faellt bei genau der Aenderung, die er begleiten soll. Geprueft wird die WIRKUNG des
+  // Schalters, nicht seine Stellung.
+  let roh2 = fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8')
+    .replace(chance, 'const HORT_START_CHANCE = 1;')
+    .replace(schalter, 'const HORT_BANNER_AKTIV = false;');
   if (SAB === 'offen') {
     const paar = sab.offen;
     check('0-sab2: die Stelle fuer offen ist in der zweiten Kopie auffindbar', roh2.split(paar[0]).length === 2);

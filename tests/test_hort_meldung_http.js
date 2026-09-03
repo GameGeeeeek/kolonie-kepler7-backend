@@ -107,7 +107,11 @@ async function starteServer() {
     stumm: ["  pushGalaxyNews('ti-trophy', 'Seltener Fund: ' + req.username",
             "  if (false) pushGalaxyNews('ti-trophy', 'Seltener Fund: ' + req.username"],
     fremdres: ['  if (!label) return res.status(400).json({ error: \'Unbekannte Ressource.\' });',
-               '  if (!label && false) return res.status(400).json({ error: \'Unbekannte Ressource.\' });']
+               '  if (!label && false) return res.status(400).json({ error: \'Unbekannte Ressource.\' });'],
+    // Die Meldung geht raus, aber ohne Art - genau der Zustand vor dem 03.09.2026, in dem ein
+    // Leser sie nur am Wortlaut haette erkennen koennen.
+    artlos: ["    + betrag.toLocaleString('de-DE') + ' ' + label + '!', 'hort');",
+             "    + betrag.toLocaleString('de-DE') + ' ' + label + '!');"]
   };
   if (SAB) {
     const paar = sab[SAB];
@@ -129,7 +133,11 @@ async function starteServer() {
   // NUR die Hort-Meldungen zaehlen, nicht alle. Gemessen beim ersten Lauf: Die Weltlage ist nie
   // leer und waechst waehrend des Tests von selbst - der Galaxie-Tick schreibt eigene Meldungen
   // (Fronten, Kriege). Eine absolute Zaehlung misst hier den Tick, nicht den Hort.
-  const hortMeldungen = async () => (await weltlage()).filter(e => e && /Seltener Fund/.test(e.text || ''));
+  //
+  // Erkannt wird an der ART, nicht am Wortlaut. Ein Filter auf "Seltener Fund" waere genau die
+  // zufaellige Momentaufnahme, vor der CLAUDE.md warnt: Eine umformulierte Meldung braeche ihn
+  // lautlos - und mit ihm das Banner im Frontend, das dieselbe Frage stellt.
+  const hortMeldungen = async () => (await weltlage()).filter(e => e && e.art === 'hort');
 
   // ---- 1: der Wurf und die Meldung ---------------------------------------------------------------
   const vorher = await hortMeldungen();
@@ -148,6 +156,8 @@ async function starteServer() {
   const text = (nachher[0] && nachher[0].text) || '';
   // Der Spielername gehoert hinein - ohne ihn ist es keine Nachricht ueber einen Spieler, sondern
   // eine ueber niemanden. Und der Name kommt aus dem Token, nicht aus dem Rumpf der Anfrage.
+  check('1c2: sie traegt die Art "hort", damit das Frontend sie nicht am Wortlaut erkennen muss',
+    (nachher[0] || {}).art === 'hort', { art: (nachher[0] || {}).art });
   check('1d: die Meldung nennt den Spieler', /anna/.test(text), { text: text.slice(0, 160) });
   check('1e: sie nennt die Ressource', /Erz/.test(text), { text: text.slice(0, 160) });
   check('1f: sie nennt den Betrag', text.replace(/\./g, '').includes(String(b)), { betrag: b, text: text.slice(0, 160) });
@@ -213,7 +223,7 @@ async function starteServer() {
   // ---- Auswertung der Gegenprobe -----------------------------------------------------------------
   // Gemessen, nicht erwartet: Was faellt wirklich? Die Liste steht hier, weil eine Pflichtliste
   // selbst eine Behauptung ist, bis sie gemessen wurde.
-  const PFLICHT = { offen: ['5a'], ungeklemmt: ['3a'], stumm: ['1c'], fremdres: ['3b'] };
+  const PFLICHT = { offen: ['5a'], ungeklemmt: ['3a'], stumm: ['1c'], fremdres: ['3b'], artlos: ['1c'] };
   if (SAB) {
     const muss = PFLICHT[SAB] || [];
     const fehlend = muss.filter(p => !gefallen.includes(p));

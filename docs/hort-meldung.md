@@ -75,8 +75,16 @@ umgelegtem Schalter und hochgesetzter Chance — ein Test, der auf 0,5 % wartet,
 Verhalten. Abschnitt 5 startet eine **zweite** Kopie mit ausgeschaltetem Schalter; nur dort lässt
 sich messen, ob der ausgelieferte Zustand wirklich schweigt.
 
-Vier Sabotagen mit gemessener Pflichtliste: `offen` → `5a`; `ungeklemmt` → `3a`; `stumm` → `1c`;
-`fremdres` → `3b`.
+Fünf Sabotagen mit gemessener Pflichtliste: `offen` → `5a`; `ungeklemmt` → `3a`; `stumm` → `1c`;
+`fremdres` → `3b`; `artlos` → `1c`.
+
+## Die Meldung trägt eine Art, keinen erkennbaren Wortlaut
+
+`pushGalaxyNews(icon, text, art)` nimmt seit dem 03.09.2026 ein optionales drittes Feld; die
+Hort-Meldung setzt `art: 'hort'`. Ohne es müsste das Frontend sie am Satzanfang erkennen
+(`/Seltener Fund/`) — genau die zufällige Momentaufnahme, vor der CLAUDE.md warnt: Eine
+umformulierte Meldung bräche das Banner lautlos. Alle bestehenden Aufrufer bleiben unverändert und
+liefern kein `art`.
 
 **Zwei Messungen, die den Test verändert haben** — beide hätten ihn stumm gemacht:
 

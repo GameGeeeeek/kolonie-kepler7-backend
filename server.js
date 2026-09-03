@@ -6102,9 +6102,15 @@ function systemOwnershipMap(g) {
   }
   return map;
 }
-function pushGalaxyNews(icon, text) {
+// `art` (03.09.2026) ist optional und benennt die SORTE der Meldung. Ohne sie muesste ein Leser
+// am Wortlaut erkennen, worum es geht - genau die zufaellige Momentaufnahme, vor der CLAUDE.md
+// warnt: Eine umformulierte Meldung braeche die Erkennung lautlos. Die bestehenden Aufrufer bleiben
+// unveraendert und liefern kein `art`; nur wer erkannt werden muss, setzt eins.
+function pushGalaxyNews(icon, text, art) {
   const g = loadOrInitGalaxy();
-  g.news.unshift({ id: crypto.randomUUID(), time: Date.now(), icon, text });
+  const eintrag = { id: crypto.randomUUID(), time: Date.now(), icon, text };
+  if (art) eintrag.art = art;
+  g.news.unshift(eintrag);
   g.news = g.news.slice(0, 40);
 }
 // Nie ein System zerstören/besetzen, in dem tatsächlich ein Spieler zuhause ist - gilt für ALLE
@@ -7466,8 +7472,10 @@ app.post('/api/expedition/hort', authMiddleware, hortRateLimit, (req, res) => {
   const mult = Number.isFinite(roh) ? Math.min(HORT_MULT_MAX, Math.max(HORT_MULT_MIN, roh)) : 1;
   const betrag = Math.round(HORT_BASIS * (1 - HORT_STREUUNG + Math.random() * 2 * HORT_STREUUNG) * mult);
   // db synchron vor saveDb() mutieren - pushGalaxyNews tut genau das und speichert selbst nicht.
+  // Mit `art` und den Einzelteilen: Das Frontend baut daraus seine Laufschrift, ohne den Satz
+  // auseinandernehmen zu muessen - und erkennt die Meldung an der Art statt am Wortlaut.
   pushGalaxyNews('ti-trophy', 'Seltener Fund: ' + req.username + ' hat auf einer Expedition einen Hort entdeckt – '
-    + betrag.toLocaleString('de-DE') + ' ' + label + '!');
+    + betrag.toLocaleString('de-DE') + ' ' + label + '!', 'hort');
   saveDb();
   res.json({ hort: true, res: String(req.body.res), betrag });
 });

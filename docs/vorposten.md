@@ -493,3 +493,42 @@ seine ausgelieferte Stellung — ein Test, der die Auslieferung als Voraussetzun
 genau der Änderung, die er begleiten soll (Lehre aus `test_hort_meldung_http.js`). Gegenproben
 `zweigmult` (1b), `leiter` (1b, 1c) und `schalter` (2a); die Liste bei `leiter` führt 1b als
 **gemessene** Folge mit, weil die Erwartung dort aus dem unversehrten Quelltext stammt.
+
+## Etappe V3: Die Marktgebühr (03.09.2026)
+
+Der zweite der beiden Kanäle, die der Quelltext seit dem 02.09.2026 schuldet. Der Handelsknoten war
+bis hierher Produktion mal 1,8 und die dünnste Hülle — er handelte nicht.
+
+**Zwei Wirkungen, eine Zahl.** Der Kanal `markt` liegt auf derselben Leiter wie `werft`
+(0,02 → 0,16) und bekommt den Multiplikator Handel 2,20, Werft und Festung je 0,50. Ein
+Sternenmarkt kommt damit auf **35,2 %**. Daraus folgen:
+
+1. **Die Einstellgebühr sinkt anteilig** — bei 5 % Grundgebühr und 35,2 % Rabatt zahlt der
+   Verkäufer 3,24 % statt 5 % (gemessen: 3.240 statt 5.000 Kredite auf 100.000).
+2. **Mehr gleichzeitige Angebote** — ein Platz je `VP_MARKT_SLOT_SCHRITT` (0,12), höchstens drei.
+   Ein Sternenmarkt gibt zwei, zwei Sternenmärkte den Deckel.
+
+Beide hängen an derselben Summe, damit die Balance an einer Stelle sitzt. Deckel 60 %: Die Gebühr
+wird gesenkt, nie erlassen.
+
+**Die Gebühr hängt am VERKÄUFER, nicht am Käufer.** Er zahlt sie, und er ist nicht der, der die
+Anfrage stellt — im Code steht deshalb `vorpostenMarktBonus(listing.sellerId)` und ausdrücklich
+nicht `req.userId`. Die naheliegende Verwechslung hätte dem Käufer den Rabatt eines fremden
+Handelsknotens gegeben und wäre im Normalbetrieb nie aufgefallen.
+
+**Die Grenzen kommen fertig verrechnet zum Client.** `limits.feePct` und `limits.maxPerUser` sind
+die *wirklich geltenden* Werte; `basisFeePct`, `basisMaxPerUser`, `vorpostenRabatt` und
+`vorpostenAngebote` reisen daneben mit, damit die Anzeige den Rabatt benennen kann, ohne ihn selbst
+zu rechnen. Eine zweite Rechenstelle wäre die nächste Kopie-Familie.
+
+**Der Schalter.** `VP_MARKT_AKTIV` steht ausgeliefert auf `false`. Weil `vorpostenWerte` dann für
+jeden Vorposten eine harte 0 liefert, ist die Summe 0 und alles bleibt, wie es war — ein zweiter
+Schalter-Zweig in `vorpostenMarktBonus` wäre eine zweite Stelle, die dasselbe entscheidet.
+
+Wächter: `tests/test_vorposten_markt_http.js` (Port 3256, 12 Prüfungen) — gemessen über die **echten
+Endpunkte**: einstellen, kaufen, Gebühr in der Antwort lesen. Ein Test, der die Gebühr selbst
+nachrechnet, prüft seine eigene Formel. Gegenproben `verkaeufer` (2a, 2c), `gebuehr` (2a, 2c),
+`slots` (1c, 3a) und `schalter` (4a, 4b) — **alle vier Listen waren im ersten Entwurf falsch**, und
+`slots` deckte dabei einen echten Testfehler auf: Prüfung 3a ließ nur den Vorpostenlosen seine
+Plätze füllen und fragte dann den Handelsknoten — der hatte nach dem Verkauf aber null offene
+Angebote, sein Angebot ging mit und ohne Bonus durch. Jetzt füllen beide erst die Grundzahl.

@@ -7776,13 +7776,22 @@ function publicListing(l, viewerId) {
 // Preis und Verkäufername ausgeliefert, keine Spielstände.
 app.get('/api/modulemarket', authMiddleware, (req, res) => {
   const listings = loadOrInitModuleMarket();
+  /* Die Grenzen kommen FERTIG VERRECHNET zum Client (V3): Er soll die Vorposten-Wirkung nicht
+     selbst auf die Grundwerte anwenden muessen - das waere eine zweite Rechenstelle und damit die
+     naechste Kopie-Familie. `feePct` und `maxPerUser` sind deshalb die WIRKLICH geltenden Werte;
+     die Grundwerte reisen daneben mit, damit die Anzeige den Rabatt benennen kann. */
+  const marktVp = vorpostenMarktBonus(req.userId);
   res.json({
     listings: listings.map(l => publicListing(l, req.userId)),
     limits: {
-      maxPerUser: MODULE_MARKET_MAX_LISTINGS_PER_USER,
+      maxPerUser: MODULE_MARKET_MAX_LISTINGS_PER_USER + marktVp.extraAngebote,
       minPrice: MODULE_MARKET_MIN_PRICE,
       maxPrice: MODULE_MARKET_MAX_PRICE,
-      feePct: MODULE_MARKET_FEE_PCT
+      feePct: Math.round(MODULE_MARKET_FEE_PCT * (1 - marktVp.anteil) * 10000) / 10000,
+      basisFeePct: MODULE_MARKET_FEE_PCT,
+      basisMaxPerUser: MODULE_MARKET_MAX_LISTINGS_PER_USER,
+      vorpostenRabatt: marktVp.anteil,
+      vorpostenAngebote: marktVp.extraAngebote
     }
   });
 });
@@ -7799,8 +7808,11 @@ app.post('/api/modulemarket/list', authMiddleware, async (req, res) => {
   const listings = loadOrInitModuleMarket();
   if (listings.length >= MODULE_MARKET_MAX_TOTAL) return res.status(429).json({ error: 'Die Modulbörse ist gerade voll - bitte später erneut versuchen.' });
   const mine = listings.filter(l => l.sellerId === req.userId).length;
-  if (mine >= MODULE_MARKET_MAX_LISTINGS_PER_USER) {
-    return res.status(400).json({ error: 'Maximal ' + MODULE_MARKET_MAX_LISTINGS_PER_USER + ' eigene Angebote gleichzeitig.' });
+  // V3: Ein Handelsknoten haelt mehr Ware. Die Grenze wird HIER gerechnet, nicht im Client - sonst
+  // waere sie eine Bitte statt einer Regel.
+  const grenze = MODULE_MARKET_MAX_LISTINGS_PER_USER + vorpostenMarktBonus(req.userId).extraAngebote;
+  if (mine >= grenze) {
+    return res.status(400).json({ error: 'Maximal ' + grenze + ' eigene Angebote gleichzeitig.' });
   }
   const saveRaw = getSaveValue(req.userId);
   if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
@@ -7868,7 +7880,11 @@ app.post('/api/modulemarket/buy', authMiddleware, async (req, res) => {
   save.credits -= listing.price;
   const inv = moduleInvOf(save, listing.isShip);
   inv[listing.instKey] = (inv[listing.instKey] || 0) + 1;
-  const fee = Math.round(listing.price * MODULE_MARKET_FEE_PCT);
+  /* V3: Die Gebuehr sinkt um den Marktanteil der Vorposten DES VERKAEUFERS - er zahlt sie, nicht
+     der Kaeufer. Genau deshalb steht hier `listing.sellerId` und nicht `req.userId`: Die
+     naheliegende Verwechslung haette dem Kaeufer den Rabatt eines fremden Handelsknotens gegeben. */
+  const marktVp = vorpostenMarktBonus(listing.sellerId);
+  const fee = Math.round(listing.price * MODULE_MARKET_FEE_PCT * (1 - marktVp.anteil));
   const payout = listing.price - fee;
   // Der Erlös geht NICHT direkt in den Spielstand des Verkäufers: der kann online sein, und sein
   // nächster Auto-Save würde die Gutschrift mit seinem älteren Client-Stand überschreiben (siehe
@@ -7880,6 +7896,7 @@ app.post('/api/modulemarket/buy', authMiddleware, async (req, res) => {
     isShip: listing.isShip,
     price: listing.price,
     fee,
+    vorpostenRabatt: marktVp.anteil,
     buyerName: req.username,
     time: Date.now()
   });
@@ -13021,6 +13038,23 @@ const VORPOSTEN_ABBAU_MS = 24 * 3600 * 1000;
    Frontend-Auslieferung umgelegt. Ein gemeldeter Nutzen, der nirgends wirkt, waere eine Luege. */
 const VP_WERFT_AKTIV = false;
 const VP_WERFT_DECKEL = 0.40;
+/* ETAPPE V3: DIE MARKTGEBUEHR (03.09.2026). Der zweite von zwei Kanaelen, die der Quelltext seit
+   dem 02.09.2026 schuldet. Der Handelsknoten war bis hierher Produktion mal 1,8 und die duennste
+   Huelle - er handelte nicht.
+
+   Zwei Wirkungen, beide SERVERAUTORITATIV (die Modulboerse liegt in db.shared, die Gebuehr wird
+   beim Verkauf gerechnet):
+     1. Die Einstellgebuehr sinkt anteilig  - der Verkaeufer behaelt mehr vom Erloes.
+     2. Mehr gleichzeitige Angebote          - ein Marktplatz haelt mehr Ware.
+   Beide haengen an DERSELBEN Zahl, damit die Balance an einer Stelle sitzt: die Summe des Kanals
+   ueber alle eigenen Vorposten. Deckel 60 % - die Gebuehr wird gesenkt, nie erlassen.
+
+   Die Angebotsplaetze sind eine ABLEITUNG daraus (ein Platz je VP_MARKT_SLOT_SCHRITT, hoechstens
+   VP_MARKT_SLOTS_MAX): ein Sternenmarkt (0,352) gibt zwei, zwei Sternenmaerkte den Deckel. */
+const VP_MARKT_AKTIV = false;
+const VP_MARKT_DECKEL = 0.60;
+const VP_MARKT_SLOT_SCHRITT = 0.12;
+const VP_MARKT_SLOTS_MAX = 3;
 const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
 const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
 const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer, am Objekt
@@ -13050,14 +13084,14 @@ const VORPOSTEN_STUFEN = [
      Produktionsbonus, Aufklaerungsstufe); alle drei wirken im Frontend bereits.
      `kampfpunkte`/`xp`/`credits` sind die Beute beim Fall, anteilig - sie haengen bewusst NUR an
      der Stufe, nicht am Zweig: sonst lohnte es sich, gezielt die wehrhaftesten Ziele zu schleifen. */
-  { stufe: 1, name: 'Feldlager',  kernLp: 20000,   verteidigung: 2500,   garnisonMax: 300,   flug: 0.06, prod: 0.015, scan: 1, werft: 0.02, kampfpunkte: 30,   xp: 250,   credits: 1200,  kosten: null },
-  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,   verteidigung: 12000,  garnisonMax: 800,   flug: 0.10, prod: 0.03,  scan: 2, werft: 0.035, kampfpunkte: 80,   xp: 700,   credits: 3500,  kosten: { erz: 200000, kristalle: 130000, deuterium: 80000 } },
-  { stufe: 3, name: 'Bastion',    kernLp: 400000,  verteidigung: 60000,  garnisonMax: 2000,  flug: 0.15, prod: 0.05,  scan: 3, werft: 0.05, kampfpunkte: 200,  xp: 2000,  credits: 9000,  kosten: { erz: 600000, kristalle: 400000, deuterium: 250000 } },
-  { stufe: 4, name: 'Ausbaustufe 4', kernLp: 800000,  verteidigung: 110000, garnisonMax: 3200,  flug: 0.18, prod: 0.065, scan: 3, werft: 0.07, kampfpunkte: 320,  xp: 3200,  credits: 15000, kosten: { erz: 1200000, kristalle: 800000,  deuterium: 500000,  nanolegierungen: 400 } },
-  { stufe: 5, name: 'Ausbaustufe 5', kernLp: 1400000, verteidigung: 190000, garnisonMax: 4800,  flug: 0.21, prod: 0.08,  scan: 4, werft: 0.09, kampfpunkte: 480,  xp: 5000,  credits: 24000, kosten: { erz: 2000000, kristalle: 1400000, deuterium: 900000,  nanolegierungen: 900,  quantenchips: 300 } },
-  { stufe: 6, name: 'Ausbaustufe 6', kernLp: 2400000, verteidigung: 320000, garnisonMax: 7000,  flug: 0.24, prod: 0.095, scan: 4, werft: 0.11, kampfpunkte: 700,  xp: 7500,  credits: 38000, kosten: { erz: 3400000, kristalle: 2400000, deuterium: 1500000, nanolegierungen: 1800, quantenchips: 800 } },
-  { stufe: 7, name: 'Ausbaustufe 7', kernLp: 4000000, verteidigung: 520000, garnisonMax: 10000, flug: 0.27, prod: 0.11,  scan: 5, werft: 0.135, kampfpunkte: 1000, xp: 11000, credits: 60000, kosten: { erz: 5500000, kristalle: 4000000, deuterium: 2600000, nanolegierungen: 3200, quantenchips: 1600, metamaterial: 400 } },
-  { stufe: 8, name: 'Ausbaustufe 8', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, werft: 0.16, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskerne: 120 } }
+  { stufe: 1, name: 'Feldlager',  kernLp: 20000,   verteidigung: 2500,   garnisonMax: 300,   flug: 0.06, prod: 0.015, scan: 1, werft: 0.02, markt: 0.02, kampfpunkte: 30,   xp: 250,   credits: 1200,  kosten: null },
+  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,   verteidigung: 12000,  garnisonMax: 800,   flug: 0.10, prod: 0.03,  scan: 2, werft: 0.035, markt: 0.035, kampfpunkte: 80,   xp: 700,   credits: 3500,  kosten: { erz: 200000, kristalle: 130000, deuterium: 80000 } },
+  { stufe: 3, name: 'Bastion',    kernLp: 400000,  verteidigung: 60000,  garnisonMax: 2000,  flug: 0.15, prod: 0.05,  scan: 3, werft: 0.05, markt: 0.05, kampfpunkte: 200,  xp: 2000,  credits: 9000,  kosten: { erz: 600000, kristalle: 400000, deuterium: 250000 } },
+  { stufe: 4, name: 'Ausbaustufe 4', kernLp: 800000,  verteidigung: 110000, garnisonMax: 3200,  flug: 0.18, prod: 0.065, scan: 3, werft: 0.07, markt: 0.07, kampfpunkte: 320,  xp: 3200,  credits: 15000, kosten: { erz: 1200000, kristalle: 800000,  deuterium: 500000,  nanolegierungen: 400 } },
+  { stufe: 5, name: 'Ausbaustufe 5', kernLp: 1400000, verteidigung: 190000, garnisonMax: 4800,  flug: 0.21, prod: 0.08,  scan: 4, werft: 0.09, markt: 0.09, kampfpunkte: 480,  xp: 5000,  credits: 24000, kosten: { erz: 2000000, kristalle: 1400000, deuterium: 900000,  nanolegierungen: 900,  quantenchips: 300 } },
+  { stufe: 6, name: 'Ausbaustufe 6', kernLp: 2400000, verteidigung: 320000, garnisonMax: 7000,  flug: 0.24, prod: 0.095, scan: 4, werft: 0.11, markt: 0.11, kampfpunkte: 700,  xp: 7500,  credits: 38000, kosten: { erz: 3400000, kristalle: 2400000, deuterium: 1500000, nanolegierungen: 1800, quantenchips: 800 } },
+  { stufe: 7, name: 'Ausbaustufe 7', kernLp: 4000000, verteidigung: 520000, garnisonMax: 10000, flug: 0.27, prod: 0.11,  scan: 5, werft: 0.135, markt: 0.135, kampfpunkte: 1000, xp: 11000, credits: 60000, kosten: { erz: 5500000, kristalle: 4000000, deuterium: 2600000, nanolegierungen: 3200, quantenchips: 1600, metamaterial: 400 } },
+  { stufe: 8, name: 'Ausbaustufe 8', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, werft: 0.16, markt: 0.16, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskerne: 120 } }
 ];
 /* DIE DREI SPEZIALISIERUNGEN. Ab Stufe VORPOSTEN_ZWEIG_AB waehlt der Besitzer EINMAL eine
    Ausrichtung; sie steht danach im Dokument (`doc.zweig`) und ist unveraenderlich - eine
@@ -13077,17 +13111,17 @@ const VORPOSTEN_ZWEIGE = {
   werft: {
     key: 'werft', name: 'Werft', kurz: 'Schnelle Flotten: kurze Flugzeiten, solide Struktur.',
     namen: { 4: 'Werftgerüst', 5: 'Dockring', 6: 'Schiffsschmiede', 7: 'Flottenwerft', 8: 'Sternenwerft' },
-    mult: { kernLp: 0.90, verteidigung: 0.85, garnisonMax: 1.00, flug: 1.50, prod: 0.60, scan: 1.00, werft: 2.20 }
+    mult: { kernLp: 0.90, verteidigung: 0.85, garnisonMax: 1.00, flug: 1.50, prod: 0.60, scan: 1.00, werft: 2.20, markt: 0.50 }
   },
   handel: {
     key: 'handel', name: 'Handelsknoten', kurz: 'Ertrag und Fernsicht - dafür die dünnste Hülle.',
     namen: { 4: 'Handelsposten', 5: 'Umschlagring', 6: 'Frachtkreuz', 7: 'Handelsknoten', 8: 'Sternenmarkt' },
-    mult: { kernLp: 0.80, verteidigung: 0.75, garnisonMax: 0.85, flug: 1.00, prod: 1.80, scan: 1.25, werft: 0.50 }
+    mult: { kernLp: 0.80, verteidigung: 0.75, garnisonMax: 0.85, flug: 1.00, prod: 1.80, scan: 1.25, werft: 0.50, markt: 2.20 }
   },
   festung: {
     key: 'festung', name: 'Festungsring', kurz: 'Hält Systeme: dickster Kern, größte Garnison.',
     namen: { 4: 'Wehrring', 5: 'Zitadelle', 6: 'Sperrfeuerring', 7: 'Kriegsbastion', 8: 'Sternenfestung' },
-    mult: { kernLp: 1.35, verteidigung: 1.60, garnisonMax: 1.45, flug: 0.70, prod: 0.50, scan: 1.00, werft: 0.50 }
+    mult: { kernLp: 1.35, verteidigung: 1.60, garnisonMax: 1.45, flug: 0.70, prod: 0.50, scan: 1.00, werft: 0.50, markt: 0.50 }
   }
 };
 function vorpostenZweigOk(z) { return typeof z === 'string' && Object.prototype.hasOwnProperty.call(VORPOSTEN_ZWEIGE, z); }
@@ -13111,6 +13145,7 @@ function vorpostenStufe(n, zweig) {
     flug: Math.round(basis.flug * m.flug * 1000) / 1000,
     prod: Math.round(basis.prod * m.prod * 1000) / 1000,
     werft: Math.round((basis.werft || 0) * (m.werft || 0) * 1000) / 1000,
+    markt: Math.round((basis.markt || 0) * (m.markt || 0) * 1000) / 1000,
     scan: Math.max(1, Math.round(basis.scan * m.scan))
   });
 }
@@ -13138,6 +13173,8 @@ function vorpostenWerte(doc) {
        Sorte angezeigter Nutzen, die es in diesem Projekt nicht geben soll. */
     werft: VP_WERFT_AKTIV ? Math.round((st.werft || 0) * (1 + b.werft + pr.werft) * 1000) / 1000 : 0,
     werftDeckel: VP_WERFT_DECKEL,
+    markt: VP_MARKT_AKTIV ? Math.round((st.markt || 0) * (1 + b.markt + pr.markt) * 1000) / 1000 : 0,
+    marktDeckel: VP_MARKT_DECKEL,
     flugDeckel: pr.flugDeckel,
     modulBoni: b, projektBoni: pr
   });
@@ -13160,6 +13197,21 @@ function vorpostenSchreib(doc) {
   db.shared[vorpostenKey(doc.sys)] = JSON.stringify(doc);
 }
 function vorpostenLoesch(sys) { delete db.shared[vorpostenKey(sys)]; }
+/* Was die eigenen Vorposten am MARKT bringen - die eine Stelle, die den Kanal zusammenzaehlt.
+   Sie wird fuer den VERKAEUFER gerufen, nicht fuer den Anfragenden: Beim Kauf zahlt der Verkaeufer
+   die Gebuehr, und er ist nicht der, der die Anfrage stellt. Steht der Schalter auf false, liefert
+   `vorpostenWerte` fuer jeden Vorposten eine harte 0 - die Summe ist dann 0 und alles bleibt, wie
+   es war. Ein eigener Schalter-Zweig hier waere eine zweite Stelle, die dasselbe entscheidet. */
+function vorpostenMarktBonus(userId) {
+  if (!userId) return { anteil: 0, extraAngebote: 0 };
+  let summe = 0;
+  for (const d of vorpostenAlle()) {
+    if (d.besitzer !== userId) continue;
+    summe += vorpostenWerte(d).markt || 0;
+  }
+  const anteil = Math.min(VP_MARKT_DECKEL, Math.round(summe * 1000) / 1000);
+  return { anteil, extraAngebote: Math.min(VP_MARKT_SLOTS_MAX, Math.floor(anteil / VP_MARKT_SLOT_SCHRITT)) };
+}
 function vorpostenAlle() {
   const out = [];
   for (const k of Object.keys(db.shared)) {
@@ -13315,7 +13367,7 @@ function vpProjekteFertig(doc, jetzt) {
 /* Die Summe der FERTIGEN Projekte je Kanal. Ein laufendes wirkt nicht - sonst waere die Bauzeit
    eine Zierde. `flugDeckel` ist kein Anteil, sondern eine Obergrenze: es gilt die hoechste. */
 function vpProjektBoni(doc, jetzt) {
-  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0, flugDeckel: VP_FLUG_DECKEL };
+  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0, markt: 0, flugDeckel: VP_FLUG_DECKEL };
   for (const key of vpProjekteFertig(doc, jetzt)) {
     const w = (vpProjektDef(key) || {}).wirkung || {};
     for (const k of Object.keys(w)) {
@@ -13377,7 +13429,7 @@ function vpModulTeile(instKey) {
 /* Die Summe der eingebauten Module je Kanal. Ein Kanal mit zwei Modulen addiert - ein Deckel
    waere hier falsch: die Steckplaetze SIND der Deckel (hoechstens fuenf, und jeder kostet). */
 function vpModulBoni(doc) {
-  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0 };
+  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0, markt: 0 };
   const slots = vpModulSlots(doc && doc.stufe);
   for (const instKey of (doc && Array.isArray(doc.module) ? doc.module : []).slice(0, slots)) {
     const teil = vpModulTeile(instKey);
@@ -13470,7 +13522,7 @@ function vorpostenFuerClient(doc, userId, jetzt) {
     abbauAb: vorpostenAbbauLaeuft(doc) || null,
     schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
-    nutzen: { flug: st.flug, prod: st.prod, scan: st.scan, werft: st.werft, flugDeckel: st.flugDeckel, werftDeckel: st.werftDeckel },
+    nutzen: { flug: st.flug, prod: st.prod, scan: st.scan, werft: st.werft, markt: st.markt, flugDeckel: st.flugDeckel, werftDeckel: st.werftDeckel, marktDeckel: VP_MARKT_DECKEL },
     eigener,
     /* NUR DER BESITZER sieht den Anflug. Verteidigung, Garnisonszahl und Steckplaetze stehen
        bewusst jedem offen - ein Angreifer soll sehen, worauf er sich einlaesst. Ein ANFLUG ist

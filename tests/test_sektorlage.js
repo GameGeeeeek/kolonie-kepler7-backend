@@ -201,8 +201,12 @@ if (!fs.existsSync(FRONTEND)) {
 /* Solange das Frontend die Lage nicht kennt, darf sie nicht wirken - sonst waeren NPCs in
    einzelnen Regionen bis zu einem Viertel zaeher, ohne dass eine Anzeige den Grund nennt.
    Geprueft wird BEIDES: die Grundstellung und dass der Takt wirklich an ihr abbiegt. */
-check('6: SEKTOR_LAGE_AKTIV steht in der Grundstellung auf false',
-  API.SEKTOR_LAGE_AKTIV === false, { wert: API.SEKTOR_LAGE_AKTIV });
+/* Am 03.09.2026 umgelegt, unmittelbar nach dem Frontend-Merge (v8.659.0 live). Die Pruefung
+   dreht sich damit um: Solange die Anzeige da ist, MUSS der Schalter an sein - ein versehentliches
+   Zurueckdrehen waere eine Karte, die eine Lage zeichnet, die es nicht mehr gibt.
+   Die Notabschaltung zur Laufzeit bleibt davon unberuehrt; sie kann nur AB-, nie einschalten. */
+check('6: SEKTOR_LAGE_AKTIV ist an - das Frontend zeigt die Lage seit v8.659.0',
+  API.SEKTOR_LAGE_AKTIV === true, { wert: API.SEKTOR_LAGE_AKTIV });
 const TICK = schneide('function sektorLageTick(g) {', /\n\}/);
 check('6b: sektorLageTick kehrt bei ausgeschaltetem Schalter SOFORT zurueck - vor jedem Schreibzugriff',
   !!TICK && /^\s*if \(!SEKTOR_LAGE_AKTIV\) return;/m.test(TICK)

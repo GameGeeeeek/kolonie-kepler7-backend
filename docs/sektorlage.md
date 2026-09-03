@@ -1,8 +1,10 @@
 # Die Sektorlage (E5)
 
 Stand 03.09.2026. Konzept: `kolonie-kepler7/docs/sektorkarte-konzept.md`, Abschnitt V5.
-Umgesetzt im Backend mit **ausgeschaltetem Schalter** (`SEKTOR_LAGE_AKTIV = false`); umgelegt wird
-er im Frontend-PR, der die Anzeige mitbringt.
+Umgesetzt im Backend mit ausgeschaltetem Schalter (#222); **am 03.09.2026 umgelegt**
+(`SEKTOR_LAGE_AKTIV = true`), unmittelbar nachdem die Anzeige mit Frontend **v8.659.0** live war.
+Die Reihenfolge ist die Regel, nicht Vorsicht: Allein ausgeliefert wären NPCs in einzelnen
+Regionen bis zu einem Viertel zäher gewesen, ohne dass eine Anzeige den Grund kennt.
 
 ## Was sie ist
 
@@ -80,11 +82,15 @@ Vollständig Server. `g.sektorLage` liegt in `db.galaxy` und ist über `PUT /api
 keinen Client erreichbar; es reist über `galaxyFuerClient` mit (`Object.assign` über `g`), ohne
 eine Zeile Verdrahtung.
 
-Der Schalter steht auf **false**: Allein ausgeliefert wären NPCs in einzelnen Regionen bis zu
-einem Viertel zäher, ohne dass eine Anzeige den Grund kennt. `sektorLageTick` kehrt dann sofort
-zurück, **vor** jedem Schreibzugriff, und `g.sektorLage` bleibt auf seiner leeren Vorgabe. Die
-Vorgabe steht trotzdem in `loadOrInitGalaxy`, damit das Frontend nicht zwischen „noch nie
-gerechnet" und „kaputt" raten muss.
+Der Schalter ist seit dem 03.09.2026 **an**. Steht er aus, kehrt `sektorLageTick` sofort zurück,
+**vor** jedem Schreibzugriff, und `g.sektorLage` bleibt auf seiner leeren Vorgabe. Die Vorgabe
+steht trotzdem in `loadOrInitGalaxy`, damit das Frontend nicht zwischen „noch nie gerechnet" und
+„kaputt" raten muss. Die Notabschaltung zur Laufzeit (`db.notAus`) kann wie überall nur
+AB-, nie einschalten.
+
+`tests/test_sektorlage.js` Prüfung 6 hat sich mit dem Umlegen **umgedreht**: Sie verlangt jetzt,
+dass der Schalter **an** ist. Solange die Anzeige im Frontend steht, wäre ein versehentliches
+Zurückdrehen eine Karte, die eine Lage zeichnet, die es nicht mehr gibt.
 
 ## Kopie-Familie
 
@@ -110,18 +116,25 @@ einer reinen Funktion, die mit gestellten Beständen gefüttert wird). Gegenprob
 | Deckel entfernt | 2b |
 | eine Sektorkoordinate weicht vom Frontend ab | 5a, 5b |
 | zwei Sektorzeilen vertauscht | 5a |
-| Schalter versehentlich auf `true` | 6 |
+| Schalter versehentlich auf `false` zurückgedreht | 6 |
 
 Am Stand vor dieser Etappe fällt die Ankerprüfung 0a und der Lauf bricht ab — der Block existiert
 dort nicht.
 
-## Was das Frontend noch braucht
+## Was das Frontend daraus macht (v8.659.0)
 
-Offen bis zum Frontend-PR: `npcEffectiveDefense` muss den Faktor aus `galaxyCache.sektorLage`
-mitnehmen und ihn **beim Missionsstart einfrieren** (wie `protoBlockade` beim Abbau) — sonst zeigt
-die Vorschau eine Verteidigung, die der Kampf sechs Minuten später nicht mehr benutzt. Dazu die
-vierte Textzeile am Regionsknoten, die fünfte Kopfzeile der Sektoransicht, der Info-Block in
-`npcMapMenu`, Angriffsvorschau, Kampfbericht und `HELP_SECTIONS`.
+`npcEffectiveDefense` nimmt den Faktor aus `galaxyCache.sektorLage` auf und friert beim
+Missionsstart den **Welt-Anteil** ein (`npcWeltFaktor` = `npcEmpireStrength` × Sektorfaktor) —
+nicht die fertige Zahl. Der erste Entwurf fror die ganze Verteidigung ein, und das war falsch:
+`npcEffectiveLoot()` liest den Siegzähler bei der **Ankunft**, also hätten gestapelte Angriffe
+steigende Beute gegen eingefrorene Verteidigung bekommen. Übertragbare Lehre: **Wer eine Größe
+einfriert, friert auch jede Beziehung ein, in der sie steht.**
 
-Die Frontend-Kopie `NEST_STUFEN` trägt bewusst **kein** `punkte`-Feld, und das soll so bleiben:
-Der Client rechnet die Lage nicht nach, er liest sie.
+Angezeigt wird sie als farbiger Regionsrand (statt einer fünften Textzeile — der Knoten ist voll),
+als vierte Kopfzeile der Sektoransicht, im Kartenmenü des Gegners, in der Angriffsvorschau und in
+`HELP_SECTIONS`. Der Kampfbericht bleibt bewusst unberührt: Er zeigt den eingefrorenen Wert, ist
+also nicht veraltet, nur unerklärt.
+
+Die Frontend-Kopie `NEST_STUFEN` trägt weiterhin **kein** `punkte`-Feld, und das soll so bleiben:
+Der Client rechnet die Lage nicht nach, er liest sie. `tests/test_sektorlage_ui.js` Prüfung 0d
+hält das fest.

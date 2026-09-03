@@ -11908,7 +11908,7 @@ function npcStaerkeZiel(g) {
    SCHALTER: Solange SEKTOR_LAGE_AKTIV aus ist, wird gar nichts gerechnet und `g.sektorLage`
    bleibt leer. Allein ausgeliefert waeren NPCs in einzelnen Regionen bis zu einem Viertel zaeher,
    ohne dass eine Anzeige den Grund kennt. Umgelegt wird er im Frontend-PR. */
-const SEKTOR_LAGE_AKTIV = false;
+const SEKTOR_LAGE_AKTIV = true;   // umgelegt am 03.09.2026, unmittelbar nach dem Frontend-Merge (v8.659.0 live)
 const SEKTOR_DRUCK_JE_FESTUNG = 2;      // eine Festung wiegt wie ein Nest der Stufe 2
 const SEKTOR_LAGE_STEIGUNG = 0.02;      // je Punkt Abstand zum Galaxieschnitt
 const SEKTOR_LAGE_DECKEL = 1.25;

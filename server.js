@@ -3988,7 +3988,25 @@ function rawFleetPower(f, ssAtkMult, t2AtkMult, marks) {
     // atk 250). Bewusst OHNE t2M: Der Multiplikator kommt aus der Modulgruppe 'raffiniert', und
     // die fuehrt den Koloss nicht - siehe die ausfuehrliche Begruendung an derselben Zeile in
     // attackPowerRaw des Frontends.
-    dm('urmateriekoloss', f.urmateriekoloss) * 250;
+    dm('urmateriekoloss', f.urmateriekoloss) * 250 +
+    // Kausalitaetsbrecher, Paktkorvette, Bundeskreuzer, Sternenbanner (03.09.2026, Spieler-Befund
+    // Sascha mit Bildschirmfoto: "werden garnicht bei angriffen mit einbezogen"). Die SECHSTE
+    // Wiederholung derselben Luecke - und die erste auf DIESER Seite. Die vier standen in
+    // SHIP_ATK_VALUES, in SHIP_DEF_WEIGHTS und im Frontend in ATTACK_SHIP_KEYS/attackPowerRaw,
+    // fehlten aber in dieser handgeschriebenen Summe. Folge, gemessen: In der VERTEIDIGUNG zaehlten
+    // sie voll mit (weightedFleetDefensePower und fleetShieldSum laufen ueber SHIP_ATK_VALUES), im
+    // ANGRIFF null - ueber PvP, Nester, Festungen, Anfechtungen und Vorposten-Garnisonen hinweg.
+    //
+    // WARUM DER WAECHTER NICHT ANSCHLUG: tests/test_angriffssumme.js im Frontend prueft Abschnitt 3
+    // gegen SHIP_ATK_VALUES - eine Tabelle, die vollstaendig war und die der Kampf gar nicht liest.
+    // Der Test bewachte die falsche Tuer. Er prueft ab sofort zusaetzlich diese Summe hier.
+    //
+    // Multiplikatoren exakt wie im Frontend (attackPowerRaw): Der Kausalitaetsbrecher bekommt t2M
+    // (Modulgruppe 'raffiniert' fuehrt ihn), die drei Allianzschiffe bewusst keinen - ihre Module
+    // erzeugen den Faktor nicht, ihn zu vergeben hiesse einen Bonus zu schenken, den es nicht gibt.
+    dm('kausalitaetsbrecher', f.kausalitaetsbrecher) * 340 * t2M +
+    dm('paktkorvette', f.paktkorvette) * 40 + dm('bundeskreuzer', f.bundeskreuzer) * 110 +
+    dm('sternenbanner', f.sternenbanner) * 240;
 }
 // Verteidigungsspezialisierung (13.07.2026) - defWeight-Gewichte identisch zum Frontend (SHIP_DEFS),
 // wirken NUR hier auf die Verteidigung, nie auf die Angriffskraft. Keine Schilde hier (der Backend-

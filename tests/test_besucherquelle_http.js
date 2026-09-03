@@ -38,7 +38,7 @@ const os = require('os');
 const { spawn } = require('child_process');
 
 const WURZEL = path.resolve(__dirname, '..');
-const PORT = Number(process.env.TEST_PORT || 3253);
+const PORT = Number(process.env.TEST_PORT || 3254);
 
 let fail = false;
 const check = (n, c, x) => { console.log((c ? 'OK  ' : 'FAIL') + ' - ' + n + (x !== undefined ? ' | ' + JSON.stringify(x) : '')); fail = fail || !c; };

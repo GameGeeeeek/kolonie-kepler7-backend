@@ -3648,7 +3648,22 @@ const COUNTER_ROLE_OF = {
   carrier: 'abfang', riftwaechter: 'abfang', enterschiff: 'bomber',
   // Allianzflotte (05.08.2026): bewusst auf alle drei Rollen verteilt statt geschlossen ins
   // Kapital-Lager - sonst waere die muehsam auf 7/6/8 gebrachte Verteilung sofort wieder schief.
-  paktkorvette: 'abfang', bundeskreuzer: 'kapital', sternenbanner: 'bomber'
+  paktkorvette: 'abfang', bundeskreuzer: 'kapital', sternenbanner: 'bomber',
+  // Kausalitaetsbrecher (03.09.2026, Vollpruefung nach dem rawFleetPower-Befund): KAPITAL.
+  // Er fehlte in dieser Tabelle KOMPLETT - das staerkste Schiff des Spiels stand damit als
+  // einziges Kampfschiff ausserhalb von Schere-Stein-Papier (Kontermultiplikator immer 1), war
+  // fuer fleetDiversityMult unsichtbar (Klassen ohne Rolle werden uebersprungen) und fiel im
+  // Frontend durch shipMarkFamily bis auf 'zivil' durch - Werftmarken-Texte eines Zivilschiffs
+  // und ein Laderaum-Zweig an einem Schiff ohne Frachtraum.
+  // BOMBER (nicht Kapital, obwohl der Rumpf danach aussieht): Kapital war mit 10 Klassen bereits
+  // die vollste Rolle; ein elftes Schiff haette die Verteilung auf 8/7/11 gebracht und das
+  // Geruest im Frontend gesprengt (tests/test_flotte_v8375.js, Hoechstabstand 3). Bomber ist
+  // ohnehin gut belegt - hoechster Angriffswert des Spiels (340), dieselbe Rolle wie der
+  // Singularitaets-Vernichter. Neue Verteilung 8/8/10. Die Rolle entscheidet ueber
+  // shipMarkAtkPerStep auch den Werftmarken-Angriffszuwachs (bomber 0,04 statt 0,03) -
+  // im Frontend haengt derselbe Wert an SHIP_MARK_PER_STEP_FAMILIE, beide Seiten muessen
+  // deshalb dieselbe Rolle fuehren. Entscheidung Sascha.
+  kausalitaetsbrecher: 'bomber'
 };
 const SHIP_COUNTERS = (() => {
   const byRole = {}; for (const r of COUNTER_ROLE_DEFS) byRole[r.key] = [];
@@ -4071,7 +4086,10 @@ const COUNTER_ROLE_ATK = {
   cruisers: 20, destroyers: 45, schlachtschiff: 90, superschlachtschiff: 220, carrier: 15,
   waechter: 8, quantenkreuzer: 80, fusionsdreadnought: 180, metamaterialtitan: 150,
   enterschiff: 25, riftwaechter: 20,
-  paktkorvette: 40, bundeskreuzer: 110, sternenbanner: 240
+  paktkorvette: 40, bundeskreuzer: 110, sternenbanner: 240,
+  // Wert identisch zu SHIP_DEFS des Frontends (atk 340). Eine Rolle ohne Gewicht zaehlt in der
+  // Rollenbalance still als 0 - tests/test_flottenbalance.js im Frontend vergleicht beide Seiten.
+  kausalitaetsbrecher: 340
 };
 function fleetDiversityMult(fleet) {
   if (!fleet) return 1;

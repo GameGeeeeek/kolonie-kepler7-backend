@@ -2500,7 +2500,7 @@ function passwortProblem(passwort, username) {
 
 // --- Registrierung (E-Mail optional, aber nötig für Passwort-Reset) ---
 app.post('/api/register', authRateLimit, async (req, res) => {
-  const { username, password, email } = req.body || {};
+  const { username, password, email, herkunft } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Name und Passwort erforderlich.' });
   const cleanName = String(username).trim();
   if (!/^[a-zA-Z0-9_\-äöüÄÖÜß]{3,18}$/.test(cleanName)) {
@@ -2524,6 +2524,11 @@ app.post('/api/register', authRateLimit, async (req, res) => {
   const userId = crypto.randomUUID();
   const home = assignHomeSlot();
   db.users[key] = { userId, username: cleanName, passwordHash, email: cleanEmail, emailVerified: false, createdAt: Date.now(), homeSystem: home.system, homeSlot: home.slot };
+  // Herkunft nur anlegen, wenn wirklich etwas ankam - ein `herkunft: null` an jedem Konto waere ein
+  // Feld, das aussieht wie eine Messung und keine ist. Ein alter Client schickt nichts; dann bleibt
+  // das Konto ohne Feld, und die Auswertung zaehlt es als "unbekannt" statt als "direkt".
+  const herkunftSauber = herkunftSaeubern(herkunft);
+  if (herkunftSauber) db.users[key].herkunft = herkunftSauber;
   grantNewbieShield(userId); // 4 Tage Anfängerschutz ab Registrierung
   recordAnalyticsEvent(userId, 'funnel:register'); // Onboarding-Trichter: Konto angelegt
 
@@ -5323,6 +5328,37 @@ function pruneOldAnalytics() {
       if (new Date(key + ':00:00Z').getTime() < cutoffHour) delete db.analytics.hourly[key];
     }
   }
+}
+/* Woher ein Konto kam - gesetzt EINMAL bei der Registrierung, danach nie wieder angefasst.
+
+   WARUM AM NUTZEROBJEKT und nicht im Spielstand: Der Spielstand ist klientenautoritativ und wird
+   beim naechsten regulaeren Speichern ueberschrieben; die Herkunft waere nach der ersten Sitzung
+   weg. Dasselbe Muster wie `user.staub` und `user.marktTag`.
+
+   WARUM NICHT als Analytics-Ereignis: `recordAnalyticsEvent` zaehlt je Tag und wird nach 60 Tagen
+   bereinigt. Die Frage, die ueber bezahlte Werbung entscheidet, lautet aber nicht "wie viele kamen
+   im Mai", sondern "von denen, die ueber X kamen, spielt noch jemand?" - und die braucht einen
+   dauerhaften Vermerk am Konto, den man gegen `aktivAuswerten` halten kann.
+
+   GESAEUBERT WIE `cleanEvent` (eine Zeichenklasse, kein zweites Muster daneben): Die Werte landen
+   spaeter in einer Admin-Ansicht; alles, was kein Bezeichner ist, hat dort nichts zu suchen. Die
+   Laenge ist knapp bemessen - eine Kampagnen-Kennung ist kurz, und eine 2-kB-Zeichenkette je Konto
+   waere eine Einladung, die db.json aufzublaehen.
+
+   NICHT GESPEICHERT wird die volle verweisende Adresse - nur ihr Hostname, und den bildet das
+   Frontend. Der Pfad einer fremden Seite kann Suchbegriffe oder Konto-Kennungen enthalten; fuer
+   die Frage "welcher Kanal bringt Spieler" reicht die Domain vollstaendig aus. */
+const HERKUNFT_FELDER = ['quelle', 'medium', 'kampagne', 'verweis'];
+function herkunftSaeubern(roh) {
+  if (!roh || typeof roh !== 'object') return null;
+  const sauber = {};
+  for (const feld of HERKUNFT_FELDER) {
+    const wert = String(roh[feld] || '').slice(0, 40).replace(/[^a-zA-Z0-9_:.-]/g, '');
+    if (wert) sauber[feld] = wert;
+  }
+  if (!Object.keys(sauber).length) return null;   // nichts Brauchbares dabei -> gar kein Feld anlegen
+  sauber.zeit = Date.now();
+  return sauber;
 }
 function recordAnalyticsEvent(userId, eventName) {
   if (!db.analytics) db.analytics = { daily: {}, hourly: {} };
@@ -14902,6 +14938,51 @@ app.get('/api/admin/aktivitaet', authMiddleware, (req, res) => {
    dieselben Felder lesen. */
 const GESCHENK_TEXT_MAX = 200;
 const GESCHENKE_MERKEN = 20;
+/* Welcher Kanal bringt Spieler, die BLEIBEN - je Quelle der ganze Trichter statt einer Kopfzahl.
+
+   Die Zahl, die ueber bezahlte Werbung entscheidet, ist nicht "wie viele kamen ueber TikTok",
+   sondern wie viele davon die E-Mail bestaetigt, tatsaechlich gespielt und danach nicht aufgehoert
+   haben. Genau diese vier Stufen stehen hier nebeneinander; eine Quelle, die viele Konten und
+   keine aktiven Spieler bringt, ist teurer als eine, die halb so viele bringt und sie behaelt.
+
+   AGGREGIERT, nie je Konto: Die Antwort nennt keine Namen und keine Kennungen. Die Frage lautet
+   "welcher Kanal", nicht "wer" - und eine Liste, die beides beantwortet, gibt mehr preis, als die
+   Frage braucht.
+
+   `aktiv14` kommt aus `aktivAuswerten` und damit aus derselben Quelle wie die Aktivitaets-Ansicht
+   (keine zweite Zaehlweise daneben). `belastbar` dort verlangt 24 beobachtete Stunden; ein Konto
+   von heute Morgen gilt deshalb noch nicht als "inaktiv", sondern als `zuJung` - sonst saehe jede
+   frische Kampagne in den ersten Stunden aus wie ein Totalausfall. */
+app.get('/api/admin/herkunft', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const jetzt = Date.now();
+  const nach = {};
+  for (const u of Object.values(db.users)) {
+    if (!u) continue;
+    const h = u.herkunft || null;
+    // Ohne Feld ist die Herkunft UNBEKANNT, nicht "direkt": Alle Konten von vor dieser Aenderung
+    // landen hier, und die als Direktzugriffe zu zaehlen waere eine erfundene Zahl.
+    const schluessel = h ? [h.quelle || '?', h.medium || '?', h.kampagne || '?'].join(' / ') : '(unbekannt)';
+    if (!nach[schluessel]) {
+      nach[schluessel] = { quelle: schluessel, verweise: {}, konten: 0, bestaetigt: 0, gespielt: 0, aktiv14: 0, zuJung: 0, erste: null, letzte: null };
+    }
+    const e = nach[schluessel];
+    e.konten++;
+    if (h && h.verweis) e.verweise[h.verweis] = (e.verweise[h.verweis] || 0) + 1;
+    if (u.emailVerified) e.bestaetigt++;
+    const priv = db.private[u.userId] || {};
+    if (priv[SAVE_KEY] !== undefined) e.gespielt++;
+    const a = aktivAuswerten(u, jetzt);
+    if (!a.belastbar) e.zuJung++; else if (a.aktiv > 0) e.aktiv14++;
+    const wann = (h && h.zeit) || u.createdAt || null;
+    if (wann) {
+      if (!e.erste || wann < e.erste) e.erste = wann;
+      if (!e.letzte || wann > e.letzte) e.letzte = wann;
+    }
+  }
+  const liste = Object.values(nach).sort((a, b) => b.konten - a.konten);
+  res.json({ ok: true, aktivTage: AKTIV_TAGE, konten: Object.keys(db.users).length, quellen: liste });
+});
 app.post('/api/admin/geschenk', authMiddleware, async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
   const { gaben, text, nurAktiveTage } = req.body || {};

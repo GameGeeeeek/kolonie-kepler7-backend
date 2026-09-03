@@ -117,6 +117,7 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/chat.md` | Bündel-Abruf, Retention |
 | `docs/offsite-sicherung.md` | Abholung der Datenbank durch den M715q, Abhol-Token, Wächter über die letzte Abholung |
 | `docs/betriebsnetz.md` | `takt()`, Absturz-Handler mit Notfall-Flush, `taktFehler` in `/api/health` |
+| `docs/hort-meldung.md` | Der seltenste Expeditionsfund: Server würfelt, Meldung in der Weltlage, Schalter `HORT_BANNER_AKTIV` |
 | `docs/ki-kampfberichte.md` | Etappe E1a: Prompt-Zuschnitt, Wahrheits-Sperren, Warteschlange, `KAMPFTEXT_AKTIV` |
 
 Der vollständige frühere Text dieser Datei liegt in der Git-Historie vor dem 01.09.2026.

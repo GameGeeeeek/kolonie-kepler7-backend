@@ -532,3 +532,59 @@ nachrechnet, prüft seine eigene Formel. Gegenproben `verkaeufer` (2a, 2c), `geb
 `slots` deckte dabei einen echten Testfehler auf: Prüfung 3a ließ nur den Vorpostenlosen seine
 Plätze füllen und fragte dann den Handelsknoten — der hatte nach dem Verkauf aber null offene
 Angebote, sein Angebot ging mit und ohne Bonus durch. Jetzt füllen beide erst die Grundzahl.
+
+## Etappe V4: Das Lager am Vorposten und die Beute beim Fall (03.09.2026)
+
+Bis hierher war ein Vorposten ein Bonus auf Zahlen — Flugzeit, Produktion, Aufklärung. Man flog nie
+hin, holte nie etwas ab, und sein Verlust kostete nur diesen Bonus. Jetzt fördert er.
+
+**Kein Ticken.** Der Stand wird beim Lesen und beim Abholen aus der verstrichenen Zeit *gerechnet*,
+nicht laufend gutgeschrieben — dieselbe Entscheidung wie bei den Projekten: kein Zustandsübergang,
+der verlorengehen könnte, kein Schreiben beim Lesen. `doc.lagerSeit` ist der einzige Zustand, und er
+fällt auf `doc.seit` zurück, damit ein Dokument von vor dieser Etappe korrekt weiterrechnet statt
+seit 1970 zu sammeln.
+
+**Der Deckel ist die ganze Balance.** `VP_LAGER_STUNDEN = 12`. Ohne ihn wäre ein vergessener
+Vorposten eine Bank, die mit der Abwesenheit wächst. Beim Abholen wird `lagerSeit` auf **jetzt**
+gesetzt, nicht um die geholten Stunden zurückgedreht — ein Zurückdrehen machte den Deckel wirkungslos.
+
+**Die Aufteilung ist gemessen, nicht erfunden:** die `baseRate`-Werte der drei Fördergebäude des
+Spiels (Erzmine 0,225, Kristallraffinerie 0,075, Deuteriumsynthetisierer 0,06). Ein Vorposten fördert
+im selben Verhältnis wie eine Kolonie; eine eigene Mischung wäre eine zweite Wirtschaftsaussage über
+dieselbe Welt.
+
+**Kalibriert gegen die eigene Förderung des Spiels.** Stufe 8 trägt 25.000 Erz-Äquivalent je Stunde,
+ein Handelsknoten 45.000 (Multiplikator 1,80 — dieselben Zahlen wie `prod`, denn wer Ertrag macht,
+macht auch Vorrat). Ein Spätspieler fördert selbst rund 145.000 Erz je Stunde (Mine 45,
+Multiplikator 4, gemessen an `ratesPerSecond` im Frontend). Das Lager ist damit eine Beigabe, kein
+Ersatz — drei volle Vorposten bleiben unter dem, was er in derselben Zeit selbst fördert.
+
+**Das Lager ist offen sichtbar**, wie Verteidigung und Garnisonszahl. Das ist der Zweck: Wer stürmt,
+soll riechen können, wo sich der Flug lohnt. Die Spannung zur älteren Regel „Beute hängt an der Stufe,
+nicht am Zubehör" ist gewollt und auflösbar: **Module sind Investition** und bleiben ungestraft,
+**das Lager ist Versäumnis** — bestraft wird, wer hortet, nicht wer ausbaut.
+
+**Beim Fall** wandert das Lager nach demselben Schadensanteil an die Angreifer wie Kampfpunkte, XP
+und Kredite (`lagerBeute`); der Besitzer erfährt in seiner Verlust-Meldung, *was* er verloren hat
+(`lagerVerloren`), nicht nur *dass*. Der Stand wird dafür gemessen, **bevor** das Dokument
+verschwindet.
+
+Der Schalter `VP_LAGER_AKTIV` steht ausgeliefert auf `false`; dann ist die Rate 0, das Lager bleibt
+leer, und `POST /api/vorposten/lager/holen` antwortet mit 404 und `inaktiv`. Der Endpunkt-Riegel ist
+mit Absicht eine zweite Stelle: Er gibt eine verständliche Auskunft statt der irreführenden „Im Lager
+liegt noch nichts".
+
+Wächter: `tests/test_vorposten_lager_http.js` (Port 3257, 17 Prüfungen). Gegenproben `deckel` (2b),
+`zurueckdrehen` (3a), `beute` (4a) und `schalter` (5a).
+
+### Zwei Testfehler, die diese Etappe aufgedeckt hat
+
+1. **Prüfung 3a war zeitabhängig.** Sie holte zweimal hintereinander ab und erwartete beim zweiten
+   Mal „leer" — ein Handelsknoten der Stufe 8 fördert aber 7,8 Erz je *Sekunde*, nach einer
+   Zehntelsekunde ist das Lager nicht mehr leer. Aufgefallen ist es daran, dass die Gegenprobe
+   `beute` 3a mitriss, obwohl sie mit dem Abholen nichts zu tun hat. Gemessen wird jetzt der
+   Zustand: `lagerSeit` steht danach auf jetzt.
+2. **Anker und Sabotagen von V2 und V3 hingen daran, dass ein Wert der letzte im `mult`-Objekt ist**
+   (`werft: 2.20 \}`). Der neue Kanal `lager` dahinter hat sie gebrochen — die Anker fielen laut, die
+   *Sabotage* aber still: Sie griff ins Leere, und die Gegenprobe belegte nichts mehr. Beide greifen
+   den Wert jetzt innerhalb des `mult`-Objekts, ohne seine Position festzuhalten.

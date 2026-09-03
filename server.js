@@ -13055,6 +13055,32 @@ const VP_MARKT_AKTIV = false;
 const VP_MARKT_DECKEL = 0.60;
 const VP_MARKT_SLOT_SCHRITT = 0.12;
 const VP_MARKT_SLOTS_MAX = 3;
+/* ETAPPE V4: DAS LAGER AM VORPOSTEN (03.09.2026). Bis hierher war ein Vorposten ein Bonus auf
+   Zahlen: Flugzeit, Produktion, Aufklaerung. Man flog nie hin, man holte nie etwas ab, und sein
+   Verlust kostete nur diesen Bonus. Jetzt sammelt er.
+
+   KEIN TICKEN. Der Ertrag wird beim ABHOLEN aus der verstrichenen Zeit GERECHNET, nicht laufend
+   gutgeschrieben - dieselbe Entscheidung wie bei den Projekten: Es gibt keinen Zustandsuebergang,
+   der verlorengehen koennte, und kein Schreiben beim Lesen. `doc.lagerSeit` ist der einzige
+   Zustand.
+
+   DER DECKEL IST DIE GANZE BALANCE. Ohne ihn waere ein vergessener Vorposten eine Bank, die mit
+   der Abwesenheit waechst. Mit VP_LAGER_STUNDEN ist nach zwoelf Stunden Schluss; wer abholen will,
+   muss vorbeischauen.
+
+   DIE AUFTEILUNG IST GEMESSEN, nicht erfunden: die baseRate-Werte der drei Foerdergebaeude des
+   Spiels (Erzmine 0,225, Kristallraffinerie 0,075, Deuteriumsynthetisierer 0,06). Ein Vorposten
+   foerdert damit im selben Verhaeltnis wie eine Kolonie - eine eigene Mischung waere eine zweite
+   Wirtschaftsaussage ueber dieselbe Welt.
+
+   KALIBRIERT gegen die eigene Foerderung des Spiels: Stufe 8 traegt 25.000 Erz-Aequivalent je
+   Stunde, ein Handelsknoten 45.000. Ein Spaetspieler foerdert selbst rund 145.000 Erz je Stunde
+   (Mine Stufe 45, Multiplikator 4, gemessen an ratesPerSecond im Frontend). Das Lager ist damit
+   eine Beigabe, kein Ersatz - und drei volle Vorposten bleiben unter dem, was er in derselben
+   Zeit selbst foerdert. */
+const VP_LAGER_AKTIV = false;
+const VP_LAGER_STUNDEN = 12;
+const VP_LAGER_ANTEILE = { erz: 0.225, kristalle: 0.075, deuterium: 0.06 };
 const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
 const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
 const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer, am Objekt
@@ -13084,14 +13110,14 @@ const VORPOSTEN_STUFEN = [
      Produktionsbonus, Aufklaerungsstufe); alle drei wirken im Frontend bereits.
      `kampfpunkte`/`xp`/`credits` sind die Beute beim Fall, anteilig - sie haengen bewusst NUR an
      der Stufe, nicht am Zweig: sonst lohnte es sich, gezielt die wehrhaftesten Ziele zu schleifen. */
-  { stufe: 1, name: 'Feldlager',  kernLp: 20000,   verteidigung: 2500,   garnisonMax: 300,   flug: 0.06, prod: 0.015, scan: 1, werft: 0.02, markt: 0.02, kampfpunkte: 30,   xp: 250,   credits: 1200,  kosten: null },
-  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,   verteidigung: 12000,  garnisonMax: 800,   flug: 0.10, prod: 0.03,  scan: 2, werft: 0.035, markt: 0.035, kampfpunkte: 80,   xp: 700,   credits: 3500,  kosten: { erz: 200000, kristalle: 130000, deuterium: 80000 } },
-  { stufe: 3, name: 'Bastion',    kernLp: 400000,  verteidigung: 60000,  garnisonMax: 2000,  flug: 0.15, prod: 0.05,  scan: 3, werft: 0.05, markt: 0.05, kampfpunkte: 200,  xp: 2000,  credits: 9000,  kosten: { erz: 600000, kristalle: 400000, deuterium: 250000 } },
-  { stufe: 4, name: 'Ausbaustufe 4', kernLp: 800000,  verteidigung: 110000, garnisonMax: 3200,  flug: 0.18, prod: 0.065, scan: 3, werft: 0.07, markt: 0.07, kampfpunkte: 320,  xp: 3200,  credits: 15000, kosten: { erz: 1200000, kristalle: 800000,  deuterium: 500000,  nanolegierungen: 400 } },
-  { stufe: 5, name: 'Ausbaustufe 5', kernLp: 1400000, verteidigung: 190000, garnisonMax: 4800,  flug: 0.21, prod: 0.08,  scan: 4, werft: 0.09, markt: 0.09, kampfpunkte: 480,  xp: 5000,  credits: 24000, kosten: { erz: 2000000, kristalle: 1400000, deuterium: 900000,  nanolegierungen: 900,  quantenchips: 300 } },
-  { stufe: 6, name: 'Ausbaustufe 6', kernLp: 2400000, verteidigung: 320000, garnisonMax: 7000,  flug: 0.24, prod: 0.095, scan: 4, werft: 0.11, markt: 0.11, kampfpunkte: 700,  xp: 7500,  credits: 38000, kosten: { erz: 3400000, kristalle: 2400000, deuterium: 1500000, nanolegierungen: 1800, quantenchips: 800 } },
-  { stufe: 7, name: 'Ausbaustufe 7', kernLp: 4000000, verteidigung: 520000, garnisonMax: 10000, flug: 0.27, prod: 0.11,  scan: 5, werft: 0.135, markt: 0.135, kampfpunkte: 1000, xp: 11000, credits: 60000, kosten: { erz: 5500000, kristalle: 4000000, deuterium: 2600000, nanolegierungen: 3200, quantenchips: 1600, metamaterial: 400 } },
-  { stufe: 8, name: 'Ausbaustufe 8', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, werft: 0.16, markt: 0.16, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskerne: 120 } }
+  { stufe: 1, name: 'Feldlager',  kernLp: 20000,   verteidigung: 2500,   garnisonMax: 300,   flug: 0.06, prod: 0.015, scan: 1, werft: 0.02, markt: 0.02, lager: 1200, kampfpunkte: 30,   xp: 250,   credits: 1200,  kosten: null },
+  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,   verteidigung: 12000,  garnisonMax: 800,   flug: 0.10, prod: 0.03,  scan: 2, werft: 0.035, markt: 0.035, lager: 2800, kampfpunkte: 80,   xp: 700,   credits: 3500,  kosten: { erz: 200000, kristalle: 130000, deuterium: 80000 } },
+  { stufe: 3, name: 'Bastion',    kernLp: 400000,  verteidigung: 60000,  garnisonMax: 2000,  flug: 0.15, prod: 0.05,  scan: 3, werft: 0.05, markt: 0.05, lager: 5000, kampfpunkte: 200,  xp: 2000,  credits: 9000,  kosten: { erz: 600000, kristalle: 400000, deuterium: 250000 } },
+  { stufe: 4, name: 'Ausbaustufe 4', kernLp: 800000,  verteidigung: 110000, garnisonMax: 3200,  flug: 0.18, prod: 0.065, scan: 3, werft: 0.07, markt: 0.07, lager: 8000, kampfpunkte: 320,  xp: 3200,  credits: 15000, kosten: { erz: 1200000, kristalle: 800000,  deuterium: 500000,  nanolegierungen: 400 } },
+  { stufe: 5, name: 'Ausbaustufe 5', kernLp: 1400000, verteidigung: 190000, garnisonMax: 4800,  flug: 0.21, prod: 0.08,  scan: 4, werft: 0.09, markt: 0.09, lager: 11500, kampfpunkte: 480,  xp: 5000,  credits: 24000, kosten: { erz: 2000000, kristalle: 1400000, deuterium: 900000,  nanolegierungen: 900,  quantenchips: 300 } },
+  { stufe: 6, name: 'Ausbaustufe 6', kernLp: 2400000, verteidigung: 320000, garnisonMax: 7000,  flug: 0.24, prod: 0.095, scan: 4, werft: 0.11, markt: 0.11, lager: 15500, kampfpunkte: 700,  xp: 7500,  credits: 38000, kosten: { erz: 3400000, kristalle: 2400000, deuterium: 1500000, nanolegierungen: 1800, quantenchips: 800 } },
+  { stufe: 7, name: 'Ausbaustufe 7', kernLp: 4000000, verteidigung: 520000, garnisonMax: 10000, flug: 0.27, prod: 0.11,  scan: 5, werft: 0.135, markt: 0.135, lager: 20000, kampfpunkte: 1000, xp: 11000, credits: 60000, kosten: { erz: 5500000, kristalle: 4000000, deuterium: 2600000, nanolegierungen: 3200, quantenchips: 1600, metamaterial: 400 } },
+  { stufe: 8, name: 'Ausbaustufe 8', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, werft: 0.16, markt: 0.16, lager: 25000, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskerne: 120 } }
 ];
 /* DIE DREI SPEZIALISIERUNGEN. Ab Stufe VORPOSTEN_ZWEIG_AB waehlt der Besitzer EINMAL eine
    Ausrichtung; sie steht danach im Dokument (`doc.zweig`) und ist unveraenderlich - eine
@@ -13111,17 +13137,17 @@ const VORPOSTEN_ZWEIGE = {
   werft: {
     key: 'werft', name: 'Werft', kurz: 'Schnelle Flotten: kurze Flugzeiten, solide Struktur.',
     namen: { 4: 'Werftgerüst', 5: 'Dockring', 6: 'Schiffsschmiede', 7: 'Flottenwerft', 8: 'Sternenwerft' },
-    mult: { kernLp: 0.90, verteidigung: 0.85, garnisonMax: 1.00, flug: 1.50, prod: 0.60, scan: 1.00, werft: 2.20, markt: 0.50 }
+    mult: { kernLp: 0.90, verteidigung: 0.85, garnisonMax: 1.00, flug: 1.50, prod: 0.60, scan: 1.00, werft: 2.20, markt: 0.50, lager: 0.60 }
   },
   handel: {
     key: 'handel', name: 'Handelsknoten', kurz: 'Ertrag und Fernsicht - dafür die dünnste Hülle.',
     namen: { 4: 'Handelsposten', 5: 'Umschlagring', 6: 'Frachtkreuz', 7: 'Handelsknoten', 8: 'Sternenmarkt' },
-    mult: { kernLp: 0.80, verteidigung: 0.75, garnisonMax: 0.85, flug: 1.00, prod: 1.80, scan: 1.25, werft: 0.50, markt: 2.20 }
+    mult: { kernLp: 0.80, verteidigung: 0.75, garnisonMax: 0.85, flug: 1.00, prod: 1.80, scan: 1.25, werft: 0.50, markt: 2.20, lager: 1.80 }
   },
   festung: {
     key: 'festung', name: 'Festungsring', kurz: 'Hält Systeme: dickster Kern, größte Garnison.',
     namen: { 4: 'Wehrring', 5: 'Zitadelle', 6: 'Sperrfeuerring', 7: 'Kriegsbastion', 8: 'Sternenfestung' },
-    mult: { kernLp: 1.35, verteidigung: 1.60, garnisonMax: 1.45, flug: 0.70, prod: 0.50, scan: 1.00, werft: 0.50, markt: 0.50 }
+    mult: { kernLp: 1.35, verteidigung: 1.60, garnisonMax: 1.45, flug: 0.70, prod: 0.50, scan: 1.00, werft: 0.50, markt: 0.50, lager: 0.50 }
   }
 };
 function vorpostenZweigOk(z) { return typeof z === 'string' && Object.prototype.hasOwnProperty.call(VORPOSTEN_ZWEIGE, z); }
@@ -13146,6 +13172,7 @@ function vorpostenStufe(n, zweig) {
     prod: Math.round(basis.prod * m.prod * 1000) / 1000,
     werft: Math.round((basis.werft || 0) * (m.werft || 0) * 1000) / 1000,
     markt: Math.round((basis.markt || 0) * (m.markt || 0) * 1000) / 1000,
+    lager: Math.round((basis.lager || 0) * (m.lager || 0)),
     scan: Math.max(1, Math.round(basis.scan * m.scan))
   });
 }
@@ -13197,6 +13224,38 @@ function vorpostenSchreib(doc) {
   db.shared[vorpostenKey(doc.sys)] = JSON.stringify(doc);
 }
 function vorpostenLoesch(sys) { delete db.shared[vorpostenKey(sys)]; }
+/* Was der Vorposten JE STUNDE foerdert, aufgeteilt nach dem gemessenen Verhaeltnis der drei
+   Foerdergebaeude. Die Summe der Anteile ist bewusst NICHT 1 - sie sind die baseRates selbst,
+   und `lager` ist ihr gemeinsamer Faktor in Erz-Aequivalent. */
+function vorpostenLagerRate(doc, werte) {
+  // `werte` darf durchgereicht werden: vorpostenFuerClient hat sie ohnehin schon, und ohne diesen
+  // Weg rechnete jeder Aufruf die ganze Stufe samt Modul- und Projektsummen ein drittes Mal nach.
+  const st = werte || vorpostenWerte(doc);
+  const basis = VP_LAGER_AKTIV ? (st.lager || 0) : 0;
+  const summe = VP_LAGER_ANTEILE.erz + VP_LAGER_ANTEILE.kristalle + VP_LAGER_ANTEILE.deuterium;
+  const aus = {};
+  for (const k of Object.keys(VP_LAGER_ANTEILE)) aus[k] = Math.round(basis * VP_LAGER_ANTEILE[k] / summe);
+  return aus;
+}
+/* Was HEUTE im Lager liegt - gerechnet, nicht gespeichert. `lagerSeit` faellt auf `seit` zurueck,
+   damit ein Dokument aus der Zeit vor dieser Etappe korrekt weiterrechnet (und nicht seit 1970
+   sammelt). Der Deckel steht in Stunden, nicht in absoluten Mengen: So waechst er von selbst mit,
+   wenn die Leiter sich aendert. */
+function vorpostenLagerStand(doc, jetzt, werte) {
+  const t = jetzt || Date.now();
+  const seit = (doc && doc.lagerSeit) || (doc && doc.seit) || t;
+  const stunden = Math.max(0, Math.min(VP_LAGER_STUNDEN, (t - seit) / 3600000));
+  const rate = vorpostenLagerRate(doc, werte);
+  const aus = {};
+  for (const k of Object.keys(rate)) aus[k] = Math.floor(rate[k] * stunden);
+  return aus;
+}
+function vorpostenLagerVoll(doc) {
+  const seit = (doc && doc.lagerSeit) || (doc && doc.seit) || Date.now();
+  return seit + VP_LAGER_STUNDEN * 3600000;
+}
+function vorpostenLagerLeer(stand) { return !stand || Object.values(stand).every(v => !(v > 0)); }
+
 /* Was die eigenen Vorposten am MARKT bringen - die eine Stelle, die den Kanal zusammenzaehlt.
    Sie wird fuer den VERKAEUFER gerufen, nicht fuer den Anfragenden: Beim Kauf zahlt der Verkaeufer
    die Gebuehr, und er ist nicht der, der die Anfrage stellt. Steht der Schalter auf false, liefert
@@ -13519,6 +13578,14 @@ function vorpostenFuerClient(doc, userId, jetzt) {
     /* Der Abbau ist fuer JEDEN sichtbar, nicht nur fuer den Besitzer - wie Verteidigung und
        Garnisonszahl. Eine Station, die in Kuerze verschwindet, ist fuer einen Angreifer eine
        echte Information: Es lohnt sich, VORHER zuzuschlagen. Genau das soll die Frist bewirken. */
+    /* DAS LAGER IST OFFEN, wie Verteidigung und Garnisonszahl. Das ist keine Nachlaessigkeit,
+       sondern der Zweck: Wer stuermt, soll RIECHEN koennen, wo sich der Flug lohnt. Die
+       Spannung zur Regel „Beute haengt an der Stufe, nicht am Zubehoer" ist gewollt und
+       aufloesbar: Module sind INVESTITION und bleiben ungestraft, das Lager ist VERSAEUMNIS -
+       bestraft wird, wer hortet, nicht wer ausbaut. */
+    lager: vorpostenLagerStand(doc, jetzt, st),
+    lagerRate: vorpostenLagerRate(doc, st),
+    lagerVollAb: vorpostenLagerVoll(doc),
     abbauAb: vorpostenAbbauLaeuft(doc) || null,
     schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
@@ -13617,6 +13684,10 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
     // Bewusst die STUFE ohne Module: sonst lohnte es sich, gut bestueckte Stationen zu jagen,
     // und wer ausbaut, macht sich zur besseren Beute. Der Ertrag haengt am Rang, nicht am Zubehoer.
     const st = vorpostenStufeVon(doc);
+    // Der Lagerstand wird HIER gemessen, bevor das Dokument verschwindet - danach gibt es nichts
+    // mehr zu rechnen, und ein spaeterer Aufruf saehe nur noch ein leeres Lager.
+    const standBeimFall = vorpostenLagerStand(doc, jetzt);
+    const lagerBeimFall = vorpostenLagerLeer(standBeimFall) ? null : standBeimFall;
     const summe = Object.values(doc.beitraege).reduce((a, b) => a + (b.schaden || 0), 0) || 1;
     for (const [uid, b] of Object.entries(doc.beitraege)) {
       const anteil = (b.schaden || 0) / summe;
@@ -13630,6 +13701,10 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
         kampfpunkte: Math.max(1, Math.round(st.kampfpunkte * anteil)),
         xp: Math.max(1, Math.round(st.xp * anteil)),
         credits: Math.max(1, Math.round(st.credits * anteil)),
+        /* V4: Das Lager wird MIT ERBEUTET, nach demselben Schadensanteil. Es ist der einzige Teil
+           der Beute, der vom Verhalten des Besitzers abhaengt statt von seiner Stufe - und das ist
+           die Absicht: Wer abholt, verliert nichts; wer hortet, fuettert seinen Angreifer. */
+        lagerBeute: lagerBeimFall ? Object.fromEntries(Object.entries(lagerBeimFall).map(([k, v]) => [k, Math.floor(v * anteil)])) : null,
         zeit: jetzt
       });
     }
@@ -13637,7 +13712,7 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
     // liest, gibt es gleich nicht mehr. Die Restgarnison ist mit dem Vorposten verloren.
     pushPendingReward(doc.besitzer, {
       type: 'vorposten-verlust', system: doc.sys, stufe: doc.stufe, name: st.name,
-      angreiferName: vermerk.angreiferName, teilnehmer,
+      angreiferName: vermerk.angreiferName, teilnehmer, lagerVerloren: lagerBeimFall,
       garnisonVerloren: Object.assign({}, doc.garnison || {}), zeit: jetzt
     });
     vorpostenLoesch(doc.sys);
@@ -13667,6 +13742,8 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
        eine Kopie-Familie mit genau der Konstante, die hier steht. */
     abbauMs: VORPOSTEN_ABBAU_MS, abbauAktiv: VORPOSTEN_ABBAU_AKTIV,
     werftDeckel: VP_WERFT_DECKEL, werftAktiv: VP_WERFT_AKTIV,
+    marktAktiv: VP_MARKT_AKTIV, marktDeckel: VP_MARKT_DECKEL,
+    lagerAktiv: VP_LAGER_AKTIV, lagerStunden: VP_LAGER_STUNDEN,
     projektDefs: VP_PROJEKT_DEFS, projekteAktiv: VP_PROJEKTE_AKTIV && !notAusGesetzt('vorposten'),
     flugDeckel: VP_FLUG_DECKEL,
     zweigAb: VORPOSTEN_ZWEIG_AB, maxStufe: VORPOSTEN_STUFEN.length,
@@ -14006,6 +14083,32 @@ app.post('/api/vorposten/abbau/abbrechen', authMiddleware, async (req, res) => {
   vorpostenSchreib(doc);
   await saveDb();
   res.json({ ok: true, vorposten: vorpostenFuerClient(doc, req.userId, Date.now()) });
+});
+
+/* V4: DAS LAGER ABHOLEN. Der Ertrag geht ueber pushPendingReward, nicht direkt in den Spielstand:
+   Der Besitzer kann online sein, und sein naechster Auto-Save wuerde eine direkte Gutschrift mit
+   seinem aelteren Client-Stand ueberschreiben (dieselbe Begruendung wie beim Modulverkauf).
+   `lagerSeit` wird auf JETZT gesetzt, nicht um die abgeholten Stunden zurueckgedreht: Wer bei
+   vollem Lager abholt, verliert das, was ueber dem Deckel liegen wuerde - genau das ist der
+   Deckel. Ein Zurueckdrehen machte ihn wirkungslos. */
+app.post('/api/vorposten/lager/holen', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  if (!VP_LAGER_AKTIV) return res.status(404).json({ error: 'Vorposten führen derzeit kein Lager.', inaktiv: true });
+  const sys = String((req.body && req.body.system) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann hier abholen.' });
+  const jetzt = Date.now();
+  const stand = vorpostenLagerStand(doc, jetzt);
+  if (vorpostenLagerLeer(stand)) return res.status(400).json({ error: 'Im Lager liegt noch nichts.', leer: true });
+  // db synchron vor saveDb() mutieren, nie im await-Rueckruf.
+  doc.lagerSeit = jetzt;
+  vorpostenSchreib(doc);
+  pushPendingReward(req.userId, Object.assign({ type: 'vorposten-lager', system: sys,
+    name: vorpostenWerte(doc).name, zeit: jetzt }, stand));
+  await saveDb();
+  res.json({ ok: true, geholt: stand, vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
 });
 
 app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {

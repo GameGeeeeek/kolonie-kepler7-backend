@@ -12846,10 +12846,12 @@ const VORPOSTEN_AKTIV = true;   // umgelegt am 02.09.2026, unmittelbar nach dem 
    Beute, kein Kampfpunkt, die Fluege umsonst. Mit der Frist bleibt der Vorposten angreifbar,
    solange er abgebaut wird - der Abbau ist damit ein Entschluss, keine Fluchttuer.
 
-   Der Schalter bleibt bis zum Frontend-Merge auf false: Das ausgelieferte Spiel erwartet von
-   /api/vorposten/aufgeben eine sofortige Loeschung samt Garnison zurueck. Waere er schon an,
-   klickte ein Spieler "aufgeben" und saehe seinen Vorposten weiter stehen. */
-const VORPOSTEN_ABBAU_AKTIV = false;   // umgelegt wird er IM Frontend-PR
+   Der Schalter stand bis zum Frontend-Merge auf false: Das ausgelieferte Spiel erwartete von
+   /api/vorposten/aufgeben eine sofortige Loeschung samt Garnison zurueck. Waere er schon an
+   gewesen, klickte ein Spieler "aufgeben" und saehe seinen Vorposten weiter stehen. Seit
+   Frontend v8.654.0 (live gemessen an version.txt) liest der Client abbauMs/abbauAktiv aus
+   diesem Katalog und beschriftet den Eintrag danach - der Schalter ist an. */
+const VORPOSTEN_ABBAU_AKTIV = true;    // an seit Frontend v8.654.0
 const VORPOSTEN_ABBAU_MS = 24 * 3600 * 1000;
 const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
 const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
@@ -13561,11 +13563,12 @@ app.post('/api/vorposten/projekt/starten', authMiddleware, async (req, res) => {
     vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
 });
 
-/* MODUL BAUEN. Verlaesslich, aber nur bis 'ungewoehnlich' - der Boden des Systems. Die Kosten
-   zahlt der Client aus seinem Spielstand (wie jede Baukosten-Buchung dieses Spiels; der Server
-   kann sie bauartbedingt nicht nachrechnen). Was der Server DOCH kontrolliert, ist die Menge:
-   eine Abklingzeit je Konto am Nutzerobjekt. Ohne sie waere der Bau eine Endlosquelle, und die
-   gefundenen Module - der eigentliche Reiz - waeren wertlos. */
+/* MODUL BAUEN. Verlaesslich, aber nur bis 'ungewoehnlich' - der Boden des Systems. Der Bau
+   kostet KEINE Rohstoffe, weder hier noch im Client (nachgelesen an beiden Seiten, 03.09.2026;
+   der Kommentar behauptete vorher das Gegenteil). Der einzige Preis ist die Zeit: eine
+   Abklingzeit je Konto am Nutzerobjekt. Ohne sie waere der Bau eine Endlosquelle, und die
+   gefundenen Module - der eigentliche Reiz - waeren wertlos. Nur das Ausbauen kostet Kredite
+   (VP_MODUL_AUSBAU_KREDITE, abgebucht am Spielstand). */
 app.post('/api/vorposten/modul/bauen', authMiddleware, async (req, res) => {
   if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
   const key = String((req.body && req.body.modul) || '');

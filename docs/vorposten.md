@@ -239,6 +239,11 @@ ausstellen. Deshalb: Bestand am Nutzerobjekt (`user.vpModule`), eingebaute Modul
 | **Bau** | `POST /api/vorposten/modul/bauen` | nur bis ungewöhnlich | Abklingzeit 6 h je Konto |
 | **Ausbau** | `POST /api/vorposten/modul/ausbauen` | – | 250 Kredite, Modul kommt heil zurück |
 
+Die Spalte „Kosten" ist wörtlich zu lesen: **Der Bau kostet keine Rohstoffe**, weder serverseitig
+noch im Client — der einzige Preis ist die Abklingzeit. Der Kommentar über dem Endpunkt behauptete
+bis zum 03.09.2026 das Gegenteil („die Kosten zahlt der Client aus seinem Spielstand"); an beiden
+Seiten nachgelesen und korrigiert. Kredite kostet nur das **Ausbauen**.
+
 Sechs Module (Kernpanzerung, Geschützbank, Hangarerweiterung, Sprungrechner, Umlaufraffinerie,
 Horchposten) wirken ausschließlich auf Kanäle, die es **schon gibt** — Kern, Verteidigung, Garnison,
 Flug, Produktion, Aufklärung. Steckplätze: einer je Stufe ab der Wahlstufe, höchstens fünf. Die
@@ -436,12 +441,21 @@ verschwindet, ist für einen Angreifer eine echte Information: Es lohnt sich, vo
 sonst wäre ein gestarteter Abbau der Weg, die Drei-pro-Konto-Grenze zu umgehen, ohne je etwas
 aufzugeben.
 
-`VORPOSTEN_ABBAU_AKTIV` steht bis zum Frontend-Merge auf `false`; solange bleibt das ausgelieferte
-Verhalten (sofort weg, Garnison zurück). Wäre der Schalter schon an, klickte ein Spieler „aufgeben"
-und sähe seinen Vorposten weiter stehen.
+`VORPOSTEN_ABBAU_AKTIV` stand bis zum Frontend-Merge auf `false`; solange blieb das ausgelieferte
+Verhalten (sofort weg, Garnison zurück). Wäre der Schalter schon an gewesen, klickte ein Spieler
+„aufgeben" und sähe seinen Vorposten weiter stehen. **Umgelegt am 03.09.2026**, nachdem Frontend
+v8.654.0 live gemessen war (`version.txt`) — dessen Kartenmenü liest `abbauMs`/`abbauAktiv` aus
+`GET /api/vorposten` und beschriftet den Eintrag danach.
 
 Wächter: `tests/test_vorposten_http.js` Abschnitt 6 (6a–6g), gefahren an einer Kopie mit umgelegtem
 Schalter **und verkürztem `galaxyTick`** (`0-kopie3`) — so misst 6f den echten Weg über den Tick
 statt einer Abkürzung, die es im Betrieb nicht gibt. Zwei Sabotagen mit gemessener Pflichtliste:
-`abbaufrist` (der Vorposten verschwindet wieder sofort) → `6b 6c 6d 6e`; `abbaumodule` (die Module
-bleiben beim Aufräumen weg) → `6g`.
+`abbaufrist` (der Vorposten verschwindet wieder sofort) → `6b 6c 6d 6e 6f`; `abbaumodule` (die
+Module bleiben beim Aufräumen weg) → `6g`.
+
+Dazu Prüfung **8e**: Der Schalter im **ausgelieferten** Stand steht auf `true`. Abschnitt 6 fährt
+eine Kopie und legt ihn selbst um — ohne 8e prüfte dieser Test also nie, was auf dem Pi läuft, und
+ein stiller Rückfall auf `false` sähe wie Normalbetrieb aus: `/api/vorposten` meldet
+`abbauAktiv:false`, das Frontend beschriftet den Eintrag brav wieder mit „aufgeben", und niemandem
+fällt etwas auf. Gegenprobe gemessen: mit `false` fällt **genau** 8e, die 83 Prüfnamen beider Läufe
+sind per `diff` identisch.

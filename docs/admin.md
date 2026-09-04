@@ -892,3 +892,51 @@ Server ignoriert es. Kein Schalter nötig.
 Wächter: `tests/test_besucherquelle_http.js` (Port 3253, 26 Prüfungen). Kernprüfung ist 5c/5d — zwei
 Quellen mit **gleicher** Kontozahl und messbar verschiedenem Verlauf; eine Prüfung auf blosse
 Anwesenheit wäre auch von einem Endpunkt erfüllt, der überall dieselbe Zahl schreibt.
+
+## Modul-Verwaltung: Fundorte, stellbare Drop-Chancen, eigene Einträge (04.09.2026)
+
+Idee Sascha („ein Module-Editor, wo welche Module gefunden werden mit welcher Drop-Chance, und ein
+Editor um neue hinzuzufügen"). **Zuerst gemessen, weil der Zuschnitt davon abhängt:**
+
+- Das Spiel hat **99 Module** — 48 Ausrüstungsmodule (`MODULE_DEFS`) und 51 Schiffsmodule
+  (`SHIP_MODULE_DEFS`), **beide im Frontend**. Das Backend führt nur die kampfrelevante Teilmenge
+  (`SHIP_MODULE_COMBAT_BASE`), zusammengehalten von `test_schiffsmodul_paritaet.js` im Frontend-Repo.
+- **Der Server vergibt genau zwei davon**: die beiden Module des Wrackkonvois. Alles andere fällt im
+  Frontend (Fraktionsläden, Abgrund, Unikate, Sets, Fertigung, Events).
+- **Nur 3 von 99 Modulen tragen ein `fundort`-Feld.** Bei den übrigen 96 steht der Fundort nirgends
+  als Datum; er steckt in der Mechanik, die sie vergibt.
+- Die Chancen sind teils **gerechnet, nicht tabelliert**: `abgrundModulChance(tiefe)` mit Deckel
+  0,35 ist eine Funktion der Tiefe, keine Zahl.
+
+**Was daraus folgt.** `MODUL_QUELLEN` führt bewusst **nur die serverseitigen** Vergabestellen und
+behauptet nicht, die Fundorte des ganzen Spiels zu kennen; `hinweisQuellen` sagt das in jeder
+Antwort. Die Übersicht im Admin-Bereich leitet den Rest aus dem Frontend-Code ab, wo er wirklich
+steht.
+
+**Stellbare Chancen.** `GET /api/admin/module` nennt je Quelle Basiswert, aktuellen Wert und ob ein
+Überschreibwert gesetzt ist; `POST /api/admin/module/chance {quelle, wert}` setzt ihn, `wert: null`
+nimmt ihn zurück. Der Basiswert bleibt im Code — **zurücknehmen löscht den Überschreibwert und
+kopiert nicht den Code-Wert hinein**, sonst fröre der Eingriff die Balance ein und eine spätere
+Änderung im Code bliebe wirkungslos (Wächter-Paar 1e/1f).
+
+Die Vergabestelle liest `modulChance(quelle)` statt der Konstanten. Ohne diese eine Zeile wäre der
+Regler eine Anzeige ohne Wirkung — genau das misst das Paar 1c/1d am **echten** Konvoi-Schlag:
+Chance 0 lässt den Konvoi fallen, aber kein Modul; Chance 1 lässt beide fallen.
+
+**Eigene Module.** `POST /api/admin/module/eigen` legt einen Eintrag an, `/eigen/loeschen` entfernt
+ihn, höchstens 50. Das ist die Hälfte, von der abzuraten war, und die Gründe stehen unverändert:
+Ein hier angelegtes Modul ist eine **dritte Kopie** neben Frontend- und Backend-Tabelle, die der
+Paritätstest bauartbedingt nicht sehen kann (er liest Dateien, keine `db.json`), und es hat keinen
+Verbraucher — es wirkt im Spiel nicht. Zwei Sicherungen dagegen, beide **am Backend** und nicht nur
+in der Anzeige:
+
+- Der Schlüssel muss mit `eigen_` beginnen. Eine Kollision mit einem der 99 Code-Module ist damit
+  bauartbedingt unmöglich, und die Herkunft steht im Schlüssel selbst.
+- `wirkung: 'keine'` reist in **jeder** Antwort mit. Eine Kennzeichnung, die nur die Oberfläche
+  kennt, wäre beim nächsten Leser weg.
+
+Ausgeliefert wird die Liste **nicht an Spieler**: Ein Modul ohne Wirkung im Schaufenster wäre ein
+Versprechen, das das Spiel nicht halten kann.
+
+**Wächter** `tests/test_admin_module_http.js` (Port 3257, 18 Prüfungen) mit den Paaren 1c/1d,
+1e/1f, 2a/2b. Sechs Gegenproben an sabotierten Kopien; die Zuordnung steht im Kopf der Testdatei.

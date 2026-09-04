@@ -15,6 +15,10 @@ prüft ihn und legt ihn zum Abholen bereit. Zwei Endpunkte: `POST /api/kampfberi
 Frontend ruft niemand den Endpunkt auf, aber er würde M715q-Zeit verbrauchen, sobald ihn jemand
 findet, und der M715q bedient auch Social Hub. Umgelegt wird im Frontend-PR der Etappe E1b.
 
+**Nachtrag 04.09.2026: `KAMPFTEXT_AKTIV` steht seit E1b auf `true`.** Umgelegt, nachdem die
+Selbstprüfung den Weg Pi → M715q und den Schlüssel belegt hatte (Abschnitt „Die Selbstprüfung" unten).
+Der Rückwärtsgang zur Laufzeit ist der Notaus `kampftext` (Abschnitt „Etappe E1b" am Ende).
+
 ### Drei Dinge, die auf dem Pi gesetzt sein müssen (Container neu erzeugen)
 
 ```
@@ -162,3 +166,35 @@ damit der Test die **Wiederholung** messen kann – eine Messung, die nach dem S
 meldete „erreichbar" noch lange, nachdem es das nicht mehr ist (Abschnitt A: Modell weg, AI Core
 weg, AI Core zurück). Der Fake im älteren `test_kampftext_http.js` zählt seither nur `/ai/chat` als
 Auftrag; `/health` und `/ai/embed` landen in `ai.sonstige`.
+
+## Etappe E1b, Backend-Hälfte (04.09.2026)
+
+Die Erkundung des Frontends für E1b hat eine Annahme des Konzepts widerlegt: **Die Berichte liegen
+nicht im Spielstand, sondern hier** – in `db.private[userId].__reports` (`addReport`), und der Client
+hält nur einen Cache, den er alle 15 Sekunden neu lädt (`loadReports`). Ein Client, der den fertigen
+Text selbst abholt und irgendwo ablegt, hätte ihn nur auf einem Gerät. Deshalb hängt der Server den
+Text an den Bericht:
+
+1. **`POST /api/reports` nennt jetzt die ID des angelegten Berichts** (`{ ok: true, id }`). Der Client
+   warf die Antwort bisher weg; ein älterer Client tut das weiterhin, ohne Schaden.
+2. **`POST /api/kampfbericht/text` nimmt `reportId` entgegen.** Nur ein **eigener, vorhandener** Bericht
+   wird verknüpft (`kampftextEigenerBericht`); eine fremde oder unbekannte ID wird still ignoriert –
+   der Auftrag läuft trotzdem und bleibt über `GET` abholbar. Kein Fehler, weil eine fehlende
+   Verknüpfung den Text nicht entwertet.
+3. **Wird der Text `fertig`, schreibt `kampftextArbeite` ihn als `kiText` in den Bericht**
+   (`kampftextAnBerichtHaengen`), synchron vor dem `saveDb()`. Ist der Bericht inzwischen gelöscht
+   oder aus dem Archiv gerollt, passiert nichts – er kommt nicht wieder.
+4. **Der Client braucht keinen Poll.** Der nächste Berichte-Abruf bringt den Text mit, auf jedem Gerät
+   des Spielers. Die Route `GET /api/kampfbericht/text/:id` bleibt (Tests, ältere Clients, Diagnose).
+5. **Notaus `kampftext`** in `NOTAUS_NAMEN`/`spawnAktivImCode`: Jeder Text kostet den M715q rund
+   70 Sekunden, und der bedient auch Social Hub. Der Betreiber kann abschalten, ohne einen Deploy;
+   der Endpunkt antwortet dann 503, die Sektion bleibt beim Spieler still weg. Einschalten kann nur
+   ein Merge (dieselbe einseitige Richtung wie bei den Spawns).
+6. **`KAMPFTEXT_AKTIV = true`.** Der Schalter wird hier umgelegt, nicht im Frontend-PR, weil die Repos
+   getrennt sind und der Client mit 503 umgeht (keine Sektion, kein Fehler). Bis der Frontend-PR
+   live ist, ruft den Endpunkt niemand auf.
+
+Wächter: `tests/test_kampftext_http.js` Abschnitte 12 und 13 (jetzt 75 Prüfungen). Abschnitt 1 lief
+bisher gegen die echte `server.js` und setzt seit dem Umlegen wie Abschnitt 2 auf eine **Kopie**, hier
+mit `false` – welche Stellung committet ist, darf das Ergebnis nicht verschieben. Gegenprobe: siehe
+Dateikopf.

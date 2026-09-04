@@ -3250,9 +3250,12 @@ app.get('/api/reports', authMiddleware, (req, res) => {
 app.post('/api/reports', authMiddleware, async (req, res) => {
   const report = req.body && req.body.report;
   if (!report) return res.status(400).json({ error: 'Kein Bericht übergeben.' });
-  addReport(req.userId, report);
+  // Die ID geht seit E1b (04.09.2026) zurueck: Der Client bestellt damit den KI-Kampftext, und
+  // der Server haengt den fertigen Text an genau diesen Bericht (kampftextAnBerichtHaengen).
+  // Vorher warf der Client die Antwort weg; ein aelterer Client tut das weiterhin, ohne Schaden.
+  const id = addReport(req.userId, report);
   await saveDb();
-  res.json({ ok: true });
+  res.json({ ok: true, id });
 });
 
 // ===== Berichts-Archiv (16.08.2026) =====
@@ -3290,8 +3293,10 @@ function addReport(userId, report) {
   db.private[userId] = db.private[userId] || {};
   const list = db.private[userId].__reports || [];
   const vorher = list.length;
-  list.unshift(Object.assign({ id: crypto.randomUUID(), time: Date.now() }, report));
+  const id = crypto.randomUUID();
+  list.unshift(Object.assign({ id, time: Date.now() }, report));
   db.private[userId].__reports = list.slice(0, Math.max(reportLimitFor(userId), vorher));
+  return id;
 }
 
 app.delete('/api/reports/:id', authMiddleware, async (req, res) => {
@@ -15694,7 +15699,12 @@ const NOTAUS_NAMEN = {
   // Im Code immer an (spawnAktivImCode), der Admin kann ihn nur AB-schalten - dieselbe Regel wie
   // bei den fuenf Spawns.
   angriffe: 'Angriffe werden angenommen (PvP, Festung, Nest, Konvoi, Vorposten)',
-  hort: 'Der seltenste Expeditionsfund wird ausgewürfelt und in der Weltlage gemeldet'
+  hort: 'Der seltenste Expeditionsfund wird ausgewürfelt und in der Weltlage gemeldet',
+  // Neunter Schalter (04.09.2026, E1b): Jeder KI-Kampftext kostet den M715q rund 70 Sekunden, und
+  // der bedient auch Social Hub. Faellt AI Core aus oder frisst die Warteschlange die Maschine,
+  // kann der Betreiber hier abschalten, ohne einen Deploy - der Endpunkt antwortet dann 503, der
+  // Client laesst die Sektion still weg (ein fehlender Text ist per Konzept kein Fehler).
+  kampftext: 'KI-Kampfberichte werden beim M715q bestellt'
 };
 const ANGRIFFE_PAUSE_TEXT = 'Angriffe sind gerade pausiert (Wartung) – bitte in ein paar Minuten noch einmal.';
 function notAusGesetzt(name) {
@@ -15741,6 +15751,7 @@ function spawnAktivImCode(name) {
      ein Fehlschlag. Die drei Felder sollen laut eigenem Kommentar unterscheiden, ob etwas
      abgeschaltet oder nie ausgeliefert wurde; fuer 'hort' sagten sie dauerhaft 'nie ausgeliefert'. */
   if (name === 'hort') return HORT_BANNER_AKTIV;
+  if (name === 'kampftext') return KAMPFTEXT_AKTIV;
   return false;
 }
 
@@ -17199,10 +17210,12 @@ app.post('/api/claim-supporter', authMiddleware, authRateLimit, async (req, res)
 //
 // SIEBEN Entscheidungen, die man kennen muss, bevor man hier etwas aendert:
 //
-// 1. KAMPFTEXT_AKTIV steht auf false (Auslieferungsschutz wie FESTUNG_SPAWN_AKTIV). Ohne das
-//    Frontend ruft niemand den Endpunkt auf - aber er wuerde M715q-Zeit verbrauchen, sobald ihn
-//    jemand findet, und der M715q bedient auch Social Hub. Umgelegt wird im Frontend-PR der
-//    Etappe E1b, nicht vorher.
+// 1. KAMPFTEXT_AKTIV stand bis zum 04.09.2026 auf false (Auslieferungsschutz wie
+//    FESTUNG_SPAWN_AKTIV): Ohne das Frontend ruft niemand den Endpunkt auf, aber er wuerde
+//    M715q-Zeit verbrauchen, sobald ihn jemand findet. Umgelegt mit der Etappe E1b, nachdem die
+//    Selbstpruefung (/api/health -> kampftext) den Weg Pi -> M715q und den Schluessel belegt
+//    hatte. Der Laufzeit-Rueckwaertsgang ist der Notaus 'kampftext' (NOTAUS_NAMEN): Der Betreiber
+//    kann abschalten, ohne einen Deploy; einschalten kann nur ein Merge.
 //
 // 2. KEIN neues Paket. Der Aufruf laeuft ueber den Kern (`http`/`https`), nicht ueber fetch oder
 //    axios. Zwei Gruende, beide gemessen: Eine Aenderung an package.json verlangt auf dem Pi ein
@@ -17235,9 +17248,19 @@ app.post('/api/claim-supporter', authMiddleware, authRateLimit, async (req, res)
 //    Ein Auftrag ist Sekunden bis Minuten alt, der Client hoert bei unbekannter Auftrags-ID auf
 //    zu fragen, und die Sektion bleibt dann eben weg. Ein persistenter Auftragsspeicher waere
 //    Aufwand fuer einen Fall, der nichts kostet.
+//
+// 8. E1b (04.09.2026): Der fertige Text haengt am BERICHT, nicht beim Client. Das Konzept ging
+//    davon aus, dass die Berichte im Spielstand liegen - sie liegen aber hier, in
+//    db.private[userId].__reports (addReport), und der Client haelt nur einen Cache, den er alle
+//    15 s neu laedt. Deshalb schickt der Client mit dem Auftrag die `reportId` seines gerade
+//    gespeicherten Berichts mit (POST /api/reports nennt sie seither), und kampftextArbeite
+//    schreibt den Text als `kiText` in genau diesen Bericht. Nur ein EIGENER Bericht zaehlt
+//    (kampftextEigenerBericht) - eine fremde oder unbekannte ID wird still ignoriert, der Auftrag
+//    laeuft trotzdem und bleibt ueber GET abholbar. Ein Client-Poll ist damit unnoetig: Der
+//    naechste Berichte-Abruf bringt den Text mit, auf jedem Geraet des Spielers.
 // ============================================================================================
 
-const KAMPFTEXT_AKTIV = false;
+const KAMPFTEXT_AKTIV = true;
 const KAMPFTEXT_AI_CORE_URL = (process.env.AI_CORE_URL || 'http://192.168.178.45:8000').replace(/\/+$/, '');
 const KAMPFTEXT_AI_CORE_KEY = process.env.AI_CORE_API_KEY || '';
 // Modellwahl aus E0 (28.08.2026): qwen3.5:4b. 2b war unbrauchbar - erfundene Schiffsnamen, ein
@@ -17506,6 +17529,8 @@ async function kampftextArbeite() {
     } else if (eintrag) {
       eintrag.status = 'fertig';
       eintrag.text = text;
+      // Synchron VOR dem saveDb() unten, wie jede db-Mutation in diesem Repo.
+      kampftextAnBerichtHaengen(auftrag.userId, auftrag.berichtId, text);
     }
   } catch (e) {
     console.error('[kampftext] Fehler ' + auftrag.id + ': ' + e.message);
@@ -17514,6 +17539,25 @@ async function kampftextArbeite() {
   kampftextLaeuft = false;
   try { await saveDb(); } catch (e) { console.error('[kampftext] saveDb: ' + e.message); }
   if (kampftextWarteschlange.length) kampftextArbeite();
+}
+
+// E1b (Punkt 8 im Kopf): Nur ein eigener, gerade vorhandener Bericht darf verknuepft werden.
+// Liefert die ID zurueck oder '' - nie einen Fehler, weil eine fehlende Verknuepfung den Auftrag
+// nicht entwertet (der Text bleibt ueber GET abholbar).
+function kampftextEigenerBericht(userId, roh) {
+  const wunsch = String(roh == null ? '' : roh).slice(0, 64);
+  if (!wunsch) return '';
+  const list = (db.private[userId] && db.private[userId].__reports) || [];
+  return list.some(r => r && r.id === wunsch) ? wunsch : '';
+}
+function kampftextAnBerichtHaengen(userId, berichtId, text) {
+  if (!berichtId) return false;
+  const list = (db.private[userId] && db.private[userId].__reports) || [];
+  const bericht = list.find(r => r && r.id === berichtId);
+  // Inzwischen geloescht oder aus dem Archiv gerollt: kein Fehler, der Text bleibt beim Auftrag.
+  if (!bericht) return false;
+  bericht.kiText = text;
+  return true;
 }
 
 function kampftextTagesZaehler(traeger, feld) {
@@ -17525,7 +17569,9 @@ function kampftextTagesZaehler(traeger, feld) {
 }
 
 app.post('/api/kampfbericht/text', authMiddleware, async (req, res) => {
-  if (!KAMPFTEXT_AKTIV) return res.status(503).json({ error: 'KI-Kampfberichte sind derzeit abgeschaltet.' });
+  // Grundstellung UND Notaus, wie bei den Spawns (spawnAktiv): abschalten kann der Betreiber zur
+  // Laufzeit, einschalten nur ein Merge.
+  if (!KAMPFTEXT_AKTIV || notAusGesetzt('kampftext')) return res.status(503).json({ error: 'KI-Kampfberichte sind derzeit abgeschaltet.' });
   const user = findUserById(req.userId);
   if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
 
@@ -17551,8 +17597,9 @@ app.post('/api/kampfbericht/text', authMiddleware, async (req, res) => {
   jeKonto.anzahl++;
   gesamt.anzahl++;
   const id = crypto.randomUUID();
-  db.kampftexte[id] = { status: 'wartet', userId: req.userId, zeit: Date.now(), text: '', grund: '' };
-  kampftextWarteschlange.push({ id, daten });
+  const berichtId = kampftextEigenerBericht(req.userId, req.body && req.body.reportId);
+  db.kampftexte[id] = { status: 'wartet', userId: req.userId, zeit: Date.now(), text: '', grund: '', berichtId };
+  kampftextWarteschlange.push({ id, daten, userId: req.userId, berichtId });
   await saveDb();
   res.status(202).json({ auftragId: id, wartend: kampftextWarteschlange.length });
   kampftextArbeite();

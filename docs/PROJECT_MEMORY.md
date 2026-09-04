@@ -128,3 +128,43 @@ Der Schaden war hier auch nicht auf „ein Vorhaben ohne Wirkung" begrenzt: Weil
 Umlegen des Schalters die schon vergangene Wartezeit als Fortschritt las, lag beim Einschalten
 sofort der volle Deckel an Schiffen bereit. **Ein Zustand, der heute nur nutzlos aussieht, kann
 beim Einschalten rückwirkend wertvoll werden.**
+
+## „Backend zuerst live" deckt nur das Hinzufügen ab (04.09.2026)
+
+Die Regel dieses Projekts lautet: Ändert ein Backend-Merge eine spielersichtbare Zahl, geht das
+Backend zuerst live, dann das Frontend. Sie ist richtig — aber sie beschreibt nur eine Richtung.
+
+Eine Sammelzeit-Liste wurde von `[30, 60, 120]` auf `[15, 30, 45, 60]` umgestellt. Die neuen Werte
+hinzuzufügen ist unproblematisch: Ein altes Frontend schickt sie nicht. Den Wert 120 zu **entfernen**
+ist die Gegenrichtung — das live stehende Frontend bot ihn weiterhin an, und der Server hätte ihn
+mit 400 abgelehnt. Der Fehler wäre im laufenden Spiel aufgetreten, hätte nur eine von drei Optionen
+betroffen und deshalb nach einem Zufallsfehler ausgesehen, nicht nach einer Versionslücke.
+
+**Die akzeptierte Menge eines Servers darf nur wachsen, solange ein älteres Frontend live ist. Nur
+die Anzeige darf vorauseilen.** Wer einen Wert wegnimmt, braucht die Vereinigungsmenge für genau
+eine Auslieferung — und einen Wächter, der beim Aufräumen bewusst rot wird, damit die Übergangsmenge
+als Entscheidung erkennbar bleibt und nicht als Versehen stehen bleibt.
+
+Der eigene Dokumentationstext behauptete zu diesem Punkt ausdrücklich das Gegenteil („kein
+Zwischenzustand, in dem ein Client etwas Unmögliches schickt"). Er war beim Schreiben plausibel und
+falsch: Geprüft worden war, dass 30 und 60 in *beiden* Listen stehen — nicht, was mit dem dritten
+Wert passiert, den nur eine Seite kennt. **Bei einer geänderten Wertemenge zählt der Wert, der
+wegfällt, nicht die, die bleiben.**
+
+## Ein Recht, das jeder sich selbst geben kann, wird durch jede neue Fähigkeit teurer (04.09.2026)
+
+Die Allianz-Mitgliedschaft ist in diesem Projekt bewusst offen: `checkAllianceKeyPermission` lässt
+jedes Konto `alliance:<TAG>:role:<eigene id>` mit `'member'` schreiben, ohne Einladung. Das war
+jahrelang folgenlos, weil daran nichts Wertvolles hing.
+
+Dann bekam die Mitgliedschaft eine neue Fähigkeit — Garnison an einem fremden Vorposten. Damit
+konnte ein Fremder den **gemeinsamen** Deckel mit den billigsten Schiffen füllen, und der Besitzer
+hatte keinen Weg zurück: Der Rückruf löscht nur die eigenen Schiffe, einen Rauswurf gibt es nicht.
+Die Lücke lag nicht in der neuen Fähigkeit und nicht in der alten Regel, sondern in ihrer
+Kombination.
+
+**Wer einem bestehenden Recht eine neue Fähigkeit anhängt, prüft die Erwerbsregel dieses Rechts neu —
+nicht die Fähigkeit.** Und die Frage dazu ist immer dieselbe: *Was kann jemand anrichten, der sich
+dieses Recht in fünf Sekunden selbst gibt, und wie bekommt der Betroffene ihn wieder los?* Fehlt
+die zweite Hälfte der Antwort, ist ein Deckel nötig — einer, der nichts löscht, sondern nur das
+Wachstum begrenzt.

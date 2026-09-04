@@ -125,8 +125,13 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
   /* ANKER aus dem QUELLTEXT. Die Leiter, die Zweig-Multiplikatoren, der Deckel und die drei
      Foerderanteile - nichts davon aus der Antwort, die geprueft werden soll. */
   const leiter = [...roh.matchAll(/\{ stufe: (\d), name: '[^']*',[^}]*lager: (\d+),/g)].map(m => Number(m[2]));
-  const multHandel = Number((roh.match(/key: 'handel',[\s\S]{0,500}?lager: ([\d.]+) \}/) || [])[1]);
-  const multFestung = Number((roh.match(/key: 'festung',[\s\S]{0,500}?lager: ([\d.]+) \}/) || [])[1]);
+  /* Der Anker greift den Wert INNERHALB des mult-Objekts, nicht an dessen Ende (Durchsicht
+     04.09.2026). `lager: ([\d.]+) \}` verlangte, dass `lager` der LETZTE Schluessel ist - eine
+     Momentaufnahme, keine Regel, und Etappe V7 schreibt absehbar einen Kanal dahinter. Die
+     Geschwistertests (test_vorposten_werft_http, test_vorposten_markt_http) wurden im selben
+     Aenderungssatz genau deshalb umgestellt; hier blieb die alte Form stehen. */
+  const multHandel = Number((roh.match(/key: 'handel',[\s\S]{0,600}?mult: \{[^}]*lager: ([\d.]+)/) || [])[1]);
+  const multFestung = Number((roh.match(/key: 'festung',[\s\S]{0,600}?mult: \{[^}]*lager: ([\d.]+)/) || [])[1]);
   const stunden = Number((roh.match(/const VP_LAGER_STUNDEN = (\d+);/) || [])[1]);
   const anteile = JSON.parse((roh.match(/const VP_LAGER_ANTEILE = (\{[^}]*\});/) || [])[1]
     .replace(/([a-z]+):/g, '"$1":'));

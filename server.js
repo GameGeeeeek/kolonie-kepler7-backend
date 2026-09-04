@@ -9076,6 +9076,22 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
    pflegen; kein Test vergleicht sie automatisch (gemessen 04.09.2026).
    Laufende Verbaende mit zwei Stunden sind unberuehrt - die Liste gilt nur beim Ausrufen. */
 const ALLIANCE_MUSTER_DURATIONS = [15 * 60, 30 * 60, 45 * 60, 60 * 60];
+/* UEBERGANGSMENGE (Durchsicht 04.09.2026 - fuenf Perspektiven fanden denselben Fehler).
+   Die Liste darueber ist die ANGEBOTENE; dies hier ist die AKZEPTIERTE, und sie ist eine Obermenge.
+   Der Grund: Das LIVE stehende Frontend fuehrt weiterhin [30, 60, 120] (origin/main:44793) und baut
+   daraus sein Auswahlfeld. Ein Backend-Merge IST die Auslieferung - wer danach im Spiel "2 Std"
+   waehlt, bekaeme 400 "Ungueltige Anfrage", waehrend 30 und 60 Minuten weiter durchgehen. Der
+   Fehler saehe nach einem Zufallsfehler aus, nicht nach einer Versionsluecke.
+   DIE LEHRE, DIE HIER FEHLTE: "Backend zuerst live" deckt nur das HINZUFUEGEN von Werten ab. Das
+   ENTFERNEN eines akzeptierten Werts ist die Gegenrichtung und braucht die Vereinigung fuer genau
+   eine Auslieferung. Nur die ANZEIGE darf vorauseilen; die akzeptierte Menge darf waehrenddessen
+   nur wachsen. docs/asteroidenfestungen.md behauptete ausdruecklich, es gebe keinen
+   Zwischenzustand - das war falsch und ist dort korrigiert.
+   ENTFERNEN, sobald das Frontend mit [15, 30, 45, 60] live ist: dann faellt diese Konstante weg und
+   `gatherOk` liest wieder ALLIANCE_MUSTER_DURATIONS. Der Merker dafuer ist Pruefung 8f in
+   tests/test_muster_festung_http.js - sie wird bei diesem Schritt bewusst rot und wird zusammen
+   mit der Konstante geloescht. */
+const ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT = ALLIANCE_MUSTER_DURATIONS.concat([120 * 60]);
 const ALLIANCE_MUSTER_COOLDOWN_MS = 24 * 3600 * 1000;
 const ALLIANCE_MUSTER_TEST_MODE = process.env.ALLIANCE_RAID_TEST_MODE === '1'; // gleicher Schalter wie beim Raid
 const ALLIANCE_MUSTER_TEST_DISPATCH_SEC = 2;
@@ -9196,7 +9212,7 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
   const istVorposten = zielArt === 'vorposten';
   const istOhneAllianz = musterZielOhneAllianz(zielArt);
   const targetTag = istOhneAllianz ? null : String(targetTagRaw || '').trim().toUpperCase();
-  const gatherOk = ALLIANCE_MUSTER_DURATIONS.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
+  const gatherOk = ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
   if (!tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   if (!istOhneAllianz && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   const myRole = allianceRoleOf(tag, req.userId);
@@ -9529,6 +9545,21 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
   if (!myRoleAttacker && !myRoleDefender) return res.status(403).json({ error: 'Nur Mitglieder der angreifenden oder verteidigenden Allianz.' });
 
   if (!doc || doc.phase !== 'enroute' || !doc.dispatch || doc.dispatch.arrivalAt > Date.now()) return res.json({ ok: true, doc });
+  /* NOTAUS 'angriffe' (Durchsicht 04.09.2026). Er stand an den fuenf EINZELangriffen, nicht am
+     Verband - dabei fuehrt dieser Endpunkt genau dieselben Rechenkerne aus
+     (nestSchlagAusfuehren, festungSchlagAusfuehren, vorpostenSchlagAusfuehren) und dazu den Schlag
+     auf eine fremde Allianzbasis. Die Beschreibung des Schalters zaehlt selbst auf, was er decken
+     soll ("PvP, Festung, Nest, Konvoi, Vorposten"); drei dieser Zielarten kann ein Verband treffen.
+     Fuer eine Ruecksicherung ist der Verband sogar der wichtigere Fall: Er loest sich bei Ankunft
+     SELBSTTAETIG auf, und sein Ergebnis ist ein gefallener Vorposten samt Belohnungen an alle
+     Beteiligten. Dieselbe Bauart wie der behobene VP_ENDPROJEKTE_AKTIV-Befund: gattert war der Weg,
+     den man anklickt, nicht der, der ausfuehrt.
+     DIE STELLE IST BEWUSST HIER, nicht am Routenkopf: Weiter oben bekaeme auch das blosse
+     Nachfragen (Sammelphase, noch nicht angekommen) eine 503, und das Kartenmenue verloere seinen
+     Zustand. Hier wird nur der SCHLAG aufgeschoben - das Dokument bleibt 'enroute' mit vergangenem
+     arrivalAt, der naechste Aufruf nach dem Fenster loest ihn regulaer auf. Es geht nichts
+     verloren, resolve wird ohnehin wiederholt aufgerufen (Angreifer wie Verteidiger). */
+  if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });
 
   if (istNestZiel) {
     const g = loadOrInitGalaxy();
@@ -13125,6 +13156,19 @@ const VP_MARKT_SLOTS_MAX = 3;
    Zeit selbst foerdert. */
 const VP_LAGER_AKTIV = false;
 const VP_LAGER_STUNDEN = 12;
+/* AB WANN UEBERHAUPT GESAMMELT WIRD (Durchsicht 04.09.2026). Ohne diese Untergrenze stuende in der
+   Sekunde, in der VP_LAGER_AKTIV auf true kippt, JEDER bestehende Vorposten sofort am Deckel:
+   `vorpostenLagerStand` faellt mangels `doc.lagerSeit` auf `doc.seit` zurueck - das Baudatum, oft
+   Wochen alt -, und die Stunden werden nur nach OBEN gegen VP_LAGER_STUNDEN geklemmt. Fuer eine
+   Bastion mit Handelsknoten waeren das auf einen Schlag 337.500 Erz, 112.500 Kristalle und
+   90.000 Deuterium je Vorposten, bis zu drei je Konto.
+   Genau diese Fehlerklasse steht seit heute in PROJECT_MEMORY („Ein Zustand, der heute nur nutzlos
+   aussieht, kann beim Einschalten rueckwirkend wertvoll werden") - fuer das Sternendock wurde sie
+   behandelt, fuer das Lager nicht.
+   0 heisst „keine Untergrenze". BEIM UMLEGEN DES SCHALTERS auf den Deploy-Zeitstempel setzen, z. B.
+   Date.parse('2026-09-05T18:00:00Z'). Kein Schreiben beim Lesen, keine Migration, nichts geloescht -
+   die Zeit vor der Aktivierung zaehlt einfach nicht. */
+const VP_LAGER_AB = 0;
 const VP_LAGER_ANTEILE = { erz: 0.225, kristalle: 0.075, deuterium: 0.06 };
 /* ETAPPE V5: DER VERBUENDETE DARF ETWAS (03.09.2026). Bis hierher stand an jeder Vorposten-Route
    `doc.besitzer !== req.userId` -> 403: Ein Allianzpartner konnte nichts. Kein Beisteuern, keine
@@ -13133,6 +13177,19 @@ const VP_LAGER_ANTEILE = { erz: 0.225, kristalle: 0.075, deuterium: 0.06 };
    Etappe a: Verbuendete duerfen GARNISON beisteuern und nur ihre eigenen Schiffe zurueckrufen.
    Etappe b: Verbuendete nutzen den Flugzeit-Bonus mit (`verbuendet` im Client-Dokument). */
 const VP_ALLIANZ_AKTIV = false;
+/* WIEVIEL DER GARNISON EIN VERBUENDETER HOECHSTENS BELEGT (Durchsicht 04.09.2026).
+   Der Befund: `vorpostenVerbuendet` leitet das Recht aus `allianceTagOf` ab, also aus
+   `db.shared['alliance:<TAG>:role:<uid>']` - und genau diesen Schluessel darf JEDES eingeloggte
+   Konto fuer sich selbst schreiben (`checkAllianceKeyPermission` erlaubt `role:<eigene id>` mit
+   'member' und prueft dabei nur Rauswurf-Sperrfrist und Mitgliederlimit; keine Einladung, keine
+   Zustimmung). Das ist eine bewusste Produktentscheidung des Allianz-Systems und wird hier nicht
+   angetastet - aber sie hat eine Folge, die es vor V5 nicht gab: Ein Fremder konnte den GEMEINSAMEN
+   Deckel `garnisonMax` mit den billigsten Schiffen fuellen, und der Besitzer bekam ihn nicht mehr
+   heraus. `rueckruf` loescht ausschliesslich `von[req.userId]`, einen Rauswurf-Endpunkt gibt es
+   nicht; der einzige Ausweg waere, den EIGENEN Vorposten 24 Stunden lang abzubauen.
+   Der Deckel LOESCHT NICHTS (Hausregel) - er begrenzt nur, wie viel Platz Verbuendete zusammen
+   belegen duerfen. Der Besitzer behaelt damit immer Raum fuer die eigene Garnison. */
+const VP_ALLIANZ_GARNISON_ANTEIL = 0.5;
 /* ETAPPE V6: die Endprojekte. Der Schalter deckt alle drei ab - sie kommen zusammen, weil sie
    zusammen die Entscheidung sind, welchen Zweig man auf der Endstufe haelt.
    DAS STERNENDOCK TICKT NICHT (wie das Lager): Was bereitliegt, wird beim Abholen aus der
@@ -13308,7 +13365,10 @@ function vorpostenLagerRate(doc, werte) {
    wenn die Leiter sich aendert. */
 function vorpostenLagerStand(doc, jetzt, werte) {
   const t = jetzt || Date.now();
-  const seit = (doc && doc.lagerSeit) || (doc && doc.seit) || t;
+  /* Der Rueckfall auf `doc.seit` haelt alte Dokumente korrekt am Rechnen (statt seit 1970 zu
+     sammeln); VP_LAGER_AB zieht darunter die Aktivierungs-Untergrenze ein, damit die Zeit VOR dem
+     Umlegen des Schalters nicht rueckwirkend zaehlt - siehe die Begruendung an der Konstante. */
+  const seit = Math.max(VP_LAGER_AB, (doc && doc.lagerSeit) || (doc && doc.seit) || t);
   const stunden = Math.max(0, Math.min(VP_LAGER_STUNDEN, (t - seit) / 3600000));
   const rate = vorpostenLagerRate(doc, werte);
   const aus = {};
@@ -13730,8 +13790,13 @@ function vorpostenFindeMission(save, missionId, typ, sysId) {
   return null;
 }
 // Gibt bei erlaubtem Zugriff null zurueck, sonst den Fehlertext fuer die 403-Antwort (Muster
-// checkAsteroidKeyPermission): Lesen bleibt fuer jedes angemeldete Konto offen, Schreiben geht nur
-// ueber die Endpunkte - sonst setzte jeder Beliebige einen fremden Kern auf null.
+// checkAsteroidKeyPermission, aber STRENGER): Ueber die generische Storage-Route ist weder Lesen
+// noch Schreiben moeglich - beides laeuft ausschliesslich ueber die Vorposten-Endpunkte. Warum
+// auch das Lesen zu ist, steht im Rumpf.
+// (Diese drei Zeilen sagten bis zum 04.09.2026 das Gegenteil - „Lesen bleibt fuer jedes angemeldete
+//  Konto offen" - und standen damit unmittelbar ueber der Regel, die sie widerlegt. Genau die
+//  Lehre, die dieser Aenderungssatz selbst in PROJECT_MEMORY geschrieben hat: Eine Rechtepruefung
+//  altert mit ihrer Begruendung.)
 function checkVorpostenKeyPermission(req, key, isWrite) {
   if (!key.startsWith('vorposten:')) return null;
   /* AUCH LESEN IST ZU (04.09.2026, Befund des Vorposten-Audits). Bis hierher stand hier nur eine
@@ -14225,6 +14290,16 @@ app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
   // V5: Gebucht wird auf das eigene Konto in der Aufschluesselung; `doc.garnison` zieht
   // vorpostenSchreib daraus nach.
   const von = vorpostenGarnisonVon(doc);
+  /* DER FREMDANTEIL IST GEDECKELT (Durchsicht 04.09.2026, Begruendung bei
+     VP_ALLIANZ_GARNISON_ANTEIL). Gerechnet wird gegen die SUMME aller Nicht-Besitzer, nicht je
+     Konto - sonst umgeht man den Deckel mit einem zweiten Konto, das sich die Mitgliedschaft
+     genauso selbst gibt. Der Besitzer selbst ist unbegrenzt; es ist sein Vorposten. */
+  if (doc.besitzer !== req.userId) {
+    const fremd = Object.keys(von).filter(uid => uid !== doc.besitzer)
+      .reduce((a, uid) => a + Object.keys(von[uid] || {})
+        .reduce((b, typ) => b + (Number(von[uid][typ]) || 0), 0), 0);
+    platz = Math.min(platz, Math.max(0, Math.floor(st.garnisonMax * VP_ALLIANZ_GARNISON_ANTEIL) - fremd));
+  }
   if (!von[req.userId]) von[req.userId] = {};
   for (const typ of Object.keys(composition)) {
     if (!vorpostenKampfschiff(typ)) continue;
@@ -14238,7 +14313,16 @@ app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
   }
   vorpostenGarnisonNachziehen(doc);
   if (!Object.keys(angenommen).length) {
-    return res.status(400).json({ error: 'Nichts stationiert - keine Kampfschiffe verfügbar oder die Garnison ist voll (' + st.garnisonMax + ' Schiffe).', garnisonMax: st.garnisonMax, frei: platz });
+    /* Der Grund wird BENANNT - sonst liest der Verbuendete die verdeckte Zusammensetzung aus dem
+       Unterschied zwischen 400 und 200 heraus, und der Besitzer versteht nicht, warum sein eigener
+       Vorposten ihn abweist. */
+    const nurAnteil = doc.besitzer !== req.userId && platz <= 0
+      && vorpostenGarnisonAnzahl(doc) < st.garnisonMax;
+    return res.status(400).json({ error: nurAnteil
+      ? 'Der Anteil der Verbündeten an dieser Garnison ist ausgeschöpft (höchstens '
+        + Math.round(VP_ALLIANZ_GARNISON_ANTEIL * 100) + ' % der ' + st.garnisonMax + ' Plätze).'
+      : 'Nichts stationiert - keine Kampfschiffe verfügbar oder die Garnison ist voll (' + st.garnisonMax + ' Schiffe).',
+      garnisonMax: st.garnisonMax, frei: platz, anteilVoll: nurAnteil });
   }
   vorpostenSchreib(doc);
   await saveDb();
@@ -15599,6 +15683,13 @@ function spawnAktivImCode(name) {
   if (name === 'vorposten') return VORPOSTEN_AKTIV;
   if (name === 'angriffe') return true;
   if (name === 'mindesteinsatz') return PVP_MINDESTEINSATZ_AKTIV;
+  /* 'hort' fehlte (Durchsicht 04.09.2026): Die Uebersicht meldete imCode:false und wirksam:false,
+     obwohl HORT_BANNER_AKTIV true ist und die Meldung tatsaechlich ausgewuerfelt wird - der
+     Endpunkt prueft die Konstante direkt und geht gar nicht ueber spawnAktiv. Das ABSCHALTEN ging
+     (notAusGesetzt wird gelesen), nur die Rueckmeldung log, und ein Wiedereinschalten sah aus wie
+     ein Fehlschlag. Die drei Felder sollen laut eigenem Kommentar unterscheiden, ob etwas
+     abgeschaltet oder nie ausgeliefert wurde; fuer 'hort' sagten sie dauerhaft 'nie ausgeliefert'. */
+  if (name === 'hort') return HORT_BANNER_AKTIV;
   return false;
 }
 

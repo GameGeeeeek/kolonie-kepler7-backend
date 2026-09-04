@@ -25,7 +25,15 @@ const SAB = process.env.KEPLER_VPALLIANZ_SABOTAGE || '';
 /* GEMESSEN am 03.09.2026 - alle vier Listen waren im ersten Entwurf falsch. `spielstand` reisst
    3b mit, und das ist keine Ungenauigkeit, sondern die Folge: Carl darf dann stationieren, seine
    zehn Schiffe stehen in der Garnison, und die Zahl, die 3b prueft, stimmt nicht mehr. */
-const MUSS_FALLEN = { schalter: ['1a'], rueckruf: ['3a', '3b'], spielstand: ['2e', '3b'], nachziehen: ['2b', '2c'] };
+/* ALLE LISTEN GEMESSEN, nicht geschaetzt. Zwei Nachtraege vom 04.09.2026:
+   `anteil` reisst 2h MIT - ohne den Deckel fuellt der Verbuendete die ganze Garnison, und die
+   Besitzerin bekommt danach selbst keinen Platz mehr. Das ist genau der Schaden des Befunds, hier
+   als Kette sichtbar.
+   `nachziehen` reisst 2h ebenfalls mit, weil 2h die Gesamtgarnison aus dem Dokument liest - wird
+   sie nicht aus der Aufschluesselung nachgezogen, stimmt die Summe nicht.
+   Beide Male nannte die erste Fassung nur die offensichtlichen Pruefungen und fiel selbst durch. */
+const MUSS_FALLEN = { schalter: ['1a'], rueckruf: ['3a', '3b'], spielstand: ['2e', '3b'],
+  nachziehen: ['2b', '2c', '2h'], anteil: ['2f', '2g', '2h'] };
 
 let fail = false;
 const ergebnis = {};
@@ -127,7 +135,11 @@ const summe = (o) => Object.values(o || {}).reduce((a, n) => a + (Number(n) || 0
   if (SAB === 'rueckruf') basis = basis
     .replace('const garnison = Object.assign({}, von[req.userId] || {});', 'const garnison = Object.assign({}, doc.garnison || {});')
     .replace('  delete von[req.userId];', '  doc.garnisonVon = {};');
-  if (SAB === 'spielstand') basis = basis.replace('const meiner = allianceTagOf(userId);', 'const meiner = (astLeseSave(userId) || {}).player && astLeseSave(userId).player.allianceTag;');
+  // `anteil` haengt den Fremddeckel aus - dann nimmt ein Verbuendeter die ganze Garnison.
+  if (SAB === 'anteil') basis = basis.replace('  if (doc.besitzer !== req.userId) {\n', '  if (false) {\n');
+  check('0c: die Sabotage `anteil` hat gegriffen (oder wurde nicht verlangt)',
+    SAB !== 'anteil' || /if \(false\) \{/.test(basis));
+  if (SAB === 'spielstand') basis = basis.replace('const meiner = karte ? karte[userId] : allianceTagOf(userId);', 'const meiner = (astLeseSave(userId) || {}).player && astLeseSave(userId).player.allianceTag;');
   /* `nachziehen` muss BEIDE Stellen treffen: vorpostenSchreib zieht die Gesamtzahl als
      Sicherheitsnetz nach, das Stationieren tut es zusaetzlich selbst. Der erste Entwurf entfernte
      nur das Netz - und nichts fiel, weil der gemessene Weg die andere Stelle benutzt. */
@@ -158,6 +170,10 @@ const summe = (o) => Object.values(o || {}).reduce((a, n) => a + (Number(n) || 0
   fs.writeFileSync(QUELLE, an);
   const db = grunddb({ [ANNA]: 'admin', [BEN]: 'member' });
   db.shared['vorposten:kep'] = JSON.stringify(vpDoc('kep', { garnison: { jaeger: 40 } }));
+  // Ein KLEINER Vorposten allein fuer die Anteils-Messung (2f/2g): Bei Stufe 6 liegt garnisonMax
+  // bei 10.150, Bens ganze Flotte hat 1.820 Schiffe - der Anteil waere dort nie die Grenze gewesen,
+  // und die Messung haette gruen gemeldet, ohne etwas zu belegen (erster Entwurf, gemessen).
+  db.shared['vorposten:mini'] = JSON.stringify(vpDoc('mini', { stufe: 1 }));
   fs.writeFileSync(dbPfad, JSON.stringify(db, null, 1));
   s = await starteServer();
   const tokA = await s.anmelden('anna'); tokB = await s.anmelden('ben');
@@ -186,6 +202,45 @@ const summe = (o) => Object.values(o || {}).reduce((a, n) => a + (Number(n) || 0
   const fremd = await s.sende('/vorposten/stationieren', tokC, { system: 'kep', planetKey: 'home', composition: { cruisers: 10 } });
   check('2e: Carl traegt den Tag in seinem SPIELSTAND, hat aber keine Rolle im geteilten Speicher - abgewiesen',
     fremd.status === 403, { status: fremd.status, fehler: fremd.body && fremd.body.error });
+
+  /* 2f: DER FREMDANTEIL IST GEDECKELT (Durchsicht 04.09.2026). Der Befund dahinter ist keine
+     Rechteluecke im engeren Sinn, sondern ihre Folge: Die Allianz-Mitgliedschaft, aus der
+     `vorpostenVerbuendet` das Recht ableitet, darf sich JEDES Konto selbst geben
+     (checkAllianceKeyPermission erlaubt `role:<eigene id>` mit 'member', ohne Einladung). Vor V5
+     war das folgenlos; mit V5 konnte ein Fremder den GEMEINSAMEN Deckel garnisonMax mit den
+     billigsten Schiffen fuellen - und der Besitzer bekam ihn nicht mehr heraus, weil `rueckruf`
+     nur die EIGENEN Schiffe loescht und es keinen Rauswurf gibt. Der einzige Ausweg waere gewesen,
+     den eigenen Vorposten 24 Stunden lang abzubauen.
+     Gemessen wird die Regel, nicht die Zahl: Ben fordert MEHR an, als der Anteil zulaesst, und
+     bekommt genau den Anteil - nicht mehr, aber auch nicht null. */
+  const anteil = Number((roh.match(/const VP_ALLIANZ_GARNISON_ANTEIL = ([\d.]+);/) || [])[1]);
+  const mini = ((await s.hole('/vorposten', tokA)).body.liste || []).find(v => v.sys === 'mini');
+  const garnMax = mini && mini.garnisonMax;
+  const flotteBen = Object.values(FLOTTE).reduce((a, n) => a + n, 0);
+  check('2f-anker: Anteil, Garnisonsdeckel und Bens Flotte reichen fuer die Messung',
+    anteil > 0 && anteil < 1 && garnMax > 0 && flotteBen > Math.floor(garnMax * anteil),
+    { anteil, garnMax, erlaubt: Math.floor(garnMax * anteil), flotteBen });
+  const gierig = await s.sende('/vorposten/stationieren', tokB, { system: 'mini', planetKey: 'home',
+    composition: { jaeger: 900 } });
+  const nachGierig = liesDoc('mini');
+  const fremdSumme = Object.keys(nachGierig.garnisonVon || {}).filter(u => u !== ANNA)
+    .reduce((a, u) => a + summe(nachGierig.garnisonVon[u]), 0);
+  check('2f: ein Verbuendeter belegt hoechstens seinen Anteil - der Besitzer behaelt Platz',
+    gierig.status === 200 && fremdSumme === Math.floor(garnMax * anteil)
+    && summe(nachGierig.garnison) < garnMax,
+    { status: gierig.status, fremdSumme, erlaubt: Math.floor(garnMax * anteil),
+      garnisonGesamt: summe(nachGierig.garnison), garnMax });
+  const nochmal = await s.sende('/vorposten/stationieren', tokB, { system: 'mini', planetKey: 'home',
+    composition: { jaeger: 100 } });
+  check('2g: ist der Anteil ausgeschoepft, nennt die Ablehnung den Grund - nicht die volle Garnison',
+    nochmal.status === 400 && nochmal.body && nochmal.body.anteilVoll === true
+    && /Verb/.test((nochmal.body && nochmal.body.error) || ''),
+    { status: nochmal.status, fehler: nochmal.body && nochmal.body.error, anteilVoll: nochmal.body && nochmal.body.anteilVoll });
+  check('2h: die BESITZERIN faellt nicht unter den Deckel - es ist ihr Vorposten',
+    (await s.sende('/vorposten/stationieren', tokA, { system: 'mini', planetKey: 'home',
+      composition: { jaeger: 900 } })).status === 200
+    && summe(liesDoc('mini').garnison) > Math.floor(garnMax * anteil),
+    { garnisonGesamt: summe(liesDoc('mini').garnison), erlaubt: Math.floor(garnMax * anteil) });
 
   // ---- 3) Zurueckrufen: jeder nur seins ---------------------------------------------------------
   const holtB = await s.sende('/vorposten/rueckruf', tokB, { system: 'kep' });

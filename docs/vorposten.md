@@ -16,7 +16,8 @@ entsteht. Wer das ändern will, ändert eine Sascha-Entscheidung.
 
 **Ein Vorposten je System, `db.shared['vorposten:<sysId>']`.** Die generische Storage-Route schreibt
 ihn nie (`checkVorpostenKeyPermission`, in BEIDEN Rechte-Ketten der Storage-Route eingetragen – dieselbe
-Sperre wie `asteroids:*`); Lesen bleibt offen, und `GET /api/vorposten` liefert die Liste aller
+Sperre wie `asteroids:*`); seit dem Audit ist ueber die Storage-Route auch das **Lesen** zu
+(Befund 1 unter den sieben weiter unten), und `GET /api/vorposten` liefert die Liste aller
 Vorposten mit allem, was das Frontend zum Zeichnen braucht. Das ist die Grenze, die dieses Projekt
 verteidigt: Ohne die Sperre setzte jeder Beliebige einen fremden Kern mit einer Anfrage auf null.
 
@@ -732,3 +733,93 @@ bestehende Eigenschaft des Allianz-Systems, nicht von V5, und ihre Änderung wä
 Produktentscheidung. V5 ist deshalb so gebaut, dass sie nichts hergibt: Beisteuern schadet niemandem,
 zurückgerufen wird nur der eigene Beitrag, und die Zusammensetzung sieht seit Befund 2 nur der
 Besitzer.
+
+## Vier weitere Befunde der adversarischen Durchsicht (04.09.2026)
+
+Acht Perspektiven über den ganzen Änderungssatz, 67 Befunde, 33 nach dreifacher Gegenprüfung
+bestätigt. Diese vier betrafen das Backend.
+
+**1. Die Sammelzeit-Liste durfte nicht schrumpfen.** Fünf der acht Perspektiven fanden unabhängig
+denselben Fehler: Der Merge verengt `ALLIANCE_MUSTER_DURATIONS` von `[30, 60, 120]` auf
+`[15, 30, 45, 60]` — und das **live stehende** Frontend führt weiterhin `[30, 60, 120]` und baut
+daraus sein Auswahlfeld. Ein Backend-Merge *ist* die Auslieferung: Wer danach im Spiel „2 Std"
+gewählt hätte, bekäme 400 „Ungültige Anfrage", während 30 und 60 Minuten weiter durchgehen. Der
+Fehler hätte nach einem Zufallsfehler ausgesehen, nicht nach einer Versionslücke. Der Abschnitt in
+`docs/asteroidenfestungen.md` behauptete ausdrücklich, es gebe keinen Zwischenzustand.
+
+> **Die Lehre, die hier fehlte:** „Backend zuerst live" deckt nur das **Hinzufügen** von Werten ab.
+> Das **Entfernen** eines akzeptierten Werts ist die Gegenrichtung und braucht die Vereinigungsmenge
+> für genau eine Auslieferung. Nur die *Anzeige* darf vorauseilen; die *akzeptierte* Menge darf
+> währenddessen nur wachsen.
+
+`ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT` ist diese Vereinigung und trägt ihr Ablaufdatum im
+Kommentar. Der Merker dafür ist Prüfung **8f** in `tests/test_muster_festung_http.js`: Sie wird
+bewusst rot, sobald jemand die Konstante entfernt, und wird dann mitgelöscht. Prüfung 8d testete
+vorher genau die zwei Stunden — sie wäre still grün geblieben und nimmt jetzt 90 Minuten, einen
+Wert außerhalb **beider** Listen.
+
+**2. Der Notaus `angriffe` gatterte den Verband nicht.** `spawnAktiv('angriffe')` stand an den fünf
+Einzelangriffen; `POST /api/musterattack/resolve` führt aber genau dieselben Rechenkerne aus
+(`nestSchlagAusfuehren`, `festungSchlagAusfuehren`, `vorpostenSchlagAusfuehren`) und dazu den Schlag
+auf eine fremde Allianzbasis. Die Beschreibung des Schalters zählt selbst auf, was er decken soll
+(„PvP, Festung, Nest, Konvoi, Vorposten") — drei dieser Zielarten kann ein Verband treffen. Für eine
+Rücksicherung ist der Verband sogar der wichtigere Fall: Er löst sich bei Ankunft **selbsttätig**
+auf und zahlt an alle Beteiligten aus. Dieselbe Bauart wie der behobene
+`VP_ENDPROJEKTE_AKTIV`-Befund: gattert war der Weg, den man anklickt, nicht der, der ausführt.
+
+Die Prüfung steht bewusst **nach** dem Ankunfts-Rückfall, nicht am Routenkopf: Weiter oben bekäme
+auch das bloße Nachfragen eine 503, und das Kartenmenü verlöre seinen Zustand. So wird nur der
+*Schlag* aufgeschoben — Wächter 9a–9d messen genau das: 503, Kern unberührt, Verband weiter
+`enroute`, und nach dem Fenster löst derselbe Verband regulär auf.
+
+**3. Ein Verbündeter konnte die ganze Garnison belegen — und war nicht mehr zu entfernen.** Das
+Recht kommt aus `allianceTagOf`, also aus `db.shared['alliance:<TAG>:role:<uid>']`. Genau diesen
+Schlüssel darf **jedes** eingeloggte Konto für sich selbst schreiben: `checkAllianceKeyPermission`
+erlaubt `role:<eigene id>` mit `'member'` und prüft dabei nur Rauswurf-Sperrfrist und
+Mitgliederlimit — keine Einladung, keine Zustimmung. Das ist eine bewusste Produktentscheidung des
+Allianz-Systems, aber sie hatte vor V5 keine Folgen. Mit V5 füllt ein Fremder den **gemeinsamen**
+Deckel `garnisonMax` mit den billigsten Schiffen, und der Besitzer bekommt sie nicht mehr heraus:
+`rueckruf` löscht ausschließlich `von[req.userId]`, einen Rauswurf gibt es nicht. Der einzige Ausweg
+wäre gewesen, den eigenen Vorposten 24 Stunden lang abzubauen.
+
+`VP_ALLIANZ_GARNISON_ANTEIL = 0.5` deckelt den Anteil **aller** Nicht-Besitzer zusammen (nicht je
+Konto — sonst umgeht man ihn mit einem zweiten Konto, das sich die Mitgliedschaft genauso selbst
+gibt). Der Deckel **löscht nichts**, er begrenzt nur das Wachstum. Die Ablehnung nennt den Grund,
+sonst läse der Verbündete die verdeckte Zusammensetzung aus dem Unterschied zwischen 400 und 200
+heraus. Wächter 2f–2h, gemessen an einem Vorposten der Stufe 1 (150 von 300 Plätzen): Der erste
+Entwurf maß an Stufe 6 mit 10.150 Plätzen — Bens ganze Flotte hat 1.820 Schiffe, der Anteil war dort
+nie die Grenze, und die Messung meldete grün, ohne etwas zu belegen.
+
+**4. Beim Umlegen von `VP_LAGER_AKTIV` stünde jeder Vorposten sofort am Deckel.**
+`vorpostenLagerStand` fällt mangels `doc.lagerSeit` auf `doc.seit` zurück — das Baudatum, oft Wochen
+alt —, und die Stunden werden nur nach *oben* geklemmt. In der Sekunde des Einschaltens läge für eine
+Bastion mit Handelsknoten sofort der volle Deckel bereit: 337.500 Erz, 112.500 Kristalle, 90.000
+Deuterium je Vorposten, bis zu drei je Konto. Genau die Fehlerklasse, die dieser Änderungssatz
+selbst in `PROJECT_MEMORY.md` notiert hat („Ein Zustand, der heute nur nutzlos aussieht, kann beim
+Einschalten rückwirkend wertvoll werden") — für das Sternendock wurde sie behandelt, für das Lager
+nicht. `VP_LAGER_AB` zieht eine Untergrenze ein: kein Schreiben beim Lesen, keine Migration, nichts
+gelöscht — die Zeit vor der Aktivierung zählt einfach nicht. **Beim Umlegen des Schalters auf den
+Deploy-Zeitstempel setzen.**
+
+### Zwei stumpfe Gegenproben, gefunden und geschärft
+
+- **Die Sabotage `spielstand` griff ins Leere.** Sie ersetzte `const meiner = allianceTagOf(userId);`
+  — eine Zeile, die derselbe Änderungssatz drei Commits vorher zu
+  `const meiner = karte ? karte[userId] : allianceTagOf(userId);` gemacht hatte. `String.replace`
+  meldet keinen Fehler; es lief ein **unsabotierter** Server, und die einzige Gegenprobe für die
+  Kernaussage dieser Etappe („die Rechteprüfung liest den geteilten Speicher, nicht den
+  klientenautoritativen Spielstand") belegte nichts mehr. Nach der Angleichung fällt sie wieder
+  genau auf 2e und 3b.
+- **Die Anker `multHandel`/`multFestung` hingen daran, dass `lager` der letzte Schlüssel im
+  `mult`-Objekt ist.** Genau diese Fragilität wurde im selben Änderungssatz in den beiden
+  Geschwistertests mit ausdrücklicher Begründung beseitigt („Ein Anker, der die Reihenfolge
+  festhält, ist eine Momentaufnahme, keine Regel") — im Lager-Test blieb die alte Form stehen, und
+  Etappe V7 schreibt absehbar einen Kanal dahinter.
+
+### Und zwei eigene Fehler beim Nachbauen der Wächter
+
+Beide Male eine **geratene** statt gemessene Pflichtliste: `anteil` reißt `2h` mit (ohne Deckel
+füllt der Verbündete alles, die Besitzerin bekommt danach keinen Platz), `nachziehen` ebenfalls
+(2h liest die Gesamtgarnison aus dem Dokument). Beides ist Folge, nicht Nebenschaden — und beide
+Listen fielen selbst durch, bevor sie stimmten. Zum wiederholten Mal in dieser Sitzung: **Eine
+Pflichtliste ist selbst eine Behauptung, bis die Gegenprobe sie gemessen hat.**

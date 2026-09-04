@@ -823,3 +823,28 @@ füllt der Verbündete alles, die Besitzerin bekommt danach keinen Platz), `nach
 (2h liest die Gesamtgarnison aus dem Dokument). Beides ist Folge, nicht Nebenschaden — und beide
 Listen fielen selbst durch, bevor sie stimmten. Zum wiederholten Mal in dieser Sitzung: **Eine
 Pflichtliste ist selbst eine Behauptung, bis die Gegenprobe sie gemessen hat.**
+
+## Rohstoffschlüssel sind eine Kopie-Familie mit dem Spielstand (04.09.2026)
+
+Die Kosten der Stufe 8 und aller vier Projekte nannten `singularitaetskerne` (Mehrzahl); der
+Schlüssel im Spielstand des Frontends heißt `singularitaetskern` (Einzahl) — nur das *Label* lautet
+„Singularitätskerne", daher der Irrtum.
+
+**Der Server liest `kosten` nirgends selbst.** Sie reisen rein als Anzeige zum Client, und genau
+deshalb gab es hier keinen Fehler zu sehen: Dort liefert `costAmountAvailable()` für einen
+unbekannten Schlüssel `0`, `canAfford()` also dauerhaft `false`. Folge im laufenden Spiel:
+„Ausbauen zur Stufe 8" war für jeden Spieler gesperrt, mit ihr alle drei Endprojekte (`stufeAb: 8`);
+das Sprungtor wurde seit Etappe 4 angeboten, beschrieben und ließ sich nie starten. Die Kostenzeile
+druckte obendrein den Rohschlüssel: „120 singularitaetskern".
+
+**Die Regel daraus:** Jeder Rohstoffschlüssel in `VORPOSTEN_STUFEN[].kosten` und
+`VP_PROJEKT_DEFS[].kosten` gehört zu einer Kopie-Familie mit den Rohstoff-Definitionen des
+Frontends (`RES_DEFS`, `TIER2_DEFS` und den drei Sonderzweigen von `resDefFor()`). Ein falscher
+Schlüssel sperrt still — kein Fehler, kein Log, beide Seiten grün, und es bleibt so, bis es jemand
+im Spiel ausprobiert. Ein `node --check` findet das nicht, und ein HTTP-Test hier auch nicht: Er
+bekäme die falsche Tabelle sauber ausgeliefert.
+
+**Der Wächter liegt deshalb im Frontend-Repo** (`tests/test_vorposten_paritaet.js`, Abschnitt 8) —
+dort, wo beide Seiten lesbar sind. Er liest den gültigen Vorrat aus dem Frontend-Code, statt ihn
+zu tippen: eine neue Tier-2-Ressource erweitert ihn von selbst, ein Tippfehler nicht. Wer hier eine
+Kostentabelle anfasst, lässt ihn laufen.

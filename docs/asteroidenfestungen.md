@@ -312,3 +312,30 @@ im Quelltext – die alten zwei Stunden werden mit 400 abgelehnt, 45 Minuten geh
 Server sie annimmt, sonst antwortet `create` mit „Ungültige Anfrage". Kein Schalter nötig – die
 alten Werte 30 und 60 bleiben in beiden Listen gültig, es gibt also keinen Zwischenzustand, in dem
 ein Client etwas Unmögliches schickt.
+
+
+## Die Übergangsmenge ist wieder weg (04.09.2026, derselbe Tag)
+
+`ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT` hat genau eine Auslieferung lang gelebt. Sie ließ die alten
+zwei Stunden weiter durch, solange ein Client sie noch anbot — der Fehler, den fünf Perspektiven der
+Durchsicht unabhängig gefunden hatten.
+
+**Entfernt, weil es gemessen keinen solchen Client mehr gibt**, nicht weil es plausibel schien: Das
+Spiel prüft alle fünf Minuten auf eine neue Version (`checkForNewVersionOnServer`, `setInterval`
+5 × 60 × 1000) und lädt dann **von selbst** neu, ohne Rückfrage (`saveThenReload` nach 2,5 s). Ein
+Client, der 120 Minuten anbietet, existiert damit höchstens für Minuten nach einem Deploy; Frontend
+v8.673.0 war über eine Viertelstunde live.
+
+Mit der Konstante fällt Prüfung **8f**, ihr Merker. Genau dafür war sie da: Sie hätte rot gemeldet,
+wenn jemand die Übergangsmenge entfernt, ohne es zu bemerken — und sie wird jetzt bewusst zusammen
+mit ihr gelöscht. Ein Merker, der seinen Zweck erfüllt hat, gehört weg; einer, der stehen bleibt,
+wird beim nächsten Mal für eine echte Prüfung gehalten.
+
+**Was bleibt, ist die Lehre** (`docs/PROJECT_MEMORY.md`): Die akzeptierte Menge eines Servers darf
+nur wachsen, solange ein älteres Frontend live ist. Wer hier künftig einen Wert *wegnimmt*, braucht
+wieder die Vereinigung für eine Auslieferung — und wieder einen Merker.
+
+**Und was ebenfalls bleibt, ist Prüfung 8d.** Sie testet 90 Minuten — einen Wert, der in *keiner*
+der Listen stand, weder vorher noch nachher. Deshalb hat sie diese ganze Hin- und Herbewegung
+unverändert überlebt: Ein Grenzfall, der an keiner Auslieferung hängt, misst die Regel und nicht den
+Stand.

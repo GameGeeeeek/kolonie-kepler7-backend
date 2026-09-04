@@ -9102,22 +9102,16 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
    pflegen; kein Test vergleicht sie automatisch (gemessen 04.09.2026).
    Laufende Verbaende mit zwei Stunden sind unberuehrt - die Liste gilt nur beim Ausrufen. */
 const ALLIANCE_MUSTER_DURATIONS = [15 * 60, 30 * 60, 45 * 60, 60 * 60];
-/* UEBERGANGSMENGE (Durchsicht 04.09.2026 - fuenf Perspektiven fanden denselben Fehler).
-   Die Liste darueber ist die ANGEBOTENE; dies hier ist die AKZEPTIERTE, und sie ist eine Obermenge.
-   Der Grund: Das LIVE stehende Frontend fuehrt weiterhin [30, 60, 120] (origin/main:44793) und baut
-   daraus sein Auswahlfeld. Ein Backend-Merge IST die Auslieferung - wer danach im Spiel "2 Std"
-   waehlt, bekaeme 400 "Ungueltige Anfrage", waehrend 30 und 60 Minuten weiter durchgehen. Der
-   Fehler saehe nach einem Zufallsfehler aus, nicht nach einer Versionsluecke.
-   DIE LEHRE, DIE HIER FEHLTE: "Backend zuerst live" deckt nur das HINZUFUEGEN von Werten ab. Das
-   ENTFERNEN eines akzeptierten Werts ist die Gegenrichtung und braucht die Vereinigung fuer genau
-   eine Auslieferung. Nur die ANZEIGE darf vorauseilen; die akzeptierte Menge darf waehrenddessen
-   nur wachsen. docs/asteroidenfestungen.md behauptete ausdruecklich, es gebe keinen
-   Zwischenzustand - das war falsch und ist dort korrigiert.
-   ENTFERNEN, sobald das Frontend mit [15, 30, 45, 60] live ist: dann faellt diese Konstante weg und
-   `gatherOk` liest wieder ALLIANCE_MUSTER_DURATIONS. Der Merker dafuer ist Pruefung 8f in
-   tests/test_muster_festung_http.js - sie wird bei diesem Schritt bewusst rot und wird zusammen
-   mit der Konstante geloescht. */
-const ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT = ALLIANCE_MUSTER_DURATIONS.concat([120 * 60]);
+/* Die Uebergangsmenge ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT stand hier vom 04.09.2026 bis zur
+   Auslieferung von Frontend v8.673.0 und liess die alten zwei Stunden weiter durch, solange ein
+   Client sie noch anbot. Sie ist entfernt, weil das gemessen nicht mehr vorkommt: Das Spiel prueft
+   alle 5 Minuten auf eine neue Version und laedt dann von selbst neu (checkForNewVersionOnServer,
+   setInterval 5*60*1000, danach saveThenReload nach 2,5 s) - ein Client, der 120 Minuten anbietet,
+   existiert also hoechstens fuer Minuten nach einem Deploy.
+   DIE LEHRE BLEIBT und steht in PROJECT_MEMORY: Die akzeptierte Menge eines Servers darf nur
+   wachsen, solange ein aelteres Frontend live ist. Wer hier kuenftig einen Wert WEGNIMMT, braucht
+   wieder die Vereinigung fuer eine Auslieferung - und einen Waechter, der beim Aufraeumen bewusst
+   rot wird. */
 const ALLIANCE_MUSTER_COOLDOWN_MS = 24 * 3600 * 1000;
 const ALLIANCE_MUSTER_TEST_MODE = process.env.ALLIANCE_RAID_TEST_MODE === '1'; // gleicher Schalter wie beim Raid
 const ALLIANCE_MUSTER_TEST_DISPATCH_SEC = 2;
@@ -9238,7 +9232,7 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
   const istVorposten = zielArt === 'vorposten';
   const istOhneAllianz = musterZielOhneAllianz(zielArt);
   const targetTag = istOhneAllianz ? null : String(targetTagRaw || '').trim().toUpperCase();
-  const gatherOk = ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
+  const gatherOk = ALLIANCE_MUSTER_DURATIONS.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
   if (!tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   if (!istOhneAllianz && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   const myRole = allianceRoleOf(tag, req.userId);
@@ -13161,9 +13155,16 @@ const VORPOSTEN_ABBAU_MS = 24 * 3600 * 1000;
    unpruefbar gewesen, weil ihn heute kein einzelner Vorposten erreicht. Der Wert reist als
    `werftDeckel` zum Client, damit dort keine zweite Zahl gepflegt werden muss.
 
-   Der Schalter steht auf false, bis das Frontend den Kanal liest - er wird im Zuge der
-   Frontend-Auslieferung umgelegt. Ein gemeldeter Nutzen, der nirgends wirkt, waere eine Luege. */
-const VP_WERFT_AKTIV = false;
+   UMGELEGT AM 04.09.2026 (Etappe V2, Frontend-Haelfte). Das Frontend liest den Kanal jetzt:
+   vorpostenWerftBonus() summiert nutzen.werft ueber alle eigenen Vorposten, deckelt mit dem hier
+   gemeldeten werftDeckel und multipliziert das Ergebnis im Schiffszweig von
+   effectiveBuildTimeEach() auf die Bauzeit. Angezeigt wird es an drei Stellen: in der Nutzen-Zeile
+   der Station, in der Zweigwahl (dort fehlte ausgerechnet der Kanal, nach dem der Zweig HEISST)
+   und als eigene Zeile im Werft-Tab, damit die kuerzere Bauzeit eine sichtbare Ursache hat.
+   Reihenfolge wie immer: diese Seite zuerst live, dann das Frontend. Der Zwischenzustand ist
+   harmlos - ein gemeldeter Nutzen, den ein aelteres Frontend schlicht nicht liest und auch
+   nirgends anzeigt. Umgekehrt waere es eine Luege gewesen. */
+const VP_WERFT_AKTIV = true;
 const VP_WERFT_DECKEL = 0.40;
 /* ETAPPE V3: DIE MARKTGEBUEHR (03.09.2026). Der zweite von zwei Kanaelen, die der Quelltext seit
    dem 02.09.2026 schuldet. Der Handelsknoten war bis hierher Produktion mal 1,8 und die duennste
@@ -13264,6 +13265,17 @@ const VORPOSTEN_VERLUST = 0.06;                    // Grundverlust des Angreifer
    den zweiten. Wer den Namen liest, weiss, wie sie aussieht.
    Die Namen der drei Zweige (VORPOSTEN_ZWEIGE.namen) bleiben unveraendert und ueberschreiben
    diese hier ab der Wahlstufe - sie sind die Spezialisierung, das hier ist der Grundausbau. */
+/* ROHSTOFFSCHLUESSEL SIND EINE KOPIE-FAMILIE MIT DEM FRONTEND (Messung 04.09.2026). Hier stand
+   fuenfmal `singularitaetskerne` (Plural) - im Frontend heisst der Schluessel
+   `singularitaetskern` (Einzahl; das LABEL lautet "Singularitätskerne", daher der Irrtum).
+   Der Server liest `kosten` nirgends selbst, sie reisen rein als Anzeige zum Client - und dort
+   ergab costAmountAvailable() fuer den unbekannten Schluessel immer 0, canAfford() also immer
+   false. Folge im laufenden Spiel: "Ausbauen zur Stufe 8" war dauerhaft gesperrt, und mit ihm
+   ALLE drei Endprojekte (stufeAb 8). Das Sprungtor - 6 Mio. Erz, 24 Stunden Bauzeit - wurde seit
+   Etappe 4 angeboten, beschrieben und liess sich nie starten. Zusaetzlich druckte resDefFor()
+   den Rohschluessel: "120 singularitaetskern" statt "120 Singularitätskerne".
+   Waechter: tests/test_vorposten_paritaet.js im Frontend prueft jetzt JEDEN Rohstoffschluessel
+   dieser Tabellen gegen die Rohstoff-Definitionen des Spiels. */
 const VORPOSTEN_STUFEN = [
   /* DIE LEITER (Auftrag Sascha 02.09.2026: "sehr, sehr viele Ausbaustufen fuer verschiedene
      Spezialisierungen", Entscheidung "8 Stufen + 3 Spezialisierungen ab Stufe 4").
@@ -13297,7 +13309,7 @@ const VORPOSTEN_STUFEN = [
   { stufe: 5, name: 'Weitring', kernLp: 1400000, verteidigung: 190000, garnisonMax: 4800,  flug: 0.21, prod: 0.08,  scan: 4, werft: 0.09, markt: 0.09, lager: 11500, kampfpunkte: 480,  xp: 5000,  credits: 24000, kosten: { erz: 2000000, kristalle: 1400000, deuterium: 900000,  nanolegierungen: 900,  quantenchips: 300 } },
   { stufe: 6, name: 'Habitatkranz', kernLp: 2400000, verteidigung: 320000, garnisonMax: 7000,  flug: 0.24, prod: 0.095, scan: 4, werft: 0.11, markt: 0.11, lager: 15500, kampfpunkte: 700,  xp: 7500,  credits: 38000, kosten: { erz: 3400000, kristalle: 2400000, deuterium: 1500000, nanolegierungen: 1800, quantenchips: 800 } },
   { stufe: 7, name: 'Doppelring', kernLp: 4000000, verteidigung: 520000, garnisonMax: 10000, flug: 0.27, prod: 0.11,  scan: 5, werft: 0.135, markt: 0.135, lager: 20000, kampfpunkte: 1000, xp: 11000, credits: 60000, kosten: { erz: 5500000, kristalle: 4000000, deuterium: 2600000, nanolegierungen: 3200, quantenchips: 1600, metamaterial: 400 } },
-  { stufe: 8, name: 'Orbitalfeste', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, werft: 0.16, markt: 0.16, lager: 25000, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskerne: 120 } }
+  { stufe: 8, name: 'Orbitalfeste', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, werft: 0.16, markt: 0.16, lager: 25000, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskern: 120 } }
 ];
 /* DIE DREI SPEZIALISIERUNGEN. Ab Stufe VORPOSTEN_ZWEIG_AB waehlt der Besitzer EINMAL eine
    Ausrichtung; sie steht danach im Dokument (`doc.zweig`) und ist unveraenderlich - eine
@@ -13701,19 +13713,19 @@ const VP_PROJEKT_DEFS = [
   { key: 'sternendock', name: 'Sternendock', icon: 'ti-rocket', zweig: 'werft', stufeAb: 8,
     dauerMs: 36 * 3600 * 1000, wirkung: { werftSchiff: 1 },
     desc: 'Eine eigene Helling im Orbit: Die Werft baut ohne Auftrag weiter und legt regelmäßig einen Kreuzer zum Abholen bereit.',
-    kosten: { erz: 7000000, kristalle: 5000000, deuterium: 3200000, nanolegierungen: 4000, quantenchips: 2000, metamaterial: 600, singularitaetskerne: 60 } },
+    kosten: { erz: 7000000, kristalle: 5000000, deuterium: 3200000, nanolegierungen: 4000, quantenchips: 2000, metamaterial: 600, singularitaetskern: 60 } },
   { key: 'sternenmarkt', name: 'Sternenmarkt', icon: 'ti-building-bank', zweig: 'handel', stufeAb: 8,
     dauerMs: 36 * 3600 * 1000, wirkung: { marktPlaetze: 2 },
     desc: 'Ein offener Handelsplatz am Ring: zwei zusätzliche Angebotsplätze an der Modulbörse, über die übliche Grenze hinaus.',
-    kosten: { erz: 7000000, kristalle: 5000000, deuterium: 3200000, nanolegierungen: 4000, quantenchips: 2000, metamaterial: 600, singularitaetskerne: 60 } },
+    kosten: { erz: 7000000, kristalle: 5000000, deuterium: 3200000, nanolegierungen: 4000, quantenchips: 2000, metamaterial: 600, singularitaetskern: 60 } },
   { key: 'sperrfeuer', name: 'Sperrfeuerleitstand', icon: 'ti-target', zweig: 'festung', stufeAb: 8,
     dauerMs: 36 * 3600 * 1000, wirkung: { verlust: 0.08 },
     desc: 'Vorgehaltenes Sperrfeuer über dem gesamten Anflugkorridor: Jeder Angriff auf diese Station kostet den Angreifer deutlich mehr Schiffe.',
-    kosten: { erz: 7000000, kristalle: 5000000, deuterium: 3200000, nanolegierungen: 4000, quantenchips: 2000, metamaterial: 600, singularitaetskerne: 60 } },
+    kosten: { erz: 7000000, kristalle: 5000000, deuterium: 3200000, nanolegierungen: 4000, quantenchips: 2000, metamaterial: 600, singularitaetskern: 60 } },
   { key: 'sprungtor', name: 'Sprungtor', icon: 'ti-atom-2', zweig: null, stufeAb: 7,
     dauerMs: 24 * 3600 * 1000, wirkung: { flug: 0.20, flugDeckel: 0.75 },
     desc: 'Ein durchgehend offenes Tor im Orbit: eigene Nicht-PvP-Missionen hierher fliegen bis zu drei Viertel kuerzer statt hoechstens der Haelfte.',
-    kosten: { erz: 6000000, kristalle: 4500000, deuterium: 3000000, nanolegierungen: 3500, quantenchips: 1800, metamaterial: 500, singularitaetskerne: 40 } }
+    kosten: { erz: 6000000, kristalle: 4500000, deuterium: 3000000, nanolegierungen: 3500, quantenchips: 1800, metamaterial: 500, singularitaetskern: 40 } }
 ];
 const VP_FLUG_DECKEL = 0.5;   // ohne Sprungtor; Kopie im Frontend (vorpostenFlugMult)
 function vpProjektDef(key) { return VP_PROJEKT_DEFS.find(d => d.key === key) || null; }

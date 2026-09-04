@@ -9266,7 +9266,7 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     vorpostenSystem: vorpostenZiel ? vorpostenZiel.sys : null,
     vorpostenBesitzer: vorpostenZiel ? vorpostenZiel.besitzer : null,
     vorpostenBesitzerName: vorpostenZiel ? (vorpostenZiel.besitzerName || 'Kommandant') : null,
-    vorpostenStufeName: vorpostenZiel ? vorpostenStufe(vorpostenZiel.stufe).name : null,
+    vorpostenStufeName: vorpostenZiel ? vorpostenStufeVon(vorpostenZiel).name : null,
     message: String(message || '').replace(/[<>]/g, '').slice(0, 140),
     createdAt: now, museterEndsAt: now + gatherSeconds * 1000,
     phase: 'gathering', dispatch: null, result: null
@@ -9445,7 +9445,7 @@ app.post('/api/musterattack/checkdispatch', authMiddleware, async (req, res) => 
         const bp = getNotifPrefs(bes);
         if (bp.enabled && bp.attack) {
           pushNotificationEvent(vpZiel.besitzer, 'vorposten-anflug', {
-            angreiferName: '[' + tag + ']', name: vorpostenStufe(vpZiel.stufe).name, system: doc.vorpostenSystem,
+            angreiferName: '[' + tag + ']', name: vorpostenStufeVon(vpZiel).name, system: doc.vorpostenSystem,
             schiffe: totalShips, ankunftAt: doc.dispatch.arrivalAt
           }, { skipWebPush: !allowAttackPush(vpZiel.besitzer) });
         }
@@ -9644,7 +9644,7 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
     if (jetztV < schutzBisV) {
       doc.phase = 'resolved';
       doc.result = { vorposten: true, verpasst: true, grund: 'schutz', system: doc.vorpostenSystem,
-        stufeName: vorpostenStufe(vp.stufe).name, besitzerName: vp.besitzerName || null,
+        stufeName: vorpostenStufeVon(vp).name, besitzerName: vp.besitzerName || null,
         success: false, destroyed: false, damage: 0, defensePower: 0, ownLossPct: 0, resolvedAt: jetztV };
       setMusterAttackDoc(tag, doc);
       await saveDb();
@@ -9662,7 +9662,7 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
       await saveDb();
       return res.json({ ok: true, doc });
     }
-    const stufeNameV = vorpostenStufe(vp.stufe).name;
+    const stufeNameV = vorpostenStufeVon(vp).name;
     const besitzerV = vp.besitzer, besitzerNameV = vp.besitzerName || 'Kommandant';
     const ergV = vorpostenSchlagAusfuehren(vp, doc.dispatch.totalPower, doc.dispatch.totalComposition || {}, beteiligteV, jetztV);
     doc.phase = 'resolved';
@@ -13091,6 +13091,14 @@ const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer
 const VORPOSTEN_AUSBAU_MS = 12 * 3600 * 1000;      // zwischen zwei Ausbauten, am Objekt
 const VORPOSTEN_GARNISON_FAKTOR = 0.5;             // Anteil der rohen Flottenkraft der Garnison, der verteidigt
 const VORPOSTEN_VERLUST = 0.06;                    // Grundverlust des Angreifers je Schlag (Familie Festung/A2)
+/* DIE NAMEN ERZAEHLEN DIE ZEICHNUNG (GR-7, 04.09.2026). Sie hiessen Feldlager, Stuetzpunkt,
+   Bastion und dann "Ausbaustufe 4" bis "Ausbaustufe 8" - Bodenvokabular und Platzhalter. Seit das
+   Frontend den Vorposten auf JEDER Stufe als Raumstation zeichnet (GR-6), stand "Feldlager" unter
+   einem Orbitalkern. Jeder Name benennt jetzt, was auf dieser Stufe wirklich dazukommt: der
+   Ankerkern ist die blosse Kerntrommel, die Ringstation bekommt ihren Habitatring, der Doppelring
+   den zweiten. Wer den Namen liest, weiss, wie sie aussieht.
+   Die Namen der drei Zweige (VORPOSTEN_ZWEIGE.namen) bleiben unveraendert und ueberschreiben
+   diese hier ab der Wahlstufe - sie sind die Spezialisierung, das hier ist der Grundausbau. */
 const VORPOSTEN_STUFEN = [
   /* DIE LEITER (Auftrag Sascha 02.09.2026: "sehr, sehr viele Ausbaustufen fuer verschiedene
      Spezialisierungen", Entscheidung "8 Stufen + 3 Spezialisierungen ab Stufe 4").
@@ -13114,14 +13122,14 @@ const VORPOSTEN_STUFEN = [
      Produktionsbonus, Aufklaerungsstufe); alle drei wirken im Frontend bereits.
      `kampfpunkte`/`xp`/`credits` sind die Beute beim Fall, anteilig - sie haengen bewusst NUR an
      der Stufe, nicht am Zweig: sonst lohnte es sich, gezielt die wehrhaftesten Ziele zu schleifen. */
-  { stufe: 1, name: 'Feldlager',  kernLp: 20000,   verteidigung: 2500,   garnisonMax: 300,   flug: 0.06, prod: 0.015, scan: 1, werft: 0.02, markt: 0.02, kampfpunkte: 30,   xp: 250,   credits: 1200,  kosten: null },
+  { stufe: 1, name: 'Ankerkern',  kernLp: 20000,   verteidigung: 2500,   garnisonMax: 300,   flug: 0.06, prod: 0.015, scan: 1, werft: 0.02, markt: 0.02, kampfpunkte: 30,   xp: 250,   credits: 1200,  kosten: null },
   { stufe: 2, name: 'Stützpunkt', kernLp: 90000,   verteidigung: 12000,  garnisonMax: 800,   flug: 0.10, prod: 0.03,  scan: 2, werft: 0.035, markt: 0.035, kampfpunkte: 80,   xp: 700,   credits: 3500,  kosten: { erz: 200000, kristalle: 130000, deuterium: 80000 } },
-  { stufe: 3, name: 'Bastion',    kernLp: 400000,  verteidigung: 60000,  garnisonMax: 2000,  flug: 0.15, prod: 0.05,  scan: 3, werft: 0.05, markt: 0.05, kampfpunkte: 200,  xp: 2000,  credits: 9000,  kosten: { erz: 600000, kristalle: 400000, deuterium: 250000 } },
-  { stufe: 4, name: 'Ausbaustufe 4', kernLp: 800000,  verteidigung: 110000, garnisonMax: 3200,  flug: 0.18, prod: 0.065, scan: 3, werft: 0.07, markt: 0.07, kampfpunkte: 320,  xp: 3200,  credits: 15000, kosten: { erz: 1200000, kristalle: 800000,  deuterium: 500000,  nanolegierungen: 400 } },
-  { stufe: 5, name: 'Ausbaustufe 5', kernLp: 1400000, verteidigung: 190000, garnisonMax: 4800,  flug: 0.21, prod: 0.08,  scan: 4, werft: 0.09, markt: 0.09, kampfpunkte: 480,  xp: 5000,  credits: 24000, kosten: { erz: 2000000, kristalle: 1400000, deuterium: 900000,  nanolegierungen: 900,  quantenchips: 300 } },
-  { stufe: 6, name: 'Ausbaustufe 6', kernLp: 2400000, verteidigung: 320000, garnisonMax: 7000,  flug: 0.24, prod: 0.095, scan: 4, werft: 0.11, markt: 0.11, kampfpunkte: 700,  xp: 7500,  credits: 38000, kosten: { erz: 3400000, kristalle: 2400000, deuterium: 1500000, nanolegierungen: 1800, quantenchips: 800 } },
-  { stufe: 7, name: 'Ausbaustufe 7', kernLp: 4000000, verteidigung: 520000, garnisonMax: 10000, flug: 0.27, prod: 0.11,  scan: 5, werft: 0.135, markt: 0.135, kampfpunkte: 1000, xp: 11000, credits: 60000, kosten: { erz: 5500000, kristalle: 4000000, deuterium: 2600000, nanolegierungen: 3200, quantenchips: 1600, metamaterial: 400 } },
-  { stufe: 8, name: 'Ausbaustufe 8', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, werft: 0.16, markt: 0.16, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskerne: 120 } }
+  { stufe: 3, name: 'Kernstation',    kernLp: 400000,  verteidigung: 60000,  garnisonMax: 2000,  flug: 0.15, prod: 0.05,  scan: 3, werft: 0.05, markt: 0.05, kampfpunkte: 200,  xp: 2000,  credits: 9000,  kosten: { erz: 600000, kristalle: 400000, deuterium: 250000 } },
+  { stufe: 4, name: 'Ringstation', kernLp: 800000,  verteidigung: 110000, garnisonMax: 3200,  flug: 0.18, prod: 0.065, scan: 3, werft: 0.07, markt: 0.07, kampfpunkte: 320,  xp: 3200,  credits: 15000, kosten: { erz: 1200000, kristalle: 800000,  deuterium: 500000,  nanolegierungen: 400 } },
+  { stufe: 5, name: 'Weitring', kernLp: 1400000, verteidigung: 190000, garnisonMax: 4800,  flug: 0.21, prod: 0.08,  scan: 4, werft: 0.09, markt: 0.09, kampfpunkte: 480,  xp: 5000,  credits: 24000, kosten: { erz: 2000000, kristalle: 1400000, deuterium: 900000,  nanolegierungen: 900,  quantenchips: 300 } },
+  { stufe: 6, name: 'Habitatkranz', kernLp: 2400000, verteidigung: 320000, garnisonMax: 7000,  flug: 0.24, prod: 0.095, scan: 4, werft: 0.11, markt: 0.11, kampfpunkte: 700,  xp: 7500,  credits: 38000, kosten: { erz: 3400000, kristalle: 2400000, deuterium: 1500000, nanolegierungen: 1800, quantenchips: 800 } },
+  { stufe: 7, name: 'Doppelring', kernLp: 4000000, verteidigung: 520000, garnisonMax: 10000, flug: 0.27, prod: 0.11,  scan: 5, werft: 0.135, markt: 0.135, kampfpunkte: 1000, xp: 11000, credits: 60000, kosten: { erz: 5500000, kristalle: 4000000, deuterium: 2600000, nanolegierungen: 3200, quantenchips: 1600, metamaterial: 400 } },
+  { stufe: 8, name: 'Orbitalfeste', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, werft: 0.16, markt: 0.16, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskerne: 120 } }
 ];
 /* DIE DREI SPEZIALISIERUNGEN. Ab Stufe VORPOSTEN_ZWEIG_AB waehlt der Besitzer EINMAL eine
    Ausrichtung; sie steht danach im Dokument (`doc.zweig`) und ist unveraenderlich - eine
@@ -13179,6 +13187,11 @@ function vorpostenStufe(n, zweig) {
     scan: Math.max(1, Math.round(basis.scan * m.scan))
   });
 }
+/* IMMER DIESE FORM benutzen, wenn ein Vorposten-Dokument zur Hand ist - nie vorpostenStufe(stufe)
+   ohne Zweig. Fuenf Stellen taten genau das (GR-7 gemessen: Anflug-Meldung, Angriffs-Push,
+   Ergebnis-Liste, Nicht-Teilnehmer-Fall und die Verlustmeldung) und fielen deshalb auf den
+   Basisnamen zurueck: Ein Vorposten mit Festungszweig auf Stufe 6 hiess in Kampfberichten
+   "Ausbaustufe 6" statt "Sperrfeuerring". Die Zweignamen waren dort nie zu sehen. */
 function vorpostenStufeVon(doc) { return vorpostenStufe(doc && doc.stufe, doc && doc.zweig); }
 /* Stufe PLUS eingebaute Module - die EINE Stelle, die beides zusammensetzt. Alles, was Werte des
    Vorpostens liest (Verteidigung, Garnisonsgrenze, Kern beim Ausbau, die Client-Sicht), geht
@@ -14105,7 +14118,7 @@ app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
       if (vPrefs.enabled && vPrefs.attack) {
         pushNotificationEvent(doc.besitzer, 'vorposten-angegriffen', {
           angreiferName: req.username || 'Ein Kommandant',
-          name: vorpostenStufe(doc.stufe).name, system: sys, gefallen: erg.gefallen,
+          name: vorpostenStufeVon(doc).name, system: sys, gefallen: erg.gefallen,
           kernProzent: erg.gefallen ? 0 : Math.round(100 * Math.max(0, Math.min(1, (erg.lp || 0) / Math.max(1, erg.lpMax || 1))))
         }, { skipWebPush: !allowAttackPush(doc.besitzer) });
       }

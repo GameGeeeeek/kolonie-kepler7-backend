@@ -94,8 +94,14 @@ async function stoppeServer() { if (!srv) return; srv.kill('SIGTERM'); await war
   /* ANKER unabhaengig von der API-Antwort: Leiter und Multiplikator kommen aus dem QUELLTEXT.
      Eine Erwartung, die aus derselben Antwort stammt, die sie pruefen soll, belegt nichts. */
   const leiter = [...roh.matchAll(/\{ stufe: (\d), name: '[^']*',[^}]*werft: ([\d.]+),/g)].map(m => [Number(m[1]), Number(m[2])]);
-  const multWerft = Number((roh.match(/key: 'werft',[\s\S]{0,400}?werft: ([\d.]+) \}/) || [])[1]);
-  const multFestung = Number((roh.match(/key: 'festung',[\s\S]{0,400}?werft: ([\d.]+) \}/) || [])[1]);
+  /* GEMESSEN 04.09.2026: Diese beiden Anker suchten `werft: X }` - also den Multiplikator als
+     LETZTEN Eintrag seines Objekts. Seit dort `markt` dahintersteht (`werft: 2.20, markt: 0.50 }`)
+     fanden sie nichts mehr, und 0a wie 1b waren still rot, ohne dass sich am Verhalten etwas
+     geaendert haette. Der Anker liest jetzt den Wert unabhaengig davon, was ihm folgt - genau die
+     Fehlerklasse, vor der CLAUDE.md warnt: "Such-/Slice-Anker vor Benutzung explizit auf Existenz
+     pruefen", und ein Anker, der an der Reihenfolge seiner Nachbarn haengt, ist keiner. */
+  const multWerft = Number((roh.match(/key: 'werft',[\s\S]{0,400}?[,{]\s*werft: ([\d.]+)/) || [])[1]);
+  const multFestung = Number((roh.match(/key: 'festung',[\s\S]{0,400}?[,{]\s*werft: ([\d.]+)/) || [])[1]);
   const deckel = Number((roh.match(/const VP_WERFT_DECKEL = ([\d.]+);/) || [])[1]);
   check('0a: Leiter, Multiplikatoren und Deckel sind im Quelltext auffindbar',
     leiter.length === 8 && multWerft > 0 && multFestung > 0 && deckel > 0,

@@ -1781,8 +1781,15 @@ function pushNotificationText(type, payload) {
     ' ist erschienen - schließ dich dem Angriff an, bevor er wieder verschwindet.' };
   if (type === 'alliance-muster') {
     const min = Math.max(1, Math.round((payload.gatherSeconds || 0) / 60));
-    return { title: 'Koordinierter Angriff!', body: (payload.byName || 'Ein Kommandant') + ' greift [' + (payload.targetTag || '?') +
-      '] an - Sammelphase ' + min + ' Min. Schließ deine Flotte an!' };
+    /* `ziel` beschreibt jede Zielart in Worten; der Rueckfall auf targetTag haelt aeltere Eintraege
+       lesbar, die noch ohne das Feld in der Warteschlange liegen. Die Nachricht des Ausrufers
+       haengt hinten an, gekuerzt - eine Push-Meldung hat wenig Platz, und der volle Text steht
+       ohnehin im Verband. */
+    const ziel = payload.ziel || ('[' + (payload.targetTag || '?') + ']');
+    const n = String(payload.nachricht || '').trim();
+    const anhang = n ? ' „' + (n.length > 60 ? n.slice(0, 59) + '…' : n) + '"' : '';
+    return { title: 'Koordinierter Angriff!', body: (payload.byName || 'Ein Kommandant') + ' greift ' + ziel +
+      ' an - Sammelphase ' + min + ' Min. Schließ deine Flotte an!' + anhang };
   }
   if (type === 'alliance-base-attacked') return payload.destroyed
     ? { title: 'Allianzbasis ZERSTÖRT!', body: '[' + (payload.attackerTag || '?') + '] hat eure Basis zerstört - alle Boni sind deaktiviert, bis sie repariert ist.' }
@@ -9061,7 +9068,14 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
 // Flottenangriffskraft, ohne das volle defWeight-/Hülle-/Schild-Modulsystem des Frontends) - analog
 // zur bereits akzeptierten Vereinfachung von computeAllianceRaidPower (ohne Doktrin/Gebäude-/
 // Offiziers-Kampfbonus/Buffs).
-const ALLIANCE_MUSTER_DURATIONS = [30 * 60, 60 * 60, 120 * 60];
+/* SAMMELZEITEN (Auftrag Sascha 04.09.2026: 15/30/45/60 statt 30/60/120). Der Grund fuer die
+   kuerzeren Stufen ist der neue Einstieg: Ein Verband, den man aus dem Festungsmenue heraus
+   ausruft, wird meist ausgerufen, WEIL gerade jemand da ist - zwei Stunden Sammelphase passen zu
+   einem geplanten Termin, nicht zu einem spontanen „jetzt gleich".
+   KOPIE-FAMILIE: dieselbe Liste steht im Frontend (ALLIANCE_MUSTER_DURATIONS). Beide Seiten
+   pflegen; kein Test vergleicht sie automatisch (gemessen 04.09.2026).
+   Laufende Verbaende mit zwei Stunden sind unberuehrt - die Liste gilt nur beim Ausrufen. */
+const ALLIANCE_MUSTER_DURATIONS = [15 * 60, 30 * 60, 45 * 60, 60 * 60];
 const ALLIANCE_MUSTER_COOLDOWN_MS = 24 * 3600 * 1000;
 const ALLIANCE_MUSTER_TEST_MODE = process.env.ALLIANCE_RAID_TEST_MODE === '1'; // gleicher Schalter wie beim Raid
 const ALLIANCE_MUSTER_TEST_DISPATCH_SEC = 2;
@@ -9287,8 +9301,6 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     phase: 'gathering', dispatch: null, result: null
   };
   setMusterAttackDoc(tag, doc);
-  await saveDb();
-
   // Dieselbe Begründung wie beim Allianz-Raid (02.08.2026): eine Sammelphase mit harter Frist, die
   // bisher nur im Allianz-Chat stand. Wer nicht ohnehin gerade spielt, hat vom Aufruf nie erfahren.
   // Bewusst dieselbe Einstellungs-Kategorie 'allianceraid' wie der Raid: Für den Spieler ist beides
@@ -9301,12 +9313,25 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
       if (!user) continue;
       const prefs = getNotifPrefs(user);
       if (!prefs.enabled || !prefs.allianceraid) continue;
+      /* `ziel` und `nachricht` sind neu (04.09.2026). Vorher stand im Push nur `targetTag` - bei
+         einer Festung, einem Nest oder einem Vorposten ist der aber null, und die Meldung las sich
+         „greift [?] an". musterZielBeschreibung() kennt alle vier Zielarten und ist dieselbe
+         Quelle, aus der auch der 409-Text beim zweiten Verband gespeist wird. Die Nachricht des
+         Ausrufers stand bis hierher nur im Dokument - wer nicht ohnehin im Spiel war, hat sie nie
+         gelesen, obwohl sie genau fuer ihn gedacht ist. */
       pushNotificationEvent(memberId, 'alliance-muster', {
-        tag, byName: req.username, targetTag, gatherSeconds
+        tag, byName: req.username, targetTag, gatherSeconds,
+        ziel: musterZielBeschreibung(doc), nachricht: doc.message || ''
       });
     }
   } catch (e) { console.error('Musterangriff-Benachrichtigung fehlgeschlagen (der Angriff selbst läuft):', e.message); }
-
+  /* Die Meldungen werden VOR saveDb() eingereiht (04.09.2026). Vorher standen sie dahinter - sie
+     lagen damit nur im Speicher und erreichten die Platte erst beim naechsten fremden
+     Schreibvorgang. Ein Neustart dazwischen (und der Deploy startet den Prozess bei jedem Push
+     neu) hat den Aufruf still verschluckt: Der Verband stand, aber niemand wurde benachrichtigt.
+     Dieselbe Hausregel wie ueberall - db synchron vor saveDb() mutieren. Aufgefallen beim Bau des
+     Waechters fuer den Raid aus dem Festungsmenue, nicht im Spiel. */
+  await saveDb();
   res.json({ ok: true, doc });
 });
 

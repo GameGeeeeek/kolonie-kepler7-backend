@@ -90,3 +90,20 @@ gefallen", wenn die Liste zufällig leer ist.
 **Jede Sabotage muss belegen, dass sie gegriffen hat** — entweder durch eine Prüfung auf den
 veränderten Text (wie `0-kopie` es für die Schalter tut), oder dadurch, dass ihre Pflichtliste
 nicht leer ist. Eine leere Erwartungsliste ist nie ein gültiges Ergebnis einer Gegenprobe.
+
+## Eine Benachrichtigung nach `saveDb()` ist eine Benachrichtigung auf Verdacht (04.09.2026)
+
+`/api/musterattack/create` reihte seine Push-Meldungen **nach** `await saveDb()` ein.
+`pushNotificationEvent` mutiert `db` — der Flush war zu dem Zeitpunkt aber schon durch, die
+Meldungen lagen also nur im Speicher und erreichten die Platte erst, wenn zufällig ein fremder
+Schreibvorgang nachkam. Meistens kam einer. Ein Neustart dazwischen verschluckte den Aufruf
+lautlos, und der Deploy startet den Prozess bei jedem Push neu.
+
+Der Fehler ist deshalb so zäh, weil er **im Normalbetrieb funktioniert**: Auf einem belebten Server
+schreibt binnen Sekunden irgendwer irgendetwas. Er schlägt genau dann zu, wenn am wenigsten los ist
+— und dann fehlt eine Meldung, die niemand vermisst, weil niemand weiß, dass sie kommen sollte.
+
+**Die Hausregel „`db` immer synchron vor `saveDb()` mutieren" gilt auch für alles, was nur
+nebenbei schreibt.** Wer in einer Route eine Nebenwirkung hinter den Flush hängt — Meldung,
+Protokoll, Zähler —, hat sie nicht persistiert, sondern nur gehofft. Gefunden wurde es nicht im
+Spiel, sondern weil ein neuer Test den Posteingang **nachgelesen** hat statt nur den Rückgabewert.

@@ -13134,9 +13134,16 @@ const VORPOSTEN_ABBAU_MS = 24 * 3600 * 1000;
    unpruefbar gewesen, weil ihn heute kein einzelner Vorposten erreicht. Der Wert reist als
    `werftDeckel` zum Client, damit dort keine zweite Zahl gepflegt werden muss.
 
-   Der Schalter steht auf false, bis das Frontend den Kanal liest - er wird im Zuge der
-   Frontend-Auslieferung umgelegt. Ein gemeldeter Nutzen, der nirgends wirkt, waere eine Luege. */
-const VP_WERFT_AKTIV = false;
+   UMGELEGT AM 04.09.2026 (Etappe V2, Frontend-Haelfte). Das Frontend liest den Kanal jetzt:
+   vorpostenWerftBonus() summiert nutzen.werft ueber alle eigenen Vorposten, deckelt mit dem hier
+   gemeldeten werftDeckel und multipliziert das Ergebnis im Schiffszweig von
+   effectiveBuildTimeEach() auf die Bauzeit. Angezeigt wird es an drei Stellen: in der Nutzen-Zeile
+   der Station, in der Zweigwahl (dort fehlte ausgerechnet der Kanal, nach dem der Zweig HEISST)
+   und als eigene Zeile im Werft-Tab, damit die kuerzere Bauzeit eine sichtbare Ursache hat.
+   Reihenfolge wie immer: diese Seite zuerst live, dann das Frontend. Der Zwischenzustand ist
+   harmlos - ein gemeldeter Nutzen, den ein aelteres Frontend schlicht nicht liest und auch
+   nirgends anzeigt. Umgekehrt waere es eine Luege gewesen. */
+const VP_WERFT_AKTIV = true;
 const VP_WERFT_DECKEL = 0.40;
 /* ETAPPE V3: DIE MARKTGEBUEHR (03.09.2026). Der zweite von zwei Kanaelen, die der Quelltext seit
    dem 02.09.2026 schuldet. Der Handelsknoten war bis hierher Produktion mal 1,8 und die duennste

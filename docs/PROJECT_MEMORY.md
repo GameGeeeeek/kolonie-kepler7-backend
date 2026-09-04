@@ -69,3 +69,24 @@ Zwei Punkte, die sich beim Bauen als tragend erwiesen haben:
   verschickt — der Weg über die Platte überlebt den Neustart, ein offener Versand nicht.
 
 Einzelheiten: `docs/betriebsnetz.md`.
+
+## Eine Rechteprüfung altert mit ihrer Begründung (04.09.2026)
+
+`checkVorpostenKeyPermission` ließ das Lesen offen, und der Kommentar begründete das: im Dokument
+stehe nichts Schützenswertes. Das stimmte am Tag, an dem es geschrieben wurde. Drei Etappen später
+enthielt dasselbe Dokument den Anflug eines Dritten, die Aufschlüsselung fremder Beiträge und die
+Kampfvermerke — und die Sperre stand unverändert da, mit ihrer inzwischen falschen Begründung.
+
+**Wer einem geteilten Dokument ein Feld hinzufügt, prüft die Rechteregel dieses Dokuments neu.**
+Die Regel ist keine Eigenschaft des Schlüssels, sondern seines Inhalts, und der wächst.
+
+## Eine Sabotage, die nichts trifft, sieht aus wie eine bestandene Gegenprobe (04.09.2026)
+
+An einem Tag dreimal passiert: Eine Gegenprobe ersetzt eine Zeichenkette im Quelltext, die es nach
+einer späteren Änderung nicht mehr gibt. `String.replace` meldet keinen Fehler, die Kopie läuft
+unverändert, nichts fällt — und die Auswertung meldet „genau die erwarteten Prüfungen sind
+gefallen", wenn die Liste zufällig leer ist.
+
+**Jede Sabotage muss belegen, dass sie gegriffen hat** — entweder durch eine Prüfung auf den
+veränderten Text (wie `0-kopie` es für die Schalter tut), oder dadurch, dass ihre Pflichtliste
+nicht leer ist. Eine leere Erwartungsliste ist nie ein gültiges Ergebnis einer Gegenprobe.

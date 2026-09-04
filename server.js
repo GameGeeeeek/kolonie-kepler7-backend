@@ -13429,12 +13429,29 @@ function vorpostenGarnisonVerlust(doc, quote) {
 }
 /* Darf dieses Konto an diesem Vorposten mitwirken? Der Besitzer immer; ein Verbuendeter nur, wenn
    der Schalter an ist UND beide im geteilten Speicher dieselbe aktive Allianz haben. */
-function vorpostenVerbuendet(doc, userId) {
+function vorpostenVerbuendet(doc, userId, karte) {
   if (!doc || !userId) return false;
   if (doc.besitzer === userId) return true;
   if (!VP_ALLIANZ_AKTIV) return false;
-  const meiner = allianceTagOf(userId);
-  return !!meiner && meiner === allianceTagOf(doc.besitzer);
+  /* `karte` ist die in EINEM Durchlauf gebaute Zuordnung Konto -> Tag. Ohne sie durchsucht
+     allianceTagOf den ganzen geteilten Speicher - und zwar zweimal JE Vorposten, also bei
+     GET /api/vorposten einmal je Eintrag der Liste. Auf dem Pi, wo db.shared alle Allianzen,
+     Maerkte und Chats enthaelt, ist das der Unterschied zwischen einer Antwort und einer Pause
+     (Befund des Audits). Ohne `karte` bleibt der alte Weg - fuer die Einzelaufrufe an den
+     Endpunkten, wo genau ein Vorposten geprueft wird. */
+  const meiner = karte ? karte[userId] : allianceTagOf(userId);
+  const seiner = karte ? karte[doc.besitzer] : allianceTagOf(doc.besitzer);
+  return !!meiner && meiner === seiner;
+}
+/* Alle aktiven Allianz-Rollen in EINEM Durchlauf: Konto -> Tag. */
+function allianceTagKarte() {
+  const aus = {};
+  for (const k of Object.keys(db.shared)) {
+    const m = k.match(/^alliance:([^:]+):role:(.+)$/);
+    if (!m) continue;
+    try { const r = JSON.parse(db.shared[k]); if (r.role && r.role !== 'left') aus[m[2]] = m[1]; } catch (e) {}
+  }
+  return aus;
 }
 function vorpostenGarnisonAnzahl(doc) {
   return Object.values((doc && doc.garnison) || {}).reduce((a, n) => a + (typeof n === 'number' && n > 0 ? n : 0), 0);
@@ -13561,7 +13578,14 @@ function vpProjektBoni(doc, jetzt) {
     werftSchiff: 0, marktPlaetze: 0, verlust: 0, flugDeckel: VP_FLUG_DECKEL };
   for (const key of vpProjekteFertig(doc, jetzt)) {
     if (!zaehlt(key)) continue;
-    const w = (vpProjektDef(key) || {}).wirkung || {};
+    const def = vpProjektDef(key) || {};
+    /* Ein zweiggebundenes Projekt wirkt NUR an seiner Ausrichtung (Befund 4e des V6-Wächters).
+       Starten kann man es ohnehin nur dort - aber die Wirkung hing bisher allein am fertigen
+       Eintrag. Spaetestens mit der Umruestung (Etappe V8, die den Zweig neu waehlen laesst) haette
+       ein als Werft gebautes Sternendock an einer Festung weitergeliefert. Die Regel lautet: die
+       Wirkung haengt am Projekt UND an der Ausrichtung. */
+    if (def.zweig && doc.zweig !== def.zweig) continue;
+    const w = def.wirkung || {};
     for (const k of Object.keys(w)) {
       if (k === 'flugDeckel') aus.flugDeckel = Math.max(aus.flugDeckel, w[k]);
       else aus[k] += w[k];
@@ -13680,10 +13704,20 @@ function vorpostenFindeMission(save, missionId, typ, sysId) {
 // ueber die Endpunkte - sonst setzte jeder Beliebige einen fremden Kern auf null.
 function checkVorpostenKeyPermission(req, key, isWrite) {
   if (!key.startsWith('vorposten:')) return null;
-  if (!isWrite) return null;
-  return 'Vorposten werden ausschließlich über die Vorposten-Endpunkte verändert.';
+  /* AUCH LESEN IST ZU (04.09.2026, Befund des Vorposten-Audits). Bis hierher stand hier nur eine
+     Schreibsperre, und der Kommentar sagte „Lesen bleibt fuer jedes angemeldete Konto offen" - mit
+     der Begruendung, es gebe dort nichts zu holen. Das stimmte nicht mehr: Das Rohdokument enthaelt
+     `anflug` (den vorpostenFuerClient ausdruecklich NUR dem Besitzer schickt, weil es den Plan
+     eines Dritten verraet), seit Etappe V5 zusaetzlich `garnisonVon` (wer wie viel gestellt hat)
+     sowie `beitraege` und `schlaege`. Ein einziger GET auf den geteilten Speicher hebelte damit
+     jede dieser Entscheidungen aus.
+     Gemessen vor der Sperre: weder das Frontend noch ein Test liest diese Schluessel roh - die
+     gefilterte Sicht kommt ausschliesslich ueber GET /api/vorposten. */
+  return isWrite
+    ? 'Vorposten werden ausschließlich über die Vorposten-Endpunkte verändert.'
+    : 'Vorposten werden ausschließlich über GET /api/vorposten gelesen.';
 }
-function vorpostenFuerClient(doc, userId, jetzt) {
+function vorpostenFuerClient(doc, userId, jetzt, karte) {
   const st = vorpostenWerte(doc);
   const eigener = doc.besitzer === userId;
   const out = {
@@ -13738,7 +13772,7 @@ function vorpostenFuerClient(doc, userId, jetzt) {
        braucht die Unterscheidung, weil ein Verbuendeter stationieren und zurueckrufen darf, aber
        nicht ausbauen, abbauen oder Projekte starten. `meineGarnison` ist SEIN Anteil - die
        vollstaendige Aufschluesselung sieht weiterhin nur der Besitzer. */
-    verbuendet: !eigener && vorpostenVerbuendet(doc, userId),
+    verbuendet: !eigener && vorpostenVerbuendet(doc, userId, karte),
     meineGarnison: Object.assign({}, (vorpostenGarnisonVon(doc))[userId] || {}),
     /* NUR DER BESITZER sieht den Anflug. Verteidigung, Garnisonszahl und Steckplaetze stehen
        bewusst jedem offen - ein Angreifer soll sehen, worauf er sich einlaesst. Ein ANFLUG ist
@@ -13885,7 +13919,10 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
 
 app.get('/api/vorposten', authMiddleware, (req, res) => {
   const jetzt = Date.now();
-  const liste = VORPOSTEN_AKTIV ? vorpostenAlle().map(d => vorpostenFuerClient(d, req.userId, jetzt)) : [];
+  // Die Allianz-Zuordnung wird EINMAL gebaut und an jeden Eintrag durchgereicht, nicht je Vorposten
+  // neu gesucht (Befund des Audits). Ohne aktiven Schalter braucht sie niemand.
+  const tagKarte = (VORPOSTEN_AKTIV && VP_ALLIANZ_AKTIV) ? allianceTagKarte() : null;
+  const liste = VORPOSTEN_AKTIV ? vorpostenAlle().map(d => vorpostenFuerClient(d, req.userId, jetzt, tagKarte)) : [];
   res.json({
     ok: true, aktiv: VORPOSTEN_AKTIV, bauAktiv: spawnAktiv('vorposten'),
     maxJeKonto: VORPOSTEN_MAX_JE_KONTO, schutzMs: VORPOSTEN_SCHUTZ_MS, abklingMs: VORPOSTEN_ABKLING_MS,
@@ -13972,6 +14009,16 @@ app.post('/api/vorposten/ausbauen', authMiddleware, async (req, res) => {
   // MIT Modulen gerechnet: sonst faellt das Maximum beim Ausbau unter den Stand von vorher,
   // sobald eine Kernpanzerung steckt - ein Ausbau, der den Kern SCHRUMPFEN laesst.
   const alt = vorpostenWerte(doc);
+  /* V4-Nachtrag (Befund des Audits): Das Lager wird ABGERECHNET, bevor die Stufe steigt. Der Stand
+     wird aus `lagerSeit` mit dem AKTUELLEN Satz gerechnet - ohne diese Abrechnung waeren die Stunden
+     vor dem Ausbau rueckwirkend zum neuen, hoeheren Satz bewertet worden. Nichts geht dabei
+     verloren: Was angefallen ist, wandert in die Warteschlange, und die neue Stufe faengt bei null an. */
+  const standVorAusbau = vorpostenLagerStand(doc, Date.now());
+  if (!vorpostenLagerLeer(standVorAusbau)) {
+    pushPendingReward(req.userId, Object.assign({ type: 'vorposten-lager', system: doc.sys,
+      name: vorpostenWerte(doc).name, zeit: Date.now() }, standVorAusbau));
+  }
+  doc.lagerSeit = Date.now();
   doc.stufe = zielStufe;
   const neu = vorpostenWerte(doc);
   doc.kern = doc.kern || { lp: alt.kernLp, lpMax: alt.kernLp };
@@ -14151,7 +14198,14 @@ app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
   }
   vorpostenSchreib(doc);
   await saveDb();
-  res.json({ ok: true, angenommen, garnison: doc.garnison, garnisonAnzahl: vorpostenGarnisonAnzahl(doc), verteidigung: vorpostenVerteidigung(doc), garnisonMax: st.garnisonMax });
+  /* Die volle Zusammensetzung sieht nur der BESITZER (Befund des Audits). Ein Verbuendeter bekommt
+     seinen eigenen Anteil und die Summen - dieselbe Grenze wie in vorpostenFuerClient. Ohne diese
+     Zeile genuegte ein einziges stationiertes Schiff, um die Flottenaufstellung eines Fremden zu
+     lesen; die Allianz-Mitgliedschaft dafuer kann sich im geteilten Speicher jeder selbst geben. */
+  const eigenerSt = doc.besitzer === req.userId;
+  res.json({ ok: true, angenommen,
+    garnison: eigenerSt ? doc.garnison : Object.assign({}, vorpostenGarnisonVon(doc)[req.userId] || {}),
+    garnisonAnzahl: vorpostenGarnisonAnzahl(doc), verteidigung: vorpostenVerteidigung(doc), garnisonMax: st.garnisonMax });
 });
 
 app.post('/api/vorposten/rueckruf', authMiddleware, async (req, res) => {
@@ -14160,7 +14214,12 @@ app.post('/api/vorposten/rueckruf', authMiddleware, async (req, res) => {
   if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
   const doc = vorpostenLies(sys);
   if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
-  if (!vorpostenVerbuendet(doc, req.userId)) {
+  /* Der Rueckruf haengt am BEITRAG, nicht an der Mitgliedschaft (Befund des Audits): Wer die
+     Allianz verlaesst oder hinausgeworfen wird, kam sonst nie wieder an seine Schiffe - sie waeren
+     im Vorposten eines Fremden gefangen gewesen, ohne dass irgendetwas es gesagt haette. Wer etwas
+     gestellt hat, darf es holen; wer nichts gestellt hat, hat hier auch nichts zu holen. */
+  const vonPruef = vorpostenGarnisonVon(doc);
+  if (doc.besitzer !== req.userId && !Object.keys(vonPruef[req.userId] || {}).length) {
     return res.status(403).json({ error: 'Hier steht nichts von dir.' });
   }
   /* V5: Zurueckgerufen wird, was DIESES Konto gestellt hat - nicht die ganze Garnison. Der Besitzer
@@ -14280,7 +14339,12 @@ app.post('/api/vorposten/abbau/abbrechen', authMiddleware, async (req, res) => {
    Deckel. Ein Zurueckdrehen machte ihn wirkungslos. */
 app.post('/api/vorposten/lager/holen', authMiddleware, async (req, res) => {
   if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
-  if (!VP_LAGER_AKTIV) return res.status(404).json({ error: 'Vorposten führen derzeit kein Lager.', inaktiv: true });
+  /* Der Griff bedient BEIDES - Lager (V4) und Sternendock (V6). Er darf deshalb nicht an einem
+     der beiden Schalter allein haengen: Mit Endprojekten an und Lager aus haette das Dock Kreuzer
+     produziert, die niemand je abholen kann (Befund des Audits). */
+  if (!VP_LAGER_AKTIV && !VP_ENDPROJEKTE_AKTIV) {
+    return res.status(404).json({ error: 'Vorposten führen derzeit kein Lager.', inaktiv: true });
+  }
   const sys = String((req.body && req.body.system) || '');
   if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   const doc = vorpostenLies(sys);
@@ -14297,7 +14361,15 @@ app.post('/api/vorposten/lager/holen', authMiddleware, async (req, res) => {
   }
   // db synchron vor saveDb() mutieren, nie im await-Rueckruf.
   doc.lagerSeit = jetzt;
-  if (schiffe) doc.dockSeit = jetzt;
+  /* `dockSeit` wird um GENAU die abgeholten Perioden vorgerueckt, nicht auf jetzt gesetzt: Sonst
+     verfiele der angefangene Fortschritt - bis zu 23 Stunden bei jedem Abholen (Befund des Audits).
+     Der Rest wird dabei am DECKEL gemessen, nicht an der ganzen verstrichenen Zeit; sonst haette
+     ein lange nicht besuchtes Dock nach dem Abholen sofort wieder den vollen Stapel. */
+  if (schiffe) {
+    const stundenGesamt = Math.min(VP_DOCK_MAX * VP_DOCK_STUNDEN, (jetzt - vorpostenDockAb(doc)) / 3600000);
+    const restStunden = Math.max(0, stundenGesamt - schiffe * VP_DOCK_STUNDEN);
+    doc.dockSeit = jetzt - Math.round(restStunden * 3600000);
+  }
   vorpostenSchreib(doc);
   pushPendingReward(req.userId, Object.assign({ type: 'vorposten-lager', system: sys,
     name: vorpostenWerte(doc).name, zeit: jetzt,

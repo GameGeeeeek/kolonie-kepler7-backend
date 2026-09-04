@@ -17,7 +17,9 @@ const WURZEL = path.resolve(__dirname, '..');
 const PORT = 3259;
 const QUELLE = path.join(WURZEL, 'server_vpend_tmp.js');
 const SAB = process.env.KEPLER_VPEND_SABOTAGE || '';
-const MUSS_FALLEN = { schalter: ['1a'], sperrfeuer: ['2a'], plaetze: ['3a'], dockdeckel: ['4b'], dockseit: ['4d'] };
+/* GEMESSEN am 04.09.2026. `dockdeckel` reisst 4c mit, und das ist die Folge, nicht ein Nebenschaden:
+   Ohne Deckel liefert das Abholen 40 statt 7 Schiffe, und 4c prueft genau diese Zahl. */
+const MUSS_FALLEN = { schalter: ['1a'], sperrfeuer: ['2a'], plaetze: ['3a'], dockdeckel: ['4b', '4c'], dockseit: ['4d'] };
 
 let fail = false;
 const ergebnis = {};
@@ -120,7 +122,10 @@ const liesDoc = (sys) => JSON.parse(liesDb().shared['vorposten:' + sys]);
   if (SAB === 'sperrfeuer') basis = basis.replace("const sperrfeuer = (vorpostenWerte(doc).projektBoni || {}).verlust || 0;", 'const sperrfeuer = 0;');
   if (SAB === 'plaetze') basis = basis.replace('+ Math.round(ausProjekt) };', '};');
   if (SAB === 'dockdeckel') basis = basis.replace('Math.max(0, Math.min(VP_DOCK_MAX, Math.floor(stunden / VP_DOCK_STUNDEN)))', 'Math.max(0, Math.floor(stunden / VP_DOCK_STUNDEN))');
-  if (SAB === 'dockseit') basis = basis.replace('  if (schiffe) doc.dockSeit = jetzt;\n', '');
+  /* Die Sabotage muss den NEUEN Block treffen: Seit der Fortschritt uebertragen wird (statt
+     dockSeit auf jetzt zu setzen), gibt es die alte Zeile nicht mehr - die erste Fassung griff
+     ins Leere und sah dabei aus wie eine bestandene Gegenprobe. */
+  if (SAB === 'dockseit') basis = basis.replace(/  if \(schiffe\) \{\n(.*\n)*?  \}\n/, '');
   const an = basis.replace(/const VP_ENDPROJEKTE_AKTIV = (true|false);/, 'const VP_ENDPROJEKTE_AKTIV = true;');
   check('0b: der Endprojekt-Schalter liess sich in der Kopie umlegen', /const VP_ENDPROJEKTE_AKTIV = true;/.test(an),
     { gefunden: /const VP_ENDPROJEKTE_AKTIV = (true|false);/.test(roh) });
@@ -133,9 +138,13 @@ const liesDoc = (sys) => JSON.parse(liesDb().shared['vorposten:' + sys]);
   let s = await starteServer();
   let tokA = await s.anmelden('anna');
   const ausListe = ((await s.hole('/vorposten', tokA)).body.liste || []).find(v => v.sys === 'w8');
+  /* `projektMoeglich` ist eine Liste von SCHLUESSELN, keine Objekte (im Server nachgelesen). Der
+     erste Entwurf las `p.key`, bekam ueberall null - und bestand deshalb, ohne etwas zu belegen.
+     Ein falsches Gruen, aufgefallen erst daran, dass 1b mit derselben Lesart fiel. */
+  const ausMoeglich = ausListe.projektMoeglich || [];
   check('1a: ausgeschaltet steht auf der Endstufe KEIN Endprojekt zur Wahl',
-    !(ausListe.projektMoeglich || []).some(p => ['sternendock','sternenmarkt','sperrfeuer'].indexOf(p.key) >= 0),
-    { moeglich: (ausListe.projektMoeglich || []).map(p => p.key) });
+    ausMoeglich.length > 0 && !ausMoeglich.some(k => ['sternendock','sternenmarkt','sperrfeuer'].indexOf(k) >= 0),
+    { moeglich: ausMoeglich });
   await stoppeServer();
 
   // ---- 2) Mit umgelegtem Schalter: jeder Zweig genau seins --------------------------------------
@@ -148,7 +157,7 @@ const liesDoc = (sys) => JSON.parse(liesDb().shared['vorposten:' + sys]);
   s = await starteServer();
   tokA = await s.anmelden('anna');
   const liste = (await s.hole('/vorposten', tokA)).body.liste || [];
-  const moeglich = (sys) => ((liste.find(v => v.sys === sys) || {}).projektMoeglich || []).map(p => p.key);
+  const moeglich = (sys) => ((liste.find(v => v.sys === sys) || {}).projektMoeglich || []);
   check('1b: jeder Zweig bekommt GENAU sein Endprojekt angeboten, keines der anderen', (() => {
     const w = moeglich('w8'), h = moeglich('h8'), f = moeglich('f8');
     return w.includes('sternendock') && !w.includes('sternenmarkt') && !w.includes('sperrfeuer')

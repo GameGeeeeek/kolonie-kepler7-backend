@@ -670,3 +670,48 @@ Entscheidung sind, welchen Zweig man auf der Endstufe hält. Er gattert **beides
 nicht wirkt, bevor das Frontend es erklären kann.
 
 Wächter: `tests/test_vorposten_endprojekte_http.js` (Port 3259).
+
+## Sieben Befunde aus dem Audit der Etappen V4–V6 (04.09.2026)
+
+Vor dem Merge haben sechs unabhängige Prüfer die noch nicht ausgelieferten Etappen durchgesehen.
+Zwei kamen durch (Rechte, Datenkonsistenz), vier scheiterten an einem Kontingent — und schon diese
+zwei fanden **sieben echte Fehler**. Alle sind behoben.
+
+1. **Das Rohdokument war für jeden lesbar.** `checkVorpostenKeyPermission` sperrte nur das
+   Schreiben, mit der Begründung, im Dokument stehe nichts Schützenswertes. Das stimmte einmal.
+   Inzwischen enthält es `anflug` (das `vorpostenFuerClient` ausdrücklich **nur** dem Besitzer
+   schickt, weil es den Plan eines Dritten verrät), seit V5 `garnisonVon`, dazu `beitraege` und
+   `schlaege`. Ein einziger `GET /api/storage/vorposten:<sys>` hebelte jede dieser Entscheidungen
+   aus. **Lesen ist jetzt ebenfalls zu** — gemessen, dass weder Frontend noch Test das je roh liest.
+2. **`/stationieren` gab die volle Garnisonszusammensetzung heraus**, auch an einen Verbündeten.
+   Ein einziges stationiertes Schiff genügte, um die Flottenaufstellung eines Fremden zu lesen — und
+   die Allianz-Mitgliedschaft dafür kann sich im geteilten Speicher jeder selbst geben (siehe unten).
+   Die Antwort zeigt jetzt dem Nicht-Besitzer nur seinen eigenen Anteil und die Summen.
+3. **Der Rückruf hing an der aktuellen Mitgliedschaft.** Wer die Allianz verließ oder hinausgeworfen
+   wurde, kam nie wieder an seine Schiffe — sie wären im Vorposten eines Fremden gefangen gewesen,
+   ohne dass irgendetwas es gesagt hätte. Er hängt jetzt am **Beitrag**.
+4. **Das Sternendock hing am falschen Schalter.** Mit `VP_ENDPROJEKTE_AKTIV` an und
+   `VP_LAGER_AKTIV` aus hätte es Kreuzer produziert, die niemand abholen kann. Der Griff bedient
+   beides und prüft beide Schalter.
+5. **Jedes Abholen löschte den angefangenen Baufortschritt** des Docks — bis zu 23 Stunden.
+   `dockSeit` rückt jetzt um genau die abgeholten Perioden vor, und der Rest wird am **Deckel**
+   gemessen, damit ein lange nicht besuchtes Dock nicht sofort wieder voll ist.
+6. **Der Ausbau bewertete das Lager rückwirkend zum neuen Satz.** Es wird jetzt abgerechnet, *bevor*
+   die Stufe steigt — nichts geht verloren, die neue Stufe fängt bei null an.
+7. **`allianceTagOf` durchsuchte `db.shared` zweimal je fremdem Vorposten**, also bei jedem
+   `GET /api/vorposten` einmal je Listeneintrag. Auf dem Pi ist das der Unterschied zwischen einer
+   Antwort und einer Pause. Die Zuordnung wird jetzt **einmal** gebaut und durchgereicht.
+
+Dazu ein achter, den erst der V6-Wächter fand: **`vpProjektBoni` prüfte die Ausrichtung nicht.**
+Starten kann man ein zweiggebundenes Projekt nur an seinem Zweig, aber die *Wirkung* hing allein am
+fertigen Eintrag — spätestens mit der Umrüstung (V8, die den Zweig neu wählen lässt) hätte ein als
+Werft gebautes Sternendock an einer Festung weitergeliefert.
+
+### Was daran offen bleibt
+
+Die Rolle `member` darf sich im geteilten Speicher **jeder für sich selbst schreiben** — davor
+stehen nur die Rauswurf-Sperrfrist und das Mitgliederlimit, keine Zustimmung. Das ist eine
+bestehende Eigenschaft des Allianz-Systems, nicht von V5, und ihre Änderung wäre eine eigene
+Produktentscheidung. V5 ist deshalb so gebaut, dass sie nichts hergibt: Beisteuern schadet niemandem,
+zurückgerufen wird nur der eigene Beitrag, und die Zusammensetzung sieht seit Befund 2 nur der
+Besitzer.

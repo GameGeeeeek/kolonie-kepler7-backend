@@ -5246,7 +5246,12 @@ app.get('/api/health', (req, res) => res.json({
   // Der Zugriff auf die weiter unten definierte Konstante ist unkritisch: Dieser Rumpf laeuft
   // erst zur Anfragezeit, also lange nach der Modulauswertung (anders als ein Array-Literal, das
   // beim LADEN ausgewertet wird - die Falle, die den Serverstart schon einmal gekostet hat).
-  selbstNeustart: DEPLOY_SELBST_NEUSTART
+  selbstNeustart: DEPLOY_SELBST_NEUSTART,
+  // Selbstpruefung der KI-Kampfberichte (04.09.2026): erreicht dieser Server AI Core auf dem M715q,
+  // laeuft dort Ollama, ist das Modell da, passt der Schluessel? Beantwortet die drei Vorbedingungen
+  // der Etappe E1b von aussen - vorher waren das drei SSH-Befehle. Nennt weder Adresse noch
+  // Schluessel, nur Befunde und Laengen (Definition am Dateiende).
+  kampftext: kampftextHealth()
 }));
 
 // --- Andere Spieler in einem Sternensystem (für die Sektorkarte) ---
@@ -17412,22 +17417,29 @@ function kampftextMaengel(text, daten) {
 // --- Der Aufruf bei AI Core ------------------------------------------------------------------
 // Ueber den Kern, nicht ueber fetch (siehe Punkt 2 im Kopf). `require` steht bewusst hier drin
 // und nicht oben: ein Kernmodul kostet nichts, und der Kopf der Datei bleibt unberuehrt.
-function kampftextAnfrage(prompt) {
+// EIN Transport fuer alle Wege zu AI Core - den Textauftrag (/ai/chat) und die Selbstpruefung am
+// Ende dieses Blocks (/health, /ai/embed). Ein zweiter Client daneben waere genau die
+// Vervielfachung, die Social Hub bis PR #12 vier Fassungen derselben Timeout-Logik eingebracht hat.
+// `koerperObj === null` heisst: kein Rumpf (GET). Der Schluessel geht nur mit, wenn `mitSchluessel`
+// gesetzt ist UND einer da ist - /health von AI Core braucht keinen, und ein leerer Bearer-Header
+// waere ein dritter Befund ("Praefix ohne Wert"), der die zwei echten nur verwischt.
+function kampftextHttp(methode, pfad, koerperObj, timeoutMs, mitSchluessel) {
   return new Promise((resolve, reject) => {
     let ziel;
-    try { ziel = new URL(KAMPFTEXT_AI_CORE_URL + '/ai/chat'); }
+    try { ziel = new URL(KAMPFTEXT_AI_CORE_URL + pfad); }
     catch (e) { return reject(new Error('AI_CORE_URL ist keine gueltige Adresse: ' + KAMPFTEXT_AI_CORE_URL)); }
     const mod = require(ziel.protocol === 'https:' ? 'https' : 'http');
-    const koerper = JSON.stringify({ prompt, model: KAMPFTEXT_MODELL, temperature: 0.7, num_predict: 400 });
-    const kopf = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(koerper) };
-    if (KAMPFTEXT_AI_CORE_KEY) kopf['Authorization'] = 'Bearer ' + KAMPFTEXT_AI_CORE_KEY;
+    const koerper = koerperObj === null ? '' : JSON.stringify(koerperObj);
+    const kopf = {};
+    if (koerperObj !== null) { kopf['Content-Type'] = 'application/json'; kopf['Content-Length'] = Buffer.byteLength(koerper); }
+    if (mitSchluessel && KAMPFTEXT_AI_CORE_KEY) kopf['Authorization'] = 'Bearer ' + KAMPFTEXT_AI_CORE_KEY;
     const anfrage = mod.request({
       hostname: ziel.hostname,
       port: ziel.port || (ziel.protocol === 'https:' ? 443 : 80),
       path: ziel.pathname,
-      method: 'POST',
+      method: methode,
       headers: kopf,
-      timeout: KAMPFTEXT_TIMEOUT_MS,
+      timeout: timeoutMs,
     }, (antwort) => {
       let roh = '';
       antwort.setEncoding('utf8');
@@ -17437,21 +17449,23 @@ function kampftextAnfrage(prompt) {
         // unbegrenzt wachsende Zeichenkette im Speicher ist nie eine gute Idee.
         if (roh.length > 200000) anfrage.destroy(new Error('AI Core lieferte eine unplausibel grosse Antwort'));
       });
-      antwort.on('end', () => {
-        if (antwort.statusCode !== 200) {
-          return reject(new Error('AI Core antwortete HTTP ' + antwort.statusCode + ': ' + roh.slice(0, 200)));
-        }
-        let text;
-        try { text = String(JSON.parse(roh).response || '').trim(); }
-        catch (e) { return reject(new Error('AI Core lieferte kein JSON: ' + roh.slice(0, 200))); }
-        resolve(text);
-      });
+      antwort.on('end', () => resolve({ status: antwort.statusCode, roh }));
     });
-    anfrage.on('timeout', () => anfrage.destroy(new Error('AI Core antwortete nicht in ' + Math.round(KAMPFTEXT_TIMEOUT_MS / 1000) + 's')));
+    anfrage.on('timeout', () => anfrage.destroy(new Error('AI Core antwortete nicht in ' + Math.round(timeoutMs / 1000) + 's')));
     anfrage.on('error', reject);
-    anfrage.write(koerper);
+    if (koerper) anfrage.write(koerper);
     anfrage.end();
   });
+}
+
+async function kampftextAnfrage(prompt) {
+  const { status, roh } = await kampftextHttp('POST', '/ai/chat',
+    { prompt, model: KAMPFTEXT_MODELL, temperature: 0.7, num_predict: 400 }, KAMPFTEXT_TIMEOUT_MS, true);
+  if (status !== 200) throw new Error('AI Core antwortete HTTP ' + status + ': ' + roh.slice(0, 200));
+  let text;
+  try { text = String(JSON.parse(roh).response || '').trim(); }
+  catch (e) { throw new Error('AI Core lieferte kein JSON: ' + roh.slice(0, 200)); }
+  return text;
 }
 
 // --- Warteschlange: EIN Auftrag gleichzeitig Richtung M715q ----------------------------------
@@ -17554,3 +17568,103 @@ app.get('/api/kampfbericht/text/:id', authMiddleware, (req, res) => {
   if (eintrag.status === 'fertig') return res.json({ status: 'fertig', text: eintrag.text });
   res.json({ status: eintrag.status, grund: eintrag.grund || '' });
 });
+
+// --- Selbstpruefung: erreicht dieser Server AI Core, und passt der Schluessel? ------------------
+// (04.09.2026) Die drei Vorbedingungen der Etappe E1b - Adresse, Schluessel, Erreichbarkeit aus
+// dem Container heraus - standen als drei SSH-Befehle fuer Sascha in der Roadmap. Der Server kann
+// sie selbst messen und tut das jetzt: beim Start und alle zehn Minuten, gemeldet in /api/health
+// unter `kampftext`. Damit ist "kann der Pi den M715q erreichen?" von aussen ohne Anmeldung zu
+// beantworten - dasselbe Prinzip wie `commit`/`checkout`/`blob`/`offsiteAlterMin`. Sie laeuft
+// UNABHAENGIG von KAMPFTEXT_AKTIV: Gemessen wird, BEVOR der Schalter umgelegt wird, nicht danach.
+//
+// Drei Dinge, die man kennen muss:
+// 1. /health ist der einzige Endpunkt von AI Core ohne Auth. Er beantwortet "erreichbar?",
+//    "Ollama online?" und "ist das Modell da?" - aber nicht "stimmt der Schluessel?".
+// 2. Den Schluessel prueft /ai/embed: billig (kein Textmodell), von AI Core bewusst ungedrosselt
+//    (der Ingest-Lauf haengt daran), und AI Core prueft den Schluessel VOR jedem Ollama-Aufruf.
+//    401 heisst deshalb eindeutig "falsch" - auch wenn Ollama gerade nicht laeuft; jede andere
+//    Antwort heisst "angenommen". Nie /ai/chat: eine Pruefung, die 70 s Textgenerierung kostet,
+//    waere selbst die Last, vor der der Tagesdeckel schuetzt.
+// 3. Fehlt der Schluessel hier (0 Zeichen), wird gar nicht erst gefragt: "fehlt" und "falsch" sind
+//    zwei Befunde (AI-Core-Lektion 7), und die LAENGE steht dabei - nie der Wert. 65 statt 64 ist
+//    das Leerzeichen hinter dem "=" (derselbe Vorfall).
+// Gemeldet werden weder Adresse noch Schluessel: nur Ja/Nein, Laengen und die Fehlermeldung.
+// Der Takt ist per Umgebung stellbar, damit ein Test die WIEDERHOLUNG messen kann - eine Messung,
+// die nach dem Start nie mehr nachschaut, wuerde "erreichbar" melden, lange nachdem es das nicht
+// mehr ist. Untergrenze eine Sekunde: darunter wuerde die Pruefung sich selbst ueberholen.
+const KAMPFTEXT_PRUEF_TAKT_MS = Math.max(1000, Number(process.env.KAMPFTEXT_PRUEF_TAKT_MS) || 10 * 60 * 1000);
+let kampftextPruefstand = null;   // null = noch nie gemessen (die erste Sekunde nach dem Start)
+
+// Node-Systemfehler tragen die Zieladresse im Text ("connect ECONNREFUSED 192.168.178.45:8000").
+// Der Code allein ist die Diagnose (ECONNREFUSED: nichts hoert auf dem Port; EHOSTUNREACH: kein
+// Weg zur Maschine; ETIMEDOUT: keine Antwort) - und er nennt keine Adresse, die /api/health dann
+// oeffentlich machen wuerde.
+function kampftextFehlerKurz(e) {
+  if (e && e.code) return String(e.code);
+  return String((e && e.message) || e).slice(0, 200);
+}
+
+function kampftextFehlertext(roh) {
+  try { const j = JSON.parse(roh); return String(j.detail || j.error || roh).slice(0, 160); }
+  catch (e) { return String(roh || '').slice(0, 160); }
+}
+
+async function kampftextPruefe() {
+  const stand = {
+    gemessen: Date.now(),
+    // null heisst "nicht messbar" (AI Core nicht erreichbar), false heisst "gemessen: nein".
+    aiCore: { erreichbar: false, ollamaOnline: null, modellVorhanden: null, fehler: '' },
+    schluessel: { zeichen: KAMPFTEXT_AI_CORE_KEY.length, befund: 'ungeprueft', hinweis: '' }
+  };
+  try {
+    const { status, roh } = await kampftextHttp('GET', '/health', null, 5000, false);
+    if (status !== 200) throw new Error('AI Core /health antwortete HTTP ' + status);
+    // Eigene Meldung statt der von JSON.parse: V8 haengt dort ein Stueck der Eingabe an, und die
+    // stuende dann in einer oeffentlichen Antwort.
+    let body;
+    try { body = JSON.parse(roh); } catch (e) { throw new Error('AI Core /health lieferte kein JSON'); }
+    stand.aiCore.erreichbar = true;
+    stand.aiCore.ollamaOnline = body.ollama_online === true;
+    const modelle = Array.isArray(body.models) ? body.models.map(String) : [];
+    stand.aiCore.modellVorhanden = modelle.indexOf(KAMPFTEXT_MODELL) >= 0;
+  } catch (e) {
+    stand.aiCore.fehler = kampftextFehlerKurz(e);
+  }
+  if (!stand.schluessel.zeichen) {
+    stand.schluessel.befund = 'fehlt';
+  } else if (stand.aiCore.erreichbar) {
+    try {
+      const { status, roh } = await kampftextHttp('POST', '/ai/embed', { input: 'Kolonie Kepler-7 Selbstpruefung' }, 15000, true);
+      if (status === 401) { stand.schluessel.befund = 'falsch'; stand.schluessel.hinweis = kampftextFehlertext(roh); }
+      else if (status === 503) { stand.schluessel.befund = 'unklar'; stand.schluessel.hinweis = 'AI Core selbst meldet: ' + kampftextFehlertext(roh); }
+      else { stand.schluessel.befund = 'passt'; if (status !== 200) stand.schluessel.hinweis = 'angenommen, aber HTTP ' + status + ': ' + kampftextFehlertext(roh); }
+    } catch (e) {
+      stand.schluessel.befund = 'unklar';
+      stand.schluessel.hinweis = kampftextFehlerKurz(e);
+    }
+  }
+  const vorher = kampftextPruefstand;
+  kampftextPruefstand = stand;
+  // Ein Logeintrag nur bei Aenderung - ein Dauerzustand im Zehn-Minuten-Takt waere Rauschen im
+  // Containerlog, und genau darin gehen Meldungen unter (Deploy-Historie).
+  if (!vorher || vorher.aiCore.erreichbar !== stand.aiCore.erreichbar || vorher.schluessel.befund !== stand.schluessel.befund) {
+    console.log('[kampftext] Selbstpruefung: AI Core ' +
+      (stand.aiCore.erreichbar ? 'erreichbar' : 'NICHT erreichbar (' + stand.aiCore.fehler + ')') +
+      ', Schluessel ' + stand.schluessel.befund + ' (' + stand.schluessel.zeichen + ' Zeichen)' +
+      (stand.schluessel.hinweis ? ' - ' + stand.schluessel.hinweis : ''));
+  }
+}
+
+function kampftextHealth() {
+  const s = kampftextPruefstand;
+  return {
+    aktiv: KAMPFTEXT_AKTIV,
+    modell: KAMPFTEXT_MODELL,
+    gemessenVorSek: s ? Math.round((Date.now() - s.gemessen) / 1000) : null,
+    aiCore: s ? s.aiCore : null,
+    schluessel: s ? s.schluessel : { zeichen: KAMPFTEXT_AI_CORE_KEY.length, befund: 'ungeprueft', hinweis: '' }
+  };
+}
+// Startlauf in setImmediate (Todeszone, siehe tests/test_serverstart.js), Wiederholung im Takt.
+setImmediate(takt('kampftextPruefung-start', kampftextPruefe));
+setInterval(takt('kampftextPruefung', kampftextPruefe), KAMPFTEXT_PRUEF_TAKT_MS);

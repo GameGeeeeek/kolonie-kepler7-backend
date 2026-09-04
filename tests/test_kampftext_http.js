@@ -36,7 +36,9 @@
 // ebenfalls nur die Stufe), 14k (misst, dass der npc-Text unveraendert ist), 15a (der Kampf
 // selbst) und 13e (ein alter Server bestellt nie). Ohne die Verallgemeinerung der
 // Schiffsnamen-Sperre (nur eigene/verlorene Schiffe) fallen genau 15g und 15h - der Angreifer-Text
-// nennt die Waechter der Gegenseite und wird verworfen. Abschnitt 17 (Codex-Befund an #237, zwei
+// nennt die Waechter der Gegenseite und wird verworfen. Nach der ersten E2-Messung (AI Core #43,
+// Listen heissen Schiffstypen, verluste als Datum, Regel gegen Stueckzahlen als Wort): am alten
+// Datenblock fallen genau 14e2 und 15d2. Abschnitt 17 (Codex-Befund an #237, zwei
 // Texte oder keiner auch am Rand des Gesamtdeckels): ohne die Vorpruefung beider Plaetze in
 // kampftextPvpBestellen fallen genau 17a, 17b und 17c. BEFUND aus 14m: Die Sperre fand
 // "Mondzerstoerer" (oe) nicht, weil sie nur die Umlaut-Schreibweise suchte - seit E2 wird auch der
@@ -571,6 +573,10 @@ const KAMPF = {
       JSON.stringify(zahlenImBlock(pw)) === '["6"]', { zahlen: zahlenImBlock(pw) });
     check('14e: keine der E0-Groessen steht im Prompt',
       ['attackPower', 'defensePower', 'bossHpNachher', 'chancePct', '388120', '2400000'].every(f => pw.indexOf(f) < 0));
+    // Nach der ersten Messung (AI Core #43): Listen heissen Schiffstypen, die Regel sagt es dazu.
+    check('14e2: die Listen heissen Schiffstypen, und die Regeln verbieten Stueckzahlen auch als Wort',
+      pw.indexOf('"eigene_schiffstypen"') >= 0 && pw.indexOf('"verlorene_schiffstypen"') >= 0 && pw.indexOf('"eigene_schiffe"') < 0 &&
+      /SCHIFFSTYPEN, keine Stueckzahlen/.test(pw) && /auch nicht als Wort/.test(pw), { anfang: pw.slice(pw.indexOf('STRIKTE'), pw.indexOf('STRIKTE') + 80) });
 
     // Festung: nur der FALL bekommt einen Text - die Regel ist eine Sperre, keine Client-Konvention.
     const festung = { art: 'festung', stufeName: 'Sternenfeste', systemName: 'Chronos', stufe: 3, gefallen: false,
@@ -669,6 +675,8 @@ const KAMPF = {
     check('15d: beide tragen beide Namen, das Ziel und BEIDE Flotten mit deutschen Namen',
       [pa, pv].every(p => p.indexOf('"angreifer": "gerd"') >= 0 && p.indexOf('"verteidiger": "hanna"') >= 0 &&
         p.indexOf('"ziel": "Heimatwelt"') >= 0 && p.indexOf('Kreuzer') >= 0 && p.indexOf('Bomber') >= 0 && p.indexOf('Wächter') >= 0));
+    check('15d2: die Flotten heissen Schiffstypen, und die Verluste stehen als Datum "nicht bekannt" (erste Messung: ein Verteidiger-Text erfand sie)',
+      [pa, pv].every(p => p.indexOf('"schiffstypen_angreifer"') >= 0 && p.indexOf('"schiffstypen_verteidiger"') >= 0 && p.indexOf('"verluste": "nicht bekannt"') >= 0));
     check('15e: der Ausgang passt je Sicht zum Ergebnis des Servers',
       gewonnen ? (/Sieg, die Verteidigung wurde durchbrochen/.test(pa) && /durchbrochen, der Angreifer kam durch/.test(pv) && /ja, Rohstoffe erbeutet/.test(pa))
                : (/Niederlage, die Verteidigung hielt stand/.test(pa) && /Angriff abgewehrt/.test(pv) && /nein, keine Beute/.test(pa)),

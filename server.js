@@ -17450,14 +17450,21 @@ function kampftextVerband(roh) {
 // Text ist dort zwangslaeufig eine Erfindung. Jede Zeichenkette laeuft durch dieselbe Whitelist
 // wie der Gegnername (Punkt 3 im Kopf): Namen von Weltboss, Festung, System, Volk und die zwei
 // Spielernamen sind die einzigen Zeichenketten, die den Prompt erreichen.
+// ERSTE MESSUNG (04.09.2026, AI Core #43): Acht von acht Texten kamen durch die Sperren, alle
+// Fakten richtig - und sieben von acht nannten erfundene Stueckzahlen als Wort ("ein Schlachtschiff,
+// ein Waechter und ein Quantenkreuzer" fuer 30/80/12). Ursache im Datenblock: Eine Liste
+// "eigene_schiffe: [Bomber, Kreuzer]" liest das Modell als ZWEI Schiffe. Deshalb heissen die Listen
+// "..._schiffstypen", die Regeln sagen es dazu, und der Spielerkampf traegt "verluste: nicht
+// bekannt" als Feld (ein Verteidiger-Text hatte Verluste erfunden). npc/E1 bleibt bei seinen
+// gemessenen Feldnamen - der Paritaetstest des Frontends haelt sie fest.
 function kampftextDatenFuer(art, roh) {
   roh = roh || {};
   if (art === 'weltboss') {
     return {
       weltboss: kampftextGegnerName(roh.npcName),
       ausgang: roh.bossZerstoert ? 'Der Weltboss ist vernichtet' : 'Der Weltboss steht noch, der Schlag hat ihn nur geschwaecht',
-      eigene_schiffe: kampftextSchiffsliste(roh.fleet),
-      verlorene_schiffe: kampftextSchiffsliste(roh.ownLostShips),
+      eigene_schiffstypen: kampftextSchiffsliste(roh.fleet),
+      verlorene_schiffstypen: kampftextSchiffsliste(roh.ownLostShips),
     };
   }
   if (art === 'festung') {
@@ -17466,8 +17473,8 @@ function kampftextDatenFuer(art, roh) {
       system: kampftextGegnerName(roh.systemName),
       ausgang: roh.gefallen ? 'Die Festung ist gefallen' : 'Die Festung steht noch',
       im_verband: kampftextVerband(roh),
-      eigene_schiffe: kampftextSchiffsliste(roh.fleet),
-      verlorene_schiffe: kampftextSchiffsliste(roh.eigeneVerluste),
+      eigene_schiffstypen: kampftextSchiffsliste(roh.fleet),
+      verlorene_schiffstypen: kampftextSchiffsliste(roh.eigeneVerluste),
     };
   }
   if (art === 'koenigin') {
@@ -17476,8 +17483,8 @@ function kampftextDatenFuer(art, roh) {
       system: kampftextGegnerName(roh.systemName),
       ausgang: roh.schwarmGefallen ? 'Die Koenigin ist gefallen, ihr ganzer Schwarm zerfaellt' : 'Die Koenigin lebt noch',
       im_verband: kampftextVerband(roh),
-      eigene_schiffe: kampftextSchiffsliste(roh.fleet),
-      verlorene_schiffe: kampftextSchiffsliste(roh.eigeneVerluste),
+      eigene_schiffstypen: kampftextSchiffsliste(roh.fleet),
+      verlorene_schiffstypen: kampftextSchiffsliste(roh.eigeneVerluste),
     };
   }
   if (art === 'pvp-angriff' || art === 'pvp-verteidigung') {
@@ -17492,8 +17499,9 @@ function kampftextDatenFuer(art, roh) {
         ? (gewonnen ? 'Sieg, die Verteidigung wurde durchbrochen' : 'Niederlage, die Verteidigung hielt stand')
         : (gewonnen ? 'Die Verteidigung wurde durchbrochen, der Angreifer kam durch' : 'Angriff abgewehrt, die Verteidigung hielt stand'),
       beute: (gewonnen && roh.stolen && Object.keys(roh.stolen).length) ? 'ja, Rohstoffe erbeutet' : 'nein, keine Beute',
-      schiffe_angreifer: kampftextSchiffsliste(roh.fleet),
-      schiffe_verteidiger: kampftextSchiffsliste(roh.defenderFleet),
+      verluste: 'nicht bekannt',
+      schiffstypen_angreifer: kampftextSchiffsliste(roh.fleet),
+      schiffstypen_verteidiger: kampftextSchiffsliste(roh.defenderFleet),
     };
   }
   return null;
@@ -17506,14 +17514,14 @@ function kampftextUnvollstaendig(art, daten, roh) {
   roh = roh || {};
   if (!daten) return 'Unbekannte Kampfart.';
   if (art === 'npc') return (!daten.gegner || !daten.eigene_schiffe.length) ? 'Kampfdaten unvollstaendig (Gegner und mindestens ein eigenes Schiff noetig).' : '';
-  if (art === 'weltboss') return (!daten.weltboss || !daten.eigene_schiffe.length) ? 'Kampfdaten unvollstaendig (Weltboss und mindestens ein eigenes Schiff noetig).' : '';
+  if (art === 'weltboss') return (!daten.weltboss || !daten.eigene_schiffstypen.length) ? 'Kampfdaten unvollstaendig (Weltboss und mindestens ein eigenes Schiff noetig).' : '';
   if (art === 'festung') {
     if (!roh.gefallen) return 'Nur der Fall einer Festung bekommt einen Text.';
-    return (!daten.festung || !daten.system || !daten.eigene_schiffe.length) ? 'Kampfdaten unvollstaendig (Festung, System und mindestens ein eigenes Schiff noetig).' : '';
+    return (!daten.festung || !daten.system || !daten.eigene_schiffstypen.length) ? 'Kampfdaten unvollstaendig (Festung, System und mindestens ein eigenes Schiff noetig).' : '';
   }
   if (art === 'koenigin') {
     if (!roh.schwarmGefallen) return 'Nur der Fall einer Koenigin bekommt einen Text.';
-    return (!daten.volk || !daten.system || !daten.eigene_schiffe.length) ? 'Kampfdaten unvollstaendig (Volk, System und mindestens ein eigenes Schiff noetig).' : '';
+    return (!daten.volk || !daten.system || !daten.eigene_schiffstypen.length) ? 'Kampfdaten unvollstaendig (Volk, System und mindestens ein eigenes Schiff noetig).' : '';
   }
   return 'Diese Kampfart bestellt der Server selbst.';
 }
@@ -17563,7 +17571,9 @@ const KAMPFTEXT_E2_REGELN =
   'STRIKTE REGELN: Nutze ausschliesslich die untenstehenden Daten. Nenne KEINE Zahlen und KEINE ' +
   'Zeitangaben - die genauen Werte stehen im Bericht daneben, dein Text erzaehlt nur. Erfinde ' +
   'keine Schiffsnamen, keine Orte, keine Mechaniken und keine Verluste, die nicht in den Daten ' +
-  'stehen. Du entscheidest nichts - du beschreibst nur, was geschehen ist.\n\n' +
+  'stehen. Die Listen nennen SCHIFFSTYPEN, keine Stueckzahlen - nenne keine Anzahl, auch nicht ' +
+  'als Wort (kein \'ein Kreuzer\', kein \'drei Bomber\'). Du entscheidest nichts - du beschreibst nur, ' +
+  'was geschehen ist.\n\n' +
   'KAMPFDATEN:\n';
 function kampftextPromptFuer(art, daten) {
   if (!KAMPFTEXT_EINLEITUNGEN[art]) return kampftextPrompt(daten);

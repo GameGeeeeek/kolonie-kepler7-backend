@@ -262,6 +262,16 @@ Anweisungstext ab „Du bist der Bordschreiber". Deshalb steht die Weiche in `ka
 dem `return {`, die E2-Datenblöcke stehen hinter `kampftextDatenText`, und die E2-Einleitungen
 hinter `kampftextPrompt`. Wer das umsortiert, fällt dort.
 
+### Nach der ersten Messung (04.09.2026, AI Core #43)
+
+Acht von acht Texten kamen durch die Sperren, alle Fakten stimmten – und **sieben von acht nannten
+erfundene Stückzahlen als Wort** („ein Schlachtschiff, ein Wächter und ein Quantenkreuzer" für
+30/80/12). Die Ursache saß im Datenblock: Eine Liste `eigene_schiffe: [Bomber, Kreuzer]` liest das
+Modell als zwei Schiffe. Deshalb heißen die E2-Listen seither `…_schiffstypen`, die Regeln verbieten
+Stückzahlen ausdrücklich auch als Wort, und der Spielerkampf trägt `verluste: nicht bekannt` als
+Feld (ein Verteidiger-Text hatte Verluste erfunden). `npc` bleibt bei den fünf gemessenen
+Feldnamen. Wächter 14e2 und 15d2; ob die Änderung reicht, sagt die zweite Messung.
+
 ### Der Schalter `KAMPFTEXT_E2_AKTIV`
 
 Grundstellung **aus**, wie `FESTUNG_SPAWN_AKTIV` vor seiner Etappe: Die Roadmap verlangt, jede neue

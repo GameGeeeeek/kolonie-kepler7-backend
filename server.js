@@ -4058,6 +4058,41 @@ function rawFleetPower(f, ssAtkMult, t2AtkMult, marks) {
 // Punktwerte, damit ein PvP-Angriff und der Bestenlisten-Score sie nicht stillschweigend mit 0
 // bewerten - genau der Fallstrick, an dem SHIP_SCORE_WEIGHTS hier schon dreimal veraltet ist.
 const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5, leerenjaeger:1.1, kometenjaeger:0.6, enterschiff:1.6, phantomschiff:0.3, riftwaechter:0.8, hyperjaeger:0.6, hyperbomber:0.9, metamaterialtitan:2.0, singularitaetsvernichter:1.6, kausalitaetsbrecher:1.8, urmateriekoloss:1.8, paktkorvette:0.7, bundeskreuzer:1.7, sternenbanner:1.5 };
+/* SIGNATUR - wie schwer ein Rumpf zu verbergen ist. Spiegel von SHIP_DEFS[].signatur im Frontend
+   (dort eingefuehrt 03.09.2026, v8.660.0). Er kam BEWUSST erst mit Etappe 2 hierher: In Etappe 1
+   las serverseitig nichts die Signatur, ein Spiegel waere toter Code gewesen. Jetzt liest ihn die
+   Anflug-Meldung, und damit ist er noetig.
+
+   ALLE 46 Klassen, nicht nur die 26 Kampfklassen aus SHIP_ATK_VALUES darunter: Ein Angriffsverband
+   nimmt Frachter mit, und ausgerechnet die Bergungsschiffe tragen hohe Werte (600/700) - ein
+   Spiegel nur der Kampfschiffe wuerde die auffaelligsten Rumpfe uebersehen. Das Superschlachtschiff
+   steht wie ueberall in keiner Frontend-Liste und traegt seinen Wert dort in einem eigenen Zweig;
+   hier steht es ganz normal mit drin.
+   Die Vollstaendigkeit haelt test_paritaet_tabellen im Frontend-Repo - Schluesselmengen UND Werte,
+   nicht nur eine Schwelle. */
+const SHIP_SIGNATUR = {
+  spionageschiff:2, spaeher:3, jaeger:10, lotsenboot:10, ships:10, bomber:15, kometenjaeger:15,
+  recycler:15, frachter:20, hyperjaeger:20, phantomschiff:20, presslufthai:20, schuerfschiff:20,
+  forscher:30, gesandtenschiff:30, ankerwerfer:45, echoschnitter:45, nullkiel:45, paktkorvette:45,
+  riftwaechter:45, cruisers:60, kessel:60, bannschiff:80, destroyers:80, nanoklinge:80, waechter:80,
+  enterschiff:100, hyperbomber:100, leerenjaeger:150, colonyShips:180, frachtergross:180, carrier:240,
+  bergungsfrachter:600, quantenkreuzer:600, schlachtschiff:600, bergungskran:700, bundeskreuzer:700,
+  fusionsdreadnought:700, grundgaenger:700, metamaterialtitan:800, sternenbanner:800,
+  superschlachtschiff:800, singularitaetsvernichter:900, urmateriekoloss:900,
+  kausalitaetsbrecher:1000, mondzerstoerer:1000
+};
+/* Ein Verband ist so sichtbar wie sein SICHTBARSTES Schiff - MAXIMUM, nicht Summe und nicht
+   Mittelwert, exakt wie fleetSignatur() im Frontend. Summe waere kaputt (500 Jaeger sichtbarer als
+   ein Schlachtschiff), Mittelwert auch (ein Schlachtschiff hinter genug Jaegern verstecken). */
+function fleetSignaturServer(fleet){
+  let hoechste = 0;
+  for (const k of Object.keys(fleet || {})){
+    if (!((fleet[k] || 0) > 0)) continue;
+    const s = SHIP_SIGNATUR[k] || 0;
+    if (s > hoechste) hoechste = s;
+  }
+  return hoechste;
+}
 const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130, metamaterialtitan:150, singularitaetsvernichter:280, kausalitaetsbrecher:340, urmateriekoloss:250, paktkorvette:40, bundeskreuzer:110, sternenbanner:240 };
 // marks (31.07.2026): derselbe atk-Markenfaktor wie in rawFleetPower - es ist derselbe
 // Angriffswert, hier nur mit defWeight verrechnet.

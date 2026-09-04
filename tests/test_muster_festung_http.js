@@ -46,7 +46,7 @@ const SAB = process.env.KEPLER_MF_SABOTAGE || '';
    Liste nannte je nur eine Pruefung - eine Pflichtliste ist selbst eine Behauptung, bis die
    Gegenprobe sie gemessen hat. */
 const MUSS_FALLEN = { rechte: ['2c'], gewicht: ['4c', '4d'], claim: ['5a', '5b'],
-  notaus: ['9a', '9b', '9c'], sammelzeiten: ['8f'] };
+  notaus: ['9a', '9b', '9c'] };
 
 let fail = false;
 const ergebnis = {};
@@ -203,8 +203,6 @@ function festung(opt) {
        Einzelrouten - deshalb ist sie mit dem Zeilenumbruch eindeutig. `0-sabotage` belegt das. */
     notaus: ["if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });\n",
              "\n"],
-    sammelzeiten: ["ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT.includes(gatherSeconds)",
-                   "ALLIANCE_MUSTER_DURATIONS.includes(gatherSeconds)"]
   };
   if (SAB) {
     const paar = sab[SAB];
@@ -433,11 +431,12 @@ function festung(opt) {
   s = await starteServer(true);
   {
     const tokA7 = await s.anmelden('anna');
-    /* 8d NIMMT 90 MINUTEN, NICHT MEHR 120 (Durchsicht 04.09.2026). Die erste Fassung testete
-       genau die zwei Stunden - und die sind seit der Uebergangsmenge
-       ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT wieder erlaubt, solange das alte Frontend live ist.
-       Die Pruefung waere damit still gruen geblieben, obwohl sie das Gegenteil belegt haette.
-       90 Minuten stehen in KEINER der beiden Listen und messen deshalb weiter die Regel. */
+    /* 8d NIMMT 90 MINUTEN, NICHT 120 (Durchsicht 04.09.2026). Die erste Fassung testete genau
+       die zwei Stunden - und die waren waehrend der Uebergangsmenge voruebergehend wieder
+       erlaubt. Die Pruefung waere damit still gruen geblieben, obwohl sie das Gegenteil belegt
+       haette. 90 Minuten standen in KEINER der Listen, weder damals noch heute, und messen die
+       Regel deshalb UNABHAENGIG davon, welche Werte gerade gelten. Genau darin liegt der Wert:
+       Ein Grenzfall, der an keiner Auslieferung haengt, ueberlebt jede Aenderung der Liste. */
     const zuLang = await post('/musterattack/create', tokA7, { tag: TAG, zielArt: 'festung',
       festungSystem: sys, festungId: 'fest-1', festungZiel: 'kern', gatherSeconds: 90 * 60 });
     check('8d: eine Sammelzeit ausserhalb BEIDER Listen wird abgelehnt',
@@ -446,20 +445,14 @@ function festung(opt) {
       festungSystem: sys, festungId: 'fest-1', festungZiel: 'kern', gatherSeconds: 45 * 60 });
     check('8e: 45 Minuten gehen durch - die neue Liste gilt am echten Endpunkt, nicht nur im Quelltext',
       passt.status === 200, { status: passt.status, error: passt.body && passt.body.error });
-    /* 8f IST EIN MERKER MIT ABLAUFDATUM. Solange das live stehende Frontend zwei Stunden anbietet,
-       MUSS der Server sie annehmen - sonst laeuft ein Spieler im laufenden Spiel in ein
-       "Ungueltige Anfrage", waehrend 30 und 60 Minuten weiter gehen.
-       Diese Pruefung wird bewusst ROT, sobald jemand ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT
-       entfernt - und genau dann gehoert sie mit geloescht. Das ist ihr Zweck: Sie haelt fest,
-       dass die Uebergangsmenge eine Entscheidung war und kein Versehen. */
-    await stoppeServer();
-    await aendereDbOhneStart(d => { delete d.shared['alliance:' + TAG + ':musterattack']; });
-    s = await starteServer(true);
-    const tokA8 = await s.anmelden('anna');
-    const uebergang = await post('/musterattack/create', tokA8, { tag: TAG, zielArt: 'festung',
-      festungSystem: sys, festungId: 'fest-1', festungZiel: 'kern', gatherSeconds: 120 * 60 });
-    check('8f: die zwei Stunden des LIVE stehenden Frontends werden weiter angenommen (Uebergang)',
-      uebergang.status === 200, { status: uebergang.status, error: uebergang.body && uebergang.body.error });
+    /* HIER STAND 8f, DER MERKER FUER DIE UEBERGANGSMENGE (04.09.2026, an diesem Tag wieder
+       entfernt). Er hielt fest, dass der Server die zwei Stunden des damals noch live stehenden
+       Frontends weiter annimmt - und er sollte rot werden, sobald jemand die Uebergangsmenge
+       loescht. Genau das ist eingetreten: Frontend v8.673.0 ist live, gemessen bietet kein Client
+       mehr 120 Minuten an (Versionspruefung alle 5 Minuten mit automatischem Neuladen), die
+       Konstante ist weg und diese Pruefung mit ihr.
+       8d misst weiter mit 90 Minuten - einem Wert, der in KEINER der beiden Listen stand und
+       deshalb unabhaengig von dieser Aufraeumung die Regel prueft. */
   }
 
   // ---- 9) Der Notaus 'angriffe' gattert auch den VERBAND ---------------------------------------

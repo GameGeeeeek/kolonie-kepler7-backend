@@ -9081,22 +9081,16 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
    pflegen; kein Test vergleicht sie automatisch (gemessen 04.09.2026).
    Laufende Verbaende mit zwei Stunden sind unberuehrt - die Liste gilt nur beim Ausrufen. */
 const ALLIANCE_MUSTER_DURATIONS = [15 * 60, 30 * 60, 45 * 60, 60 * 60];
-/* UEBERGANGSMENGE (Durchsicht 04.09.2026 - fuenf Perspektiven fanden denselben Fehler).
-   Die Liste darueber ist die ANGEBOTENE; dies hier ist die AKZEPTIERTE, und sie ist eine Obermenge.
-   Der Grund: Das LIVE stehende Frontend fuehrt weiterhin [30, 60, 120] (origin/main:44793) und baut
-   daraus sein Auswahlfeld. Ein Backend-Merge IST die Auslieferung - wer danach im Spiel "2 Std"
-   waehlt, bekaeme 400 "Ungueltige Anfrage", waehrend 30 und 60 Minuten weiter durchgehen. Der
-   Fehler saehe nach einem Zufallsfehler aus, nicht nach einer Versionsluecke.
-   DIE LEHRE, DIE HIER FEHLTE: "Backend zuerst live" deckt nur das HINZUFUEGEN von Werten ab. Das
-   ENTFERNEN eines akzeptierten Werts ist die Gegenrichtung und braucht die Vereinigung fuer genau
-   eine Auslieferung. Nur die ANZEIGE darf vorauseilen; die akzeptierte Menge darf waehrenddessen
-   nur wachsen. docs/asteroidenfestungen.md behauptete ausdruecklich, es gebe keinen
-   Zwischenzustand - das war falsch und ist dort korrigiert.
-   ENTFERNEN, sobald das Frontend mit [15, 30, 45, 60] live ist: dann faellt diese Konstante weg und
-   `gatherOk` liest wieder ALLIANCE_MUSTER_DURATIONS. Der Merker dafuer ist Pruefung 8f in
-   tests/test_muster_festung_http.js - sie wird bei diesem Schritt bewusst rot und wird zusammen
-   mit der Konstante geloescht. */
-const ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT = ALLIANCE_MUSTER_DURATIONS.concat([120 * 60]);
+/* Die Uebergangsmenge ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT stand hier vom 04.09.2026 bis zur
+   Auslieferung von Frontend v8.673.0 und liess die alten zwei Stunden weiter durch, solange ein
+   Client sie noch anbot. Sie ist entfernt, weil das gemessen nicht mehr vorkommt: Das Spiel prueft
+   alle 5 Minuten auf eine neue Version und laedt dann von selbst neu (checkForNewVersionOnServer,
+   setInterval 5*60*1000, danach saveThenReload nach 2,5 s) - ein Client, der 120 Minuten anbietet,
+   existiert also hoechstens fuer Minuten nach einem Deploy.
+   DIE LEHRE BLEIBT und steht in PROJECT_MEMORY: Die akzeptierte Menge eines Servers darf nur
+   wachsen, solange ein aelteres Frontend live ist. Wer hier kuenftig einen Wert WEGNIMMT, braucht
+   wieder die Vereinigung fuer eine Auslieferung - und einen Waechter, der beim Aufraeumen bewusst
+   rot wird. */
 const ALLIANCE_MUSTER_COOLDOWN_MS = 24 * 3600 * 1000;
 const ALLIANCE_MUSTER_TEST_MODE = process.env.ALLIANCE_RAID_TEST_MODE === '1'; // gleicher Schalter wie beim Raid
 const ALLIANCE_MUSTER_TEST_DISPATCH_SEC = 2;
@@ -9217,7 +9211,7 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
   const istVorposten = zielArt === 'vorposten';
   const istOhneAllianz = musterZielOhneAllianz(zielArt);
   const targetTag = istOhneAllianz ? null : String(targetTagRaw || '').trim().toUpperCase();
-  const gatherOk = ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
+  const gatherOk = ALLIANCE_MUSTER_DURATIONS.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
   if (!tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   if (!istOhneAllianz && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   const myRole = allianceRoleOf(tag, req.userId);

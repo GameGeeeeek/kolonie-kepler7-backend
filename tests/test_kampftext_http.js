@@ -26,6 +26,22 @@
 // 13c brauchte eine Pause: Der Aufruf an AI Core geht NACH der 503/202-Antwort raus; ohne die
 // 400 ms war 13c am alten Stand gruen, bevor der Aufruf unterwegs war.
 //
+// Abschnitte 14 und 15 (E2, 04.09.2026): die grossen Momente. Der Client bestellt Weltboss,
+// Festungs-FALL und Koeniginnen-FALL mit `art` und eigenem Datenblock; den Spielerkampf bestellt
+// der Server selbst in /api/attack - zwei Prompts aus EINEM Datensatz, je einer an attack-sent und
+// attack-received. 13e: der Notaus haelt auch die serverseitige PvP-Bestellung an.
+// GEGENPROBE zu 14/15 (04.09.2026, Pruefnamen per diff): Am Stand vor E2 (server.js 7329d99)
+// fallen genau 14c, 14f-14j, 14l-14n und 15b-15j. Gruen bleiben 14a/14b/14d/14e (ein alter
+// Server lehnt eine unbekannte Art nicht ab, er ignoriert sie und baut den npc-Block - der traegt
+// ebenfalls nur die Stufe), 14k (misst, dass der npc-Text unveraendert ist), 15a (der Kampf
+// selbst) und 13e (ein alter Server bestellt nie). Ohne die Verallgemeinerung der
+// Schiffsnamen-Sperre (nur eigene/verlorene Schiffe) fallen genau 15g und 15h - der Angreifer-Text
+// nennt die Waechter der Gegenseite und wird verworfen. Abschnitt 17 (Codex-Befund an #237, zwei
+// Texte oder keiner auch am Rand des Gesamtdeckels): ohne die Vorpruefung beider Plaetze in
+// kampftextPvpBestellen fallen genau 17a, 17b und 17c. BEFUND aus 14m: Die Sperre fand
+// "Mondzerstoerer" (oe) nicht, weil sie nur die Umlaut-Schreibweise suchte - seit E2 wird auch der
+// Text normalisiert; der Messlauf von AI Core kannte beide Schreibweisen schon immer.
+//
 // Port 3240 (Server) und 3241 (gefaelschter AI Core); 3195-3231 sind belegt, gemessen mit
 // `grep -hoE "3[12][0-9][0-9]" tests/*.js | sort -un`.
 const fs = require('fs');
@@ -50,6 +66,21 @@ const CARA = crypto.randomUUID(), DORA = crypto.randomUUID();
 // Zwei frische Konten fuer Abschnitt 12 - der Tagesdeckel (10) ist bei den vier oberen nach
 // Abschnitt 10 fast oder ganz verbraucht.
 const EMIL = crypto.randomUUID(), FRIDA = crypto.randomUUID(), ADMIN = crypto.randomUUID();
+// E2: ines bestellt die Client-Arten (Abschnitt 14); gerd greift hanna an (15), jonas karla unter
+// Notaus (13e). Die vier PvP-Konten tragen ihren Spielstand schon in der Grund-DB - ohne
+// Registrierung gibt es keinen Anfaengerschild, der den Angriff mit 403 abprallen liesse.
+const INES = crypto.randomUUID(), GERD = crypto.randomUUID(), HANNA = crypto.randomUUID();
+const JONAS = crypto.randomUUID(), KARLA = crypto.randomUUID();
+const LARS = crypto.randomUUID(), MIA = crypto.randomUUID();
+const NILS = crypto.randomUUID(), OLGA = crypto.randomUUID();
+const angreiferSave = JSON.stringify({
+  resources: { erz: 1e5, kristalle: 1e5, deuterium: 1e5, energie: 1e5 }, credits: 1000,
+  buildings: { lager: 60, werft: 10 }, research: {}, fleet: { cruisers: 40, bomber: 12 }, colonies: {}
+});
+const verteidigerSave = JSON.stringify({
+  resources: { erz: 1000000 }, credits: 0, buildings: { schild: 7 }, research: {},
+  fleet: { waechter: 5 }, colonies: {}
+});
 
 function grunddb() {
   return {
@@ -61,9 +92,23 @@ function grunddb() {
       emil: { userId: EMIL, username: 'emil', passwordHash: hash, emailVerified: true, createdAt: Date.now() },
       frida: { userId: FRIDA, username: 'frida', passwordHash: hash, emailVerified: true, createdAt: Date.now() },
       // Der Admin heisst in diesem Repo immer gamegeeeeek (isAdmin) - Abschnitt 13 liest die Schalter-Uebersicht.
-      gamegeeeeek: { userId: ADMIN, username: 'gamegeeeeek', passwordHash: hash, emailVerified: true, createdAt: Date.now() }
+      gamegeeeeek: { userId: ADMIN, username: 'gamegeeeeek', passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      ines:  { userId: INES,  username: 'ines',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      gerd:  { userId: GERD,  username: 'gerd',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      hanna: { userId: HANNA, username: 'hanna', passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      jonas: { userId: JONAS, username: 'jonas', passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      karla: { userId: KARLA, username: 'karla', passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      lars:  { userId: LARS,  username: 'lars',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      mia:   { userId: MIA,   username: 'mia',   passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      nils:  { userId: NILS,  username: 'nils',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      olga:  { userId: OLGA,  username: 'olga',  passwordHash: hash, emailVerified: true, createdAt: Date.now() }
     },
-    private: {}, shared: {}, resetTokens: {},
+    private: {
+      [GERD]: { 'kepler7-save-v3': angreiferSave }, [HANNA]: { 'kepler7-save-v3': verteidigerSave },
+      [JONAS]: { 'kepler7-save-v3': angreiferSave }, [KARLA]: { 'kepler7-save-v3': verteidigerSave },
+      [LARS]: { 'kepler7-save-v3': angreiferSave }, [MIA]: { 'kepler7-save-v3': verteidigerSave },
+      [NILS]: { 'kepler7-save-v3': angreiferSave }, [OLGA]: { 'kepler7-save-v3': verteidigerSave }
+    }, shared: {}, resetTokens: {},
     galaxy: { npcEmpireStrength: 1, marketTrend: 1, collapsedSystems: {}, controlledSystems: {},
       news: [], activeWar: null, activeWormhole: null, lastTick: Date.now(), factions: {} }
   };
@@ -73,6 +118,8 @@ const dbPfad = path.join(os.tmpdir(), 'kepler-kampftext-' + process.pid + '.json
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kepler-kampftext-'));
 const kopiePfad = path.join(WURZEL, 'server.kampftext-test.js');
 const kopieAusPfad = path.join(WURZEL, 'server.kampftext-aus-test.js');
+// E2: eine dritte Kopie - E1 an, E2 aus (die Grundstellung bis zur Messung am M715q), Abschnitt 16.
+const kopieE2AusPfad = path.join(WURZEL, 'server.kampftext-e2aus-test.js');
 let srv = null, aiSrv = null;
 
 function aufraeumen() {
@@ -81,6 +128,7 @@ function aufraeumen() {
   try { fs.unlinkSync(dbPfad); } catch (e) {}
   try { fs.unlinkSync(kopiePfad); } catch (e) {}
   try { fs.unlinkSync(kopieAusPfad); } catch (e) {}
+  try { fs.unlinkSync(kopieE2AusPfad); } catch (e) {}
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) {}
 }
 process.on('exit', aufraeumen);
@@ -201,9 +249,13 @@ const KAMPF = {
   // wie er gerade committet ist (Muster aus test_hort_meldung_http.js).
   const quelle = fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8');
   const schalter = /const KAMPFTEXT_AKTIV = (true|false);/;
+  const schalterE2 = /const KAMPFTEXT_E2_AKTIV = (true|false);/;
   check('0-vorab: der Schalter ist im Quelltext auffindbar', schalter.test(quelle), { ausgeliefert: (quelle.match(schalter) || [])[1] });
+  check('0-vorab2: der E2-Schalter ist im Quelltext auffindbar', schalterE2.test(quelle), { ausgeliefert: (quelle.match(schalterE2) || [])[1] });
   fs.writeFileSync(kopieAusPfad, quelle.replace(schalter, 'const KAMPFTEXT_AKTIV = false;'));
-  fs.writeFileSync(kopiePfad, quelle.replace(schalter, 'const KAMPFTEXT_AKTIV = true;'));
+  // Die Hauptkopie misst E1 UND E2 in Stellung "an" - unabhaengig davon, was gerade committet ist.
+  fs.writeFileSync(kopiePfad, quelle.replace(schalter, 'const KAMPFTEXT_AKTIV = true;').replace(schalterE2, 'const KAMPFTEXT_E2_AKTIV = true;'));
+  fs.writeFileSync(kopieE2AusPfad, quelle.replace(schalter, 'const KAMPFTEXT_AKTIV = true;').replace(schalterE2, 'const KAMPFTEXT_E2_AKTIV = false;'));
 
   // ---------------------------------------------------------------------------------------
   // 1 - der Schalter (Kopie mit KAMPFTEXT_AKTIV=false)
@@ -488,6 +540,161 @@ const KAMPF = {
     check('12m: das Ganze hinterlaesst keinen Takt-Fehler', health.body && health.body.taktFehler === 0, { taktFehler: health.body && health.body.taktFehler });
   }
 
+  // Hilfen fuer E2: die Zahlen im Datenblock (alles hinter KAMPFDATEN:) und der letzte Prompt.
+  const zahlenImBlock = (p) => {
+    const block = p.slice(p.indexOf('KAMPFDATEN:'));
+    return [...new Set((block.match(/\d(?:[\d.,]*\d)?/g) || []).map(z => z.replace(/[.,]/g, '')))];
+  };
+  const letzterPrompt = () => (ai.prompts[ai.prompts.length - 1] || {}).prompt || '';
+
+  // ---------------------------------------------------------------------------------------
+  // 14 - E2: die Client-Arten (Weltboss, Festungs-Fall, Koeniginnen-Fall)
+  // ---------------------------------------------------------------------------------------
+  {
+    const ines = await api.anmelden('ines');
+    check('14-vorab: Konto angemeldet', !!ines);
+    ai.antwort = () => 'Der Verband fuehrte seinen Schlag und kehrte um.';
+
+    // Weltboss: Name traegt die Stufe, alle E0-Risikogroessen liegen bei - keine darf durch.
+    const weltboss = { art: 'weltboss', npcName: 'Leviathan der Leere - Stufe 6', npcLevel: 6, bossZerstoert: false,
+      attackPower: 388120, defensePower: 2400000, bossHpNachher: 1811880, chancePct: 100, weltboss: true,
+      fleet: { quantenkreuzer: 45, bomber: 30, waechter: 12 }, ownLostShips: { bomber: 4 } };
+    const w = await api.auftrag(ines, weltboss);
+    check('14a: ein Weltboss-Auftrag wird angenommen (202)', w.status === 202, { status: w.status, body: w.body });
+    const wEnde = await warteAufEnde(api, ines, w.body && w.body.auftragId);
+    check('14b: ... und wird fertig', wEnde.body && wEnde.body.status === 'fertig', wEnde.body);
+    const pw = letzterPrompt();
+    check('14c: der Weltboss-Prompt hat seine eigene Einleitung und den Datenblock der Art',
+      /Schlag gegen einen Weltboss/.test(pw) && pw.indexOf('"weltboss": "Leviathan der Leere - Stufe 6"') >= 0 &&
+      /steht noch/.test(pw) && pw.indexOf('Quantenkreuzer') >= 0 && pw.indexOf('"gegner"') < 0, { anfang: pw.slice(0, 120) });
+    check('14d: die Stufe im Namen ist die EINZIGE Zahl im Datenblock',
+      JSON.stringify(zahlenImBlock(pw)) === '["6"]', { zahlen: zahlenImBlock(pw) });
+    check('14e: keine der E0-Groessen steht im Prompt',
+      ['attackPower', 'defensePower', 'bossHpNachher', 'chancePct', '388120', '2400000'].every(f => pw.indexOf(f) < 0));
+
+    // Festung: nur der FALL bekommt einen Text - die Regel ist eine Sperre, keine Client-Konvention.
+    const festung = { art: 'festung', stufeName: 'Sternenfeste', systemName: 'Chronos', stufe: 3, gefallen: false,
+      schaden: 418000, kern: 0, kernMax: 1200000, anteil: 0.35, teilnehmer: 4,
+      fleet: { destroyers: 80, cruisers: 120, bomber: 40 }, eigeneVerluste: { destroyers: 9, bomber: 6 } };
+    const fSteht = await api.auftrag(ines, festung);
+    check('14f: eine Festung, die noch steht, bekommt keinen Text (400 mit Grund)',
+      fSteht.status === 400 && /Fall einer Festung/.test(JSON.stringify(fSteht.body)), { status: fSteht.status, body: fSteht.body });
+    const f = await api.auftrag(ines, Object.assign({}, festung, { gefallen: true }));
+    check('14g: der Festungs-Fall wird angenommen', f.status === 202, { status: f.status, body: f.body });
+    await warteAufEnde(api, ines, f.body && f.body.auftragId);
+    const pf = letzterPrompt();
+    check('14h: der Festungs-Prompt: Einleitung, Festung, System, Ausgang als Satz, Verband, deutsche Schiffsnamen, KEINE Zahl',
+      /Asteroidenfestung/.test(pf) && pf.indexOf('"festung": "Sternenfeste"') >= 0 && pf.indexOf('"system": "Chronos"') >= 0 &&
+      /Die Festung ist gefallen/.test(pf) && /ja, mit anderen Kommandanten/.test(pf) && pf.indexOf('Zerstörer') >= 0 &&
+      zahlenImBlock(pf).length === 0 && pf.indexOf('418000') < 0 && pf.indexOf('anteil') < 0,
+      { zahlen: zahlenImBlock(pf), anfang: pf.slice(0, 100) });
+
+    // Koenigin: dasselbe Muster, Sperre auf schwarmGefallen.
+    const koenigin = { art: 'koenigin', volkName: 'Xantheer-Kollektiv', systemName: 'Vega', stufe: 5, stufeName: 'Königin',
+      gefallen: true, schwarmGefallen: false, schaden: 1310000, lp: 0, lpMax: 4000000, anteil: 0.33, teilnehmer: 6, mitgerissen: 3,
+      fleet: { bomber: 150, carrier: 20, hyperbomber: 12 }, eigeneVerluste: { bomber: 31 } };
+    const kLebt = await api.auftrag(ines, koenigin);
+    check('14i: ein Nest-Schlag ohne Koeniginnen-Fall bekommt keinen Text (400 mit Grund)',
+      kLebt.status === 400 && /Fall einer Koenigin/.test(JSON.stringify(kLebt.body)), { status: kLebt.status, body: kLebt.body });
+    const k = await api.auftrag(ines, Object.assign({}, koenigin, { schwarmGefallen: true }));
+    await warteAufEnde(api, ines, k.body && k.body.auftragId);
+    const pk = letzterPrompt();
+    check('14j: der Koeniginnen-Prompt: Einleitung, Volk, System, "Schwarm zerfaellt", keine Zahl, kein Anteil',
+      k.status === 202 && /Alien-Koenigin/.test(pk) && pk.indexOf('"volk": "Xantheer-Kollektiv"') >= 0 &&
+      /Schwarm zerfaellt/.test(pk) && zahlenImBlock(pk).length === 0 && pk.indexOf('mitgerissen') < 0 && pk.indexOf('Trägerschiff') >= 0,
+      { status: k.status, zahlen: zahlenImBlock(pk) });
+
+    // Der npc-Weg bleibt, was er war: ohne `art` derselbe Prompt wie in Abschnitt 3.
+    const n = await api.auftrag(ines, KAMPF);
+    await warteAufEnde(api, ines, n.body && n.body.auftragId);
+    const pn = letzterPrompt();
+    check('14k: ohne `art` entsteht weiter der gemessene npc-Prompt (E0-Text, fuenf Felder)',
+      n.status === 202 && pn.startsWith('Du bist der Bordschreiber') && /ueber den folgenden Kampf\./.test(pn) &&
+      pn.indexOf('"gegner": "Piratennest Kharon-Tiefe"') >= 0 && pn.indexOf('"stufe": 6') >= 0, { anfang: pn.slice(0, 120) });
+
+    // Unbekannte Art und die zwei Server-Arten vom Client: abgelehnt, KEIN Aufruf an AI Core.
+    const vorher = ai.prompts.length;
+    const fremd = await api.auftrag(ines, Object.assign({}, KAMPF, { art: 'raid' }));
+    const pvpVomClient = await api.auftrag(ines, { art: 'pvp-verteidigung', attackerName: 'x', targetName: 'ines', fleet: { cruisers: 1 }, defenderFleet: { waechter: 1 } });
+    await warte(300);
+    check('14l: eine unbekannte Art und die PvP-Arten vom Client werden abgelehnt (400), ohne Aufruf an AI Core',
+      fremd.status === 400 && /Unbekannte Kampfart/.test(JSON.stringify(fremd.body)) &&
+      pvpVomClient.status === 400 && /Server selbst/.test(JSON.stringify(pvpVomClient.body)) && ai.prompts.length === vorher,
+      { fremd: fremd.body, pvp: pvpVomClient.body, aufrufe: ai.prompts.length - vorher });
+
+    // Die Sperren gelten fuer jede Art: ein fremdes Schiff im Weltboss-Text, eine Zahl im Koeniginnen-Text.
+    ai.antwort = () => 'Der Mondzerstoerer eroeffnete das Feuer auf den Leviathan.';
+    const w2 = await api.auftrag(ines, weltboss);
+    const w2Ende = await warteAufEnde(api, ines, w2.body && w2.body.auftragId);
+    ai.antwort = () => 'Drei Wellen brachen ueber das Nest, 40 Bomber kehrten nicht zurueck.';
+    const k2 = await api.auftrag(ines, Object.assign({}, koenigin, { schwarmGefallen: true }));
+    const k2Ende = await warteAufEnde(api, ines, k2.body && k2.body.auftragId);
+    check('14m: ein fremdes Schiff im Weltboss-Text wird verworfen', w2Ende.body && w2Ende.body.status === 'verworfen' && /Mondzerst/.test(w2Ende.body.grund || ''), w2Ende.body);
+    check('14n: eine Zahl im Koeniginnen-Text ist zwangslaeufig erfunden - verworfen', k2Ende.body && k2Ende.body.status === 'verworfen' && /erfundene Zahl 40/.test(k2Ende.body.grund || ''), k2Ende.body);
+    ai.antwort = () => 'Der Verband kehrte zurueck.';
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // 15 - E2: der Spielerkampf - zwei Texte aus EINEM Datensatz, bestellt vom Server
+  // ---------------------------------------------------------------------------------------
+  {
+    const auth = (tok) => ({ 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok });
+    const berichte = async (tok) => ((await api.j('/reports', { headers: auth(tok) })).body.reports || []);
+    const gerd = await api.anmelden('gerd');
+    const hanna = await api.anmelden('hanna');
+    check('15-vorab: Angreifer und Verteidiger angemeldet', !!gerd && !!hanna);
+    const vor = ai.prompts.length;
+    const gesamtVorher = ((JSON.parse(fs.readFileSync(dbPfad, 'utf8')).kampftextTag) || {}).anzahl || 0;
+    // Beide Texte nennen die Flotte der GEGENSEITE (Waechter bei hanna, Kreuzer bei gerd) - genau
+    // das muss die Sperre durchlassen, das Modell hat beide Listen gesehen.
+    ai.antwort = (n) => n - vor === 1
+      ? 'Unsere Kreuzer brachen durch die Reihe der Waechter, die Station lag offen vor uns.'
+      : 'Die Waechter der Station stemmten sich gegen die anrueckenden Kreuzer.';
+    const angriff = await api.j('/attack', { method: 'POST', headers: auth(gerd), body: JSON.stringify({ targetUserId: HANNA }) });
+    check('15a: der Angriff kommt zustande (200)', angriff.status === 200 && typeof angriff.body.success === 'boolean', { status: angriff.status, body: angriff.body && angriff.body.error });
+    const gewonnen = !!(angriff.body && angriff.body.success);
+    // Auf BEIDE Texte warten statt fest zu schlafen.
+    let gesendet = null, empfangen = null;
+    for (let i = 0; i < 80; i++) {
+      gesendet = (await berichte(gerd)).find(r => r.type === 'attack-sent');
+      empfangen = (await berichte(hanna)).find(r => r.type === 'attack-received');
+      if (gesendet && gesendet.kiText && empfangen && empfangen.kiText) break;
+      await warte(100);
+    }
+    check('15b: AI Core wurde GENAU ZWEIMAL gefragt - ein Datensatz, zwei Perspektiven', ai.prompts.length - vor === 2, { aufrufe: ai.prompts.length - vor });
+    const pa = (ai.prompts[vor] || {}).prompt || '', pv = (ai.prompts[vor + 1] || {}).prompt || '';
+    check('15c: der erste Prompt ist die Sicht des Angreifers, der zweite die der Verteidiger',
+      /Sicht des Angreifers/.test(pa) && pa.indexOf('"sicht": "Angreifer"') >= 0 && /Sicht der Verteidiger/.test(pv) && pv.indexOf('"sicht": "Verteidiger"') >= 0,
+      { a: pa.slice(0, 80), v: pv.slice(0, 80) });
+    check('15d: beide tragen beide Namen, das Ziel und BEIDE Flotten mit deutschen Namen',
+      [pa, pv].every(p => p.indexOf('"angreifer": "gerd"') >= 0 && p.indexOf('"verteidiger": "hanna"') >= 0 &&
+        p.indexOf('"ziel": "Heimatwelt"') >= 0 && p.indexOf('Kreuzer') >= 0 && p.indexOf('Bomber') >= 0 && p.indexOf('Wächter') >= 0));
+    check('15e: der Ausgang passt je Sicht zum Ergebnis des Servers',
+      gewonnen ? (/Sieg, die Verteidigung wurde durchbrochen/.test(pa) && /durchbrochen, der Angreifer kam durch/.test(pv) && /ja, Rohstoffe erbeutet/.test(pa))
+               : (/Niederlage, die Verteidigung hielt stand/.test(pa) && /Angriff abgewehrt/.test(pv) && /nein, keine Beute/.test(pa)),
+      { gewonnen, a: (pa.match(/"ausgang": "[^"]+"/) || [])[0], v: (pv.match(/"ausgang": "[^"]+"/) || [])[0] });
+    // `pa.length > 0` ist die Nicht-Vacuitaets-Wache: Ohne Prompts (alter Server) waere die
+    // Pruefung sonst gruen, weil ein leerer Text keine Zahl traegt.
+    check('15f: kein Datenblock traegt eine Zahl, und keine Kraft, Beute oder Verlustquote erreicht das Modell',
+      pa.length > 0 && pv.length > 0 && zahlenImBlock(pa).length === 0 && zahlenImBlock(pv).length === 0 &&
+      ['attackPower', 'defensePower', 'stolen', 'defenderLossPct', 'phasen'].every(f => pa.indexOf(f) < 0 && pv.indexOf(f) < 0),
+      { a: zahlenImBlock(pa), v: zahlenImBlock(pv) });
+    check('15g: der Angreifer-Text haengt an gerds attack-sent-Bericht - obwohl er die Waechter der Gegenseite nennt',
+      !!gesendet && /Reihe der Waechter/.test(gesendet.kiText || ''), gesendet && { kiText: gesendet.kiText });
+    check('15h: der Verteidiger-Text haengt an hannas attack-received-Bericht',
+      !!empfangen && /stemmten sich/.test(empfangen.kiText || ''), empfangen && { kiText: empfangen.kiText });
+    const dbj = JSON.parse(fs.readFileSync(dbPfad, 'utf8'));
+    check('15i: EIN Kampf kostet den Angreifer EINEN Auftrag seines Tagesdeckels, den Verteidiger keinen, den Gesamtdeckel zwei',
+      ((dbj.users.gerd || {}).kampftextTag || {}).anzahl === 1 && !(dbj.users.hanna || {}).kampftextTag &&
+      ((dbj.kampftextTag || {}).anzahl || 0) - gesamtVorher === 2,
+      { gerd: (dbj.users.gerd || {}).kampftextTag, hanna: (dbj.users.hanna || {}).kampftextTag, gesamt: ((dbj.kampftextTag || {}).anzahl || 0) - gesamtVorher });
+    const health = await api.j('/health');
+    check('15j: /api/health nennt die Kampfarten (Erkennungsweg fuer einen Server ohne E2) und keinen Takt-Fehler',
+      health.body && health.body.kampftext && JSON.stringify(health.body.kampftext.arten) === JSON.stringify(['npc', 'weltboss', 'festung', 'koenigin', 'pvp-angriff', 'pvp-verteidigung']) && health.body.kampftext.e2 === true && health.body.taktFehler === 0,
+      health.body && { arten: health.body.kampftext && health.body.kampftext.arten, taktFehler: health.body.taktFehler });
+    ai.antwort = () => 'Der Verband kehrte zurueck.';
+  }
+
   // ---------------------------------------------------------------------------------------
   // 13 - der Notaus 'kampftext' (Betreiber schaltet zur Laufzeit ab)
   // ---------------------------------------------------------------------------------------
@@ -508,6 +715,12 @@ const KAMPF = {
     // unterwegs ist (so gemessen in der Gegenprobe: 13c blieb faelschlich gruen).
     await warte(400);
     check('13c: und es geht KEIN Aufruf an AI Core raus', ai.prompts.length === vorher, { aufrufe: ai.prompts.length - vorher });
+    // E2: auch die serverseitige PvP-Bestellung haelt der Notaus an - der Kampf selbst findet statt.
+    const jonas = await api2.anmelden('jonas');
+    const angriff = await api2.j('/attack', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + jonas }, body: JSON.stringify({ targetUserId: KARLA }) });
+    await warte(400);
+    check('13e: ein Spielerkampf unter Notaus findet statt, bestellt aber keinen Text', angriff.status === 200 && ai.prompts.length === vorher,
+      { status: angriff.status, aufrufe: ai.prompts.length - vorher });
     const admin = await api2.anmelden('gamegeeeeek');
     const uebersicht = await api2.j('/admin/schalter', { headers: { Authorization: 'Bearer ' + admin } });
     const eintrag = ((uebersicht.body && uebersicht.body.schalter) || []).find(x => x.name === 'kampftext');
@@ -517,6 +730,64 @@ const KAMPF = {
   }
 
   await stoppeServer();
+
+  // ---------------------------------------------------------------------------------------
+  // 16 - E2 in Grundstellung AUS (E1 an): npc laeuft, jede andere Art wartet auf die Messung
+  // ---------------------------------------------------------------------------------------
+  {
+    // Der Notaus aus Abschnitt 13 steht noch in der DB - bei gestopptem Server zuruecknehmen, sonst
+    // misst dieser Abschnitt den Notaus statt des E2-Schalters (so beim ersten Lauf gemessen).
+    const dbj2 = JSON.parse(fs.readFileSync(dbPfad, 'utf8'));
+    delete dbj2.notAus;
+    fs.writeFileSync(dbPfad, JSON.stringify(dbj2));
+    const api3 = await starteServer(kopieE2AusPfad);
+    const ines = await api3.anmelden('ines');
+    const vorher = ai.prompts.length;
+    ai.antwort = () => 'Der Verband kehrte zurueck.';
+    const weltboss = await api3.auftrag(ines, { art: 'weltboss', npcName: 'Nova-Titan - Stufe 11', npcLevel: 11, bossZerstoert: true, fleet: { jaeger: 400 }, ownLostShips: {} });
+    check('16a: mit KAMPFTEXT_E2_AKTIV=false lehnt die Route eine E2-Art ab (503 mit Grund)',
+      weltboss.status === 503 && /nicht freigegeben/.test(JSON.stringify(weltboss.body)), { status: weltboss.status, body: weltboss.body });
+    const npc = await api3.auftrag(ines, KAMPF);
+    const npcEnde = await warteAufEnde(api3, ines, npc.body && npc.body.auftragId);
+    check('16b: der npc-Kampf (E1) laeuft davon unberuehrt', npc.status === 202 && npcEnde.body && npcEnde.body.status === 'fertig', { status: npc.status, ende: npcEnde.body });
+    const lars = await api3.anmelden('lars');
+    const angriff = await api3.j('/attack', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + lars }, body: JSON.stringify({ targetUserId: MIA }) });
+    await warte(400);
+    check('16c: ein Spielerkampf findet statt, bestellt aber keinen Text', angriff.status === 200 && ai.prompts.length - vorher === 1,
+      { status: angriff.status, aufrufe: ai.prompts.length - vorher });
+    const health = await api3.j('/health');
+    check('16d: /api/health zeigt e2: false - so sieht das Frontend, dass es noch nicht bestellen soll',
+      health.body && health.body.kampftext && health.body.kampftext.e2 === false, health.body && health.body.kampftext && { e2: health.body.kampftext.e2 });
+    await stoppeServer();
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // 17 - E2: zwei Texte oder keiner - auch am Rand des Gesamtdeckels (Codex-Befund an #237)
+  // ---------------------------------------------------------------------------------------
+  {
+    // Gesamtdeckel auf 299 von 300 stellen - bei gestopptem Server, mit dem Tagesstempel des
+    // Servers (staubTagesschluessel: UTC-Datum), sonst setzt der Zaehler sich beim ersten Zugriff
+    // zurueck und die Pruefung misst einen vollen Deckel statt des Randes.
+    const dbj3 = JSON.parse(fs.readFileSync(dbPfad, 'utf8'));
+    dbj3.kampftextTag = { stempel: new Date().toISOString().slice(0, 10), anzahl: 299 };
+    fs.writeFileSync(dbPfad, JSON.stringify(dbj3));
+    const api4 = await starteServer(kopiePfad);
+    const nils = await api4.anmelden('nils');
+    const ines = await api4.anmelden('ines');
+    const vorher = ai.prompts.length;
+    ai.antwort = () => 'Der Verband kehrte zurueck.';
+    const angriff = await api4.j('/attack', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + nils }, body: JSON.stringify({ targetUserId: OLGA }) });
+    await warte(500);
+    check('17a: bei EINEM freien Platz bestellt der Spielerkampf KEINEN Text - nicht einen fuer den Angreifer allein',
+      angriff.status === 200 && ai.prompts.length === vorher, { status: angriff.status, aufrufe: ai.prompts.length - vorher });
+    const nachher = JSON.parse(fs.readFileSync(dbPfad, 'utf8'));
+    check('17b: ... und die Pruefung hat den letzten Platz nicht verbraucht', ((nachher.kampftextTag || {}).anzahl) === 299, nachher.kampftextTag);
+    const npc = await api4.auftrag(ines, KAMPF);
+    check('17c: den letzten Platz bekommt der naechste Einzelauftrag (202), der uebernaechste faellt am Deckel (429)',
+      npc.status === 202 && (await api4.auftrag(ines, KAMPF)).status === 429, { status: npc.status });
+    await stoppeServer();
+  }
+
   console.log('');
   console.log(fail ? 'FEHLGESCHLAGEN' : 'Alles gruen.');
   process.exit(fail ? 1 : 0);

@@ -4960,16 +4960,25 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
       }
     }
 
-    addReport(req.userId, {
+    const angreiferBerichtId = addReport(req.userId, {
       type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt',
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
       phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder
     });
-    addReport(targetUserId, {
+    const verteidigerBerichtId = addReport(targetUserId, {
       type: 'attack-received', result: 'loss', attackerName: req.username,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
       phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder
     });
+    // KI-Kampfberichte E2 (04.09.2026): zwei Texte aus diesem einen Datensatz, je einer an den
+    // Bericht jeder Seite. Synchron (nur db-Mutation), das saveDb() unten persistiert die Auftraege.
+    // Im try: Der Erzaehltext darf den Kampf nie kaputtmachen - ein Fehler hier ist ein Log, kein 500.
+    try {
+      kampftextPvpBestellen(req.userId, angreiferBerichtId, targetUserId, verteidigerBerichtId, {
+        attackerName: req.username, targetName: targetUser ? targetUser.username : 'Unbekannt',
+        standortArt: standortFelder.standortArt || 'heimat', result: 'win', stolen,
+        fleet: attackerFleetSummary, defenderFleet: targetFleetSummary });
+    } catch (e) { console.error('[kampftext] pvp-Bestellung: ' + e.message); }
     // Verteidiger benachrichtigen (Retention-Trigger 21.07.2026): angegriffen zu werden ist einer der
     // stärksten Rückkehr-Anlässe. Server hat den Kampf ohnehin aufgelöst - hier nur der Push obendrauf.
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: false, looted: Object.keys(stolen).length > 0 }, { skipWebPush: !allowAttackPush(targetUserId) }); }
@@ -5014,18 +5023,25 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Spielstand gemeldet wird. Gegen Absprache zählt je Angreifer nur ein Angriff pro Tag.
     const staubAbwehr = staubAbwehrGutschreiben(targetUser, req.userId);
 
-    addReport(req.userId, {
+    const angreiferBerichtId = addReport(req.userId, {
       type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt',
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
       phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder
     });
-    addReport(targetUserId, {
+    const verteidigerBerichtId = addReport(targetUserId, {
       // staubReward steht im Bericht, damit die Gutschrift nicht unsichtbar bleibt: Der Verteidiger
       // war beim Kampf per Definition nicht dabei, der Bericht ist seine einzige Quelle.
       type: 'attack-received', result: 'win', attackerName: req.username, defendReward: abwehrCp, staubReward: staubAbwehr,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
       phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder
     });
+    // KI-Kampfberichte E2: siehe Siegzweig - hier ohne Beute, aus Verteidigersicht "abgewehrt".
+    try {
+      kampftextPvpBestellen(req.userId, angreiferBerichtId, targetUserId, verteidigerBerichtId, {
+        attackerName: req.username, targetName: targetUser ? targetUser.username : 'Unbekannt',
+        standortArt: standortFelder.standortArt || 'heimat', result: 'loss', stolen: {},
+        fleet: attackerFleetSummary, defenderFleet: targetFleetSummary });
+    } catch (e) { console.error('[kampftext] pvp-Bestellung: ' + e.message); }
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: true, looted: false }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     kampfVerlaufVermerken(findUserById(req.userId), { rolle: 'angriff', gegner: targetUser ? targetUser.username : null, ziel: standortFelder.targetPlanet || 'home', erfolg: false, angriff: attackPower, verteidigung: defensePower, beute: 0 });
     kampfVerlaufVermerken(targetUser, { rolle: 'verteidigung', gegner: req.username, ziel: standortFelder.targetPlanet || 'home', erfolg: true, angriff: attackPower, verteidigung: defensePower, beute: 0 });
@@ -17268,6 +17284,12 @@ app.post('/api/claim-supporter', authMiddleware, authRateLimit, async (req, res)
 // ============================================================================================
 
 const KAMPFTEXT_AKTIV = true;
+// E2 (04.09.2026): Grundstellung AUS, bis die fuenf neuen Kampfarten am M715q gemessen sind
+// (Roadmap: "dieselbe E0-Messung, nicht eine neue Schaetzung" - Befehl in AI Cores README, PR #42).
+// Umgelegt wird per Merge, unmittelbar vor dem Frontend-PR (Hausregel: Backend zuerst live). Solange
+// er aus ist, lehnt die Route jede Art ausser npc mit 503 ab, und /api/attack bestellt nichts -
+// der Kampf selbst laeuft unveraendert. Der Notaus 'kampftext' schaltet zur Laufzeit alles ab.
+const KAMPFTEXT_E2_AKTIV = false;
 const KAMPFTEXT_AI_CORE_URL = (process.env.AI_CORE_URL || 'http://192.168.178.45:8000').replace(/\/+$/, '');
 const KAMPFTEXT_AI_CORE_KEY = process.env.AI_CORE_API_KEY || '';
 // Modellwahl aus E0 (28.08.2026): qwen3.5:4b. 2b war unbrauchbar - erfundene Schiffsnamen, ein
@@ -17341,6 +17363,20 @@ const KAMPFTEXT_SCHIFFSNAMEN = {
   superschlachtschiff: 'Superschlachtschiff',
 };
 
+// --- E2: die grossen Momente (04.09.2026) ------------------------------------------------------
+// Weltboss, Festungs-Fall, Koenigin und der Spielerkampf mit beiden Perspektiven. Jede Kampfart
+// hat ihren eigenen Datenblock (kampftextDatenFuer) und ihre eigene Einleitung
+// (KAMPFTEXT_EINLEITUNGEN); Regeln und Sperren sind dieselben. Kopie-Familie mit
+// gamegeeeeek-ai-core/tools/kampftext_messlauf.py (prompt_daten_fuer, E2_EINLEITUNGEN, E2_REGELN),
+// dort am Modell GEMESSEN, bevor hier ausgeliefert wird.
+const KAMPFTEXT_ARTEN = ['npc', 'weltboss', 'festung', 'koenigin', 'pvp-angriff', 'pvp-verteidigung'];
+// Nur diese bestellt der CLIENT (Feld `art`, ohne Feld npc). Die zwei PvP-Perspektiven bestellt
+// dieser Server selbst in /api/attack - dort kennt er beide Flotten und beide Berichte; ein Client,
+// der sie schickt, wird abgelehnt, sonst koennte jeder fuer jeden Verteidiger Texte bestellen.
+const KAMPFTEXT_CLIENT_ARTEN = ['npc', 'weltboss', 'festung', 'koenigin'];
+// Standortart des Servers (standortArtVon) -> Wort fuer den Prompt.
+const KAMPFTEXT_ZIEL_NAMEN = { heimat: 'Heimatwelt', kolonie: 'Kolonie', mond: 'Mond' };
+
 // --- Prompt-Bau: dieselben fuenf Felder wie in AI Cores prompt_daten() ---------------------
 //
 // Der Zuschnitt ist am 28.08.2026 am echten Modell gemessen worden (Entscheidung Sascha:
@@ -17378,6 +17414,11 @@ function kampftextSchiffsliste(roh) {
 }
 
 function kampftextDaten(roh) {
+  // E2: die anderen Kampfarten haben ihren eigenen Datenblock (kampftextDatenFuer, HINTER
+  // kampftextDatenText - der Paritaetstest des Frontends schneidet die fuenf npc-Felder zwischen
+  // dieser Funktion und kampftextDatenText aus; ein zweites `return {` hier zaehlte mit).
+  const art = kampftextArt(roh);
+  if (art && art !== 'npc') return kampftextDatenFuer(art, roh);
   return {
     gegner: kampftextGegnerName(roh && roh.npcName),
     stufe: Math.max(1, Math.min(999, Math.floor(Number(roh && roh.npcLevel) || 1))),
@@ -17394,6 +17435,89 @@ function kampftextDatenText(daten) {
   return JSON.stringify(daten, null, 1);
 }
 
+function kampftextArt(roh) {
+  const art = String((roh && roh.art) || 'npc');
+  return KAMPFTEXT_ARTEN.indexOf(art) >= 0 ? art : '';
+}
+function kampftextVerband(roh) {
+  return Number(roh && roh.teilnehmer) > 1 ? 'ja, mit anderen Kommandanten' : 'nein, allein';
+}
+// Der Datenblock je Kampfart - GENAU das, was das Modell sieht. Zuschnitt wie in E0: Namen,
+// Ausgang als SATZ (nicht als Code - "gefallen: true" laesst einem kleinen Modell mehr Raum zum
+// Raten als "Die Festung ist gefallen"), Schiffstypen. Keine Kraefte, keine Beutezahlen, keine
+// Anteile, keine Zeiten. Der Weltboss traegt seine Stufe im Namen (worldBossName des Clients:
+// '... - Stufe 6'); Festung, Koenigin und Spielerkampf tragen GAR KEINE Zahl - jede Ziffernfolge im
+// Text ist dort zwangslaeufig eine Erfindung. Jede Zeichenkette laeuft durch dieselbe Whitelist
+// wie der Gegnername (Punkt 3 im Kopf): Namen von Weltboss, Festung, System, Volk und die zwei
+// Spielernamen sind die einzigen Zeichenketten, die den Prompt erreichen.
+function kampftextDatenFuer(art, roh) {
+  roh = roh || {};
+  if (art === 'weltboss') {
+    return {
+      weltboss: kampftextGegnerName(roh.npcName),
+      ausgang: roh.bossZerstoert ? 'Der Weltboss ist vernichtet' : 'Der Weltboss steht noch, der Schlag hat ihn nur geschwaecht',
+      eigene_schiffe: kampftextSchiffsliste(roh.fleet),
+      verlorene_schiffe: kampftextSchiffsliste(roh.ownLostShips),
+    };
+  }
+  if (art === 'festung') {
+    return {
+      festung: kampftextGegnerName(roh.stufeName),
+      system: kampftextGegnerName(roh.systemName),
+      ausgang: roh.gefallen ? 'Die Festung ist gefallen' : 'Die Festung steht noch',
+      im_verband: kampftextVerband(roh),
+      eigene_schiffe: kampftextSchiffsliste(roh.fleet),
+      verlorene_schiffe: kampftextSchiffsliste(roh.eigeneVerluste),
+    };
+  }
+  if (art === 'koenigin') {
+    return {
+      volk: kampftextGegnerName(roh.volkName),
+      system: kampftextGegnerName(roh.systemName),
+      ausgang: roh.schwarmGefallen ? 'Die Koenigin ist gefallen, ihr ganzer Schwarm zerfaellt' : 'Die Koenigin lebt noch',
+      im_verband: kampftextVerband(roh),
+      eigene_schiffe: kampftextSchiffsliste(roh.fleet),
+      verlorene_schiffe: kampftextSchiffsliste(roh.eigeneVerluste),
+    };
+  }
+  if (art === 'pvp-angriff' || art === 'pvp-verteidigung') {
+    const gewonnen = roh.result === 'win';   // aus Sicht des Angreifers, so meldet es /api/attack
+    const angreiferSicht = art === 'pvp-angriff';
+    return {
+      sicht: angreiferSicht ? 'Angreifer' : 'Verteidiger',
+      angreifer: kampftextGegnerName(roh.attackerName),
+      verteidiger: kampftextGegnerName(roh.targetName),
+      ziel: KAMPFTEXT_ZIEL_NAMEN[roh.standortArt] || 'Kolonie',
+      ausgang: angreiferSicht
+        ? (gewonnen ? 'Sieg, die Verteidigung wurde durchbrochen' : 'Niederlage, die Verteidigung hielt stand')
+        : (gewonnen ? 'Die Verteidigung wurde durchbrochen, der Angreifer kam durch' : 'Angriff abgewehrt, die Verteidigung hielt stand'),
+      beute: (gewonnen && roh.stolen && Object.keys(roh.stolen).length) ? 'ja, Rohstoffe erbeutet' : 'nein, keine Beute',
+      schiffe_angreifer: kampftextSchiffsliste(roh.fleet),
+      schiffe_verteidiger: kampftextSchiffsliste(roh.defenderFleet),
+    };
+  }
+  return null;
+}
+// Was einem Auftrag fehlt, als Satz fuer den Aufrufer - leer heisst vollstaendig. Die Regel
+// "nur der FALL bekommt einen Text" steht hier als Sperre und nicht nur als Konvention im Client
+// (AI-Core-Lektion 10): Eine Festung wird bis zu siebenmal am Tag beschossen, gefallen ist sie
+// einmal - der Text gehoert dem seltenen Moment, nicht jedem Schlag.
+function kampftextUnvollstaendig(art, daten, roh) {
+  roh = roh || {};
+  if (!daten) return 'Unbekannte Kampfart.';
+  if (art === 'npc') return (!daten.gegner || !daten.eigene_schiffe.length) ? 'Kampfdaten unvollstaendig (Gegner und mindestens ein eigenes Schiff noetig).' : '';
+  if (art === 'weltboss') return (!daten.weltboss || !daten.eigene_schiffe.length) ? 'Kampfdaten unvollstaendig (Weltboss und mindestens ein eigenes Schiff noetig).' : '';
+  if (art === 'festung') {
+    if (!roh.gefallen) return 'Nur der Fall einer Festung bekommt einen Text.';
+    return (!daten.festung || !daten.system || !daten.eigene_schiffe.length) ? 'Kampfdaten unvollstaendig (Festung, System und mindestens ein eigenes Schiff noetig).' : '';
+  }
+  if (art === 'koenigin') {
+    if (!roh.schwarmGefallen) return 'Nur der Fall einer Koenigin bekommt einen Text.';
+    return (!daten.volk || !daten.system || !daten.eigene_schiffe.length) ? 'Kampfdaten unvollstaendig (Volk, System und mindestens ein eigenes Schiff noetig).' : '';
+  }
+  return 'Diese Kampfart bestellt der Server selbst.';
+}
+
 function kampftextPrompt(daten) {
   return 'Du bist der Bordschreiber eines Raumschiff-Verbands im Browsergame Kolonie Kepler-7. ' +
     'Verfasse einen kurzen, atmosphaerischen Logbucheintrag (hoechstens 500 Zeichen, Deutsch) ' +
@@ -17402,6 +17526,48 @@ function kampftextPrompt(daten) {
     'daneben, dein Text erzaehlt nur. Erfinde keine Schiffsnamen, keine Orte, keine ' +
     'Mechaniken. Du entscheidest nichts - du beschreibst nur, was geschehen ist.\n\n' +
     'KAMPFDATEN:\n' + kampftextDatenText(daten);
+}
+
+// E2: die Einleitung je Kampfart; die Regeln dahinter sind fuer alle E2-Arten dieselben. Beides
+// wortgleich mit E2_EINLEITUNGEN/E2_REGELN im Messlauf von AI Core - der Text IST das Gemessene.
+// Der Spielerkampf traegt keine Verluste (der Server kennt beim Kampf nur Prozentwerte, keine
+// Stueckzahlen), deshalb verbieten die Regeln ausdruecklich erfundene Verluste.
+const KAMPFTEXT_EINLEITUNGEN = {
+  weltboss:
+    'Du bist der Bordschreiber eines Raumschiff-Verbands im Browsergame Kolonie Kepler-7. ' +
+    'Verfasse einen kurzen, atmosphaerischen Logbucheintrag (hoechstens 500 Zeichen, Deutsch) ' +
+    'ueber den folgenden Schlag gegen einen Weltboss - ein riesiges Wesen, gegen das viele ' +
+    'Kommandanten gemeinsam kaempfen; dein Verband hat einen Schlag gefuehrt. ',
+  festung:
+    'Du bist der Bordschreiber eines Raumschiff-Verbands im Browsergame Kolonie Kepler-7. ' +
+    'Verfasse einen kurzen, atmosphaerischen Logbucheintrag (hoechstens 500 Zeichen, Deutsch) ' +
+    'ueber den folgenden Angriff auf eine Asteroidenfestung; der Ausgang in den Daten sagt, ' +
+    'ob sie gefallen ist. ',
+  koenigin:
+    'Du bist der Bordschreiber eines Raumschiff-Verbands im Browsergame Kolonie Kepler-7. ' +
+    'Verfasse einen kurzen, atmosphaerischen Logbucheintrag (hoechstens 500 Zeichen, Deutsch) ' +
+    'ueber den folgenden Angriff auf das Nest einer Alien-Koenigin; der Ausgang in den Daten ' +
+    'sagt, ob sie gefallen ist. ',
+  'pvp-angriff':
+    'Du bist der Bordschreiber eines Raumschiff-Verbands im Browsergame Kolonie Kepler-7. ' +
+    'Verfasse einen kurzen, atmosphaerischen Logbucheintrag (hoechstens 500 Zeichen, Deutsch) ' +
+    'ueber den folgenden Angriff deines Verbands auf den Standort eines anderen Kommandanten. ' +
+    'Du schreibst aus Sicht des Angreifers. ',
+  'pvp-verteidigung':
+    'Du bist der Chronist eines Standorts im Browsergame Kolonie Kepler-7. ' +
+    'Verfasse einen kurzen, atmosphaerischen Logbucheintrag (hoechstens 500 Zeichen, Deutsch) ' +
+    'ueber den folgenden Angriff eines anderen Kommandanten auf diesen Standort. ' +
+    'Du schreibst aus Sicht der Verteidiger. ',
+};
+const KAMPFTEXT_E2_REGELN =
+  'STRIKTE REGELN: Nutze ausschliesslich die untenstehenden Daten. Nenne KEINE Zahlen und KEINE ' +
+  'Zeitangaben - die genauen Werte stehen im Bericht daneben, dein Text erzaehlt nur. Erfinde ' +
+  'keine Schiffsnamen, keine Orte, keine Mechaniken und keine Verluste, die nicht in den Daten ' +
+  'stehen. Du entscheidest nichts - du beschreibst nur, was geschehen ist.\n\n' +
+  'KAMPFDATEN:\n';
+function kampftextPromptFuer(art, daten) {
+  if (!KAMPFTEXT_EINLEITUNGEN[art]) return kampftextPrompt(daten);
+  return KAMPFTEXT_EINLEITUNGEN[art] + KAMPFTEXT_E2_REGELN + kampftextDatenText(daten);
 }
 
 // --- Die drei Sperren -----------------------------------------------------------------------
@@ -17431,10 +17597,18 @@ function kampftextFremdeSchiffe(text, daten) {
   // EXAKTER Vergleich, kein Teilstring: Sonst gilt der Mondzerstoerer als erlaubt, sobald
   // Zerstoerer im Verband stehen - genau der Anlassfall dieser Pruefung.
   const norm = (n) => n.replace(/ae/g, 'ä').replace(/oe/g, 'ö').replace(/ue/g, 'ü').toLowerCase();
-  const erlaubt = new Set(daten.eigene_schiffe.concat(daten.verlorene_schiffe).map(norm));
+  // Alle Schiffslisten des Datenblocks - bei E2 auch die der Gegenseite (schiffe_verteidiger im
+  // Angreifer-Text und umgekehrt): Was das Modell gesehen hat, darf es nennen. Abgeleitet aus
+  // dem Datenblock, nicht aus einer Feldliste - kommt eine Liste dazu, waechst der Satz mit.
+  const erlaubt = new Set([].concat.apply([], Object.values(daten).filter(Array.isArray)).map(norm));
+  // Auch der TEXT wird normalisiert (Befund 14m, 04.09.2026): Das Modell schreibt Umlaute gern
+  // als ae/oe/ue - "Mondzerstoerer" fand die Suche nach 'Mondzerstörer' nicht, und das fremde
+  // Schiff kam durch. Der Messlauf von AI Core kennt beide Schreibweisen seit jeher; hier fehlte die
+  // Spiegelung. Klein geschrieben wird beides, damit "mondzerstörer" nicht ebenso durchrutscht.
+  const t = norm(String(text || ''));
   const raus = [];
   for (const name of Object.values(KAMPFTEXT_SCHIFFSNAMEN)) {
-    if (String(text || '').indexOf(name) >= 0 && !erlaubt.has(norm(name)) && raus.indexOf(name) < 0) raus.push(name);
+    if (t.indexOf(norm(name)) >= 0 && !erlaubt.has(norm(name)) && raus.indexOf(name) < 0) raus.push(name);
   }
   return raus.sort();
 }
@@ -17526,7 +17700,7 @@ async function kampftextArbeite() {
   const eintrag = (db.kampftexte || {})[auftrag.id];
   if (eintrag) eintrag.status = 'laeuft';
   try {
-    const text = await kampftextAnfrage(kampftextPrompt(auftrag.daten));
+    const text = await kampftextAnfrage(kampftextPromptFuer(auftrag.art || 'npc', auftrag.daten));
     const maengel = kampftextMaengel(text, auftrag.daten);
     if (maengel.length) {
       // Kein zweiter Versuch: Ein Retry kostet weitere 70 s M715q fuer denselben Text, und ein
@@ -17575,6 +17749,55 @@ function kampftextTagesZaehler(traeger, feld) {
   return traeger[feld];
 }
 
+// E2: EINE Stelle, die einreiht - fuer den Client-Auftrag (Route darunter) und die zwei
+// PvP-Perspektiven aus /api/attack. Erst zaehlen, dann einreihen (Punkt 1 der Drosselung), beide
+// Zaehler im selben synchronen Block. `zaehleKonto` ist beim Verteidiger-Text aus: EIN Kampf
+// kostet den Angreifer EINEN Auftrag seines Tagesdeckels, der Verteidiger hat nichts bestellt;
+// der Gesamtdeckel zaehlt jeden Text, weil jeder den M715q 70 Sekunden kostet.
+function kampftextEinreihen(a) {
+  kampftextAufraeumen();
+  const jeKonto = a.zaehleKonto ? kampftextTagesZaehler(a.user, 'kampftextTag') : null;
+  if (jeKonto && jeKonto.anzahl >= KAMPFTEXT_PRO_TAG) {
+    return { status: 429, error: 'Tagesgrenze erreicht: ' + KAMPFTEXT_PRO_TAG + ' KI-Kampfberichte pro Tag.', proTag: KAMPFTEXT_PRO_TAG };
+  }
+  const gesamt = kampftextTagesZaehler(db, 'kampftextTag');
+  if (gesamt.anzahl >= KAMPFTEXT_GESAMT_PRO_TAG) {
+    return { status: 429, error: 'Heute sind alle KI-Kampfberichte vergeben - morgen wieder.' };
+  }
+  if (jeKonto) jeKonto.anzahl++;
+  gesamt.anzahl++;
+  const id = crypto.randomUUID();
+  db.kampftexte[id] = { status: 'wartet', userId: a.userId, zeit: Date.now(), text: '', grund: '', berichtId: a.berichtId || '', art: a.art };
+  kampftextWarteschlange.push({ id, art: a.art, daten: a.daten, userId: a.userId, berichtId: a.berichtId || '' });
+  return { status: 202, auftragId: id, wartend: kampftextWarteschlange.length };
+}
+// E2: der Spielerkampf, zwei Texte aus EINEM Datensatz. /api/attack ruft das nach den beiden
+// addReport-Aufrufen (attack-sent/attack-received) - der Server kennt dort beide Flotten, beide
+// Namen und beide Berichts-IDs; der Client bestellt fuer PvP nichts. Kein Text ohne Gegenstueck:
+// Ist der Tagesdeckel des Angreifers erschoepft, bekommt auch der Verteidiger keinen - sonst
+// erzaehlte der Bericht der einen Seite einen Kampf, den die andere nicht erzaehlt bekommt.
+// Rein synchron bis auf den Anstoss der Warteschlange (setImmediate), damit der Angriffs-Handler
+// seine Antwort nicht auf den M715q wartet; sein saveDb() persistiert die Eintraege.
+function kampftextPvpBestellen(angreiferId, angreiferBerichtId, verteidigerId, verteidigerBerichtId, datensatz) {
+  if (!KAMPFTEXT_AKTIV || !KAMPFTEXT_E2_AKTIV || notAusGesetzt('kampftext')) return false;
+  const angreifer = findUserById(angreiferId);
+  if (!angreifer || !verteidigerId) return false;
+  // BEIDE Plaetze pruefen, BEVOR der erste eingereiht wird (Codex-Befund an #237): Bei 299 von 300
+  // nahm der Angreifer-Text den letzten Platz des Gesamtdeckels, der Verteidiger-Text fiel mit 429
+  // weg - ein Text statt zwei, genau das Gegenteil von "zwei oder keiner". Alles hier ist synchron,
+  // zwischen Pruefung und Einreihen kann sich kein Zaehler bewegen.
+  kampftextAufraeumen();
+  if (kampftextTagesZaehler(angreifer, 'kampftextTag').anzahl >= KAMPFTEXT_PRO_TAG) return false;
+  if (kampftextTagesZaehler(db, 'kampftextTag').anzahl + 2 > KAMPFTEXT_GESAMT_PRO_TAG) return false;
+  const a = kampftextEinreihen({ user: angreifer, userId: angreiferId, berichtId: angreiferBerichtId,
+    art: 'pvp-angriff', daten: kampftextDatenFuer('pvp-angriff', datensatz), zaehleKonto: true });
+  if (a.status !== 202) return false;
+  kampftextEinreihen({ user: null, userId: verteidigerId, berichtId: verteidigerBerichtId,
+    art: 'pvp-verteidigung', daten: kampftextDatenFuer('pvp-verteidigung', datensatz), zaehleKonto: false });
+  setImmediate(kampftextArbeite);
+  return true;
+}
+
 app.post('/api/kampfbericht/text', authMiddleware, async (req, res) => {
   // Grundstellung UND Notaus, wie bei den Spawns (spawnAktiv): abschalten kann der Betreiber zur
   // Laufzeit, einschalten nur ein Merge.
@@ -17582,33 +17805,23 @@ app.post('/api/kampfbericht/text', authMiddleware, async (req, res) => {
   const user = findUserById(req.userId);
   if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
 
+  // E2: die Kampfart entscheidet den Datenblock. Ohne Feld npc (aeltere Clients); die zwei
+  // PvP-Perspektiven bestellt der Server selbst (kampftextPvpBestellen), nie ein Client.
+  const art = kampftextArt(req.body);
+  if (!art) return res.status(400).json({ error: 'Unbekannte Kampfart.' });
+  if (KAMPFTEXT_CLIENT_ARTEN.indexOf(art) < 0) return res.status(400).json({ error: 'Diese Kampfart bestellt der Server selbst.' });
+  if (art !== 'npc' && !KAMPFTEXT_E2_AKTIV) return res.status(503).json({ error: 'KI-Kampfberichte fuer diese Kampfart sind noch nicht freigegeben.' });
   const daten = kampftextDaten(req.body);
   // Ohne Gegnernamen und ohne ein einziges eigenes Schiff gibt es nichts zu erzaehlen - das ist
   // kein Fehler des Spielers, aber auch kein Auftrag wert.
-  if (!daten.gegner || !daten.eigene_schiffe.length) {
-    return res.status(400).json({ error: 'Kampfdaten unvollstaendig (Gegner und mindestens ein eigenes Schiff noetig).' });
-  }
+  const mangel = kampftextUnvollstaendig(art, daten, req.body);
+  if (mangel) return res.status(400).json({ error: mangel });
 
-  kampftextAufraeumen();
-  const jeKonto = kampftextTagesZaehler(user, 'kampftextTag');
-  if (jeKonto.anzahl >= KAMPFTEXT_PRO_TAG) {
-    return res.status(429).json({ error: 'Tagesgrenze erreicht: ' + KAMPFTEXT_PRO_TAG + ' KI-Kampfberichte pro Tag.', proTag: KAMPFTEXT_PRO_TAG });
-  }
-  const gesamt = kampftextTagesZaehler(db, 'kampftextTag');
-  if (gesamt.anzahl >= KAMPFTEXT_GESAMT_PRO_TAG) {
-    return res.status(429).json({ error: 'Heute sind alle KI-Kampfberichte vergeben - morgen wieder.' });
-  }
-
-  // Erst zaehlen, dann einreihen: Zwei gleichzeitige Anfragen duerfen die Grenze nicht gemeinsam
-  // durchbrechen. Beide Zaehler wachsen im selben synchronen Block vor dem ersten await.
-  jeKonto.anzahl++;
-  gesamt.anzahl++;
-  const id = crypto.randomUUID();
   const berichtId = kampftextEigenerBericht(req.userId, req.body && req.body.reportId);
-  db.kampftexte[id] = { status: 'wartet', userId: req.userId, zeit: Date.now(), text: '', grund: '', berichtId };
-  kampftextWarteschlange.push({ id, daten, userId: req.userId, berichtId });
+  const ergebnis = kampftextEinreihen({ user, userId: req.userId, berichtId, art, daten, zaehleKonto: true });
+  if (ergebnis.status !== 202) return res.status(ergebnis.status).json({ error: ergebnis.error, proTag: ergebnis.proTag });
   await saveDb();
-  res.status(202).json({ auftragId: id, wartend: kampftextWarteschlange.length });
+  res.status(202).json({ auftragId: ergebnis.auftragId, wartend: ergebnis.wartend });
   kampftextArbeite();
 });
 
@@ -17719,6 +17932,8 @@ function kampftextHealth() {
   return {
     aktiv: KAMPFTEXT_AKTIV,
     modell: KAMPFTEXT_MODELL,
+    arten: KAMPFTEXT_ARTEN,
+    e2: KAMPFTEXT_E2_AKTIV,
     gemessenVorSek: s ? Math.round((Date.now() - s.gemessen) / 1000) : null,
     aiCore: s ? s.aiCore : null,
     schluessel: s ? s.schluessel : { zeichen: KAMPFTEXT_AI_CORE_KEY.length, befund: 'ungeprueft', hinweis: '' }

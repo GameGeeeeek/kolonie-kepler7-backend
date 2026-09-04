@@ -198,3 +198,81 @@ Wächter: `tests/test_kampftext_http.js` Abschnitte 12 und 13 (jetzt 75 Prüfung
 bisher gegen die echte `server.js` und setzt seit dem Umlegen wie Abschnitt 2 auf eine **Kopie**, hier
 mit `false` – welche Stellung committet ist, darf das Ergebnis nicht verschieben. Gegenprobe: siehe
 Dateikopf.
+
+## Etappe E2, Backend-Hälfte (04.09.2026)
+
+Die großen Momente: **Weltboss, Festungs-Fall, Königinnen-Fall und der Spielerkampf mit beiden
+Perspektiven.** Entscheidung Sascha vom selben Tag: E2 vor dem Lore-Import, danach die Chronik.
+Das Messwerkzeug in AI Core (`tools/kampftext_messlauf.py`, PR #42) kennt dieselben Kampfarten mit
+denselben Datenblöcken und Einleitungen – das ist die Kopie-Familie aus E1a, um fünf Arten
+erweitert. Gemessen wird dort, entschieden hier.
+
+**Sechs Kampfarten** (`KAMPFTEXT_ARTEN`): `npc` (E1, unverändert, ohne Feld `art`), `weltboss`,
+`festung`, `koenigin`, `pvp-angriff`, `pvp-verteidigung`. Jede hat ihren eigenen Datenblock
+(`kampftextDatenFuer`) und ihre eigene Einleitung (`KAMPFTEXT_EINLEITUNGEN`); Regeln
+(`KAMPFTEXT_E2_REGELN`) und Sperren sind für alle dieselben. Zuschnitt wie in E0: Namen, Ausgang
+**als Satz** („Die Königin ist gefallen, ihr ganzer Schwarm zerfällt" statt `gefallen: true`),
+Schiffstypen – keine Kräfte, keine Beutezahlen, keine Anteile, keine Zeiten. Der Weltboss trägt
+seine Stufe im Namen (`worldBossName` des Clients); Festung, Königin und Spielerkampf tragen
+**gar keine Zahl** – jede Ziffer im Text ist dort zwangsläufig eine Erfindung.
+
+### Sechs Entscheidungen
+
+1. **Wer bestellt, entscheidet die Art.** Weltboss, Festung und Königin bestellt der Client wie den
+   npc-Kampf (`POST /api/kampfbericht/text` mit `art`); die zwei PvP-Perspektiven bestellt **dieser
+   Server selbst** in `/api/attack` (`kampftextPvpBestellen`), direkt hinter den beiden `addReport`
+   für `attack-sent` und `attack-received`. Dort kennt er beide Flotten, beide Namen und beide
+   Berichts-IDs. Ein Client, der `pvp-*` schickt, bekommt 400 – sonst könnte jeder für jeden
+   Verteidiger Texte bestellen.
+2. **Nur der FALL bekommt einen Text – als Sperre, nicht als Client-Konvention**
+   (`kampftextUnvollstaendig`): Eine Festung ohne `gefallen`, ein Nest ohne `schwarmGefallen` wird
+   mit 400 und Grund abgelehnt. Eine Festung wird bis zu siebenmal am Tag beschossen, gefallen ist
+   sie einmal; der Text gehört dem seltenen Moment.
+3. **Zwei Texte aus einem Datensatz, oder keiner.** Der Spielerkampf kostet den Angreifer **einen**
+   Auftrag seines Tagesdeckels (er hat den Kampf ausgelöst), den Verteidiger keinen, den
+   Gesamtdeckel zwei (jeder Text kostet den M715q 70 s). Ist der Deckel des Angreifers erschöpft,
+   bekommt auch der Verteidiger keinen Text – sonst erzählte der Bericht der einen Seite einen
+   Kampf, den die andere nicht erzählt bekommt. **Beide Plätze werden geprüft, bevor der erste
+   eingereiht wird** (Codex-Befund am PR: bei 299 von 300 nahm der Angreifer-Text den letzten
+   Platz, der Verteidiger-Text fiel mit 429 weg – ein Text statt zwei). Alles synchron, zwischen
+   Prüfung und Einreihen bewegt sich kein Zähler; Wächter 17a–17c.
+4. **`kampftextEinreihen` ist die eine Stelle, die einreiht** – Route und PvP-Weg benutzen sie.
+   Erst zählen, dann einreihen, beide Zähler im selben synchronen Block (Punkt 1 der Drosselung
+   bleibt). Der Angriffs-Handler wartet nicht auf den M715q: die Bestellung ist reine db-Mutation
+   vor seinem `saveDb()`, die Warteschlange startet per `setImmediate`.
+5. **Die Schiffsnamen-Sperre liest alle Listen des Datenblocks**, nicht mehr nur
+   `eigene_schiffe`/`verlorene_schiffe`: Im Angreifer-Text ist die Flotte des Verteidigers keine
+   Erfindung, das Modell hat sie gesehen. Abgeleitet, nicht gepflegt.
+6. **Der Notaus `kampftext` und `KAMPFTEXT_AKTIV` halten auch die PvP-Bestellung an**; der Kampf
+   selbst findet statt (13e). `/api/health` → `kampftext.arten` nennt die sechs Arten – der
+   Erkennungsweg für einen Server ohne E2, bevor das Frontend bestellt.
+
+### Befund beim Bau (14m): die Sperre fand „Mondzerstoerer" nicht
+
+Sie suchte nur die Umlaut-Schreibweise (`Mondzerstörer`); ein Text mit „oe" kam durch – und genau
+so schreibt das Modell Umlaute gern. Der Messlauf von AI Core kannte beide Schreibweisen von
+Anfang an, hier fehlte die Spiegelung. Seit E2 wird auch der Text normalisiert (ae/oe/ue und
+Kleinschreibung), nicht nur die erlaubten Namen. Ein E1-Fall, gefunden durch einen E2-Test.
+
+### Der Paritätsanker bleibt
+
+`test_kampftext_paritaet.js` im Frontend schneidet die fünf npc-Felder zwischen
+`function kampftextDaten(` und `function kampftextDatenText` aus und vergleicht den **ersten**
+Anweisungstext ab „Du bist der Bordschreiber". Deshalb steht die Weiche in `kampftextDaten` **vor**
+dem `return {`, die E2-Datenblöcke stehen hinter `kampftextDatenText`, und die E2-Einleitungen
+hinter `kampftextPrompt`. Wer das umsortiert, fällt dort.
+
+### Der Schalter `KAMPFTEXT_E2_AKTIV`
+
+Grundstellung **aus**, wie `FESTUNG_SPAWN_AKTIV` vor seiner Etappe: Die Roadmap verlangt, jede neue
+Kampfart **vor** der Auslieferung am M715q zu messen (Befehl in AI Cores README, PR #42). Solange er
+aus ist, lehnt die Route jede Art außer `npc` mit 503 ab, `/api/attack` bestellt nichts, und
+`/api/health` zeigt `kampftext.e2: false` – daran sieht das Frontend, dass es noch nicht bestellen
+soll. Umgelegt wird per Merge nach der Messung, unmittelbar vor dem Frontend-PR (Hausregel: Backend
+zuerst live, per `/api/health` belegt). Der Notaus `kampftext` schaltet zur Laufzeit weiter alles ab.
+
+Wächter: `tests/test_kampftext_http.js` Abschnitte 14, 15, 16, 17 und 13e (jetzt 110 Prüfungen; die
+Hauptkopie misst beide Schalter in Stellung „an", eine dritte Kopie die Grundstellung E2 aus),
+Gegenprobe im Dateikopf. **Frontend folgt:** Bestellung mit `art` für Weltboss, Festungs-Fall und
+Königinnen-Fall, Logbuch-Sektion in den Berichten `festung-angriff`, `nest-angriff`, `attack-sent`
+und `attack-received` (der npc-Zweig zeigt sie seit E1b).

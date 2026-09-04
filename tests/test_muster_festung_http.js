@@ -45,7 +45,8 @@ const SAB = process.env.KEPLER_MF_SABOTAGE || '';
    `claim` auch 5a (die Antwort traegt dann weder `festung` noch `pve`). Die erste Fassung dieser
    Liste nannte je nur eine Pruefung - eine Pflichtliste ist selbst eine Behauptung, bis die
    Gegenprobe sie gemessen hat. */
-const MUSS_FALLEN = { rechte: ['2c'], gewicht: ['4c', '4d'], claim: ['5a', '5b'] };
+const MUSS_FALLEN = { rechte: ['2c'], gewicht: ['4c', '4d'], claim: ['5a', '5b'],
+  notaus: ['9a', '9b', '9c'], sammelzeiten: ['8f'] };
 
 let fail = false;
 const ergebnis = {};
@@ -110,12 +111,17 @@ function ende() {
 }
 process.on('exit', ende);
 
-async function starteServer() {
+async function starteServer(ohneTestmodus) {
   let log = '';
+  /* Der Testmodus laesst JEDE positive Sammelzeit durch - praktisch fuer zwei Sekunden statt
+     fuenfzehn Minuten, aber damit ist die Liste der erlaubten Dauern unpruefbar. Abschnitt 6
+     startet deshalb einen zweiten Server OHNE ihn. */
+  const umgebung = Object.assign({}, process.env, { DB_FILE: dbPfad, PORT: String(PORT), JWT_SECRET: 'testsecret',
+    ALLIANCE_RAID_TEST_MODE: '1' });
+  if (ohneTestmodus) delete umgebung.ALLIANCE_RAID_TEST_MODE;
   srv = spawn(process.execPath, [QUELLE], {
     cwd: WURZEL,
-    env: Object.assign({}, process.env, { DB_FILE: dbPfad, PORT: String(PORT), JWT_SECRET: 'testsecret',
-      ALLIANCE_RAID_TEST_MODE: '1' }),
+    env: umgebung,
     stdio: ['ignore', 'pipe', 'pipe']
   });
   srv.stdout.on('data', d => { log += d; });
@@ -146,6 +152,15 @@ function liesSave(d, uid) {
   return JSON.parse(typeof roh === 'string' ? roh : roh.value);
 }
 const schreibDb = d => fs.writeFileSync(dbPfad, JSON.stringify(d, null, 1));
+/* Wie aendereDb, aber OHNE den Server danach wieder zu starten - fuer Abschnitt 6, der ihn
+   anschliessend absichtlich ohne Testmodus hochfaehrt. */
+async function aendereDbOhneStart(fn) {
+  await stoppeServer();
+  const d = liesDb();
+  try { await fn(d); }
+  catch (e) { check('aufbau: die DB-Aenderung liess sich ausfuehren', false, { fehler: String(e).slice(0, 200) }); }
+  schreibDb(d);
+}
 async function aendereDb(fn) {
   await stoppeServer();
   const d = liesDb();
@@ -183,7 +198,13 @@ function festung(opt) {
              "(doc && doc.zielArt !== 'alien-nest') ? allianceRoleOf(doc.targetTag, req.userId) : null"],
     gewicht: ["doc.dispatch.totalComposition || {}, beteiligteF, jetzt, doc.festungZiel || 'kern', null);",
               "doc.dispatch.totalComposition || {}, [beteiligteF.find(b => b.userId === req.userId) || beteiligteF[0]], jetzt, doc.festungZiel || 'kern', null);"],
-    claim: ["if (res_.nest || res_.festung) {", "if (res_.nest) {"]
+    claim: ["if (res_.nest || res_.festung) {", "if (res_.nest) {"],
+    /* Die Notaus-Zeile in resolve ist die EINZIGE ohne den nachgestellten Kommentar der fuenf
+       Einzelrouten - deshalb ist sie mit dem Zeilenumbruch eindeutig. `0-sabotage` belegt das. */
+    notaus: ["if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });\n",
+             "\n"],
+    sammelzeiten: ["ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT.includes(gatherSeconds)",
+                   "ALLIANCE_MUSTER_DURATIONS.includes(gatherSeconds)"]
   };
   if (SAB) {
     const paar = sab[SAB];
@@ -357,6 +378,130 @@ function festung(opt) {
     check('7a: eine verschwundene Festung kostet NICHTS und nennt den Grund',
       r.status === 200 && rs && rs.festung === true && rs.verpasst === true && rs.grund === 'gefallen' && rs.ownLossPct === 0,
       { status: r.status, verpasst: rs && rs.verpasst, grund: rs && rs.grund, ownLossPct: rs && rs.ownLossPct });
+  }
+
+  // ---- 8) Der Allianz-Raid aus dem Festungsmenue: Sammelzeiten und Meldung --------------------
+  /* Auftrag Sascha (04.09.2026): Aus dem Festungsmenue heraus soll ein Allianz-Raid startbar sein,
+     mit einstellbarer Sammelphase und einer Nachricht an die Allianz. Das Backend konnte den
+     Verband gegen eine Festung schon - gefehlt haben die Dauern (30/60/120 statt 15/30/45/60) und
+     eine Meldung, die das WIRKLICHE Ziel nennt: Bei einer Festung ist targetTag null, der Push las
+     sich also „greift [?] an". */
+  {
+    const rohQuelle = fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8');
+    const dauernRoh = (rohQuelle.match(/const ALLIANCE_MUSTER_DURATIONS = \[([^\]]*)\]/) || [])[1] || '';
+    const dauern = dauernRoh.split(',').map(t => {
+      const m = t.match(/(\d+)\s*\*\s*60/);
+      return m ? Number(m[1]) : NaN;
+    });
+    check('8a: die Sammelphase ist auf 15, 30, 45 und 60 Minuten einstellbar',
+      dauern.length === 4 && dauern.join(',') === '15,30,45,60', { gemessen: dauern, roh: dauernRoh });
+
+    // Den laufenden Verband raeumen, damit ein neuer mit Nachricht angelegt werden kann.
+    /* Abschnitt 7 hat die Festung verschwinden lassen - das ist sein Zweck. Fuer diesen Abschnitt
+       steht sie wieder da, und der laufende Verband wird geraeumt, damit ein neuer mit Nachricht
+       angelegt werden kann. */
+    await aendereDb(d => {
+      const feld = d.shared[feldKey]; feld.festung = festung(); d.shared[feldKey] = feld;
+      delete d.shared['alliance:' + TAG + ':musterattack'];
+      /* Bens Postfach wird geleert. Ohne das findet die Suche unten die AELTESTE passende Meldung
+         aus einem frueheren Abschnitt - die traegt keine Nachricht, und 8c faellt, obwohl der
+         Server richtig arbeitet. Ein Test, der den falschen Datensatz liest, misst nichts. */
+      if (d.private[BEN]) d.private[BEN].__notificationEvents = [];
+    });
+    const tokA6 = await s.anmelden('anna');
+    const NACHRICHT = 'Alle Mann, wir schleifen die Feste!';
+    const r6 = await post('/musterattack/create', tokA6, { tag: TAG, zielArt: 'festung',
+      festungSystem: sys, festungId: 'fest-1', festungZiel: 'kern', gatherSeconds: 2, message: NACHRICHT });
+    check('8-vorab: der Verband mit Nachricht laesst sich anlegen', r6.status === 200, { status: r6.status, error: r6.body && r6.body.error });
+    const meldung = ((liesDb().private[BEN] || {}).__notificationEvents || []).find(e => e && e.type === 'alliance-muster');
+    check('8b: die Meldung an die Allianz nennt das WIRKLICHE Ziel, nicht ein leeres Kuerzel', (() => {
+      if (!meldung) return false;
+      const p = meldung.payload || {};
+      return typeof p.ziel === 'string' && /Asteroidenfestung/.test(p.ziel) && p.ziel.indexOf(sys) >= 0;
+    })(), { payload: meldung && meldung.payload });
+    check('8c: und sie fuehrt die Nachricht des Ausrufers mit - sonst steht sie nur im Dokument',
+      !!meldung && (meldung.payload || {}).nachricht === NACHRICHT,
+      { nachricht: meldung && (meldung.payload || {}).nachricht, erwartet: NACHRICHT });
+  }
+
+  // ---- 8d/8e) Ohne Testmodus gilt die Liste wirklich ------------------------------------------
+  await stoppeServer();
+  await aendereDbOhneStart(d => {
+    const feld = d.shared[feldKey]; feld.festung = festung(); d.shared[feldKey] = feld;
+    delete d.shared['alliance:' + TAG + ':musterattack'];
+  });
+  s = await starteServer(true);
+  {
+    const tokA7 = await s.anmelden('anna');
+    /* 8d NIMMT 90 MINUTEN, NICHT MEHR 120 (Durchsicht 04.09.2026). Die erste Fassung testete
+       genau die zwei Stunden - und die sind seit der Uebergangsmenge
+       ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT wieder erlaubt, solange das alte Frontend live ist.
+       Die Pruefung waere damit still gruen geblieben, obwohl sie das Gegenteil belegt haette.
+       90 Minuten stehen in KEINER der beiden Listen und messen deshalb weiter die Regel. */
+    const zuLang = await post('/musterattack/create', tokA7, { tag: TAG, zielArt: 'festung',
+      festungSystem: sys, festungId: 'fest-1', festungZiel: 'kern', gatherSeconds: 90 * 60 });
+    check('8d: eine Sammelzeit ausserhalb BEIDER Listen wird abgelehnt',
+      zuLang.status === 400, { status: zuLang.status, error: zuLang.body && zuLang.body.error });
+    const passt = await post('/musterattack/create', tokA7, { tag: TAG, zielArt: 'festung',
+      festungSystem: sys, festungId: 'fest-1', festungZiel: 'kern', gatherSeconds: 45 * 60 });
+    check('8e: 45 Minuten gehen durch - die neue Liste gilt am echten Endpunkt, nicht nur im Quelltext',
+      passt.status === 200, { status: passt.status, error: passt.body && passt.body.error });
+    /* 8f IST EIN MERKER MIT ABLAUFDATUM. Solange das live stehende Frontend zwei Stunden anbietet,
+       MUSS der Server sie annehmen - sonst laeuft ein Spieler im laufenden Spiel in ein
+       "Ungueltige Anfrage", waehrend 30 und 60 Minuten weiter gehen.
+       Diese Pruefung wird bewusst ROT, sobald jemand ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT
+       entfernt - und genau dann gehoert sie mit geloescht. Das ist ihr Zweck: Sie haelt fest,
+       dass die Uebergangsmenge eine Entscheidung war und kein Versehen. */
+    await stoppeServer();
+    await aendereDbOhneStart(d => { delete d.shared['alliance:' + TAG + ':musterattack']; });
+    s = await starteServer(true);
+    const tokA8 = await s.anmelden('anna');
+    const uebergang = await post('/musterattack/create', tokA8, { tag: TAG, zielArt: 'festung',
+      festungSystem: sys, festungId: 'fest-1', festungZiel: 'kern', gatherSeconds: 120 * 60 });
+    check('8f: die zwei Stunden des LIVE stehenden Frontends werden weiter angenommen (Uebergang)',
+      uebergang.status === 200, { status: uebergang.status, error: uebergang.body && uebergang.body.error });
+  }
+
+  // ---- 9) Der Notaus 'angriffe' gattert auch den VERBAND ---------------------------------------
+  /* Befund der Durchsicht 04.09.2026: spawnAktiv('angriffe') stand an den fuenf Einzelangriffen,
+     nicht an /musterattack/resolve - dabei fuehrt der Endpunkt genau dieselben Rechenkerne aus.
+     Der Zweck des Schalters ("fuer die Dauer einer Ruecksicherung") trifft auf den Verband sogar
+     staerker zu: Er loest sich bei Ankunft SELBSTTAETIG auf und zahlt an alle Beteiligten aus.
+     Gemessen wird am ECHTEN Endpunkt mit gesetztem Notaus, nicht am Quelltext. */
+  {
+    await aendereDbOhneStart(d => {
+      const feld = d.shared[feldKey]; feld.festung = festung(); d.shared[feldKey] = feld;
+      d.shared['alliance:' + TAG + ':musterattack'] = JSON.stringify({
+        id: 'notaus-1', tag: TAG, zielArt: 'festung', targetTag: null,
+        festungSystem: sys, festungId: 'fest-1', festungZiel: 'kern', festungStufeName: 'Sternenfeste',
+        createdBy: ANNA, createdByName: 'anna', message: '',
+        createdAt: Date.now() - 60000, museterEndsAt: Date.now() - 30000,
+        phase: 'enroute', result: null,
+        dispatch: { arrivalAt: Date.now() - 1000, totalPower: 500000, totalShips: 1000,
+          participantCount: 1, participants: [{ userId: ANNA, name: 'anna', power: 500000, shipCount: 1000 }],
+          totalComposition: { cruisers: 1000 } }
+      });
+      d.notAus = Object.assign({}, d.notAus, { angriffe: { aus: true, grund: 'Test', seit: Date.now() } });
+    });
+    s = await starteServer();
+    const tokA9 = await s.anmelden('anna');
+    const kernVor9 = (festLesen() || {}).kern;
+    const gesperrt = await post('/musterattack/resolve', tokA9, { tag: TAG });
+    check('9a: mit gesetztem Notaus schlaegt der Verband NICHT ein',
+      gesperrt.status === 503 && !!(gesperrt.body && gesperrt.body.pausiert),
+      { status: gesperrt.status, pausiert: gesperrt.body && gesperrt.body.pausiert });
+    check('9b: und der Kern der Festung ist unberuehrt geblieben',
+      (festLesen() || {}).kern === kernVor9, { vorher: kernVor9, nachher: (festLesen() || {}).kern });
+    check('9c: der Verband steht weiter enroute - er ist aufgeschoben, nicht verloren',
+      (JSON.parse(liesDb().shared['alliance:' + TAG + ':musterattack'] || 'null') || {}).phase === 'enroute',
+      { phase: (JSON.parse(liesDb().shared['alliance:' + TAG + ':musterattack'] || 'null') || {}).phase });
+    await aendereDbOhneStart(d => { delete d.notAus.angriffe; });
+    s = await starteServer();
+    const tokA10 = await s.anmelden('anna');
+    const frei = await post('/musterattack/resolve', tokA10, { tag: TAG });
+    check('9d: nach dem Fenster loest derselbe Verband regulaer auf - nichts ist verlorengegangen',
+      frei.status === 200 && frei.body && frei.body.doc && frei.body.doc.phase === 'resolved',
+      { status: frei.status, phase: frei.body && frei.body.doc && frei.body.doc.phase });
   }
 
   await stoppeServer();

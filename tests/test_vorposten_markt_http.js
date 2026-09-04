@@ -118,7 +118,10 @@ async function stoppeServer() { if (!srv) return; srv.kill('SIGTERM'); await war
   const marktDeckel = Number((roh.match(/const VP_MARKT_DECKEL = ([\d.]+);/) || [])[1]);
   const schritt = Number((roh.match(/const VP_MARKT_SLOT_SCHRITT = ([\d.]+);/) || [])[1]);
   const leiter = [...roh.matchAll(/\{ stufe: (\d), name: '[^']*',[^}]*markt: ([\d.]+),/g)].map(m => Number(m[2]));
-  const multHandel = Number((roh.match(/key: 'handel',[\s\S]{0,400}?markt: ([\d.]+) \}/) || [])[1]);
+  /* Der Anker greift den Wert INNERHALB des mult-Objekts, ohne zu verlangen, dass er dort der
+     letzte ist - sonst bricht ihn der naechste Kanal, der dahinter geschrieben wird (genau so am
+     03.09.2026 durch Etappe V4 passiert). */
+  const multHandel = Number((roh.match(/key: 'handel',[\s\S]{0,600}?mult: \{[^}]*markt: ([\d.]+)/) || [])[1]);
   const erwarteterAnteil = Math.round(leiter[7] * multHandel * 1000) / 1000;
   check('0a: Grundgebuehr, Grundplaetze, Deckel, Schritt und Leiter sind im Quelltext auffindbar',
     basisFee > 0 && basisSlots > 0 && marktDeckel > 0 && schritt > 0 && leiter.length === 8 && multHandel > 0,

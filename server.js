@@ -1044,6 +1044,21 @@ function allianceTagWhereAdmin(userId) {
   }
   return null;
 }
+/* Der Allianz-Tag eines Kontos - jede aktive Rolle, nicht nur 'admin'. Gelesen wird der GETEILTE
+   Speicher, nicht `save.player.allianceTag`: Der Spielstand ist klientenautoritativ, und eine
+   Rechteprüfung, die ihn glaubt, ist keine. Ein Konto gehoert hoechstens einer Allianz an (siehe
+   allianceTagWhereAdmin). */
+function allianceTagOf(userId) {
+  if (!userId) return null;
+  const suffix = ':role:' + userId;
+  for (const k of Object.keys(db.shared)) {
+    if (!k.endsWith(suffix)) continue;
+    const m = k.match(/^alliance:([^:]+):role:/);
+    if (!m) continue;
+    try { const r = JSON.parse(db.shared[k]); if (r.role && r.role !== 'left') return m[1]; } catch (e) {}
+  }
+  return null;
+}
 // Aktive Mitglieder zählen (jede Rolle außer 'left') - für das Mitgliederlimit.
 function allianceMemberCount(tag) {
   const prefix = 'alliance:' + tag + ':role:';
@@ -1766,8 +1781,15 @@ function pushNotificationText(type, payload) {
     ' ist erschienen - schließ dich dem Angriff an, bevor er wieder verschwindet.' };
   if (type === 'alliance-muster') {
     const min = Math.max(1, Math.round((payload.gatherSeconds || 0) / 60));
-    return { title: 'Koordinierter Angriff!', body: (payload.byName || 'Ein Kommandant') + ' greift [' + (payload.targetTag || '?') +
-      '] an - Sammelphase ' + min + ' Min. Schließ deine Flotte an!' };
+    /* `ziel` beschreibt jede Zielart in Worten; der Rueckfall auf targetTag haelt aeltere Eintraege
+       lesbar, die noch ohne das Feld in der Warteschlange liegen. Die Nachricht des Ausrufers
+       haengt hinten an, gekuerzt - eine Push-Meldung hat wenig Platz, und der volle Text steht
+       ohnehin im Verband. */
+    const ziel = payload.ziel || ('[' + (payload.targetTag || '?') + ']');
+    const n = String(payload.nachricht || '').trim();
+    const anhang = n ? ' „' + (n.length > 60 ? n.slice(0, 59) + '…' : n) + '"' : '';
+    return { title: 'Koordinierter Angriff!', body: (payload.byName || 'Ein Kommandant') + ' greift ' + ziel +
+      ' an - Sammelphase ' + min + ' Min. Schließ deine Flotte an!' + anhang };
   }
   if (type === 'alliance-base-attacked') return payload.destroyed
     ? { title: 'Allianzbasis ZERSTÖRT!', body: '[' + (payload.attackerTag || '?') + '] hat eure Basis zerstört - alle Boni sind deaktiviert, bis sie repariert ist.' }
@@ -9051,7 +9073,30 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
 // Flottenangriffskraft, ohne das volle defWeight-/Hülle-/Schild-Modulsystem des Frontends) - analog
 // zur bereits akzeptierten Vereinfachung von computeAllianceRaidPower (ohne Doktrin/Gebäude-/
 // Offiziers-Kampfbonus/Buffs).
-const ALLIANCE_MUSTER_DURATIONS = [30 * 60, 60 * 60, 120 * 60];
+/* SAMMELZEITEN (Auftrag Sascha 04.09.2026: 15/30/45/60 statt 30/60/120). Der Grund fuer die
+   kuerzeren Stufen ist der neue Einstieg: Ein Verband, den man aus dem Festungsmenue heraus
+   ausruft, wird meist ausgerufen, WEIL gerade jemand da ist - zwei Stunden Sammelphase passen zu
+   einem geplanten Termin, nicht zu einem spontanen „jetzt gleich".
+   KOPIE-FAMILIE: dieselbe Liste steht im Frontend (ALLIANCE_MUSTER_DURATIONS). Beide Seiten
+   pflegen; kein Test vergleicht sie automatisch (gemessen 04.09.2026).
+   Laufende Verbaende mit zwei Stunden sind unberuehrt - die Liste gilt nur beim Ausrufen. */
+const ALLIANCE_MUSTER_DURATIONS = [15 * 60, 30 * 60, 45 * 60, 60 * 60];
+/* UEBERGANGSMENGE (Durchsicht 04.09.2026 - fuenf Perspektiven fanden denselben Fehler).
+   Die Liste darueber ist die ANGEBOTENE; dies hier ist die AKZEPTIERTE, und sie ist eine Obermenge.
+   Der Grund: Das LIVE stehende Frontend fuehrt weiterhin [30, 60, 120] (origin/main:44793) und baut
+   daraus sein Auswahlfeld. Ein Backend-Merge IST die Auslieferung - wer danach im Spiel "2 Std"
+   waehlt, bekaeme 400 "Ungueltige Anfrage", waehrend 30 und 60 Minuten weiter durchgehen. Der
+   Fehler saehe nach einem Zufallsfehler aus, nicht nach einer Versionsluecke.
+   DIE LEHRE, DIE HIER FEHLTE: "Backend zuerst live" deckt nur das HINZUFUEGEN von Werten ab. Das
+   ENTFERNEN eines akzeptierten Werts ist die Gegenrichtung und braucht die Vereinigung fuer genau
+   eine Auslieferung. Nur die ANZEIGE darf vorauseilen; die akzeptierte Menge darf waehrenddessen
+   nur wachsen. docs/asteroidenfestungen.md behauptete ausdruecklich, es gebe keinen
+   Zwischenzustand - das war falsch und ist dort korrigiert.
+   ENTFERNEN, sobald das Frontend mit [15, 30, 45, 60] live ist: dann faellt diese Konstante weg und
+   `gatherOk` liest wieder ALLIANCE_MUSTER_DURATIONS. Der Merker dafuer ist Pruefung 8f in
+   tests/test_muster_festung_http.js - sie wird bei diesem Schritt bewusst rot und wird zusammen
+   mit der Konstante geloescht. */
+const ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT = ALLIANCE_MUSTER_DURATIONS.concat([120 * 60]);
 const ALLIANCE_MUSTER_COOLDOWN_MS = 24 * 3600 * 1000;
 const ALLIANCE_MUSTER_TEST_MODE = process.env.ALLIANCE_RAID_TEST_MODE === '1'; // gleicher Schalter wie beim Raid
 const ALLIANCE_MUSTER_TEST_DISPATCH_SEC = 2;
@@ -9172,7 +9217,7 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
   const istVorposten = zielArt === 'vorposten';
   const istOhneAllianz = musterZielOhneAllianz(zielArt);
   const targetTag = istOhneAllianz ? null : String(targetTagRaw || '').trim().toUpperCase();
-  const gatherOk = ALLIANCE_MUSTER_DURATIONS.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
+  const gatherOk = ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT.includes(gatherSeconds) || (ALLIANCE_MUSTER_TEST_MODE && Number(gatherSeconds) > 0);
   if (!tag || !gatherOk) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   if (!istOhneAllianz && (!targetTag || targetTag === tag)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   const myRole = allianceRoleOf(tag, req.userId);
@@ -9277,8 +9322,6 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
     phase: 'gathering', dispatch: null, result: null
   };
   setMusterAttackDoc(tag, doc);
-  await saveDb();
-
   // Dieselbe Begründung wie beim Allianz-Raid (02.08.2026): eine Sammelphase mit harter Frist, die
   // bisher nur im Allianz-Chat stand. Wer nicht ohnehin gerade spielt, hat vom Aufruf nie erfahren.
   // Bewusst dieselbe Einstellungs-Kategorie 'allianceraid' wie der Raid: Für den Spieler ist beides
@@ -9291,12 +9334,25 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
       if (!user) continue;
       const prefs = getNotifPrefs(user);
       if (!prefs.enabled || !prefs.allianceraid) continue;
+      /* `ziel` und `nachricht` sind neu (04.09.2026). Vorher stand im Push nur `targetTag` - bei
+         einer Festung, einem Nest oder einem Vorposten ist der aber null, und die Meldung las sich
+         „greift [?] an". musterZielBeschreibung() kennt alle vier Zielarten und ist dieselbe
+         Quelle, aus der auch der 409-Text beim zweiten Verband gespeist wird. Die Nachricht des
+         Ausrufers stand bis hierher nur im Dokument - wer nicht ohnehin im Spiel war, hat sie nie
+         gelesen, obwohl sie genau fuer ihn gedacht ist. */
       pushNotificationEvent(memberId, 'alliance-muster', {
-        tag, byName: req.username, targetTag, gatherSeconds
+        tag, byName: req.username, targetTag, gatherSeconds,
+        ziel: musterZielBeschreibung(doc), nachricht: doc.message || ''
       });
     }
   } catch (e) { console.error('Musterangriff-Benachrichtigung fehlgeschlagen (der Angriff selbst läuft):', e.message); }
-
+  /* Die Meldungen werden VOR saveDb() eingereiht (04.09.2026). Vorher standen sie dahinter - sie
+     lagen damit nur im Speicher und erreichten die Platte erst beim naechsten fremden
+     Schreibvorgang. Ein Neustart dazwischen (und der Deploy startet den Prozess bei jedem Push
+     neu) hat den Aufruf still verschluckt: Der Verband stand, aber niemand wurde benachrichtigt.
+     Dieselbe Hausregel wie ueberall - db synchron vor saveDb() mutieren. Aufgefallen beim Bau des
+     Waechters fuer den Raid aus dem Festungsmenue, nicht im Spiel. */
+  await saveDb();
   res.json({ ok: true, doc });
 });
 
@@ -9494,6 +9550,21 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
   if (!myRoleAttacker && !myRoleDefender) return res.status(403).json({ error: 'Nur Mitglieder der angreifenden oder verteidigenden Allianz.' });
 
   if (!doc || doc.phase !== 'enroute' || !doc.dispatch || doc.dispatch.arrivalAt > Date.now()) return res.json({ ok: true, doc });
+  /* NOTAUS 'angriffe' (Durchsicht 04.09.2026). Er stand an den fuenf EINZELangriffen, nicht am
+     Verband - dabei fuehrt dieser Endpunkt genau dieselben Rechenkerne aus
+     (nestSchlagAusfuehren, festungSchlagAusfuehren, vorpostenSchlagAusfuehren) und dazu den Schlag
+     auf eine fremde Allianzbasis. Die Beschreibung des Schalters zaehlt selbst auf, was er decken
+     soll ("PvP, Festung, Nest, Konvoi, Vorposten"); drei dieser Zielarten kann ein Verband treffen.
+     Fuer eine Ruecksicherung ist der Verband sogar der wichtigere Fall: Er loest sich bei Ankunft
+     SELBSTTAETIG auf, und sein Ergebnis ist ein gefallener Vorposten samt Belohnungen an alle
+     Beteiligten. Dieselbe Bauart wie der behobene VP_ENDPROJEKTE_AKTIV-Befund: gattert war der Weg,
+     den man anklickt, nicht der, der ausfuehrt.
+     DIE STELLE IST BEWUSST HIER, nicht am Routenkopf: Weiter oben bekaeme auch das blosse
+     Nachfragen (Sammelphase, noch nicht angekommen) eine 503, und das Kartenmenue verloere seinen
+     Zustand. Hier wird nur der SCHLAG aufgeschoben - das Dokument bleibt 'enroute' mit vergangenem
+     arrivalAt, der naechste Aufruf nach dem Fenster loest ihn regulaer auf. Es geht nichts
+     verloren, resolve wird ohnehin wiederholt aufgerufen (Angreifer wie Verteidiger). */
+  if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });
 
   if (istNestZiel) {
     const g = loadOrInitGalaxy();
@@ -13090,6 +13161,74 @@ const VP_MARKT_AKTIV = false;
 const VP_MARKT_DECKEL = 0.60;
 const VP_MARKT_SLOT_SCHRITT = 0.12;
 const VP_MARKT_SLOTS_MAX = 3;
+/* ETAPPE V4: DAS LAGER AM VORPOSTEN (03.09.2026). Bis hierher war ein Vorposten ein Bonus auf
+   Zahlen: Flugzeit, Produktion, Aufklaerung. Man flog nie hin, man holte nie etwas ab, und sein
+   Verlust kostete nur diesen Bonus. Jetzt sammelt er.
+
+   KEIN TICKEN. Der Ertrag wird beim ABHOLEN aus der verstrichenen Zeit GERECHNET, nicht laufend
+   gutgeschrieben - dieselbe Entscheidung wie bei den Projekten: Es gibt keinen Zustandsuebergang,
+   der verlorengehen koennte, und kein Schreiben beim Lesen. `doc.lagerSeit` ist der einzige
+   Zustand.
+
+   DER DECKEL IST DIE GANZE BALANCE. Ohne ihn waere ein vergessener Vorposten eine Bank, die mit
+   der Abwesenheit waechst. Mit VP_LAGER_STUNDEN ist nach zwoelf Stunden Schluss; wer abholen will,
+   muss vorbeischauen.
+
+   DIE AUFTEILUNG IST GEMESSEN, nicht erfunden: die baseRate-Werte der drei Foerdergebaeude des
+   Spiels (Erzmine 0,225, Kristallraffinerie 0,075, Deuteriumsynthetisierer 0,06). Ein Vorposten
+   foerdert damit im selben Verhaeltnis wie eine Kolonie - eine eigene Mischung waere eine zweite
+   Wirtschaftsaussage ueber dieselbe Welt.
+
+   KALIBRIERT gegen die eigene Foerderung des Spiels: Stufe 8 traegt 25.000 Erz-Aequivalent je
+   Stunde, ein Handelsknoten 45.000. Ein Spaetspieler foerdert selbst rund 145.000 Erz je Stunde
+   (Mine Stufe 45, Multiplikator 4, gemessen an ratesPerSecond im Frontend). Das Lager ist damit
+   eine Beigabe, kein Ersatz - und drei volle Vorposten bleiben unter dem, was er in derselben
+   Zeit selbst foerdert. */
+const VP_LAGER_AKTIV = false;
+const VP_LAGER_STUNDEN = 12;
+/* AB WANN UEBERHAUPT GESAMMELT WIRD (Durchsicht 04.09.2026). Ohne diese Untergrenze stuende in der
+   Sekunde, in der VP_LAGER_AKTIV auf true kippt, JEDER bestehende Vorposten sofort am Deckel:
+   `vorpostenLagerStand` faellt mangels `doc.lagerSeit` auf `doc.seit` zurueck - das Baudatum, oft
+   Wochen alt -, und die Stunden werden nur nach OBEN gegen VP_LAGER_STUNDEN geklemmt. Fuer eine
+   Bastion mit Handelsknoten waeren das auf einen Schlag 337.500 Erz, 112.500 Kristalle und
+   90.000 Deuterium je Vorposten, bis zu drei je Konto.
+   Genau diese Fehlerklasse steht seit heute in PROJECT_MEMORY („Ein Zustand, der heute nur nutzlos
+   aussieht, kann beim Einschalten rueckwirkend wertvoll werden") - fuer das Sternendock wurde sie
+   behandelt, fuer das Lager nicht.
+   0 heisst „keine Untergrenze". BEIM UMLEGEN DES SCHALTERS auf den Deploy-Zeitstempel setzen, z. B.
+   Date.parse('2026-09-05T18:00:00Z'). Kein Schreiben beim Lesen, keine Migration, nichts geloescht -
+   die Zeit vor der Aktivierung zaehlt einfach nicht. */
+const VP_LAGER_AB = 0;
+const VP_LAGER_ANTEILE = { erz: 0.225, kristalle: 0.075, deuterium: 0.06 };
+/* ETAPPE V5: DER VERBUENDETE DARF ETWAS (03.09.2026). Bis hierher stand an jeder Vorposten-Route
+   `doc.besitzer !== req.userId` -> 403: Ein Allianzpartner konnte nichts. Kein Beisteuern, keine
+   Nutzung, kein Mitbauen - reines Einzeleigentum in einem Allianzspiel.
+
+   Etappe a: Verbuendete duerfen GARNISON beisteuern und nur ihre eigenen Schiffe zurueckrufen.
+   Etappe b: Verbuendete nutzen den Flugzeit-Bonus mit (`verbuendet` im Client-Dokument). */
+const VP_ALLIANZ_AKTIV = false;
+/* WIEVIEL DER GARNISON EIN VERBUENDETER HOECHSTENS BELEGT (Durchsicht 04.09.2026).
+   Der Befund: `vorpostenVerbuendet` leitet das Recht aus `allianceTagOf` ab, also aus
+   `db.shared['alliance:<TAG>:role:<uid>']` - und genau diesen Schluessel darf JEDES eingeloggte
+   Konto fuer sich selbst schreiben (`checkAllianceKeyPermission` erlaubt `role:<eigene id>` mit
+   'member' und prueft dabei nur Rauswurf-Sperrfrist und Mitgliederlimit; keine Einladung, keine
+   Zustimmung). Das ist eine bewusste Produktentscheidung des Allianz-Systems und wird hier nicht
+   angetastet - aber sie hat eine Folge, die es vor V5 nicht gab: Ein Fremder konnte den GEMEINSAMEN
+   Deckel `garnisonMax` mit den billigsten Schiffen fuellen, und der Besitzer bekam ihn nicht mehr
+   heraus. `rueckruf` loescht ausschliesslich `von[req.userId]`, einen Rauswurf-Endpunkt gibt es
+   nicht; der einzige Ausweg waere, den EIGENEN Vorposten 24 Stunden lang abzubauen.
+   Der Deckel LOESCHT NICHTS (Hausregel) - er begrenzt nur, wie viel Platz Verbuendete zusammen
+   belegen duerfen. Der Besitzer behaelt damit immer Raum fuer die eigene Garnison. */
+const VP_ALLIANZ_GARNISON_ANTEIL = 0.5;
+/* ETAPPE V6: die Endprojekte. Der Schalter deckt alle drei ab - sie kommen zusammen, weil sie
+   zusammen die Entscheidung sind, welchen Zweig man auf der Endstufe haelt.
+   DAS STERNENDOCK TICKT NICHT (wie das Lager): Was bereitliegt, wird beim Abholen aus der
+   verstrichenen Zeit gerechnet. Ein Kreuzer je 24 Stunden, hoechstens sieben gestapelt - dieselbe
+   Groessenordnung wie beim Lager, also eine Beigabe und kein Ersatz fuer die eigene Werft. */
+const VP_ENDPROJEKTE_AKTIV = false;
+const VP_DOCK_STUNDEN = 24;
+const VP_DOCK_MAX = 7;
+const VP_DOCK_SCHIFF = 'cruisers';
 const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
 const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
 const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer, am Objekt
@@ -13127,14 +13266,17 @@ const VORPOSTEN_STUFEN = [
      Produktionsbonus, Aufklaerungsstufe); alle drei wirken im Frontend bereits.
      `kampfpunkte`/`xp`/`credits` sind die Beute beim Fall, anteilig - sie haengen bewusst NUR an
      der Stufe, nicht am Zweig: sonst lohnte es sich, gezielt die wehrhaftesten Ziele zu schleifen. */
-  { stufe: 1, name: 'Ankerkern',  kernLp: 20000,   verteidigung: 2500,   garnisonMax: 300,   flug: 0.06, prod: 0.015, scan: 1, werft: 0.02, markt: 0.02, kampfpunkte: 30,   xp: 250,   credits: 1200,  kosten: null },
-  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,   verteidigung: 12000,  garnisonMax: 800,   flug: 0.10, prod: 0.03,  scan: 2, werft: 0.035, markt: 0.035, kampfpunkte: 80,   xp: 700,   credits: 3500,  kosten: { erz: 200000, kristalle: 130000, deuterium: 80000 } },
-  { stufe: 3, name: 'Kernstation',    kernLp: 400000,  verteidigung: 60000,  garnisonMax: 2000,  flug: 0.15, prod: 0.05,  scan: 3, werft: 0.05, markt: 0.05, kampfpunkte: 200,  xp: 2000,  credits: 9000,  kosten: { erz: 600000, kristalle: 400000, deuterium: 250000 } },
-  { stufe: 4, name: 'Ringstation', kernLp: 800000,  verteidigung: 110000, garnisonMax: 3200,  flug: 0.18, prod: 0.065, scan: 3, werft: 0.07, markt: 0.07, kampfpunkte: 320,  xp: 3200,  credits: 15000, kosten: { erz: 1200000, kristalle: 800000,  deuterium: 500000,  nanolegierungen: 400 } },
-  { stufe: 5, name: 'Weitring', kernLp: 1400000, verteidigung: 190000, garnisonMax: 4800,  flug: 0.21, prod: 0.08,  scan: 4, werft: 0.09, markt: 0.09, kampfpunkte: 480,  xp: 5000,  credits: 24000, kosten: { erz: 2000000, kristalle: 1400000, deuterium: 900000,  nanolegierungen: 900,  quantenchips: 300 } },
-  { stufe: 6, name: 'Habitatkranz', kernLp: 2400000, verteidigung: 320000, garnisonMax: 7000,  flug: 0.24, prod: 0.095, scan: 4, werft: 0.11, markt: 0.11, kampfpunkte: 700,  xp: 7500,  credits: 38000, kosten: { erz: 3400000, kristalle: 2400000, deuterium: 1500000, nanolegierungen: 1800, quantenchips: 800 } },
-  { stufe: 7, name: 'Doppelring', kernLp: 4000000, verteidigung: 520000, garnisonMax: 10000, flug: 0.27, prod: 0.11,  scan: 5, werft: 0.135, markt: 0.135, kampfpunkte: 1000, xp: 11000, credits: 60000, kosten: { erz: 5500000, kristalle: 4000000, deuterium: 2600000, nanolegierungen: 3200, quantenchips: 1600, metamaterial: 400 } },
-  { stufe: 8, name: 'Orbitalfeste', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, werft: 0.16, markt: 0.16, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskerne: 120 } }
+  /* NAMEN von origin/master (die Stufen heissen nach dem, was man sieht), `lager` aus Etappe V4.
+     Beide Seiten hatten hier etwas Eigenes - eine Seite pauschal zu nehmen haette entweder die
+     Namen oder den Lagerkanal verloren (04.09.2026). */
+  { stufe: 1, name: 'Ankerkern',  kernLp: 20000,   verteidigung: 2500,   garnisonMax: 300,   flug: 0.06, prod: 0.015, scan: 1, werft: 0.02, markt: 0.02, lager: 1200, kampfpunkte: 30,   xp: 250,   credits: 1200,  kosten: null },
+  { stufe: 2, name: 'Stützpunkt', kernLp: 90000,   verteidigung: 12000,  garnisonMax: 800,   flug: 0.10, prod: 0.03,  scan: 2, werft: 0.035, markt: 0.035, lager: 2800, kampfpunkte: 80,   xp: 700,   credits: 3500,  kosten: { erz: 200000, kristalle: 130000, deuterium: 80000 } },
+  { stufe: 3, name: 'Kernstation',    kernLp: 400000,  verteidigung: 60000,  garnisonMax: 2000,  flug: 0.15, prod: 0.05,  scan: 3, werft: 0.05, markt: 0.05, lager: 5000, kampfpunkte: 200,  xp: 2000,  credits: 9000,  kosten: { erz: 600000, kristalle: 400000, deuterium: 250000 } },
+  { stufe: 4, name: 'Ringstation', kernLp: 800000,  verteidigung: 110000, garnisonMax: 3200,  flug: 0.18, prod: 0.065, scan: 3, werft: 0.07, markt: 0.07, lager: 8000, kampfpunkte: 320,  xp: 3200,  credits: 15000, kosten: { erz: 1200000, kristalle: 800000,  deuterium: 500000,  nanolegierungen: 400 } },
+  { stufe: 5, name: 'Weitring', kernLp: 1400000, verteidigung: 190000, garnisonMax: 4800,  flug: 0.21, prod: 0.08,  scan: 4, werft: 0.09, markt: 0.09, lager: 11500, kampfpunkte: 480,  xp: 5000,  credits: 24000, kosten: { erz: 2000000, kristalle: 1400000, deuterium: 900000,  nanolegierungen: 900,  quantenchips: 300 } },
+  { stufe: 6, name: 'Habitatkranz', kernLp: 2400000, verteidigung: 320000, garnisonMax: 7000,  flug: 0.24, prod: 0.095, scan: 4, werft: 0.11, markt: 0.11, lager: 15500, kampfpunkte: 700,  xp: 7500,  credits: 38000, kosten: { erz: 3400000, kristalle: 2400000, deuterium: 1500000, nanolegierungen: 1800, quantenchips: 800 } },
+  { stufe: 7, name: 'Doppelring', kernLp: 4000000, verteidigung: 520000, garnisonMax: 10000, flug: 0.27, prod: 0.11,  scan: 5, werft: 0.135, markt: 0.135, lager: 20000, kampfpunkte: 1000, xp: 11000, credits: 60000, kosten: { erz: 5500000, kristalle: 4000000, deuterium: 2600000, nanolegierungen: 3200, quantenchips: 1600, metamaterial: 400 } },
+  { stufe: 8, name: 'Orbitalfeste', kernLp: 6500000, verteidigung: 850000, garnisonMax: 14000, flug: 0.30, prod: 0.13,  scan: 5, werft: 0.16, markt: 0.16, lager: 25000, kampfpunkte: 1500, xp: 17000, credits: 95000, kosten: { erz: 9000000, kristalle: 6500000, deuterium: 4200000, nanolegierungen: 5500, quantenchips: 3000, metamaterial: 1000, singularitaetskerne: 120 } }
 ];
 /* DIE DREI SPEZIALISIERUNGEN. Ab Stufe VORPOSTEN_ZWEIG_AB waehlt der Besitzer EINMAL eine
    Ausrichtung; sie steht danach im Dokument (`doc.zweig`) und ist unveraenderlich - eine
@@ -13154,17 +13296,17 @@ const VORPOSTEN_ZWEIGE = {
   werft: {
     key: 'werft', name: 'Werft', kurz: 'Schnelle Flotten: kurze Flugzeiten, solide Struktur.',
     namen: { 4: 'Werftgerüst', 5: 'Dockring', 6: 'Schiffsschmiede', 7: 'Flottenwerft', 8: 'Sternenwerft' },
-    mult: { kernLp: 0.90, verteidigung: 0.85, garnisonMax: 1.00, flug: 1.50, prod: 0.60, scan: 1.00, werft: 2.20, markt: 0.50 }
+    mult: { kernLp: 0.90, verteidigung: 0.85, garnisonMax: 1.00, flug: 1.50, prod: 0.60, scan: 1.00, werft: 2.20, markt: 0.50, lager: 0.60 }
   },
   handel: {
     key: 'handel', name: 'Handelsknoten', kurz: 'Ertrag und Fernsicht - dafür die dünnste Hülle.',
     namen: { 4: 'Handelsposten', 5: 'Umschlagring', 6: 'Frachtkreuz', 7: 'Handelsknoten', 8: 'Sternenmarkt' },
-    mult: { kernLp: 0.80, verteidigung: 0.75, garnisonMax: 0.85, flug: 1.00, prod: 1.80, scan: 1.25, werft: 0.50, markt: 2.20 }
+    mult: { kernLp: 0.80, verteidigung: 0.75, garnisonMax: 0.85, flug: 1.00, prod: 1.80, scan: 1.25, werft: 0.50, markt: 2.20, lager: 1.80 }
   },
   festung: {
     key: 'festung', name: 'Festungsring', kurz: 'Hält Systeme: dickster Kern, größte Garnison.',
     namen: { 4: 'Wehrring', 5: 'Zitadelle', 6: 'Sperrfeuerring', 7: 'Kriegsbastion', 8: 'Sternenfestung' },
-    mult: { kernLp: 1.35, verteidigung: 1.60, garnisonMax: 1.45, flug: 0.70, prod: 0.50, scan: 1.00, werft: 0.50, markt: 0.50 }
+    mult: { kernLp: 1.35, verteidigung: 1.60, garnisonMax: 1.45, flug: 0.70, prod: 0.50, scan: 1.00, werft: 0.50, markt: 0.50, lager: 0.50 }
   }
 };
 function vorpostenZweigOk(z) { return typeof z === 'string' && Object.prototype.hasOwnProperty.call(VORPOSTEN_ZWEIGE, z); }
@@ -13189,6 +13331,7 @@ function vorpostenStufe(n, zweig) {
     prod: Math.round(basis.prod * m.prod * 1000) / 1000,
     werft: Math.round((basis.werft || 0) * (m.werft || 0) * 1000) / 1000,
     markt: Math.round((basis.markt || 0) * (m.markt || 0) * 1000) / 1000,
+    lager: Math.round((basis.lager || 0) * (m.lager || 0)),
     scan: Math.max(1, Math.round(basis.scan * m.scan))
   });
 }
@@ -13238,6 +13381,10 @@ function vorpostenLies(sys) {
    wird es nirgends mehr (vorpostenKernMax rechnet), aber ein Dokument, das ein anderes Dach
    behauptet als die Rechnung, waere eine Falle fuer den naechsten Leser - und fuer Sicherungen. */
 function vorpostenSchreib(doc) {
+  // Die Gesamtzahl wird bei JEDEM Schreiben aus der Aufschluesselung nachgezogen - dieselbe
+  // Vorsicht wie beim Kern-Dach. Wer `doc.garnison` direkt anfasst, verliert seine Aenderung hier;
+  // genau das ist die Absicht (es gibt nur noch EINE Quelle).
+  if (doc) vorpostenGarnisonNachziehen(doc);
   if (doc && doc.kern) {
     doc.kern.lpMax = vorpostenKernMax(doc);
     doc.kern.lp = Math.max(0, Math.min(doc.kern.lpMax, Math.round(doc.kern.lp || 0)));
@@ -13245,6 +13392,58 @@ function vorpostenSchreib(doc) {
   db.shared[vorpostenKey(doc.sys)] = JSON.stringify(doc);
 }
 function vorpostenLoesch(sys) { delete db.shared[vorpostenKey(sys)]; }
+/* Was der Vorposten JE STUNDE foerdert, aufgeteilt nach dem gemessenen Verhaeltnis der drei
+   Foerdergebaeude. Die Summe der Anteile ist bewusst NICHT 1 - sie sind die baseRates selbst,
+   und `lager` ist ihr gemeinsamer Faktor in Erz-Aequivalent. */
+function vorpostenLagerRate(doc, werte) {
+  // `werte` darf durchgereicht werden: vorpostenFuerClient hat sie ohnehin schon, und ohne diesen
+  // Weg rechnete jeder Aufruf die ganze Stufe samt Modul- und Projektsummen ein drittes Mal nach.
+  const st = werte || vorpostenWerte(doc);
+  const basis = VP_LAGER_AKTIV ? (st.lager || 0) : 0;
+  const summe = VP_LAGER_ANTEILE.erz + VP_LAGER_ANTEILE.kristalle + VP_LAGER_ANTEILE.deuterium;
+  const aus = {};
+  for (const k of Object.keys(VP_LAGER_ANTEILE)) aus[k] = Math.round(basis * VP_LAGER_ANTEILE[k] / summe);
+  return aus;
+}
+/* Was HEUTE im Lager liegt - gerechnet, nicht gespeichert. `lagerSeit` faellt auf `seit` zurueck,
+   damit ein Dokument aus der Zeit vor dieser Etappe korrekt weiterrechnet (und nicht seit 1970
+   sammelt). Der Deckel steht in Stunden, nicht in absoluten Mengen: So waechst er von selbst mit,
+   wenn die Leiter sich aendert. */
+function vorpostenLagerStand(doc, jetzt, werte) {
+  const t = jetzt || Date.now();
+  /* Der Rueckfall auf `doc.seit` haelt alte Dokumente korrekt am Rechnen (statt seit 1970 zu
+     sammeln); VP_LAGER_AB zieht darunter die Aktivierungs-Untergrenze ein, damit die Zeit VOR dem
+     Umlegen des Schalters nicht rueckwirkend zaehlt - siehe die Begruendung an der Konstante. */
+  const seit = Math.max(VP_LAGER_AB, (doc && doc.lagerSeit) || (doc && doc.seit) || t);
+  const stunden = Math.max(0, Math.min(VP_LAGER_STUNDEN, (t - seit) / 3600000));
+  const rate = vorpostenLagerRate(doc, werte);
+  const aus = {};
+  for (const k of Object.keys(rate)) aus[k] = Math.floor(rate[k] * stunden);
+  return aus;
+}
+/* V6: WAS AM STERNENDOCK BEREITLIEGT. Gerechnet wie das Lager, aus `doc.dockSeit` - kein Ticken,
+   kein Zustandsuebergang, der verlorengehen koennte. `dockSeit` faellt auf die Fertigstellung des
+   Projekts zurueck, nicht auf `doc.seit`: Sonst haette eine alte Station am Tag der Fertigstellung
+   sofort den vollen Stapel. */
+function vorpostenDockAb(doc) {
+  const p = vpProjektListe(doc).find(x => x && x.key === 'sternendock');
+  return (doc && doc.dockSeit) || (p && p.fertigAb) || 0;
+}
+function vorpostenDockStand(doc, jetzt, werte) {
+  if (!VP_ENDPROJEKTE_AKTIV) return 0;
+  const st = werte || vorpostenWerte(doc);
+  if (!((st.projektBoni || {}).werftSchiff > 0)) return 0;
+  const ab = vorpostenDockAb(doc);
+  if (!ab) return 0;
+  const stunden = Math.max(0, ((jetzt || Date.now()) - ab) / 3600000);
+  return Math.max(0, Math.min(VP_DOCK_MAX, Math.floor(stunden / VP_DOCK_STUNDEN)));
+}
+function vorpostenLagerVoll(doc) {
+  const seit = (doc && doc.lagerSeit) || (doc && doc.seit) || Date.now();
+  return seit + VP_LAGER_STUNDEN * 3600000;
+}
+function vorpostenLagerLeer(stand) { return !stand || Object.values(stand).every(v => !(v > 0)); }
+
 /* Was die eigenen Vorposten am MARKT bringen - die eine Stelle, die den Kanal zusammenzaehlt.
    Sie wird fuer den VERKAEUFER gerufen, nicht fuer den Anfragenden: Beim Kauf zahlt der Verkaeufer
    die Gebuehr, und er ist nicht der, der die Anfrage stellt. Steht der Schalter auf false, liefert
@@ -13258,7 +13457,14 @@ function vorpostenMarktBonus(userId) {
     summe += vorpostenWerte(d).markt || 0;
   }
   const anteil = Math.min(VP_MARKT_DECKEL, Math.round(summe * 1000) / 1000);
-  return { anteil, extraAngebote: Math.min(VP_MARKT_SLOTS_MAX, Math.floor(anteil / VP_MARKT_SLOT_SCHRITT)) };
+  /* V6: Der Sternenmarkt gibt seine Plaetze ZUSAETZLICH und ausserhalb des Deckels - das ist der
+     Sinn eines Endprojekts: Es hebt eine Grenze, statt sie weiter auszureizen. */
+  let ausProjekt = 0;
+  for (const d of vorpostenAlle()) {
+    if (d.besitzer !== userId) continue;
+    ausProjekt += (vorpostenWerte(d).projektBoni || {}).marktPlaetze || 0;
+  }
+  return { anteil, extraAngebote: Math.min(VP_MARKT_SLOTS_MAX, Math.floor(anteil / VP_MARKT_SLOT_SCHRITT)) + Math.round(ausProjekt) };
 }
 function vorpostenAlle() {
   const out = [];
@@ -13313,6 +13519,75 @@ function vorpostenAnflugEntfernen(doc, musterId) {
   if (rest.length === doc.anflug.length) return false;
   doc.anflug = rest;
   return true;
+}
+/* WER WAS BEIGESTEUERT HAT (Etappe V5). `doc.garnison` bleibt die Gesamtzahl - alles andere im
+   System liest sie, vom Verteidigungswert bis zur Anzeige. `doc.garnisonVon` ist die
+   Aufschluesselung je Konto und die eigentliche QUELLE: Sie entscheidet, wer was zurueckrufen
+   darf. `doc.garnison` wird daraus nachgezogen (wie `kern.lpMax`), damit die beiden nie
+   auseinanderlaufen koennen - zwei Zahlen ueber denselben Bestand sind sonst eine Frage der Zeit. */
+function vorpostenGarnisonVon(doc) {
+  if (!doc.garnisonVon || typeof doc.garnisonVon !== 'object') {
+    // Migration: Alles, was vor dieser Etappe eingeflogen ist, gehoert dem Besitzer.
+    doc.garnisonVon = doc.besitzer ? { [doc.besitzer]: Object.assign({}, doc.garnison || {}) } : {};
+  }
+  return doc.garnisonVon;
+}
+function vorpostenGarnisonNachziehen(doc) {
+  const von = vorpostenGarnisonVon(doc);
+  const summe = {};
+  for (const teil of Object.values(von)) {
+    for (const [typ, n] of Object.entries(teil || {})) {
+      const z = Math.max(0, Math.round(Number(n) || 0));
+      if (z > 0) summe[typ] = (summe[typ] || 0) + z;
+    }
+  }
+  doc.garnison = summe;
+}
+/* Verluste treffen JEDEN Beitragenden mit derselben QUOTE, nicht die Gesamtzahl mit anschliessender
+   Verteilung. Der Unterschied ist eine Rundung je Konto und Schiffstyp; dafuer ist die Rechnung
+   nachvollziehbar und niemand verliert Schiffe, die er nie gestellt hat. */
+function vorpostenGarnisonVerlust(doc, quote) {
+  const von = vorpostenGarnisonVon(doc);
+  const verluste = {};
+  for (const teil of Object.values(von)) {
+    for (const [typ, n] of Object.entries(Object.assign({}, teil))) {
+      const hat = Math.max(0, Math.round(Number(n) || 0));
+      if (hat <= 0) { delete teil[typ]; continue; }
+      const weg = Math.min(hat, Math.round(hat * quote));
+      if (weg <= 0) continue;
+      teil[typ] = hat - weg;
+      if (teil[typ] <= 0) delete teil[typ];
+      verluste[typ] = (verluste[typ] || 0) + weg;
+    }
+  }
+  vorpostenGarnisonNachziehen(doc);
+  return verluste;
+}
+/* Darf dieses Konto an diesem Vorposten mitwirken? Der Besitzer immer; ein Verbuendeter nur, wenn
+   der Schalter an ist UND beide im geteilten Speicher dieselbe aktive Allianz haben. */
+function vorpostenVerbuendet(doc, userId, karte) {
+  if (!doc || !userId) return false;
+  if (doc.besitzer === userId) return true;
+  if (!VP_ALLIANZ_AKTIV) return false;
+  /* `karte` ist die in EINEM Durchlauf gebaute Zuordnung Konto -> Tag. Ohne sie durchsucht
+     allianceTagOf den ganzen geteilten Speicher - und zwar zweimal JE Vorposten, also bei
+     GET /api/vorposten einmal je Eintrag der Liste. Auf dem Pi, wo db.shared alle Allianzen,
+     Maerkte und Chats enthaelt, ist das der Unterschied zwischen einer Antwort und einer Pause
+     (Befund des Audits). Ohne `karte` bleibt der alte Weg - fuer die Einzelaufrufe an den
+     Endpunkten, wo genau ein Vorposten geprueft wird. */
+  const meiner = karte ? karte[userId] : allianceTagOf(userId);
+  const seiner = karte ? karte[doc.besitzer] : allianceTagOf(doc.besitzer);
+  return !!meiner && meiner === seiner;
+}
+/* Alle aktiven Allianz-Rollen in EINEM Durchlauf: Konto -> Tag. */
+function allianceTagKarte() {
+  const aus = {};
+  for (const k of Object.keys(db.shared)) {
+    const m = k.match(/^alliance:([^:]+):role:(.+)$/);
+    if (!m) continue;
+    try { const r = JSON.parse(db.shared[k]); if (r.role && r.role !== 'left') aus[m[2]] = m[1]; } catch (e) {}
+  }
+  return aus;
 }
 function vorpostenGarnisonAnzahl(doc) {
   return Object.values((doc && doc.garnison) || {}).reduce((a, n) => a + (typeof n === 'number' && n > 0 ? n : 0), 0);
@@ -13397,6 +13672,23 @@ const VP_PROJEKT_DEFS = [
      ist im Spiel bei 50 % gedeckelt, und ein Vorposten der Stufe 8 liegt mit Modulen schon daran.
      Ein Tor, das nur aufaddiert, taete also nichts - genau die Sorte angezeigter Nutzen, die es in
      diesem Projekt nicht geben soll. Es hebt stattdessen den DECKEL auf 75 %. */
+  /* ETAPPE V6: DIE ENDPROJEKTE (03.09.2026). Ab Stufe 7 gab es nichts mehr zu entscheiden - die
+     drei Zweige unterschieden sich in Multiplikatoren und je einem Projekt der Stufe 5. Jetzt hat
+     jeder Zweig auf der Endstufe etwas, das NUR er kann, und jedes davon ist eine andere ART von
+     Wirkung: Die Werft PRODUZIERT, der Handel ERWEITERT eine Grenze, die Festung KOSTET den
+     Angreifer. Drei Prozentpunkte mehr waeren keine Entscheidung gewesen. */
+  { key: 'sternendock', name: 'Sternendock', icon: 'ti-rocket', zweig: 'werft', stufeAb: 8,
+    dauerMs: 36 * 3600 * 1000, wirkung: { werftSchiff: 1 },
+    desc: 'Eine eigene Helling im Orbit: Die Werft baut ohne Auftrag weiter und legt regelmäßig einen Kreuzer zum Abholen bereit.',
+    kosten: { erz: 7000000, kristalle: 5000000, deuterium: 3200000, nanolegierungen: 4000, quantenchips: 2000, metamaterial: 600, singularitaetskerne: 60 } },
+  { key: 'sternenmarkt', name: 'Sternenmarkt', icon: 'ti-building-bank', zweig: 'handel', stufeAb: 8,
+    dauerMs: 36 * 3600 * 1000, wirkung: { marktPlaetze: 2 },
+    desc: 'Ein offener Handelsplatz am Ring: zwei zusätzliche Angebotsplätze an der Modulbörse, über die übliche Grenze hinaus.',
+    kosten: { erz: 7000000, kristalle: 5000000, deuterium: 3200000, nanolegierungen: 4000, quantenchips: 2000, metamaterial: 600, singularitaetskerne: 60 } },
+  { key: 'sperrfeuer', name: 'Sperrfeuerleitstand', icon: 'ti-target', zweig: 'festung', stufeAb: 8,
+    dauerMs: 36 * 3600 * 1000, wirkung: { verlust: 0.08 },
+    desc: 'Vorgehaltenes Sperrfeuer über dem gesamten Anflugkorridor: Jeder Angriff auf diese Station kostet den Angreifer deutlich mehr Schiffe.',
+    kosten: { erz: 7000000, kristalle: 5000000, deuterium: 3200000, nanolegierungen: 4000, quantenchips: 2000, metamaterial: 600, singularitaetskerne: 60 } },
   { key: 'sprungtor', name: 'Sprungtor', icon: 'ti-atom-2', zweig: null, stufeAb: 7,
     dauerMs: 24 * 3600 * 1000, wirkung: { flug: 0.20, flugDeckel: 0.75 },
     desc: 'Ein durchgehend offenes Tor im Orbit: eigene Nicht-PvP-Missionen hierher fliegen bis zu drei Viertel kuerzer statt hoechstens der Haelfte.',
@@ -13415,9 +13707,21 @@ function vpProjekteFertig(doc, jetzt) {
 /* Die Summe der FERTIGEN Projekte je Kanal. Ein laufendes wirkt nicht - sonst waere die Bauzeit
    eine Zierde. `flugDeckel` ist kein Anteil, sondern eine Obergrenze: es gilt die hoechste. */
 function vpProjektBoni(doc, jetzt) {
-  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0, markt: 0, flugDeckel: VP_FLUG_DECKEL };
+  // Ein Endprojekt wirkt erst, wenn sein Schalter an ist - sonst waere die Wirkung da, bevor das
+  // Frontend sie erklaeren kann. Der Filter steht HIER und nicht bei jedem Verbraucher einzeln.
+  const zaehlt = (key) => VP_ENDPROJEKTE_AKTIV || !vpIstEndprojekt(key);
+  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0, markt: 0,
+    werftSchiff: 0, marktPlaetze: 0, verlust: 0, flugDeckel: VP_FLUG_DECKEL };
   for (const key of vpProjekteFertig(doc, jetzt)) {
-    const w = (vpProjektDef(key) || {}).wirkung || {};
+    if (!zaehlt(key)) continue;
+    const def = vpProjektDef(key) || {};
+    /* Ein zweiggebundenes Projekt wirkt NUR an seiner Ausrichtung (Befund 4e des V6-Wächters).
+       Starten kann man es ohnehin nur dort - aber die Wirkung hing bisher allein am fertigen
+       Eintrag. Spaetestens mit der Umruestung (Etappe V8, die den Zweig neu waehlen laesst) haette
+       ein als Werft gebautes Sternendock an einer Festung weitergeliefert. Die Regel lautet: die
+       Wirkung haengt am Projekt UND an der Ausrichtung. */
+    if (def.zweig && doc.zweig !== def.zweig) continue;
+    const w = def.wirkung || {};
     for (const k of Object.keys(w)) {
       if (k === 'flugDeckel') aus.flugDeckel = Math.max(aus.flugDeckel, w[k]);
       else aus[k] += w[k];
@@ -13427,9 +13731,12 @@ function vpProjektBoni(doc, jetzt) {
 }
 // Was an DIESEM Vorposten ueberhaupt in Frage kommt: Stufe erreicht, Ausrichtung passend, noch
 // nicht begonnen. Der Client soll die Liste nicht selbst zusammenrechnen muessen.
+const VP_ENDPROJEKTE = ['sternendock', 'sternenmarkt', 'sperrfeuer'];
+function vpIstEndprojekt(key) { return VP_ENDPROJEKTE.indexOf(key) >= 0; }
 function vpProjektVerfuegbar(doc, jetzt) {
   const begonnen = vpProjektListe(doc).map(p => p && p.key);
   return VP_PROJEKT_DEFS.filter(d =>
+    (VP_ENDPROJEKTE_AKTIV || !vpIstEndprojekt(d.key)) &&
     begonnen.indexOf(d.key) < 0 && (doc.stufe || 1) >= d.stufeAb && (!d.zweig || doc.zweig === d.zweig)
   ).map(d => d.key);
 }
@@ -13529,14 +13836,29 @@ function vorpostenFindeMission(save, missionId, typ, sysId) {
   return null;
 }
 // Gibt bei erlaubtem Zugriff null zurueck, sonst den Fehlertext fuer die 403-Antwort (Muster
-// checkAsteroidKeyPermission): Lesen bleibt fuer jedes angemeldete Konto offen, Schreiben geht nur
-// ueber die Endpunkte - sonst setzte jeder Beliebige einen fremden Kern auf null.
+// checkAsteroidKeyPermission, aber STRENGER): Ueber die generische Storage-Route ist weder Lesen
+// noch Schreiben moeglich - beides laeuft ausschliesslich ueber die Vorposten-Endpunkte. Warum
+// auch das Lesen zu ist, steht im Rumpf.
+// (Diese drei Zeilen sagten bis zum 04.09.2026 das Gegenteil - „Lesen bleibt fuer jedes angemeldete
+//  Konto offen" - und standen damit unmittelbar ueber der Regel, die sie widerlegt. Genau die
+//  Lehre, die dieser Aenderungssatz selbst in PROJECT_MEMORY geschrieben hat: Eine Rechtepruefung
+//  altert mit ihrer Begruendung.)
 function checkVorpostenKeyPermission(req, key, isWrite) {
   if (!key.startsWith('vorposten:')) return null;
-  if (!isWrite) return null;
-  return 'Vorposten werden ausschließlich über die Vorposten-Endpunkte verändert.';
+  /* AUCH LESEN IST ZU (04.09.2026, Befund des Vorposten-Audits). Bis hierher stand hier nur eine
+     Schreibsperre, und der Kommentar sagte „Lesen bleibt fuer jedes angemeldete Konto offen" - mit
+     der Begruendung, es gebe dort nichts zu holen. Das stimmte nicht mehr: Das Rohdokument enthaelt
+     `anflug` (den vorpostenFuerClient ausdruecklich NUR dem Besitzer schickt, weil es den Plan
+     eines Dritten verraet), seit Etappe V5 zusaetzlich `garnisonVon` (wer wie viel gestellt hat)
+     sowie `beitraege` und `schlaege`. Ein einziger GET auf den geteilten Speicher hebelte damit
+     jede dieser Entscheidungen aus.
+     Gemessen vor der Sperre: weder das Frontend noch ein Test liest diese Schluessel roh - die
+     gefilterte Sicht kommt ausschliesslich ueber GET /api/vorposten. */
+  return isWrite
+    ? 'Vorposten werden ausschließlich über die Vorposten-Endpunkte verändert.'
+    : 'Vorposten werden ausschließlich über GET /api/vorposten gelesen.';
 }
-function vorpostenFuerClient(doc, userId, jetzt) {
+function vorpostenFuerClient(doc, userId, jetzt, karte) {
   const st = vorpostenWerte(doc);
   const eigener = doc.besitzer === userId;
   const out = {
@@ -13567,11 +13889,32 @@ function vorpostenFuerClient(doc, userId, jetzt) {
     /* Der Abbau ist fuer JEDEN sichtbar, nicht nur fuer den Besitzer - wie Verteidigung und
        Garnisonszahl. Eine Station, die in Kuerze verschwindet, ist fuer einen Angreifer eine
        echte Information: Es lohnt sich, VORHER zuzuschlagen. Genau das soll die Frist bewirken. */
+    /* DAS LAGER IST OFFEN, wie Verteidigung und Garnisonszahl. Das ist keine Nachlaessigkeit,
+       sondern der Zweck: Wer stuermt, soll RIECHEN koennen, wo sich der Flug lohnt. Die
+       Spannung zur Regel „Beute haengt an der Stufe, nicht am Zubehoer" ist gewollt und
+       aufloesbar: Module sind INVESTITION und bleiben ungestraft, das Lager ist VERSAEUMNIS -
+       bestraft wird, wer hortet, nicht wer ausbaut. */
+    lager: vorpostenLagerStand(doc, jetzt, st),
+    lagerRate: vorpostenLagerRate(doc, st),
+    lagerVollAb: vorpostenLagerVoll(doc),
+    /* V6: Was am Sternendock bereitliegt, und die Dominanz. `dominiert` ist bewusst ABGELEITET und
+       kein neuer Zustand: Wer die Endstufe haelt, dominiert das System - sichtbar fuer alle. In
+       `db.galaxy.controlledSystems` gehoert das NICHT; dort haengt die Eroberungsmechanik samt
+       NPC-Rueckeroberung, und ein Vorposten haette dort nichts zu suchen. */
+    dockBereit: vorpostenDockStand(doc, jetzt, st),
+    dockSchiff: VP_DOCK_SCHIFF,
+    dominiert: (doc.stufe || 1) >= VORPOSTEN_STUFEN.length,
     abbauAb: vorpostenAbbauLaeuft(doc) || null,
     schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
     nutzen: { flug: st.flug, prod: st.prod, scan: st.scan, werft: st.werft, markt: st.markt, flugDeckel: st.flugDeckel, werftDeckel: st.werftDeckel, marktDeckel: VP_MARKT_DECKEL },
     eigener,
+    /* V5: `verbuendet` heisst „darf hier mitwirken, ist aber nicht der Besitzer". Der Client
+       braucht die Unterscheidung, weil ein Verbuendeter stationieren und zurueckrufen darf, aber
+       nicht ausbauen, abbauen oder Projekte starten. `meineGarnison` ist SEIN Anteil - die
+       vollstaendige Aufschluesselung sieht weiterhin nur der Besitzer. */
+    verbuendet: !eigener && vorpostenVerbuendet(doc, userId, karte),
+    meineGarnison: Object.assign({}, (vorpostenGarnisonVon(doc))[userId] || {}),
     /* NUR DER BESITZER sieht den Anflug. Verteidigung, Garnisonszahl und Steckplaetze stehen
        bewusst jedem offen - ein Angreifer soll sehen, worauf er sich einlaesst. Ein ANFLUG ist
        etwas anderes: Er verraet den Plan eines Dritten. Wer ihn allen zeigte, machte aus der
@@ -13640,17 +13983,15 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
   // Die Garnison verliert serverseitig - sie wohnt im Dokument, nicht in einem Spielstand.
   const garnQuote = Math.max(0.02, Math.min(0.5, 0.05 + 0.30 * (kraft / (kraft + verteidigung))));
   const garnisonVerluste = {};
-  for (const [typ, n] of Object.entries(doc.garnison || {})) {
-    if (typeof n !== 'number' || n <= 0) continue;
-    const weg = Math.min(n, Math.round(n * garnQuote));
-    if (weg <= 0) continue;
-    doc.garnison[typ] = n - weg;
-    if (doc.garnison[typ] <= 0) delete doc.garnison[typ];
-    garnisonVerluste[typ] = weg;
-  }
+  // V5: Der Verlust trifft jeden Beitragenden mit derselben Quote (vorpostenGarnisonVerlust) -
+  // vorher wurde die Gesamtzahl gekuerzt, was mit mehreren Beitragenden niemandem zuzuordnen waere.
+  Object.assign(garnisonVerluste, vorpostenGarnisonVerlust(doc, garnQuote));
   // Der Angreifer verliert als QUOTE (der Server schreibt keinen fremden Spielstand); die Garnison
   // treibt sie hoch, ein leerer Vorposten kostet fast nur den Grundverlust.
-  const quote = Math.max(0.03, Math.min(0.45, VORPOSTEN_VERLUST + 0.20 * (verteidigung / (kraft + verteidigung)) + Math.random() * 0.04));
+  /* V6: Der Sperrfeuerleitstand schlaegt auf die Verlustquote des Angreifers auf - VOR dem Deckel,
+     nicht daneben: Auch eine Endstufe soll einen Angriff nicht unbezahlbar machen. */
+  const sperrfeuer = (vorpostenWerte(doc).projektBoni || {}).verlust || 0;
+  const quote = Math.max(0.03, Math.min(0.45, VORPOSTEN_VERLUST + sperrfeuer + 0.20 * (verteidigung / (kraft + verteidigung)) + Math.random() * 0.04));
 
   const gefallen = doc.kern.lp <= 0;
   const erster = beteiligte[0] || {};
@@ -13665,6 +14006,10 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
     // Bewusst die STUFE ohne Module: sonst lohnte es sich, gut bestueckte Stationen zu jagen,
     // und wer ausbaut, macht sich zur besseren Beute. Der Ertrag haengt am Rang, nicht am Zubehoer.
     const st = vorpostenStufeVon(doc);
+    // Der Lagerstand wird HIER gemessen, bevor das Dokument verschwindet - danach gibt es nichts
+    // mehr zu rechnen, und ein spaeterer Aufruf saehe nur noch ein leeres Lager.
+    const standBeimFall = vorpostenLagerStand(doc, jetzt);
+    const lagerBeimFall = vorpostenLagerLeer(standBeimFall) ? null : standBeimFall;
     const summe = Object.values(doc.beitraege).reduce((a, b) => a + (b.schaden || 0), 0) || 1;
     for (const [uid, b] of Object.entries(doc.beitraege)) {
       const anteil = (b.schaden || 0) / summe;
@@ -13678,6 +14023,10 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
         kampfpunkte: Math.max(1, Math.round(st.kampfpunkte * anteil)),
         xp: Math.max(1, Math.round(st.xp * anteil)),
         credits: Math.max(1, Math.round(st.credits * anteil)),
+        /* V4: Das Lager wird MIT ERBEUTET, nach demselben Schadensanteil. Es ist der einzige Teil
+           der Beute, der vom Verhalten des Besitzers abhaengt statt von seiner Stufe - und das ist
+           die Absicht: Wer abholt, verliert nichts; wer hortet, fuettert seinen Angreifer. */
+        lagerBeute: lagerBeimFall ? Object.fromEntries(Object.entries(lagerBeimFall).map(([k, v]) => [k, Math.floor(v * anteil)])) : null,
         zeit: jetzt
       });
     }
@@ -13685,9 +14034,22 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
     // liest, gibt es gleich nicht mehr. Die Restgarnison ist mit dem Vorposten verloren.
     pushPendingReward(doc.besitzer, {
       type: 'vorposten-verlust', system: doc.sys, stufe: doc.stufe, name: st.name,
-      angreiferName: vermerk.angreiferName, teilnehmer,
-      garnisonVerloren: Object.assign({}, doc.garnison || {}), zeit: jetzt
+      angreiferName: vermerk.angreiferName, teilnehmer, lagerVerloren: lagerBeimFall,
+      alsVerbuendeter: false,
+      garnisonVerloren: Object.assign({}, (vorpostenGarnisonVon(doc))[doc.besitzer] || {}), zeit: jetzt
     });
+    /* V5: Auch VERBUENDETE, die Schiffe gestellt haben, verlieren sie mit dem Vorposten - und
+       erfahren es. Ohne diese Meldung waere ihre Garnison eines Tages einfach nicht mehr da, ohne
+       dass irgendetwas es gesagt haette. Das Lager gehoert dem Besitzer, es steht hier nicht. */
+    for (const [uid, teil] of Object.entries(vorpostenGarnisonVon(doc))) {
+      if (!uid || uid === doc.besitzer || !Object.keys(teil || {}).length) continue;
+      pushPendingReward(uid, {
+        type: 'vorposten-verlust', system: doc.sys, stufe: doc.stufe, name: st.name,
+        angreiferName: vermerk.angreiferName, teilnehmer, lagerVerloren: null,
+        alsVerbuendeter: true, besitzerName: doc.besitzerName || 'Kommandant',
+        garnisonVerloren: Object.assign({}, teil), zeit: jetzt
+      });
+    }
     vorpostenLoesch(doc.sys);
   } else {
     vorpostenSchreib(doc);
@@ -13698,7 +14060,10 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
 
 app.get('/api/vorposten', authMiddleware, (req, res) => {
   const jetzt = Date.now();
-  const liste = VORPOSTEN_AKTIV ? vorpostenAlle().map(d => vorpostenFuerClient(d, req.userId, jetzt)) : [];
+  // Die Allianz-Zuordnung wird EINMAL gebaut und an jeden Eintrag durchgereicht, nicht je Vorposten
+  // neu gesucht (Befund des Audits). Ohne aktiven Schalter braucht sie niemand.
+  const tagKarte = (VORPOSTEN_AKTIV && VP_ALLIANZ_AKTIV) ? allianceTagKarte() : null;
+  const liste = VORPOSTEN_AKTIV ? vorpostenAlle().map(d => vorpostenFuerClient(d, req.userId, jetzt, tagKarte)) : [];
   res.json({
     ok: true, aktiv: VORPOSTEN_AKTIV, bauAktiv: spawnAktiv('vorposten'),
     maxJeKonto: VORPOSTEN_MAX_JE_KONTO, schutzMs: VORPOSTEN_SCHUTZ_MS, abklingMs: VORPOSTEN_ABKLING_MS,
@@ -13715,6 +14080,10 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
        eine Kopie-Familie mit genau der Konstante, die hier steht. */
     abbauMs: VORPOSTEN_ABBAU_MS, abbauAktiv: VORPOSTEN_ABBAU_AKTIV,
     werftDeckel: VP_WERFT_DECKEL, werftAktiv: VP_WERFT_AKTIV,
+    marktAktiv: VP_MARKT_AKTIV, marktDeckel: VP_MARKT_DECKEL,
+    lagerAktiv: VP_LAGER_AKTIV, lagerStunden: VP_LAGER_STUNDEN,
+    allianzAktiv: VP_ALLIANZ_AKTIV,
+    endprojekteAktiv: VP_ENDPROJEKTE_AKTIV, dockStunden: VP_DOCK_STUNDEN, dockMax: VP_DOCK_MAX, dockSchiff: VP_DOCK_SCHIFF,
     projektDefs: VP_PROJEKT_DEFS, projekteAktiv: VP_PROJEKTE_AKTIV && !notAusGesetzt('vorposten'),
     flugDeckel: VP_FLUG_DECKEL,
     zweigAb: VORPOSTEN_ZWEIG_AB, maxStufe: VORPOSTEN_STUFEN.length,
@@ -13781,6 +14150,16 @@ app.post('/api/vorposten/ausbauen', authMiddleware, async (req, res) => {
   // MIT Modulen gerechnet: sonst faellt das Maximum beim Ausbau unter den Stand von vorher,
   // sobald eine Kernpanzerung steckt - ein Ausbau, der den Kern SCHRUMPFEN laesst.
   const alt = vorpostenWerte(doc);
+  /* V4-Nachtrag (Befund des Audits): Das Lager wird ABGERECHNET, bevor die Stufe steigt. Der Stand
+     wird aus `lagerSeit` mit dem AKTUELLEN Satz gerechnet - ohne diese Abrechnung waeren die Stunden
+     vor dem Ausbau rueckwirkend zum neuen, hoeheren Satz bewertet worden. Nichts geht dabei
+     verloren: Was angefallen ist, wandert in die Warteschlange, und die neue Stufe faengt bei null an. */
+  const standVorAusbau = vorpostenLagerStand(doc, Date.now());
+  if (!vorpostenLagerLeer(standVorAusbau)) {
+    pushPendingReward(req.userId, Object.assign({ type: 'vorposten-lager', system: doc.sys,
+      name: vorpostenWerte(doc).name, zeit: Date.now() }, standVorAusbau));
+  }
+  doc.lagerSeit = Date.now();
   doc.stufe = zielStufe;
   const neu = vorpostenWerte(doc);
   doc.kern = doc.kern || { lp: alt.kernLp, lpMax: alt.kernLp };
@@ -13814,6 +14193,20 @@ app.post('/api/vorposten/projekt/starten', authMiddleware, async (req, res) => {
   const doc = vorpostenLies(sys);
   if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
   if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer startet Projekte an seinem Vorposten.' });
+  /* AUDIT-BEFUND 04.09.2026: Der Schalter gattert die ANGEBOTENE Liste (vpProjektVerfuegbar) und
+     die WIRKUNG (vpProjektBoni) - dieser Endpunkt pruefte ihn nie. Wer den Schluessel direkt
+     schickte, startete im Auslieferungsstand ein Endprojekt, obwohl der Vorposten es gar nicht zur
+     Wahl stellt. Zwei Folgen, und die zweite ist die schlimmere:
+       (a) Der EINZIGE Projektplatz der Station ist 36 Stunden lang fuer ein Vorhaben ohne Wirkung
+           blockiert - abbrechen gibt es bewusst nicht.
+       (b) Wird der Schalter spaeter umgelegt, faellt vorpostenDockAb() mangels `doc.dockSeit` auf
+           `p.fertigAb` zurueck. Die ganze aufgelaufene Zeit waere rueckwirkend Baufortschritt, der
+           volle Stapel laege sofort bereit.
+     Die Lehre steht in PROJECT_MEMORY: Ein Schalter, der nur die ANZEIGE einer Wahl gattert, ist
+     kein Schalter - er muss an der Stelle stehen, die die Wahl AUSFUEHRT. */
+  if (!VP_ENDPROJEKTE_AKTIV && vpIstEndprojekt(key)) {
+    return res.status(404).json({ error: 'Dieses Vorhaben steht noch nicht zur Verfügung.', inaktiv: true });
+  }
   const jetzt = Date.now();
   const laeuft = vpProjektLaeuft(doc, jetzt);
   if (laeuft) {
@@ -13928,7 +14321,11 @@ app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
   if (!vorpostenSysOk(sys) || !composition || typeof composition !== 'object' || planetKey.length > 64) return res.status(400).json({ error: 'Ungültige Anfrage.' });
   const doc = vorpostenLies(sys);
   if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
-  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann hier stationieren.' });
+  if (!vorpostenVerbuendet(doc, req.userId)) {
+    return res.status(403).json({ error: VP_ALLIANZ_AKTIV
+      ? 'Nur der Besitzer und seine Allianz können hier stationieren.'
+      : 'Nur der Besitzer kann hier stationieren.' });
+  }
   const save = astLeseSave(req.userId);
   if (!save) return res.status(403).json({ error: 'Kein gespeicherter Spielstand.' });
   const fleetObj = planetKey === 'home' ? save.fleet : (save.colonies && save.colonies[planetKey] && save.colonies[planetKey].fleet);
@@ -13936,7 +14333,20 @@ app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
   const st = vorpostenWerte(doc);
   let platz = Math.max(0, st.garnisonMax - vorpostenGarnisonAnzahl(doc));
   const angenommen = {};
-  doc.garnison = doc.garnison || {};
+  // V5: Gebucht wird auf das eigene Konto in der Aufschluesselung; `doc.garnison` zieht
+  // vorpostenSchreib daraus nach.
+  const von = vorpostenGarnisonVon(doc);
+  /* DER FREMDANTEIL IST GEDECKELT (Durchsicht 04.09.2026, Begruendung bei
+     VP_ALLIANZ_GARNISON_ANTEIL). Gerechnet wird gegen die SUMME aller Nicht-Besitzer, nicht je
+     Konto - sonst umgeht man den Deckel mit einem zweiten Konto, das sich die Mitgliedschaft
+     genauso selbst gibt. Der Besitzer selbst ist unbegrenzt; es ist sein Vorposten. */
+  if (doc.besitzer !== req.userId) {
+    const fremd = Object.keys(von).filter(uid => uid !== doc.besitzer)
+      .reduce((a, uid) => a + Object.keys(von[uid] || {})
+        .reduce((b, typ) => b + (Number(von[uid][typ]) || 0), 0), 0);
+    platz = Math.min(platz, Math.max(0, Math.floor(st.garnisonMax * VP_ALLIANZ_GARNISON_ANTEIL) - fremd));
+  }
+  if (!von[req.userId]) von[req.userId] = {};
   for (const typ of Object.keys(composition)) {
     if (!vorpostenKampfschiff(typ)) continue;
     const angefordert = Math.max(0, Math.floor(Number(composition[typ]) || 0));
@@ -13944,15 +14354,32 @@ app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
     const n = Math.min(angefordert, verfuegbar, platz);
     if (n <= 0) continue;
     angenommen[typ] = n;
-    doc.garnison[typ] = (doc.garnison[typ] || 0) + n;
+    von[req.userId][typ] = (von[req.userId][typ] || 0) + n;
     platz -= n;
   }
+  vorpostenGarnisonNachziehen(doc);
   if (!Object.keys(angenommen).length) {
-    return res.status(400).json({ error: 'Nichts stationiert - keine Kampfschiffe verfügbar oder die Garnison ist voll (' + st.garnisonMax + ' Schiffe).', garnisonMax: st.garnisonMax, frei: platz });
+    /* Der Grund wird BENANNT - sonst liest der Verbuendete die verdeckte Zusammensetzung aus dem
+       Unterschied zwischen 400 und 200 heraus, und der Besitzer versteht nicht, warum sein eigener
+       Vorposten ihn abweist. */
+    const nurAnteil = doc.besitzer !== req.userId && platz <= 0
+      && vorpostenGarnisonAnzahl(doc) < st.garnisonMax;
+    return res.status(400).json({ error: nurAnteil
+      ? 'Der Anteil der Verbündeten an dieser Garnison ist ausgeschöpft (höchstens '
+        + Math.round(VP_ALLIANZ_GARNISON_ANTEIL * 100) + ' % der ' + st.garnisonMax + ' Plätze).'
+      : 'Nichts stationiert - keine Kampfschiffe verfügbar oder die Garnison ist voll (' + st.garnisonMax + ' Schiffe).',
+      garnisonMax: st.garnisonMax, frei: platz, anteilVoll: nurAnteil });
   }
   vorpostenSchreib(doc);
   await saveDb();
-  res.json({ ok: true, angenommen, garnison: doc.garnison, garnisonAnzahl: vorpostenGarnisonAnzahl(doc), verteidigung: vorpostenVerteidigung(doc), garnisonMax: st.garnisonMax });
+  /* Die volle Zusammensetzung sieht nur der BESITZER (Befund des Audits). Ein Verbuendeter bekommt
+     seinen eigenen Anteil und die Summen - dieselbe Grenze wie in vorpostenFuerClient. Ohne diese
+     Zeile genuegte ein einziges stationiertes Schiff, um die Flottenaufstellung eines Fremden zu
+     lesen; die Allianz-Mitgliedschaft dafuer kann sich im geteilten Speicher jeder selbst geben. */
+  const eigenerSt = doc.besitzer === req.userId;
+  res.json({ ok: true, angenommen,
+    garnison: eigenerSt ? doc.garnison : Object.assign({}, vorpostenGarnisonVon(doc)[req.userId] || {}),
+    garnisonAnzahl: vorpostenGarnisonAnzahl(doc), verteidigung: vorpostenVerteidigung(doc), garnisonMax: st.garnisonMax });
 });
 
 app.post('/api/vorposten/rueckruf', authMiddleware, async (req, res) => {
@@ -13961,9 +14388,21 @@ app.post('/api/vorposten/rueckruf', authMiddleware, async (req, res) => {
   if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
   const doc = vorpostenLies(sys);
   if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
-  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann seine Garnison zurückrufen.' });
-  const garnison = Object.assign({}, doc.garnison || {});
-  doc.garnison = {};
+  /* Der Rueckruf haengt am BEITRAG, nicht an der Mitgliedschaft (Befund des Audits): Wer die
+     Allianz verlaesst oder hinausgeworfen wird, kam sonst nie wieder an seine Schiffe - sie waeren
+     im Vorposten eines Fremden gefangen gewesen, ohne dass irgendetwas es gesagt haette. Wer etwas
+     gestellt hat, darf es holen; wer nichts gestellt hat, hat hier auch nichts zu holen. */
+  const vonPruef = vorpostenGarnisonVon(doc);
+  if (doc.besitzer !== req.userId && !Object.keys(vonPruef[req.userId] || {}).length) {
+    return res.status(403).json({ error: 'Hier steht nichts von dir.' });
+  }
+  /* V5: Zurueckgerufen wird, was DIESES Konto gestellt hat - nicht die ganze Garnison. Der Besitzer
+     eines Vorpostens, in dem Verbuendete stehen, kann deren Schiffe also nicht einziehen. */
+  const von = vorpostenGarnisonVon(doc);
+  const garnison = Object.assign({}, von[req.userId] || {});
+  if (!Object.keys(garnison).length) return res.status(400).json({ error: 'Hier steht nichts von dir.', leer: true });
+  delete von[req.userId];
+  vorpostenGarnisonNachziehen(doc);
   vorpostenSchreib(doc);
   await saveDb();
   res.json({ ok: true, garnison, verteidigung: vorpostenVerteidigung(doc) });
@@ -13998,10 +14437,20 @@ async function vorpostenAbbauTick() {
     const module = (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlots(doc.stufe));
     if (user) for (const instKey of module) if (vpModulTeile(instKey)) vpModulGeben(user, instKey, 1);
     const st = vorpostenStufeVon(doc);
-    pushPendingReward(doc.besitzer, {
-      type: 'vorposten-abbau', system: doc.sys, stufe: doc.stufe || 1, name: st.name,
-      garnison: Object.assign({}, doc.garnison || {}), module, zeit: jetzt
-    });
+    /* V5: JEDER Beitragende bekommt SEINE Schiffe zurueck, nicht der Besitzer alle. Der Besitzer
+       bekommt seine Meldung auch dann, wenn er nichts stationiert hatte - es ist schliesslich sein
+       Vorposten, der verschwindet, und die Module liegen in seinem Bestand. */
+    const vonAbbau = vorpostenGarnisonVon(doc);
+    const empfaenger = new Set(Object.keys(vonAbbau).concat([doc.besitzer]));
+    for (const uid of empfaenger) {
+      if (!uid) continue;
+      pushPendingReward(uid, {
+        type: 'vorposten-abbau', system: doc.sys, stufe: doc.stufe || 1, name: st.name,
+        garnison: Object.assign({}, vonAbbau[uid] || {}),
+        module: uid === doc.besitzer ? module : [],
+        alsVerbuendeter: uid !== doc.besitzer, zeit: jetzt
+      });
+    }
     vorpostenLoesch(doc.sys);
     fertig++;
     console.log('[vorposten] abbau fertig sys=' + doc.sys + ' userId=' + doc.besitzer +
@@ -14054,6 +14503,53 @@ app.post('/api/vorposten/abbau/abbrechen', authMiddleware, async (req, res) => {
   vorpostenSchreib(doc);
   await saveDb();
   res.json({ ok: true, vorposten: vorpostenFuerClient(doc, req.userId, Date.now()) });
+});
+
+/* V4: DAS LAGER ABHOLEN. Der Ertrag geht ueber pushPendingReward, nicht direkt in den Spielstand:
+   Der Besitzer kann online sein, und sein naechster Auto-Save wuerde eine direkte Gutschrift mit
+   seinem aelteren Client-Stand ueberschreiben (dieselbe Begruendung wie beim Modulverkauf).
+   `lagerSeit` wird auf JETZT gesetzt, nicht um die abgeholten Stunden zurueckgedreht: Wer bei
+   vollem Lager abholt, verliert das, was ueber dem Deckel liegen wuerde - genau das ist der
+   Deckel. Ein Zurueckdrehen machte ihn wirkungslos. */
+app.post('/api/vorposten/lager/holen', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  /* Der Griff bedient BEIDES - Lager (V4) und Sternendock (V6). Er darf deshalb nicht an einem
+     der beiden Schalter allein haengen: Mit Endprojekten an und Lager aus haette das Dock Kreuzer
+     produziert, die niemand je abholen kann (Befund des Audits). */
+  if (!VP_LAGER_AKTIV && !VP_ENDPROJEKTE_AKTIV) {
+    return res.status(404).json({ error: 'Vorposten führen derzeit kein Lager.', inaktiv: true });
+  }
+  const sys = String((req.body && req.body.system) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'Ungültige Anfrage.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann hier abholen.' });
+  const jetzt = Date.now();
+  const stand = vorpostenLagerStand(doc, jetzt);
+  /* V6: Am selben Griff haengt, was am Sternendock bereitliegt. EIN Abholen fuer alles, was der
+     Vorposten bereithaelt - zwei Endpunkte fuer denselben Handgriff waeren zwei Stellen, an denen
+     man den Zeitstempel vergessen kann. Leer ist die Anfrage nur, wenn BEIDES leer ist. */
+  const schiffe = vorpostenDockStand(doc, jetzt);
+  if (vorpostenLagerLeer(stand) && !schiffe) {
+    return res.status(400).json({ error: 'Hier liegt noch nichts bereit.', leer: true });
+  }
+  // db synchron vor saveDb() mutieren, nie im await-Rueckruf.
+  doc.lagerSeit = jetzt;
+  /* `dockSeit` wird um GENAU die abgeholten Perioden vorgerueckt, nicht auf jetzt gesetzt: Sonst
+     verfiele der angefangene Fortschritt - bis zu 23 Stunden bei jedem Abholen (Befund des Audits).
+     Der Rest wird dabei am DECKEL gemessen, nicht an der ganzen verstrichenen Zeit; sonst haette
+     ein lange nicht besuchtes Dock nach dem Abholen sofort wieder den vollen Stapel. */
+  if (schiffe) {
+    const stundenGesamt = Math.min(VP_DOCK_MAX * VP_DOCK_STUNDEN, (jetzt - vorpostenDockAb(doc)) / 3600000);
+    const restStunden = Math.max(0, stundenGesamt - schiffe * VP_DOCK_STUNDEN);
+    doc.dockSeit = jetzt - Math.round(restStunden * 3600000);
+  }
+  vorpostenSchreib(doc);
+  pushPendingReward(req.userId, Object.assign({ type: 'vorposten-lager', system: sys,
+    name: vorpostenWerte(doc).name, zeit: jetzt,
+    schiffe: schiffe ? { [VP_DOCK_SCHIFF]: schiffe } : null }, stand));
+  await saveDb();
+  res.json({ ok: true, geholt: stand, schiffe, vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
 });
 
 app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
@@ -15233,6 +15729,13 @@ function spawnAktivImCode(name) {
   if (name === 'vorposten') return VORPOSTEN_AKTIV;
   if (name === 'angriffe') return true;
   if (name === 'mindesteinsatz') return PVP_MINDESTEINSATZ_AKTIV;
+  /* 'hort' fehlte (Durchsicht 04.09.2026): Die Uebersicht meldete imCode:false und wirksam:false,
+     obwohl HORT_BANNER_AKTIV true ist und die Meldung tatsaechlich ausgewuerfelt wird - der
+     Endpunkt prueft die Konstante direkt und geht gar nicht ueber spawnAktiv. Das ABSCHALTEN ging
+     (notAusGesetzt wird gelesen), nur die Rueckmeldung log, und ein Wiedereinschalten sah aus wie
+     ein Fehlschlag. Die drei Felder sollen laut eigenem Kommentar unterscheiden, ob etwas
+     abgeschaltet oder nie ausgeliefert wurde; fuer 'hort' sagten sie dauerhaft 'nie ausgeliefert'. */
+  if (name === 'hort') return HORT_BANNER_AKTIV;
   return false;
 }
 

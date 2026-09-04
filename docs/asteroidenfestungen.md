@@ -272,3 +272,43 @@ eine Behauptung, bis die Gegenprobe sie gemessen hat.
 **Die Auslieferungsreihenfolge ist gleichgültig:** Ohne das Frontend schickt niemand
 `zielArt: 'festung'`, und ohne dieses Backend antwortet `create` mit 400 „Unbekannte Zielart" – kein
 Zustand, in dem eine Zahl still falsch würde. Kein Schalter nötig.
+
+## Sammelphase 15/30/45/60 und eine Meldung, die ihr Ziel nennt (04.09.2026)
+
+Auftrag Sascha: „füge hier hinzu das man unter festung angreifen auch allianz raid starten kann mit
+einstellbarer sammelphase 15 minuten 30 minuten 45 und 60 mit nachricht an allianz". Drei Dinge
+waren dafür im Backend zu ändern, und das dritte war ein echter Fehler, kein Wunsch.
+
+**1. `ALLIANCE_MUSTER_DURATIONS` ist jetzt `[15, 30, 45, 60]` Minuten** (vorher 30/60/120). Der
+Grund liegt im neuen Einstieg: Ein Verband, den jemand aus dem Festungsmenü heraus ausruft, wird
+ausgerufen, **weil gerade jemand da ist**. Zwei Stunden Sammelphase passen zu einem verabredeten
+Termin, nicht zu einem spontanen „jetzt gleich". Laufende Verbände mit zwei Stunden bleiben
+unberührt – die Liste wird nur beim Ausrufen geprüft. **Kopie-Familie:** dieselbe Liste steht im
+Frontend; kein Test vergleicht sie automatisch, beide Seiten also von Hand pflegen.
+
+**2. Die Push-Meldung nennt das wirkliche Ziel.** Sie las bis hierher `greift [<targetTag>] an` –
+und `targetTag` ist bei einer Festung, einem Nest und einem Vorposten **null**. Wer einen Verband
+gegen eine Festung ausrief, verschickte an seine ganze Allianz „greift [?] an". Jetzt trägt die
+Meldung `ziel: musterZielBeschreibung(doc)`, dieselbe Quelle, aus der schon der 409-Text beim
+zweiten Verband gespeist wird; der Rückfall auf `targetTag` hält ältere Einträge lesbar, die noch
+ohne das Feld in der Warteschlange liegen. Dazu hängt die **Nachricht des Ausrufers** an (auf 60
+Zeichen gekürzt) – sie stand vorher nur im Dokument, also genau dort, wo der sie nicht liest, für
+den sie gedacht ist.
+
+**3. Die Meldungen werden VOR `saveDb()` eingereiht.** Sie standen dahinter. `pushNotificationEvent`
+mutiert `db`, und `saveDb()` war zu dem Zeitpunkt schon durch: Die Meldungen lagen nur im Speicher
+und erreichten die Platte erst, wenn irgendein fremder Schreibvorgang zufällig nachkam. Ein
+Neustart dazwischen verschluckte den Aufruf still – und der Deploy startet den Prozess bei **jedem**
+Push neu. Das ist wortwörtlich die Hausregel „`db` immer synchron vor `saveDb()` mutieren"; sie galt
+hier seit dem Bau des Musterangriffs nicht. Aufgefallen ist es nicht im Spiel, sondern beim Bau des
+Wächters: Bens Posteingang war leer, obwohl der Verband stand.
+
+**Der Wächter:** `tests/test_muster_festung_http.js`, Abschnitt 8 (fünf Prüfungen, Port 3241
+unverändert). Gemessene Gegenprobe am alten Serverstand: es fallen **8a, 8b, 8c, 8d und 8e**, die
+Prüfliste beider Läufe ist per `diff` identisch. `8d` und `8e` messen am **echten Endpunkt**, nicht
+im Quelltext – die alten zwei Stunden werden mit 400 abgelehnt, 45 Minuten gehen mit 200 durch.
+
+**Auslieferungsreihenfolge: Backend zuerst.** Das Frontend darf die 15/45 erst anbieten, wenn der
+Server sie annimmt, sonst antwortet `create` mit „Ungültige Anfrage". Kein Schalter nötig – die
+alten Werte 30 und 60 bleiben in beiden Listen gültig, es gibt also keinen Zwischenzustand, in dem
+ein Client etwas Unmögliches schickt.

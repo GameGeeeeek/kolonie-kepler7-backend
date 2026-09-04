@@ -39,7 +39,8 @@ const MUSS_FALLEN = {
   schreibfrei: ['2a'],
   summe: ['3b'],
   kein_aufraeumen: ['5b'],
-  pflicht_aus_trotz_schalter: ['6a', '6b']
+  pflicht_aus_trotz_schalter: ['6a', '6b'],
+  kein_deckel: ['7a']
 };
 
 let fail = false;
@@ -160,6 +161,9 @@ async function stoppeServer() { if (!srv) return; srv.kill('SIGTERM'); await war
     '  if (meinAnflug) anflugSchreiben(targetUserId, anflugListe.filter(e => e !== meinAnflug));', '');
   if (SAB === 'pflicht_aus_trotz_schalter') basis = basis.replace(
     '  if (ANFLUG_PFLICHT) {', '  if (false) {');
+  if (SAB === 'kein_deckel') basis = basis.replace(
+    '  const arrivalAt = Math.min(roheAnkunft, Date.now() + ANFLUG_MAX_FLUG_MS);',
+    '  const arrivalAt = roheAnkunft;');
   // Der Schalter wird fuer den Pflicht-Abschnitt gleich umgelegt; Grundlauf mit false.
   fs.writeFileSync(QUELLE, basis);
 
@@ -229,6 +233,30 @@ async function stoppeServer() { if (!srv) return; srv.kill('SIGTERM'); await war
   const zuFrueh = await api.sende('/attack', tokAnna2, { targetUserId: BEN, missionId: MISSION_ID });
   check('6b: waehrend der Flugzeit wird der Angriff ebenfalls abgewiesen',
     zuFrueh.status === 425, { status: zuFrueh.status, body: zuFrueh.body });
+  await stoppeServer();
+
+  // ---- 7: die Ankunftszeit ist gedeckelt --------------------------------------------------------
+  /* OHNE DECKEL WAERE DIE STARTSPERRE EINE WAFFE. Die Ankunftszeit kommt aus einem
+     klientenautoritativen Spielstand; ein Angreifer setzt endTime auf in dreissig Tagen, meldet den
+     Abflug und haelt sein Ziel damit einen Monat am Boden - ohne je anzugreifen und ohne dass
+     irgendetwas davon nach einem Angriff aussieht.
+     Gemessen wird ueber den ECHTEN Endpunkt mit einer echten Wucher-Mission im Spielstand, nicht
+     durch Nachrechnen der Deckel-Formel. */
+  await stoppeServer();
+  const deckel = Number((roh.match(/const ANFLUG_MAX_FLUG_MS = ([^;]+);/) || [])[1]
+    ? eval((roh.match(/const ANFLUG_MAX_FLUG_MS = ([^;]+);/) || [])[1]) : 0);
+  check('7z: der Deckel ist im Quelltext auffindbar', deckel > 0, deckel);
+  fs.writeFileSync(QUELLE, basis);
+  const wucher = Date.now() + 30 * 24 * 60 * 60 * 1000;   // dreissig Tage
+  fs.writeFileSync(dbPfad, JSON.stringify(grunddb(wucher)));
+  api = await starteServer();
+  const tokAnna3 = await api.anmelden('anna');
+  const abflugWucher = await api.sende('/attack/abflug', tokAnna3, { targetUserId: BEN, missionId: MISSION_ID });
+  const gemeldet = abflugWucher.body && abflugWucher.body.arrivalAt;
+  check('7a: eine Wucher-Ankunftszeit wird auf den Deckel gekuerzt',
+    abflugWucher.status === 200 && gemeldet > 0 && gemeldet < wucher - 1000
+      && gemeldet <= Date.now() + deckel + 5000,
+    { gemeldet, eingereicht: wucher, deckel });
   await stoppeServer();
 
   // ---- Schlussurteil: bei Sabotage MUSS genau die gemessene Liste fallen ------------------------

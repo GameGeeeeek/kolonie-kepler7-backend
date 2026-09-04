@@ -4727,8 +4727,27 @@ app.post('/api/attack/abflug', attackRateLimit, authMiddleware, async (req, res)
   try { attackerSave = attackerRoh ? JSON.parse(attackerRoh) : null; } catch (e) { attackerSave = null; }
   const mission = attackerSave ? pvpFindeAngriffsmission(attackerSave, missionId, targetUserId) : null;
   if (!mission) return res.status(404).json({ error: 'Angriffsmission nicht im Spielstand gefunden.' });
-  const arrivalAt = Number(mission.endTime) || 0;
-  if (!(arrivalAt > 0)) return res.status(400).json({ error: 'Mission ohne Ankunftszeit.' });
+  /* DIE ANKUNFTSZEIT KOMMT AUS EINEM KLIENTENAUTORITATIVEN SPIELSTAND und wird deshalb gedeckelt.
+     Ohne Deckel waere die Startsperre des Verteidigers eine WAFFE: Ein Angreifer setzt endTime auf
+     in dreissig Tagen, meldet den Abflug und haelt sein Ziel damit einen Monat am Boden - ohne je
+     anzugreifen und ohne dass irgendetwas davon nach einem Angriff aussieht.
+     Gefunden beim Vorlegen der Balance-Frage an Sascha (04.09.2026), nicht im Betrieb.
+
+     ANFLUG_MAX_FLUG_MS ist bewusst grosszuegig gegenueber der gemessenen Wirklichkeit: Die
+     PvP-Basisflugzeit liegt bei 180-480 s (pseudoDistanceSeconds), und die Multiplikatoren-Kette
+     kann sie nur verkuerzen oder maessig verlaengern. Zwei Stunden schneiden also keinen echten
+     Flug ab und begrenzen den Missbrauch trotzdem auf ein Mass, das niemanden lahmlegt.
+
+     Die andere Richtung - eine kuenstlich VERKUERZTE Flugzeit - bleibt offen und das ist bewusst:
+     Sie serverseitig zu pruefen hiesse, die ganze Multiplikatoren-Kette (Forschung, Module,
+     Werftmarken, Aufstieg) zu spiegeln, also genau die Kopie-Familie zu bauen, an der dieses
+     Projekt regelmaessig scheitert. Und sie macht nichts schlimmer als vorher: Die Flugzeit war
+     bis zu dieser Etappe VOLLSTAENDIG clientseitig. Wer sie faelscht, verkuerzt seine eigene
+     Vorwarnung an das Ziel - er schadet sich selbst. */
+  const ANFLUG_MAX_FLUG_MS = 2 * 60 * 60 * 1000;
+  const roheAnkunft = Number(mission.endTime) || 0;
+  if (!(roheAnkunft > 0)) return res.status(400).json({ error: 'Mission ohne Ankunftszeit.' });
+  const arrivalAt = Math.min(roheAnkunft, Date.now() + ANFLUG_MAX_FLUG_MS);
   const signatur = fleetSignaturServer(mission.composition || {});
   const liste = (anflugLesen(targetUserId) || {}).anfluege || [];
   /* Derselbe Angreifer mit derselben Mission darf nachmelden, ohne dass der Eintrag sich verdoppelt -

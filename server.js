@@ -17782,6 +17782,13 @@ function kampftextPvpBestellen(angreiferId, angreiferBerichtId, verteidigerId, v
   if (!KAMPFTEXT_AKTIV || !KAMPFTEXT_E2_AKTIV || notAusGesetzt('kampftext')) return false;
   const angreifer = findUserById(angreiferId);
   if (!angreifer || !verteidigerId) return false;
+  // BEIDE Plaetze pruefen, BEVOR der erste eingereiht wird (Codex-Befund an #237): Bei 299 von 300
+  // nahm der Angreifer-Text den letzten Platz des Gesamtdeckels, der Verteidiger-Text fiel mit 429
+  // weg - ein Text statt zwei, genau das Gegenteil von "zwei oder keiner". Alles hier ist synchron,
+  // zwischen Pruefung und Einreihen kann sich kein Zaehler bewegen.
+  kampftextAufraeumen();
+  if (kampftextTagesZaehler(angreifer, 'kampftextTag').anzahl >= KAMPFTEXT_PRO_TAG) return false;
+  if (kampftextTagesZaehler(db, 'kampftextTag').anzahl + 2 > KAMPFTEXT_GESAMT_PRO_TAG) return false;
   const a = kampftextEinreihen({ user: angreifer, userId: angreiferId, berichtId: angreiferBerichtId,
     art: 'pvp-angriff', daten: kampftextDatenFuer('pvp-angriff', datensatz), zaehleKonto: true });
   if (a.status !== 202) return false;

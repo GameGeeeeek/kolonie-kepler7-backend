@@ -36,7 +36,9 @@
 // ebenfalls nur die Stufe), 14k (misst, dass der npc-Text unveraendert ist), 15a (der Kampf
 // selbst) und 13e (ein alter Server bestellt nie). Ohne die Verallgemeinerung der
 // Schiffsnamen-Sperre (nur eigene/verlorene Schiffe) fallen genau 15g und 15h - der Angreifer-Text
-// nennt die Waechter der Gegenseite und wird verworfen. BEFUND aus 14m: Die Sperre fand
+// nennt die Waechter der Gegenseite und wird verworfen. Abschnitt 17 (Codex-Befund an #237, zwei
+// Texte oder keiner auch am Rand des Gesamtdeckels): ohne die Vorpruefung beider Plaetze in
+// kampftextPvpBestellen fallen genau 17a, 17b und 17c. BEFUND aus 14m: Die Sperre fand
 // "Mondzerstoerer" (oe) nicht, weil sie nur die Umlaut-Schreibweise suchte - seit E2 wird auch der
 // Text normalisiert; der Messlauf von AI Core kannte beide Schreibweisen schon immer.
 //
@@ -70,6 +72,7 @@ const EMIL = crypto.randomUUID(), FRIDA = crypto.randomUUID(), ADMIN = crypto.ra
 const INES = crypto.randomUUID(), GERD = crypto.randomUUID(), HANNA = crypto.randomUUID();
 const JONAS = crypto.randomUUID(), KARLA = crypto.randomUUID();
 const LARS = crypto.randomUUID(), MIA = crypto.randomUUID();
+const NILS = crypto.randomUUID(), OLGA = crypto.randomUUID();
 const angreiferSave = JSON.stringify({
   resources: { erz: 1e5, kristalle: 1e5, deuterium: 1e5, energie: 1e5 }, credits: 1000,
   buildings: { lager: 60, werft: 10 }, research: {}, fleet: { cruisers: 40, bomber: 12 }, colonies: {}
@@ -96,12 +99,15 @@ function grunddb() {
       jonas: { userId: JONAS, username: 'jonas', passwordHash: hash, emailVerified: true, createdAt: Date.now() },
       karla: { userId: KARLA, username: 'karla', passwordHash: hash, emailVerified: true, createdAt: Date.now() },
       lars:  { userId: LARS,  username: 'lars',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
-      mia:   { userId: MIA,   username: 'mia',   passwordHash: hash, emailVerified: true, createdAt: Date.now() }
+      mia:   { userId: MIA,   username: 'mia',   passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      nils:  { userId: NILS,  username: 'nils',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      olga:  { userId: OLGA,  username: 'olga',  passwordHash: hash, emailVerified: true, createdAt: Date.now() }
     },
     private: {
       [GERD]: { 'kepler7-save-v3': angreiferSave }, [HANNA]: { 'kepler7-save-v3': verteidigerSave },
       [JONAS]: { 'kepler7-save-v3': angreiferSave }, [KARLA]: { 'kepler7-save-v3': verteidigerSave },
-      [LARS]: { 'kepler7-save-v3': angreiferSave }, [MIA]: { 'kepler7-save-v3': verteidigerSave }
+      [LARS]: { 'kepler7-save-v3': angreiferSave }, [MIA]: { 'kepler7-save-v3': verteidigerSave },
+      [NILS]: { 'kepler7-save-v3': angreiferSave }, [OLGA]: { 'kepler7-save-v3': verteidigerSave }
     }, shared: {}, resetTokens: {},
     galaxy: { npcEmpireStrength: 1, marketTrend: 1, collapsedSystems: {}, controlledSystems: {},
       news: [], activeWar: null, activeWormhole: null, lastTick: Date.now(), factions: {} }
@@ -752,6 +758,33 @@ const KAMPF = {
     const health = await api3.j('/health');
     check('16d: /api/health zeigt e2: false - so sieht das Frontend, dass es noch nicht bestellen soll',
       health.body && health.body.kampftext && health.body.kampftext.e2 === false, health.body && health.body.kampftext && { e2: health.body.kampftext.e2 });
+    await stoppeServer();
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // 17 - E2: zwei Texte oder keiner - auch am Rand des Gesamtdeckels (Codex-Befund an #237)
+  // ---------------------------------------------------------------------------------------
+  {
+    // Gesamtdeckel auf 299 von 300 stellen - bei gestopptem Server, mit dem Tagesstempel des
+    // Servers (staubTagesschluessel: UTC-Datum), sonst setzt der Zaehler sich beim ersten Zugriff
+    // zurueck und die Pruefung misst einen vollen Deckel statt des Randes.
+    const dbj3 = JSON.parse(fs.readFileSync(dbPfad, 'utf8'));
+    dbj3.kampftextTag = { stempel: new Date().toISOString().slice(0, 10), anzahl: 299 };
+    fs.writeFileSync(dbPfad, JSON.stringify(dbj3));
+    const api4 = await starteServer(kopiePfad);
+    const nils = await api4.anmelden('nils');
+    const ines = await api4.anmelden('ines');
+    const vorher = ai.prompts.length;
+    ai.antwort = () => 'Der Verband kehrte zurueck.';
+    const angriff = await api4.j('/attack', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + nils }, body: JSON.stringify({ targetUserId: OLGA }) });
+    await warte(500);
+    check('17a: bei EINEM freien Platz bestellt der Spielerkampf KEINEN Text - nicht einen fuer den Angreifer allein',
+      angriff.status === 200 && ai.prompts.length === vorher, { status: angriff.status, aufrufe: ai.prompts.length - vorher });
+    const nachher = JSON.parse(fs.readFileSync(dbPfad, 'utf8'));
+    check('17b: ... und die Pruefung hat den letzten Platz nicht verbraucht', ((nachher.kampftextTag || {}).anzahl) === 299, nachher.kampftextTag);
+    const npc = await api4.auftrag(ines, KAMPF);
+    check('17c: den letzten Platz bekommt der naechste Einzelauftrag (202), der uebernaechste faellt am Deckel (429)',
+      npc.status === 202 && (await api4.auftrag(ines, KAMPF)).status === 429, { status: npc.status });
     await stoppeServer();
   }
 

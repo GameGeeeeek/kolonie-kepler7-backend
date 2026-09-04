@@ -232,7 +232,10 @@ seine Stufe im Namen (`worldBossName` des Clients); Festung, Königin und Spiele
    Auftrag seines Tagesdeckels (er hat den Kampf ausgelöst), den Verteidiger keinen, den
    Gesamtdeckel zwei (jeder Text kostet den M715q 70 s). Ist der Deckel des Angreifers erschöpft,
    bekommt auch der Verteidiger keinen Text – sonst erzählte der Bericht der einen Seite einen
-   Kampf, den die andere nicht erzählt bekommt.
+   Kampf, den die andere nicht erzählt bekommt. **Beide Plätze werden geprüft, bevor der erste
+   eingereiht wird** (Codex-Befund am PR: bei 299 von 300 nahm der Angreifer-Text den letzten
+   Platz, der Verteidiger-Text fiel mit 429 weg – ein Text statt zwei). Alles synchron, zwischen
+   Prüfung und Einreihen bewegt sich kein Zähler; Wächter 17a–17c.
 4. **`kampftextEinreihen` ist die eine Stelle, die einreiht** – Route und PvP-Weg benutzen sie.
    Erst zählen, dann einreihen, beide Zähler im selben synchronen Block (Punkt 1 der Drosselung
    bleibt). Der Angriffs-Handler wartet nicht auf den M715q: die Bestellung ist reine db-Mutation
@@ -268,7 +271,7 @@ aus ist, lehnt die Route jede Art außer `npc` mit 503 ab, `/api/attack` bestell
 soll. Umgelegt wird per Merge nach der Messung, unmittelbar vor dem Frontend-PR (Hausregel: Backend
 zuerst live, per `/api/health` belegt). Der Notaus `kampftext` schaltet zur Laufzeit weiter alles ab.
 
-Wächter: `tests/test_kampftext_http.js` Abschnitte 14, 15, 16 und 13e (jetzt 107 Prüfungen; die
+Wächter: `tests/test_kampftext_http.js` Abschnitte 14, 15, 16, 17 und 13e (jetzt 110 Prüfungen; die
 Hauptkopie misst beide Schalter in Stellung „an", eine dritte Kopie die Grundstellung E2 aus),
 Gegenprobe im Dateikopf. **Frontend folgt:** Bestellung mit `art` für Weltboss, Festungs-Fall und
 Königinnen-Fall, Logbuch-Sektion in den Berichten `festung-angriff`, `nest-angriff`, `attack-sent`

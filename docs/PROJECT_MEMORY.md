@@ -107,3 +107,24 @@ schreibt binnen Sekunden irgendwer irgendetwas. Er schlägt genau dann zu, wenn 
 nebenbei schreibt.** Wer in einer Route eine Nebenwirkung hinter den Flush hängt — Meldung,
 Protokoll, Zähler —, hat sie nicht persistiert, sondern nur gehofft. Gefunden wurde es nicht im
 Spiel, sondern weil ein neuer Test den Posteingang **nachgelesen** hat statt nur den Rückgabewert.
+
+## Ein Schalter, der nur die Anzeige einer Wahl gattert, ist kein Schalter (04.09.2026)
+
+`VP_ENDPROJEKTE_AKTIV` stand an zwei Stellen: an der Liste, die dem Client die möglichen Projekte
+nennt, und an der Formel, die ihre Wirkung rechnet. Die Stelle dazwischen — der Endpunkt, der die
+Wahl **ausführt** — kannte ihn nicht. Ein Client, der den Schlüssel selbst schickt, kam also durch,
+obwohl dasselbe Backend ihm diesen Schlüssel nie angeboten hätte.
+
+Die Doku hat den Fehler mitgetragen und dabei verdeckt: Sie sagte, der Schalter gattere „die Wahl"
+und „die Wirkung" — beide Male in dem Ton, in dem man eine vollständige Aufzählung schreibt. Die
+Wahl war aber die *Anzeige* der Wahl. Wer den Absatz las, hatte keinen Grund nachzusehen.
+
+**Ein Notausschalter gehört an die Stelle, die HANDELT, nicht an die, die anbietet.** Anzeige und
+Ausführung sind zwei Stellen, auch wenn sie im Kopf eine sind; nur der Client, der sich an die
+Anzeige hält, sieht sie als eine. Und die Prüffrage dazu ist billig: *Was passiert, wenn jemand
+genau das schickt, was ich ihm nicht angeboten habe?*
+
+Der Schaden war hier auch nicht auf „ein Vorhaben ohne Wirkung" begrenzt: Weil ein späteres
+Umlegen des Schalters die schon vergangene Wartezeit als Fortschritt las, lag beim Einschalten
+sofort der volle Deckel an Schiffen bereit. **Ein Zustand, der heute nur nutzlos aussieht, kann
+beim Einschalten rückwirkend wertvoll werden.**

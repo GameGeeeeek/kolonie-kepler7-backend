@@ -14082,6 +14082,20 @@ app.post('/api/vorposten/projekt/starten', authMiddleware, async (req, res) => {
   const doc = vorpostenLies(sys);
   if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
   if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer startet Projekte an seinem Vorposten.' });
+  /* AUDIT-BEFUND 04.09.2026: Der Schalter gattert die ANGEBOTENE Liste (vpProjektVerfuegbar) und
+     die WIRKUNG (vpProjektBoni) - dieser Endpunkt pruefte ihn nie. Wer den Schluessel direkt
+     schickte, startete im Auslieferungsstand ein Endprojekt, obwohl der Vorposten es gar nicht zur
+     Wahl stellt. Zwei Folgen, und die zweite ist die schlimmere:
+       (a) Der EINZIGE Projektplatz der Station ist 36 Stunden lang fuer ein Vorhaben ohne Wirkung
+           blockiert - abbrechen gibt es bewusst nicht.
+       (b) Wird der Schalter spaeter umgelegt, faellt vorpostenDockAb() mangels `doc.dockSeit` auf
+           `p.fertigAb` zurueck. Die ganze aufgelaufene Zeit waere rueckwirkend Baufortschritt, der
+           volle Stapel laege sofort bereit.
+     Die Lehre steht in PROJECT_MEMORY: Ein Schalter, der nur die ANZEIGE einer Wahl gattert, ist
+     kein Schalter - er muss an der Stelle stehen, die die Wahl AUSFUEHRT. */
+  if (!VP_ENDPROJEKTE_AKTIV && vpIstEndprojekt(key)) {
+    return res.status(404).json({ error: 'Dieses Vorhaben steht noch nicht zur Verfügung.', inaktiv: true });
+  }
   const jetzt = Date.now();
   const laeuft = vpProjektLaeuft(doc, jetzt);
   if (laeuft) {

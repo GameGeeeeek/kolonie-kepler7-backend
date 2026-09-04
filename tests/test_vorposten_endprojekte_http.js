@@ -19,7 +19,13 @@ const QUELLE = path.join(WURZEL, 'server_vpend_tmp.js');
 const SAB = process.env.KEPLER_VPEND_SABOTAGE || '';
 /* GEMESSEN am 04.09.2026. `dockdeckel` reisst 4c mit, und das ist die Folge, nicht ein Nebenschaden:
    Ohne Deckel liefert das Abholen 40 statt 7 Schiffe, und 4c prueft genau diese Zahl. */
-const MUSS_FALLEN = { schalter: ['1a'], sperrfeuer: ['2a'], plaetze: ['3a'], dockdeckel: ['4b', '4c'], dockseit: ['4d'] };
+const MUSS_FALLEN = { schalter: ['1a'], sperrfeuer: ['2a'], plaetze: ['3a'], dockdeckel: ['4b', '4c'], dockseit: ['4d'],
+  /* GEMESSEN, nicht geschaetzt: `endstart` reisst 1a3 MIT, und das ist die Folge, nicht ein
+     Nebenschaden. Ohne die Sperre geht `sternendock` in 1a2 durch und belegt den EINZIGEN
+     Projektplatz - das gewoehnliche Projekt in 1a3 wird danach mit „laeuft bereits" abgelehnt.
+     Genau der Schaden, den der Befund beschreibt, hier als Kette sichtbar. Die erste Fassung
+     dieser Liste nannte nur 1a2 und 1a4 und fiel deshalb selbst durch. */
+  endstart: ['1a2', '1a3', '1a4'] };
 
 let fail = false;
 const ergebnis = {};
@@ -118,6 +124,12 @@ const liesDoc = (sys) => JSON.parse(liesDb().shared['vorposten:' + sys]);
 
   let basis = roh.replace(/const VORPOSTEN_AKTIV = (true|false);/, 'const VORPOSTEN_AKTIV = true;')
     .replace(/const VP_MARKT_AKTIV = (true|false);/, 'const VP_MARKT_AKTIV = true;');
+  /* `endstart` nimmt die Schalterpruefung AM ENDPUNKT heraus (nicht die an der Liste - die ist
+     `schalter`). Beide Sabotagen belegen sich selbst ueber 0c bzw. 0b: eine Ersetzung, die ins
+     Leere greift, meldet keinen Fehler und sieht dann aus wie eine bestandene Gegenprobe. */
+  if (SAB === 'endstart') basis = basis.replace('  if (!VP_ENDPROJEKTE_AKTIV && vpIstEndprojekt(key)) {\n', '  if (false) {\n');
+  check('0c: die Sabotage `endstart` hat gegriffen (oder wurde gar nicht verlangt)',
+    SAB !== 'endstart' || (!/if \(!VP_ENDPROJEKTE_AKTIV && vpIstEndprojekt\(key\)\) \{/.test(basis) && /if \(false\) \{/.test(basis)));
   if (SAB === 'schalter') basis = basis.replace('    (VP_ENDPROJEKTE_AKTIV || !vpIstEndprojekt(d.key)) &&\n', '');
   if (SAB === 'sperrfeuer') basis = basis.replace("const sperrfeuer = (vorpostenWerte(doc).projektBoni || {}).verlust || 0;", 'const sperrfeuer = 0;');
   if (SAB === 'plaetze') basis = basis.replace('+ Math.round(ausProjekt) };', '};');
@@ -145,6 +157,21 @@ const liesDoc = (sys) => JSON.parse(liesDb().shared['vorposten:' + sys]);
   check('1a: ausgeschaltet steht auf der Endstufe KEIN Endprojekt zur Wahl',
     ausMoeglich.length > 0 && !ausMoeglich.some(k => ['sternendock','sternenmarkt','sperrfeuer'].indexOf(k) >= 0),
     { moeglich: ausMoeglich });
+  /* AUDIT-BEFUND 04.09.2026: 1a misst nur die ANGEBOTENE Liste. Der Endpunkt selbst war offen -
+     wer den Schluessel direkt schickte, startete das Endprojekt trotz ausgeschaltetem Schalter,
+     blockierte den einzigen Projektplatz 36 Stunden lang und liess beim spaeteren Umlegen des
+     Schalters die ganze Wartezeit als Dock-Fortschritt gutschreiben. Ein Schalter, der nur die
+     Anzeige einer Wahl gattert, ist kein Schalter. */
+  const ausStart = await s.sende('/vorposten/projekt/starten', tokA, { system: 'w8', projekt: 'sternendock' });
+  check('1a2: ausgeschaltet lehnt auch der ENDPUNKT ein Endprojekt ab, nicht nur die Liste',
+    ausStart.status === 404 && !!(ausStart.body && ausStart.body.inaktiv),
+    { status: ausStart.status, body: ausStart.body });
+  const ausOffen = await s.sende('/vorposten/projekt/starten', tokA, { system: 'w8', projekt: ausMoeglich[0] });
+  check('1a3: ein gewoehnliches Projekt geht weiter durch - die Sperre trifft NUR die Endprojekte',
+    ausOffen.status === 200, { projekt: ausMoeglich[0], status: ausOffen.status });
+  check('1a4: und das abgelehnte Endprojekt steht danach NICHT im Dokument',
+    !(liesDoc('w8').projekte || []).some(p => p && p.key === 'sternendock'),
+    { projekte: (liesDoc('w8').projekte || []).map(p => p && p.key) });
   await stoppeServer();
 
   // ---- 2) Mit umgelegtem Schalter: jeder Zweig genau seins --------------------------------------

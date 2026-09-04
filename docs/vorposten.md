@@ -665,9 +665,26 @@ Eroberungsmechanik samt NPC-Rückeroberung, und ein Vorposten hätte dort nichts
 Zustand, keine Verflechtung zweier Systeme.
 
 Der Schalter `VP_ENDPROJEKTE_AKTIV` deckt alle drei ab — sie kommen zusammen, weil sie zusammen die
-Entscheidung sind, welchen Zweig man auf der Endstufe hält. Er gattert **beides**: die Wahl
-(`vpProjektVerfuegbar`) und die **Wirkung** (`vpProjektBoni`), damit ein bereits gebautes Endprojekt
-nicht wirkt, bevor das Frontend es erklären kann.
+Entscheidung sind, welchen Zweig man auf der Endstufe hält. Er gattert **drei** Stellen: die
+angebotene Wahl (`vpProjektVerfuegbar`), die **Ausführung** der Wahl
+(`POST /api/vorposten/projekt/starten`) und die **Wirkung** (`vpProjektBoni`), damit ein bereits
+gebautes Endprojekt nicht wirkt, bevor das Frontend es erklären kann.
+
+**Die mittlere fehlte bis zum 04.09.2026, und dieser Absatz behauptete das Gegenteil.** Er sagte,
+der Schalter gattere „die Wahl" — er gatterte nur die *Anzeige* der Wahl. Wer den Schlüssel direkt
+an den Endpunkt schickte, startete im Auslieferungsstand ein Endprojekt, obwohl derselbe Vorposten
+in `projektMoeglich` nur `["dockring","tiefenhorchen","sprungtor"]` nennt. Gemessen: 200 mit
+`{ok:true, projekt:'sternendock'}`. Zwei Folgen, und die zweite ist die schlimmere:
+
+1. Der **einzige** Projektplatz der Station ist 36 Stunden lang für ein Vorhaben ohne Wirkung
+   blockiert — Abbrechen gibt es bewusst nicht.
+2. Wird der Schalter später umgelegt, fällt `vorpostenDockAb()` mangels `doc.dockSeit` auf
+   `p.fertigAb` zurück. Die ganze aufgelaufene Wartezeit wäre rückwirkend Baufortschritt: gemessen
+   mit einem 30 Tage alten `fertigAb` lag sofort `dockBereit = 7` — der volle Deckel — bereit, und
+   `POST /api/vorposten/lager/holen` gab die sieben Kreuzer heraus.
+
+Der Endpunkt prüft jetzt selbst (`if (!VP_ENDPROJEKTE_AKTIV && vpIstEndprojekt(key))` → 404 mit
+`inaktiv`). Gefunden hat es die nachgeholte Rechnungs-Perspektive des Audits.
 
 Wächter: `tests/test_vorposten_endprojekte_http.js` (Port 3259).
 

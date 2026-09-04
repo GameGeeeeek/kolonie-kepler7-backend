@@ -2957,7 +2957,7 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   const expectedVersion = req.body ? req.body.expectedVersion : undefined;
 
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true) || checkWorldBossPermission(req, key, true) || checkMissionsKeyPermission(req, key, true) || checkAsteroidKeyPermission(req, key, true) || checkVorpostenKeyPermission(req, key, true);
+    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true) || checkWorldBossPermission(req, key, true) || checkMissionsKeyPermission(req, key, true) || checkAsteroidKeyPermission(req, key, true) || checkVorpostenKeyPermission(req, key, true) || checkAnflugKeyPermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
     // Mengenschutz (siehe MAX_SHARED_VALUE_BYTES oben). Bewusst NACH der Rechteprüfung und VOR jedem
     // Schreibzugriff - und bewusst nur für NEUE Schlüssel, damit die normale Spielschleife
@@ -4058,6 +4058,41 @@ function rawFleetPower(f, ssAtkMult, t2AtkMult, marks) {
 // Punktwerte, damit ein PvP-Angriff und der Bestenlisten-Score sie nicht stillschweigend mit 0
 // bewerten - genau der Fallstrick, an dem SHIP_SCORE_WEIGHTS hier schon dreimal veraltet ist.
 const SHIP_DEF_WEIGHTS = { jaeger:0.7, carrier:0.8, destroyers:0.9, bomber:0.5, waechter:2.0, schlachtschiff:1.3, superschlachtschiff:1.3, nanoklinge:0.8, quantenkreuzer:1.4, fusionsdreadnought:1.5, leerenjaeger:1.1, kometenjaeger:0.6, enterschiff:1.6, phantomschiff:0.3, riftwaechter:0.8, hyperjaeger:0.6, hyperbomber:0.9, metamaterialtitan:2.0, singularitaetsvernichter:1.6, kausalitaetsbrecher:1.8, urmateriekoloss:1.8, paktkorvette:0.7, bundeskreuzer:1.7, sternenbanner:1.5 };
+/* SIGNATUR - wie schwer ein Rumpf zu verbergen ist. Spiegel von SHIP_DEFS[].signatur im Frontend
+   (dort eingefuehrt 03.09.2026, v8.660.0). Er kam BEWUSST erst mit Etappe 2 hierher: In Etappe 1
+   las serverseitig nichts die Signatur, ein Spiegel waere toter Code gewesen. Jetzt liest ihn die
+   Anflug-Meldung, und damit ist er noetig.
+
+   ALLE 46 Klassen, nicht nur die 26 Kampfklassen aus SHIP_ATK_VALUES darunter: Ein Angriffsverband
+   nimmt Frachter mit, und ausgerechnet die Bergungsschiffe tragen hohe Werte (600/700) - ein
+   Spiegel nur der Kampfschiffe wuerde die auffaelligsten Rumpfe uebersehen. Das Superschlachtschiff
+   steht wie ueberall in keiner Frontend-Liste und traegt seinen Wert dort in einem eigenen Zweig;
+   hier steht es ganz normal mit drin.
+   Die Vollstaendigkeit haelt test_paritaet_tabellen im Frontend-Repo - Schluesselmengen UND Werte,
+   nicht nur eine Schwelle. */
+const SHIP_SIGNATUR = {
+  spionageschiff:2, spaeher:3, jaeger:10, lotsenboot:10, ships:10, bomber:15, kometenjaeger:15,
+  recycler:15, frachter:20, hyperjaeger:20, phantomschiff:20, presslufthai:20, schuerfschiff:20,
+  forscher:30, gesandtenschiff:30, ankerwerfer:45, echoschnitter:45, nullkiel:45, paktkorvette:45,
+  riftwaechter:45, cruisers:60, kessel:60, bannschiff:80, destroyers:80, nanoklinge:80, waechter:80,
+  enterschiff:100, hyperbomber:100, leerenjaeger:150, colonyShips:180, frachtergross:180, carrier:240,
+  bergungsfrachter:600, quantenkreuzer:600, schlachtschiff:600, bergungskran:700, bundeskreuzer:700,
+  fusionsdreadnought:700, grundgaenger:700, metamaterialtitan:800, sternenbanner:800,
+  superschlachtschiff:800, singularitaetsvernichter:900, urmateriekoloss:900,
+  kausalitaetsbrecher:1000, mondzerstoerer:1000
+};
+/* Ein Verband ist so sichtbar wie sein SICHTBARSTES Schiff - MAXIMUM, nicht Summe und nicht
+   Mittelwert, exakt wie fleetSignatur() im Frontend. Summe waere kaputt (500 Jaeger sichtbarer als
+   ein Schlachtschiff), Mittelwert auch (ein Schlachtschiff hinter genug Jaegern verstecken). */
+function fleetSignaturServer(fleet){
+  let hoechste = 0;
+  for (const k of Object.keys(fleet || {})){
+    if (!((fleet[k] || 0) > 0)) continue;
+    const s = SHIP_SIGNATUR[k] || 0;
+    if (s > hoechste) hoechste = s;
+  }
+  return hoechste;
+}
 const SHIP_ATK_VALUES = { cruisers:20, destroyers:45, ships:5, jaeger:10, bomber:60, schlachtschiff:90, carrier:15, superschlachtschiff:220, waechter:8, nanoklinge:55, quantenkreuzer:80, fusionsdreadnought:180, leerenjaeger:140, kometenjaeger:18, enterschiff:25, phantomschiff:35, riftwaechter:20, hyperjaeger:30, hyperbomber:130, metamaterialtitan:150, singularitaetsvernichter:280, kausalitaetsbrecher:340, urmateriekoloss:250, paktkorvette:40, bundeskreuzer:110, sternenbanner:240 };
 // marks (31.07.2026): derselbe atk-Markenfaktor wie in rawFleetPower - es ist derselbe
 // Angriffswert, hier nur mit defWeight verrechnet.
@@ -4643,6 +4678,87 @@ function pvpFindeAngriffsmission(save, missionId, targetUserId) {
   return null;
 }
 
+/* ====================== ANFLUG - Tarnwert Etappe 2 (03.09.2026) ======================
+   Entscheidung Sascha: Der SERVER fuehrt den Anflug. Bis heute existierte der Flug eines
+   Spielerangriffs ausschliesslich im Client des Angreifers - er baute eine Mission mit Flugzeit und
+   rief /api/attack erst bei Ankunft. Der Server sah davon nichts und konnte deshalb auch niemanden
+   vorwarnen. Eine Meldung, die der angreifende Client selbst schreibt, waere freiwillig: Wer nicht
+   gemeldet werden will, meldet nicht. Deshalb diese Route.
+
+   WAS SIE SCHREIBT, IST ABSICHTLICH ARM: Ankunftszeit und die SIGNATUR des Verbands - kein Name,
+   keine Zusammensetzung, keine Staerke. Was ein Verteidiger daraus zu sehen bekommt, entscheidet
+   sein eigener Signaturscanner; dieselbe Staffelung wie beim Bestand in Etappe 1 (nichts / "da
+   bewegt sich etwas" / Groessenklasse). Der Server verschleiert also nicht, er liefert schlicht
+   nicht mehr aus, als die Mechanik braucht.
+
+   ANFLUG_PFLICHT ist der Notausschalter und steht bewusst auf false: Solange das Frontend den
+   Abflug noch nicht meldet, wuerde eine Pflicht JEDEN Spielerangriff blockieren. Umgelegt wird er
+   im Frontend-PR, wie bei VORPOSTEN_AKTIV und SEKTOR_LAGE_AKTIV zuvor. Bis dahin nimmt der Server
+   die Meldung entgegen und schreibt den Kanal (harmlos), verlangt sie aber nicht. */
+const ANFLUG_PFLICHT = false;
+/* Wie lange eine Meldung nach der Ankunft noch gilt. Sie muss die Ankunft ueberleben, weil der
+   Angreifer erst DANN aufloest - und ohne Frist waere die Pflichtpruefung unten ein Rennen gegen
+   die eigene Uhr. Grosszuegig gewaehlt: Ein Angreifer, dessen Tab beim Ankunftszeitpunkt gedrosselt
+   war, soll seinen Angriff nicht verlieren. */
+const ANFLUG_GNADE_MS = 6 * 60 * 60 * 1000;
+function anflugKey(zielUserId) { return 'anflug:' + zielUserId; }
+function anflugLesen(zielUserId) {
+  try { const r = db.shared[anflugKey(zielUserId)]; return r ? JSON.parse(r) : null; } catch (e) { return null; }
+}
+/* Ein Dokument je ANGEGRIFFENEM, darin eine Liste - mehrere Angreifer koennen gleichzeitig
+   unterwegs sein, und der Verteidiger will alle sehen. Abgelaufene Eintraege fallen beim Schreiben
+   heraus; ein eigener Aufraeum-Takt waere eine zweite Stelle, die dasselbe tut. */
+function anflugSchreiben(zielUserId, eintraege) {
+  const jetzt = Date.now();
+  const frisch = (eintraege || []).filter(e => e && (e.arrivalAt || 0) + ANFLUG_GNADE_MS > jetzt);
+  if (!frisch.length) { delete db.shared[anflugKey(zielUserId)]; return; }
+  db.shared[anflugKey(zielUserId)] = JSON.stringify({ ziel: zielUserId, stand: jetzt, anfluege: frisch });
+}
+app.post('/api/attack/abflug', attackRateLimit, authMiddleware, async (req, res) => {
+  if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });
+  const { targetUserId } = req.body || {};
+  const missionId = (req.body && req.body.missionId) !== undefined ? String(req.body.missionId) : '';
+  if (!targetUserId || targetUserId === req.userId) return res.status(400).json({ error: 'Ungültiges Ziel.' });
+  if (!missionId) return res.status(400).json({ error: 'missionId erforderlich.' });
+  /* Die Flotte kommt NICHT aus dem Request - dieselbe Regel wie bei /api/attack. Der Server liest
+     die Mission im gespeicherten Spielstand des Angreifers und nimmt ihre Zusammensetzung. */
+  const attackerRoh = getSaveValue(req.userId);
+  let attackerSave = null;
+  try { attackerSave = attackerRoh ? JSON.parse(attackerRoh) : null; } catch (e) { attackerSave = null; }
+  const mission = attackerSave ? pvpFindeAngriffsmission(attackerSave, missionId, targetUserId) : null;
+  if (!mission) return res.status(404).json({ error: 'Angriffsmission nicht im Spielstand gefunden.' });
+  /* DIE ANKUNFTSZEIT KOMMT AUS EINEM KLIENTENAUTORITATIVEN SPIELSTAND und wird deshalb gedeckelt.
+     Ohne Deckel waere die Startsperre des Verteidigers eine WAFFE: Ein Angreifer setzt endTime auf
+     in dreissig Tagen, meldet den Abflug und haelt sein Ziel damit einen Monat am Boden - ohne je
+     anzugreifen und ohne dass irgendetwas davon nach einem Angriff aussieht.
+     Gefunden beim Vorlegen der Balance-Frage an Sascha (04.09.2026), nicht im Betrieb.
+
+     ANFLUG_MAX_FLUG_MS ist bewusst grosszuegig gegenueber der gemessenen Wirklichkeit: Die
+     PvP-Basisflugzeit liegt bei 180-480 s (pseudoDistanceSeconds), und die Multiplikatoren-Kette
+     kann sie nur verkuerzen oder maessig verlaengern. Zwei Stunden schneiden also keinen echten
+     Flug ab und begrenzen den Missbrauch trotzdem auf ein Mass, das niemanden lahmlegt.
+
+     Die andere Richtung - eine kuenstlich VERKUERZTE Flugzeit - bleibt offen und das ist bewusst:
+     Sie serverseitig zu pruefen hiesse, die ganze Multiplikatoren-Kette (Forschung, Module,
+     Werftmarken, Aufstieg) zu spiegeln, also genau die Kopie-Familie zu bauen, an der dieses
+     Projekt regelmaessig scheitert. Und sie macht nichts schlimmer als vorher: Die Flugzeit war
+     bis zu dieser Etappe VOLLSTAENDIG clientseitig. Wer sie faelscht, verkuerzt seine eigene
+     Vorwarnung an das Ziel - er schadet sich selbst. */
+  const ANFLUG_MAX_FLUG_MS = 2 * 60 * 60 * 1000;
+  const roheAnkunft = Number(mission.endTime) || 0;
+  if (!(roheAnkunft > 0)) return res.status(400).json({ error: 'Mission ohne Ankunftszeit.' });
+  const arrivalAt = Math.min(roheAnkunft, Date.now() + ANFLUG_MAX_FLUG_MS);
+  const signatur = fleetSignaturServer(mission.composition || {});
+  const liste = (anflugLesen(targetUserId) || {}).anfluege || [];
+  /* Derselbe Angreifer mit derselben Mission darf nachmelden, ohne dass der Eintrag sich verdoppelt -
+     der Client wiederholt den Abflug bei einem fehlgeschlagenen Netzaufruf. */
+  const ohneAlt = liste.filter(e => !(String(e.von) === String(req.userId) && String(e.mission) === missionId));
+  ohneAlt.push({ von: req.userId, mission: missionId, abflugAt: Date.now(), arrivalAt, signatur });
+  anflugSchreiben(targetUserId, ohneAlt);
+  await saveDb();
+  res.json({ ok: true, arrivalAt, signatur });
+});
+
 app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });   // Notaus 'angriffe' (02.09.2026)
   const { targetUserId, targetPlanet } = req.body || {};
@@ -4656,6 +4772,25 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   if (shieldLeft > 0) return res.status(403).json({ error: 'Ziel steht unter Angriffs-Schutzschild.', shieldMs: shieldLeft });
   // Selbst offensiv werden verwirkt den eigenen Schild.
   breakOwnAttackShield(req.userId);
+
+  /* DER ANFLUG MUSS GELANDET SEIN (Tarnwert Etappe 2). Genau EINE Stelle, bewusst hier oben vor
+     jeder Verzweigung: Diese Route hat mehrere Ausgaenge, und ein Aufraeumen an jedem einzelnen
+     waere die Sorte Auslassung, an der dieses Projekt regelmaessig scheitert.
+     Der Eintrag wird IMMER gestrichen, auch wenn die Pflicht aus ist - sonst staut sich der Kanal
+     mit Anfluegen voll, die laengst angekommen sind, und der Verteidiger sieht Gespenster.
+     Die Pflicht selbst haengt am Schalter: Solange das Frontend den Abflug nicht meldet, wuerde sie
+     jeden Spielerangriff blockieren. */
+  const anflugDoc = anflugLesen(targetUserId);
+  const anflugListe = (anflugDoc && anflugDoc.anfluege) || [];
+  const meinAnflug = anflugListe.find(e => String(e.von) === String(req.userId)
+    && (!missionId || String(e.mission) === missionId)) || null;
+  if (ANFLUG_PFLICHT) {
+    if (!meinAnflug) return res.status(409).json({ error: 'Kein gemeldeter Anflug auf dieses Ziel.', anflugFehlt: true });
+    if (Date.now() < (meinAnflug.arrivalAt || 0)) {
+      return res.status(425).json({ error: 'Die Flotte ist noch unterwegs.', arrivalAt: meinAnflug.arrivalAt });
+    }
+  }
+  if (meinAnflug) anflugSchreiben(targetUserId, anflugListe.filter(e => e !== meinAnflug));
 
   const attackerRaw = getSaveValue(req.userId);
   const targetRaw = getSaveValue(targetUserId);
@@ -13492,6 +13627,24 @@ function checkVorpostenKeyPermission(req, key, isWrite) {
   if (!key.startsWith('vorposten:')) return null;
   if (!isWrite) return null;
   return 'Vorposten werden ausschließlich über die Vorposten-Endpunkte verändert.';
+}
+/* ANFLUG (Tarnwert Etappe 2, 03.09.2026): die Vorwarnung des Verteidigers.
+   Schluessel: anflug:<zielUserId>, ein Dokument je ANGEGRIFFENEM, nicht je Angreifer.
+
+   SCHREIBEN IST KOMPLETT GESPERRT - hier schreibt ausschliesslich der Server (in /api/attack/abflug
+   und beim Aufloesen). Das ist der ganze Sinn der Etappe: Eine Vorwarnung, die der Angreifer selbst
+   verfassen oder weglassen koennte, waere freiwillig und damit wertlos gegen genau die Spieler,
+   gegen die sie schuetzen soll.
+
+   LESEN bleibt offen, wie bei incomingmuster daneben. Das ist bewusst und kein Versehen: Der
+   Inhalt ist absichtlich arm - Ankunftszeit und Signatur des Verbands, KEIN Angreifername und
+   keine Zusammensetzung. Wer fremde Dokumente durchsieht, erfaehrt daraus nur, dass irgendwo etwas
+   unterwegs ist. Was ein Verteidiger davon zu sehen bekommt, entscheidet sein eigener Sensor, und
+   das rechnet der Client (dieselbe Staffelung wie beim Bestand in Etappe 1). */
+function checkAnflugKeyPermission(req, key, isWrite) {
+  if (!key.startsWith('anflug:')) return null;
+  if (!isWrite) return null;
+  return 'Anflug-Meldungen schreibt ausschließlich der Server.';
 }
 function vorpostenFuerClient(doc, userId, jetzt) {
   const st = vorpostenWerte(doc);

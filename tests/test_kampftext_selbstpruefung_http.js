@@ -9,8 +9,9 @@
 // der /health und /ai/embed so beantwortet wie der echte, einschliesslich der 401-Meldung mit der
 // Zeichenzahl (AI-Core-Lektion 7: "fehlt" und "falsch" sind zwei Befunde).
 //
-// Port 3258 (Server) und 3259 (gefaelschter AI Core); belegt sind 3187 und 3195-3257, gemessen mit
-// `grep -hoE "3[12][0-9][0-9]" tests/*.js | sort -un`.
+// Port 3260 (Server) und 3261 (gefaelschter AI Core); belegt sind 3187 und 3195-3259, gemessen mit
+// `grep -hoE "3[12][0-9][0-9]" tests/*.js | sort -un`. Erst 3258/3259 - die nahm #226 zeitgleich (Vorposten-
+// Tests), gemerkt beim zweiten Messen nach dem Merge von master, genau der Fall der Hausregel.
 //
 // GEPRUEFT WIRD (vier Serverstaende, weil der Schluessel nur ueber die Umgebung wechselt):
 //   A  alles richtig: erreichbar, Ollama online, Modell da, Schluessel passt, als Bearer an
@@ -34,7 +35,7 @@
 //   * Wird der Schluessel auch bei 0 Zeichen abgefragt (Zweig `!stand.schluessel.zeichen` entfernt),
 //     fallen genau C1 und C2.
 //   * Mit der rohen Node-Meldung statt kampftextFehlerKurz faellt genau D4: "connect ECONNREFUSED
-//     127.0.0.1:3259" - live waere das die Adresse des M715q in einer oeffentlichen Antwort.
+//     127.0.0.1:3261" - live waere das die Adresse des M715q in einer oeffentlichen Antwort.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -42,7 +43,7 @@ const http = require('http');
 const { spawn } = require('child_process');
 
 const WURZEL = path.resolve(__dirname, '..');
-const PORT = Number(process.env.TEST_PORT || 3258);
+const PORT = Number(process.env.TEST_PORT || 3260);
 const AI_PORT = PORT + 1;
 
 let fail = false;

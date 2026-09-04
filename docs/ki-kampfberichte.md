@@ -155,7 +155,7 @@ erzeugt den Container neu; Sekunden später steht der Befund in `/api/health`. I
 lassen sich `BACKUP_PULL_TOKEN` (Off-Site-Sicherung) und `DEPLOY_ALARM_MAIL` (Deploy-Alarm) setzen,
 die aus demselben Grund seit dem 02.09. bzw. 22.08. ausstehen.
 
-Wächter: `tests/test_kampftext_selbstpruefung_http.js` (Port 3258/3259; 20 Prüfungen, vier
+Wächter: `tests/test_kampftext_selbstpruefung_http.js` (Port 3260/3261; 20 Prüfungen, vier
 Serverstände, weil der Schlüssel nur über die Umgebung wechselt; vier Gegenproben mit gemessenen
 Ausfall-Listen im Dateikopf). Der Takt ist per `KAMPFTEXT_PRUEF_TAKT_MS` stellbar (Untergrenze 1 s),
 damit der Test die **Wiederholung** messen kann – eine Messung, die nach dem Start nie mehr nachschaut,

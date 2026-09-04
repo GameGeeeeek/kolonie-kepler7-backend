@@ -13178,8 +13178,18 @@ const VP_WERFT_DECKEL = 0.40;
    ueber alle eigenen Vorposten. Deckel 60 % - die Gebuehr wird gesenkt, nie erlassen.
 
    Die Angebotsplaetze sind eine ABLEITUNG daraus (ein Platz je VP_MARKT_SLOT_SCHRITT, hoechstens
-   VP_MARKT_SLOTS_MAX): ein Sternenmarkt (0,352) gibt zwei, zwei Sternenmaerkte den Deckel. */
-const VP_MARKT_AKTIV = false;
+   VP_MARKT_SLOTS_MAX): ein Sternenmarkt (0,352) gibt zwei, zwei Sternenmaerkte den Deckel.
+
+   UMGELEGT AM 04.09.2026 (Etappe V3, Frontend-Haelfte). Die WIRKUNG lag hier immer schon
+   vollstaendig - `limits.feePct` und `limits.maxPerUser` reisen fertig verrechnet zum Client, und
+   der liest beide seit jeher. Was fehlte, war die BENENNUNG: Der Verkaeufer haette eine kleinere
+   Gebuehr und mehr Plaetze gesehen, ohne zu erfahren, woher. Genau dafuer schickt der Endpunkt
+   `basisFeePct`, `basisMaxPerUser`, `vorpostenRabatt` und `vorpostenAngebote` daneben mit; das
+   Frontend benennt sie jetzt an drei Stellen (Kopfzeile der Boerse, Verkaufsdialog,
+   Verkaufsmeldung) und rechnet nichts davon nach.
+   Nebenbefund aus derselben Arbeit: Das Frontend rundete die Gebuehr auf GANZE Prozent. Ohne
+   Vorposten stimmte das (5 %), mit Rabatt nicht mehr - 3,24 % wurden als "3%" angezeigt. */
+const VP_MARKT_AKTIV = true;
 const VP_MARKT_DECKEL = 0.60;
 const VP_MARKT_SLOT_SCHRITT = 0.12;
 const VP_MARKT_SLOTS_MAX = 3;

@@ -94,10 +94,12 @@ async function stoppeServer() { if (!srv) return; srv.kill('SIGTERM'); await war
   /* ANKER unabhaengig von der API-Antwort: Leiter und Multiplikator kommen aus dem QUELLTEXT.
      Eine Erwartung, die aus derselben Antwort stammt, die sie pruefen soll, belegt nichts. */
   const leiter = [...roh.matchAll(/\{ stufe: (\d), name: '[^']*',[^}]*werft: ([\d.]+),/g)].map(m => [Number(m[1]), Number(m[2])]);
-  /* Der Anker greift den Wert INNERHALB des mult-Objekts, ohne zu verlangen, dass er dort der
-     letzte ist. Der erste Entwurf endete auf „werft: 2.20 \}" - und fiel prompt, als Etappe V4 den
-     Kanal `lager` hinter ihn schrieb. Ein Anker, der die Reihenfolge festhaelt, ist eine
-     Momentaufnahme, keine Regel. */
+  /* BEIDE SEITEN HABEN AM 04.09.2026 DIESELBE FRAGILITAET BEHOBEN, verschieden formuliert.
+     Uebernommen ist die allgemeinere Fassung: ein Helfer multVon(zweig, kanal), der den Wert
+     INNERHALB des mult-Objekts greift, ohne zu verlangen, dass er dort der letzte ist. Der
+     urspruengliche Anker endete auf „werft: 2.20 \}" und fiel, sobald ein Kanal dahinterkam -
+     erst `markt`, dann `lager`. Ein Anker, der die Reihenfolge festhaelt, ist eine
+     Momentaufnahme, keine Regel; mit dem Helfer gilt das fuer JEDEN Kanal, nicht nur fuer werft. */
   const multVon = (zweig, kanal) => Number((roh.match(new RegExp("key: '" + zweig + "',[\\s\\S]{0,600}?mult: \\{[^}]*" + kanal + ": ([\\d.]+)")) || [])[1]);
   const multWerft = multVon('werft', 'werft');
   const multFestung = multVon('festung', 'werft');

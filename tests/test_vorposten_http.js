@@ -213,6 +213,7 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     // Die zwei Haelften der Spezialisierung (02.09.2026) einzeln sabotierbar: die WAHL beim Ausbau
     // und die WIRKUNG der Multiplikatoren. Beide zusammen waeren eine Sabotage, die zu viel trifft.
     else if (SAB === 'zweigwahl') geflippt = geflippt.replace('  const brauchtZweig = zielStufe === VORPOSTEN_ZWEIG_AB && !vorpostenZweigOk(doc.zweig);', '  const brauchtZweig = false;');
+
     else if (SAB === 'zweigwerte') geflippt = geflippt.replace('  if (!z || basis.stufe < VORPOSTEN_ZWEIG_AB) return basis;', '  return basis;');
     // Stationsmodule (02.09.2026), zwei Haelften: der BESTAND (nimmt der Einbau wirklich eines weg?)
     // und die WIRKUNG (aendert ein eingebautes Modul die Werte?). Letztere reisst seit dem
@@ -267,6 +268,34 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
   check('1c2: die Leiter steigt streng (Kern, Verteidigung, Garnison) - kein Ausbau ohne Gewinn',
     get0.body.stufen.every((st, i) => i === 0 || (st.kernLp > get0.body.stufen[i-1].kernLp && st.verteidigung > get0.body.stufen[i-1].verteidigung && st.garnisonMax > get0.body.stufen[i-1].garnisonMax)),
     get0.body.stufen && get0.body.stufen.map(st => st.kernLp));
+  /* 1c4/1c5 (GR-7, 04.09.2026): Die Namen selbst waren NIE geprueft - deshalb fiel jahrelang
+     nicht auf, dass die Stufen 4 bis 8 "Ausbaustufe 4" bis "Ausbaustufe 8" hiessen, also
+     Platzhalter. Geprueft wird die REGEL, nicht die Wortliste: Jede Stufe traegt einen eigenen,
+     nicht leeren Namen, und keiner davon ist ein durchnummerierter Platzhalter. Eine spaetere
+     Umbenennung bleibt damit frei, ein Rueckfall in "Ausbaustufe N" faellt auf. */
+  /* 1c6 (GR-7): DER RUECKFALL, den es wirklich gab. Fuenf Stellen riefen vorpostenStufe(x.stufe)
+     ohne den Zweig - Anflug-Meldung, Angriffs-Push, Ergebnis-Liste, Nicht-Teilnehmer-Fall und die
+     Verlustmeldung. Sie bekamen dadurch den Basisnamen: Ein Vorposten mit Festungszweig auf
+     Stufe 6 hiess in Kampfberichten "Ausbaustufe 6" statt "Sperrfeuerring", die Zweignamen waren
+     dort nie zu sehen. Geprueft am Quelltext, weil eine HTTP-Kette dafuer erst einen Vorposten
+     ausbauen, einen Zweig waehlen und ihn dann angreifen muesste - und weil die REGEL genau hier
+     lebt: Wer ein Dokument zur Hand hat, nimmt vorpostenStufeVon(). Erlaubt bleiben nur der
+     Aufruf mit ausdruecklichem Zweig und der fuer die Grundstufe eines noch nicht gebauten
+     Vorpostens. */
+  const serverQuelle = fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8');
+  const zweigVerschluckt = (serverQuelle.match(/vorpostenStufe\(([^)]*)\)/g) || [])
+    .filter(r => !/vorpostenStufeVon/.test(r))
+    .filter(r => !/,/.test(r))                       // mit zweitem Argument ist es in Ordnung
+    .filter(r => !/vorpostenStufe\(1\)/.test(r))     // Grundstufe eines neuen Vorpostens
+    .filter(r => /\./.test(r));                      // nur Aufrufe MIT einem Dokumentfeld
+  check('1c6: kein Aufruf liest die Stufe eines Dokuments ohne seinen Zweig',
+    zweigVerschluckt.length === 0, { gefunden: zweigVerschluckt });
+  const namen = (get0.body.stufen || []).map(st => st.name);
+  check('1c4: jede Stufe traegt einen eigenen Namen - keiner doppelt, keiner leer',
+    namen.length >= 3 && namen.every(n => typeof n === 'string' && n.trim().length > 2)
+    && new Set(namen).size === namen.length, namen);
+  check('1c5: und keiner davon ist ein durchnummerierter Platzhalter',
+    namen.every(n => !/^(Ausbaustufe|Stufe)\s*\d+$/i.test(n)), namen);
   check('1c3: die drei Zweige reisen mit, jeder mit Namen ab der Wahlstufe und Multiplikatoren',
     Array.isArray(get0.body.zweige) && get0.body.zweige.length === 3 && get0.body.zweigAb >= 2
     && get0.body.zweige.every(z => z.key && z.name && z.kurz && z.mult && z.namen && Object.keys(z.namen).length === (get0.body.maxStufe - get0.body.zweigAb + 1)),
@@ -292,7 +321,7 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     const sb = liesSave(d, BEN); sb.fleet.missions = [bauMission('b2', SYS1)]; schreibSave(d, BEN, sb);
   });
   const bau = await post(tokA, '/vorposten/bauen', { system: SYS1, missionId: 'b1' });
-  check('2b: mit Baukolonne entsteht ein Feldlager mit dem Kern der ersten Stufe',
+  check('2b: mit Baukolonne entsteht ein Ankerkern mit dem Kern der ersten Stufe',
     bau.status === 200 && bau.body.ok === true && bau.body.vorposten && bau.body.vorposten.stufe === 1 && bau.body.vorposten.kern.lpMax === KERN1,
     bau.body && (bau.body.vorposten ? { stufe: bau.body.vorposten.stufe, lpMax: bau.body.vorposten.kern.lpMax } : bau.body));
   const belegt = await post(tokB, '/vorposten/bauen', { system: SYS1, missionId: 'b2' });
@@ -343,7 +372,7 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
      03.09.2026 rechnet der Server `lpMax` aus Stufe, Zweig und Modulen und kappt beim Schreiben,
      was darueber liegt. Ein Stufe-1-Vorposten mit 900.000 eingetragenen Punkten war vorher eine
      stille Falschangabe - er faellt jetzt beim ersten Schlag, weil sein echtes Dach 20.000 ist.
-     Stufe 3 (Bastion) traegt 400.000 und uebersteht 4b sicher. Der Ausgangswert wird ausserdem
+     Stufe 3 (Kernstation) traegt 400.000 und uebersteht 4b sicher. Der Ausgangswert wird ausserdem
      beim SERVER erfragt statt aus der Vorrichtung gelesen - so misst 4b2 die Rechnung des
      Servers und nicht die eigene Annahme. */
   await aendereDb(d => {

@@ -2957,7 +2957,7 @@ app.put('/api/storage/:key', authMiddleware, async (req, res) => {
   const expectedVersion = req.body ? req.body.expectedVersion : undefined;
 
   if (shared) {
-    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true) || checkWorldBossPermission(req, key, true) || checkMissionsKeyPermission(req, key, true) || checkAsteroidKeyPermission(req, key, true) || checkVorpostenKeyPermission(req, key, true);
+    const denyReason = checkAllianceKeyPermission(req, key, true) || checkPactKeyPermission(req, key, true) || checkChatKeyPermission(req, key, true) || checkHallOfFamePermission(req, key, true) || checkMoonDefensePermission(req, key, true) || checkWorldBossPermission(req, key, true) || checkMissionsKeyPermission(req, key, true) || checkAsteroidKeyPermission(req, key, true) || checkVorpostenKeyPermission(req, key, true) || checkAnflugKeyPermission(req, key, true);
     if (denyReason) return res.status(403).json({ error: denyReason });
     // Mengenschutz (siehe MAX_SHARED_VALUE_BYTES oben). Bewusst NACH der Rechteprüfung und VOR jedem
     // Schreibzugriff - und bewusst nur für NEUE Schlüssel, damit die normale Spielschleife
@@ -4678,6 +4678,68 @@ function pvpFindeAngriffsmission(save, missionId, targetUserId) {
   return null;
 }
 
+/* ====================== ANFLUG - Tarnwert Etappe 2 (03.09.2026) ======================
+   Entscheidung Sascha: Der SERVER fuehrt den Anflug. Bis heute existierte der Flug eines
+   Spielerangriffs ausschliesslich im Client des Angreifers - er baute eine Mission mit Flugzeit und
+   rief /api/attack erst bei Ankunft. Der Server sah davon nichts und konnte deshalb auch niemanden
+   vorwarnen. Eine Meldung, die der angreifende Client selbst schreibt, waere freiwillig: Wer nicht
+   gemeldet werden will, meldet nicht. Deshalb diese Route.
+
+   WAS SIE SCHREIBT, IST ABSICHTLICH ARM: Ankunftszeit und die SIGNATUR des Verbands - kein Name,
+   keine Zusammensetzung, keine Staerke. Was ein Verteidiger daraus zu sehen bekommt, entscheidet
+   sein eigener Signaturscanner; dieselbe Staffelung wie beim Bestand in Etappe 1 (nichts / "da
+   bewegt sich etwas" / Groessenklasse). Der Server verschleiert also nicht, er liefert schlicht
+   nicht mehr aus, als die Mechanik braucht.
+
+   ANFLUG_PFLICHT ist der Notausschalter und steht bewusst auf false: Solange das Frontend den
+   Abflug noch nicht meldet, wuerde eine Pflicht JEDEN Spielerangriff blockieren. Umgelegt wird er
+   im Frontend-PR, wie bei VORPOSTEN_AKTIV und SEKTOR_LAGE_AKTIV zuvor. Bis dahin nimmt der Server
+   die Meldung entgegen und schreibt den Kanal (harmlos), verlangt sie aber nicht. */
+const ANFLUG_PFLICHT = false;
+/* Wie lange eine Meldung nach der Ankunft noch gilt. Sie muss die Ankunft ueberleben, weil der
+   Angreifer erst DANN aufloest - und ohne Frist waere die Pflichtpruefung unten ein Rennen gegen
+   die eigene Uhr. Grosszuegig gewaehlt: Ein Angreifer, dessen Tab beim Ankunftszeitpunkt gedrosselt
+   war, soll seinen Angriff nicht verlieren. */
+const ANFLUG_GNADE_MS = 6 * 60 * 60 * 1000;
+function anflugKey(zielUserId) { return 'anflug:' + zielUserId; }
+function anflugLesen(zielUserId) {
+  try { const r = db.shared[anflugKey(zielUserId)]; return r ? JSON.parse(r) : null; } catch (e) { return null; }
+}
+/* Ein Dokument je ANGEGRIFFENEM, darin eine Liste - mehrere Angreifer koennen gleichzeitig
+   unterwegs sein, und der Verteidiger will alle sehen. Abgelaufene Eintraege fallen beim Schreiben
+   heraus; ein eigener Aufraeum-Takt waere eine zweite Stelle, die dasselbe tut. */
+function anflugSchreiben(zielUserId, eintraege) {
+  const jetzt = Date.now();
+  const frisch = (eintraege || []).filter(e => e && (e.arrivalAt || 0) + ANFLUG_GNADE_MS > jetzt);
+  if (!frisch.length) { delete db.shared[anflugKey(zielUserId)]; return; }
+  db.shared[anflugKey(zielUserId)] = JSON.stringify({ ziel: zielUserId, stand: jetzt, anfluege: frisch });
+}
+app.post('/api/attack/abflug', attackRateLimit, authMiddleware, async (req, res) => {
+  if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });
+  const { targetUserId } = req.body || {};
+  const missionId = (req.body && req.body.missionId) !== undefined ? String(req.body.missionId) : '';
+  if (!targetUserId || targetUserId === req.userId) return res.status(400).json({ error: 'Ungültiges Ziel.' });
+  if (!missionId) return res.status(400).json({ error: 'missionId erforderlich.' });
+  /* Die Flotte kommt NICHT aus dem Request - dieselbe Regel wie bei /api/attack. Der Server liest
+     die Mission im gespeicherten Spielstand des Angreifers und nimmt ihre Zusammensetzung. */
+  const attackerRoh = getSaveValue(req.userId);
+  let attackerSave = null;
+  try { attackerSave = attackerRoh ? JSON.parse(attackerRoh) : null; } catch (e) { attackerSave = null; }
+  const mission = attackerSave ? pvpFindeAngriffsmission(attackerSave, missionId, targetUserId) : null;
+  if (!mission) return res.status(404).json({ error: 'Angriffsmission nicht im Spielstand gefunden.' });
+  const arrivalAt = Number(mission.endTime) || 0;
+  if (!(arrivalAt > 0)) return res.status(400).json({ error: 'Mission ohne Ankunftszeit.' });
+  const signatur = fleetSignaturServer(mission.composition || {});
+  const liste = (anflugLesen(targetUserId) || {}).anfluege || [];
+  /* Derselbe Angreifer mit derselben Mission darf nachmelden, ohne dass der Eintrag sich verdoppelt -
+     der Client wiederholt den Abflug bei einem fehlgeschlagenen Netzaufruf. */
+  const ohneAlt = liste.filter(e => !(String(e.von) === String(req.userId) && String(e.mission) === missionId));
+  ohneAlt.push({ von: req.userId, mission: missionId, abflugAt: Date.now(), arrivalAt, signatur });
+  anflugSchreiben(targetUserId, ohneAlt);
+  await saveDb();
+  res.json({ ok: true, arrivalAt, signatur });
+});
+
 app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });   // Notaus 'angriffe' (02.09.2026)
   const { targetUserId, targetPlanet } = req.body || {};
@@ -4691,6 +4753,25 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   if (shieldLeft > 0) return res.status(403).json({ error: 'Ziel steht unter Angriffs-Schutzschild.', shieldMs: shieldLeft });
   // Selbst offensiv werden verwirkt den eigenen Schild.
   breakOwnAttackShield(req.userId);
+
+  /* DER ANFLUG MUSS GELANDET SEIN (Tarnwert Etappe 2). Genau EINE Stelle, bewusst hier oben vor
+     jeder Verzweigung: Diese Route hat mehrere Ausgaenge, und ein Aufraeumen an jedem einzelnen
+     waere die Sorte Auslassung, an der dieses Projekt regelmaessig scheitert.
+     Der Eintrag wird IMMER gestrichen, auch wenn die Pflicht aus ist - sonst staut sich der Kanal
+     mit Anfluegen voll, die laengst angekommen sind, und der Verteidiger sieht Gespenster.
+     Die Pflicht selbst haengt am Schalter: Solange das Frontend den Abflug nicht meldet, wuerde sie
+     jeden Spielerangriff blockieren. */
+  const anflugDoc = anflugLesen(targetUserId);
+  const anflugListe = (anflugDoc && anflugDoc.anfluege) || [];
+  const meinAnflug = anflugListe.find(e => String(e.von) === String(req.userId)
+    && (!missionId || String(e.mission) === missionId)) || null;
+  if (ANFLUG_PFLICHT) {
+    if (!meinAnflug) return res.status(409).json({ error: 'Kein gemeldeter Anflug auf dieses Ziel.', anflugFehlt: true });
+    if (Date.now() < (meinAnflug.arrivalAt || 0)) {
+      return res.status(425).json({ error: 'Die Flotte ist noch unterwegs.', arrivalAt: meinAnflug.arrivalAt });
+    }
+  }
+  if (meinAnflug) anflugSchreiben(targetUserId, anflugListe.filter(e => e !== meinAnflug));
 
   const attackerRaw = getSaveValue(req.userId);
   const targetRaw = getSaveValue(targetUserId);
@@ -13527,6 +13608,24 @@ function checkVorpostenKeyPermission(req, key, isWrite) {
   if (!key.startsWith('vorposten:')) return null;
   if (!isWrite) return null;
   return 'Vorposten werden ausschließlich über die Vorposten-Endpunkte verändert.';
+}
+/* ANFLUG (Tarnwert Etappe 2, 03.09.2026): die Vorwarnung des Verteidigers.
+   Schluessel: anflug:<zielUserId>, ein Dokument je ANGEGRIFFENEM, nicht je Angreifer.
+
+   SCHREIBEN IST KOMPLETT GESPERRT - hier schreibt ausschliesslich der Server (in /api/attack/abflug
+   und beim Aufloesen). Das ist der ganze Sinn der Etappe: Eine Vorwarnung, die der Angreifer selbst
+   verfassen oder weglassen koennte, waere freiwillig und damit wertlos gegen genau die Spieler,
+   gegen die sie schuetzen soll.
+
+   LESEN bleibt offen, wie bei incomingmuster daneben. Das ist bewusst und kein Versehen: Der
+   Inhalt ist absichtlich arm - Ankunftszeit und Signatur des Verbands, KEIN Angreifername und
+   keine Zusammensetzung. Wer fremde Dokumente durchsieht, erfaehrt daraus nur, dass irgendwo etwas
+   unterwegs ist. Was ein Verteidiger davon zu sehen bekommt, entscheidet sein eigener Sensor, und
+   das rechnet der Client (dieselbe Staffelung wie beim Bestand in Etappe 1). */
+function checkAnflugKeyPermission(req, key, isWrite) {
+  if (!key.startsWith('anflug:')) return null;
+  if (!isWrite) return null;
+  return 'Anflug-Meldungen schreibt ausschließlich der Server.';
 }
 function vorpostenFuerClient(doc, userId, jetzt) {
   const st = vorpostenWerte(doc);

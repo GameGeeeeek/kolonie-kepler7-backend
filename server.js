@@ -12377,6 +12377,29 @@ const A2_MODUL_CHANCE = 0.3; // Basis-Fallchance je Modul, multipliziert mit dem
 const A2_MODUL_DEF = { defKey: 'kv_bergungslogik', seltenheit: 'episch', quelle: 'konvoi', art: 'standort' };
 const A2_KAMPFMODUL_DEF = { defKey: 'kv_bergungspanzer', seltenheit: 'episch', quelle: 'konvoi', art: 'schiff' };
 
+/* --- Modul-Fundorte und stellbare Drop-Chancen (04.09.2026) ---
+   GEMESSEN, bevor das hier entstand: Von den 99 Modulen des Spiels vergibt der SERVER genau zwei -
+   die beiden des Wrackkonvois. Alle anderen fallen im Frontend (Fraktionslaeden, Abgrund, Unikate,
+   Sets, Fertigung, Events). Dieses Verzeichnis fuehrt deshalb bewusst nur die serverseitigen
+   Vergabestellen und behauptet nicht, die Fundorte des ganzen Spiels zu kennen; die Uebersicht im
+   Admin-Bereich leitet den Rest aus dem Frontend-Code ab, wo er wirklich steht.
+   Der Basiswert bleibt im Code, der Betreiber setzt nur einen Ueberschreibwert daneben (db.modulChancen).
+   Zuruecknehmen heisst: den Ueberschreibwert loeschen, NICHT den Basiswert hineinkopieren - sonst
+   friert der Eingriff den Code-Wert ein, und eine spaetere Balance-Aenderung im Code bliebe wirkungslos. */
+const MODUL_QUELLEN = {
+  konvoi_standort: { name: 'Wrackkonvoi - Standort-Modul', modul: 'kv_bergungslogik', basis: A2_MODUL_CHANCE,
+    hinweis: 'Wird zusaetzlich mit dem Schadensanteil des Spielers multipliziert.' },
+  konvoi_schiff: { name: 'Wrackkonvoi - Schiffsmodul', modul: 'kv_bergungspanzer', basis: A2_MODUL_CHANCE,
+    hinweis: 'Wird zusaetzlich mit dem Schadensanteil des Spielers multipliziert.' }
+};
+function modulChance(quelle) {
+  const def = MODUL_QUELLEN[quelle];
+  if (!def) return 0;
+  const roh = db.modulChancen && db.modulChancen[quelle];
+  if (typeof roh !== 'number' || !Number.isFinite(roh)) return def.basis;
+  return Math.max(0, Math.min(1, roh));
+}
+
 function A2FindeMission(save, missionId, zielId) {
   const flotten = [];
   if (save && save.fleet) flotten.push(save.fleet);
@@ -12437,8 +12460,10 @@ function A2SchlagAusfuehren(g, ziel, kraft, composition, beteiligte, jetzt) {
         zeit: jetzt
       };
       // Chance je Anteil - der Server wuerfelt, das Modul ist damit nicht F5-druckbar.
-      if (Math.random() < anteil * A2_MODUL_CHANCE) reward.modul = Object.assign({}, A2_MODUL_DEF);
-      if (Math.random() < anteil * A2_MODUL_CHANCE) reward.kampfmodul = Object.assign({}, A2_KAMPFMODUL_DEF);
+      // modulChance() statt der Konstanten: Sonst waere der Regler im Admin-Bereich eine Anzeige
+      // ohne Wirkung - und genau das faellt sonst niemandem auf.
+      if (Math.random() < anteil * modulChance('konvoi_standort')) reward.modul = Object.assign({}, A2_MODUL_DEF);
+      if (Math.random() < anteil * modulChance('konvoi_schiff')) reward.kampfmodul = Object.assign({}, A2_KAMPFMODUL_DEF);
       pushPendingReward(uid, reward);
     }
     const idx = liste.indexOf(ziel);
@@ -16013,6 +16038,93 @@ app.post('/api/admin/mail-alle', authMiddleware, async (req, res) => {
   const status = (gesendet === 0 && fehlgeschlagen > 0) ? 502 : 200;
   res.status(status).json({ ok: status === 200, gesendet, abgemeldet, ohneAdresse, fehlgeschlagen, uebrig, deckel: MAIL_ALLE_MAX,
     error: status === 502 ? 'Keine einzige Mail ging raus - der Mail-Dienst nimmt nichts an.' : undefined });
+});
+
+/* --- Modul-Verwaltung (04.09.2026, Idee Sascha "Module-Editor") ---
+   ZWEI HAELFTEN, und sie sind ungleich sicher:
+   1. Die CHANCEN sind gefahrlos stellbar. Sie haben genau einen Verbraucher (die Vergabestelle),
+      der Basiswert bleibt im Code, und der Wertebereich kommt ebenfalls von dort.
+   2. EIGENE MODULE sind es nicht, und das steht hier, weil es beim Anfassen zaehlt: Die 99 Module
+      des Spiels leben im Frontend-Code, das Backend fuehrt nur die kampfrelevante Teilmenge, und
+      test_schiffsmodul_paritaet.js (im Frontend-Repo) haelt beide zusammen. Ein hier angelegtes
+      Modul ist eine DRITTE Kopie, die dieser Paritaetstest bauartbedingt nicht sehen kann - er
+      liest Dateien, keine db.json. Es hat deshalb auch keinen Verbraucher und wirkt im Spiel nicht.
+      Zwei Sicherungen dagegen, beide bewusst am Backend und nicht nur in der Anzeige:
+      - Der Schluessel MUSS mit `eigen_` beginnen. Damit ist eine Kollision mit einem Code-Modul
+        bauartbedingt unmoeglich, und die Herkunft steht im Schluessel selbst.
+      - `wirkung: 'keine'` reist in JEDER Antwort mit. Wer die Liste liest, kann den Zustand nicht
+        uebersehen; eine Kennzeichnung, die nur die Oberflaeche kennt, waere beim naechsten Leser weg.
+      Ausgeliefert wird die Liste NICHT an Spieler: Ein Modul ohne Wirkung im Schaufenster waere ein
+      Versprechen, das das Spiel nicht halten kann. */
+const EIGENE_MODULE_MAX = 50;
+const EIGEN_SCHLUESSEL = /^eigen_[a-z0-9_]{2,24}$/;
+function eigeneModule() {
+  if (!Array.isArray(db.eigeneModule)) db.eigeneModule = [];
+  return db.eigeneModule;
+}
+app.get('/api/admin/module', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  res.json({
+    quellen: Object.entries(MODUL_QUELLEN).map(([k, d]) => ({
+      quelle: k, name: d.name, modul: d.modul, hinweis: d.hinweis || null,
+      basis: d.basis, aktuell: modulChance(k),
+      gestellt: typeof (db.modulChancen || {})[k] === 'number'
+    })),
+    // Ausdruecklich mitgeliefert: Der Server vergibt nur diese zwei Module. Ohne den Satz haelt die
+    // Oberflaeche diese Liste fuer "alle Fundorte des Spiels" und zeigt 97 Module als quellenlos.
+    hinweisQuellen: 'Der Server vergibt nur diese Module. Alle uebrigen Fundorte stehen im Frontend-Code.',
+    eigene: eigeneModule().map(m => Object.assign({}, m, { wirkung: 'keine' })),
+    eigeneMax: EIGENE_MODULE_MAX
+  });
+});
+app.post('/api/admin/module/chance', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const quelle = String((req.body && req.body.quelle) || '');
+  if (!MODUL_QUELLEN[quelle]) return res.status(400).json({ error: 'Unbekannte Quelle - erlaubt sind ' + Object.keys(MODUL_QUELLEN).join(', ') + '.' });
+  if (!db.modulChancen || typeof db.modulChancen !== 'object') db.modulChancen = {};
+  const roh = req.body ? req.body.wert : null;
+  if (roh === null || roh === undefined || roh === '') {
+    delete db.modulChancen[quelle];
+    await saveDb();
+    return res.json({ ok: true, quelle, zurueckgesetzt: true, aktuell: modulChance(quelle), basis: MODUL_QUELLEN[quelle].basis });
+  }
+  const wert = Number(roh);
+  if (!Number.isFinite(wert) || wert < 0 || wert > 1) return res.status(400).json({ error: 'Die Chance liegt zwischen 0 und 1 (0,3 = 30 %).' });
+  db.modulChancen[quelle] = wert;
+  await saveDb();
+  res.json({ ok: true, quelle, aktuell: modulChance(quelle), basis: MODUL_QUELLEN[quelle].basis, gestellt: true });
+});
+app.post('/api/admin/module/eigen', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const b = req.body || {};
+  const key = String(b.key || '').trim().toLowerCase();
+  if (!EIGEN_SCHLUESSEL.test(key)) return res.status(400).json({ error: 'Der Schluessel beginnt mit "eigen_" und hat danach 2 bis 24 Zeichen (a-z, 0-9, _). So kann er nie ein Modul des Spiels ueberschreiben.' });
+  const name = String(b.name || '').trim().slice(0, 60);
+  const beschreibung = String(b.beschreibung || '').trim().slice(0, 300);
+  if (name.length < 3) return res.status(400).json({ error: 'Bitte einen Namen von mindestens drei Zeichen.' });
+  if (beschreibung.length < 10) return res.status(400).json({ error: 'Bitte eine Beschreibung von mindestens zehn Zeichen - ein Eintrag ohne Text ist im Spiel nicht erklaerbar.' });
+  const liste = eigeneModule();
+  const vorhanden = liste.findIndex(m => m && m.key === key);
+  if (vorhanden < 0 && liste.length >= EIGENE_MODULE_MAX) return res.status(400).json({ error: 'Es sind hoechstens ' + EIGENE_MODULE_MAX + ' eigene Module vorgesehen.' });
+  const eintrag = { key, name, beschreibung,
+    icon: String(b.icon || '').trim().slice(0, 40) || null,
+    art: b.art === 'schiff' ? 'schiff' : 'standort',
+    seltenheit: String(b.seltenheit || '').trim().slice(0, 20) || null,
+    notiz: String(b.notiz || '').trim().slice(0, 200) || null,
+    zeit: Date.now(), von: req.username || null };
+  if (vorhanden >= 0) liste[vorhanden] = eintrag; else liste.push(eintrag);
+  await saveDb();
+  res.json({ ok: true, modul: Object.assign({}, eintrag, { wirkung: 'keine' }), ersetzt: vorhanden >= 0, anzahl: liste.length });
+});
+app.post('/api/admin/module/eigen/loeschen', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const key = String((req.body && req.body.key) || '').trim().toLowerCase();
+  const liste = eigeneModule();
+  const i = liste.findIndex(m => m && m.key === key);
+  if (i < 0) return res.status(404).json({ error: 'Dieses eigene Modul gibt es nicht.' });
+  liste.splice(i, 1);
+  await saveDb();
+  res.json({ ok: true, key, anzahl: liste.length });
 });
 
 /* --- Galaxie-Eingriff (02.09.2026) ---

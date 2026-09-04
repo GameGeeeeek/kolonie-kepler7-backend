@@ -164,8 +164,11 @@ async function starteServer(umgebung) {
   let api = await starteServer({ AI_CORE_API_KEY: 'testschluessel' });
   let h = await api.warteBis(k => k.gemessenVorSek !== null);
   let k = h.kampftext || {};
-  check('A1: /api/health traegt `kampftext`, Schalter aus, Modell benannt',
-    !!h.kampftext && k.aktiv === false && k.modell === 'qwen3.5:4b' && typeof k.gemessenVorSek === 'number', h.kampftext);
+  // `aktiv` spiegelt die Konstante im Quelltext - welche Stellung gerade committet ist, darf das
+  // Ergebnis nicht verschieben (bis E1b stand sie auf false, seither auf true).
+  const imCode = (/const KAMPFTEXT_AKTIV = (true|false);/.exec(fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8')) || [])[1] === 'true';
+  check('A1: /api/health traegt `kampftext`, Schalter wie im Quelltext, Modell benannt',
+    !!h.kampftext && k.aktiv === imCode && k.modell === 'qwen3.5:4b' && typeof k.gemessenVorSek === 'number', { aktiv: k.aktiv, imCode });
   check('A2: AI Core erreichbar, Ollama online, Modell vorhanden',
     !!k.aiCore && k.aiCore.erreichbar === true && k.aiCore.ollamaOnline === true && k.aiCore.modellVorhanden === true && k.aiCore.fehler === '', k.aiCore);
   check('A3: Schluessel passt, Laenge stimmt (14), kein Hinweis',

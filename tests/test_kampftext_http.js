@@ -6,10 +6,25 @@
 // ist der Gegenstand der halben Datei: WAS das Modell zu sehen bekommt, entscheidet mehr als jede
 // nachgelagerte Sperre (E0-Messung vom 28.08.2026, acht von acht Texten falsch).
 //
-// Der Test startet ZWEI Serverstaende: die echte server.js (KAMPFTEXT_AKTIV=false, Abschnitt 1)
-// und eine Kopie mit umgelegtem Schalter (alles Weitere). Anders ginge es nicht - mit
-// ausgeschaltetem Schalter haette der ganze Rest keinen Gegenstand, und welche Stellung gerade
-// committet ist, darf das Ergebnis nicht verschieben.
+// Der Test startet ZWEI Kopien von server.js: eine mit KAMPFTEXT_AKTIV=false (Abschnitt 1) und
+// eine mit umgelegtem Schalter (alles Weitere). Anders ginge es nicht - mit ausgeschaltetem
+// Schalter haette der ganze Rest keinen Gegenstand, und welche Stellung gerade committet ist,
+// darf das Ergebnis nicht verschieben (seit E1b, 04.09.2026, steht sie auf true; Abschnitt 1 lief
+// vorher gegen die echte Datei und misst seither die Kopie mit false).
+//
+// Abschnitte 12 und 13 (E1b, 04.09.2026): Der fertige Text haengt am Bericht (kiText) - nur am
+// EIGENEN; POST /api/reports nennt dafuer die Berichts-ID. Und der Notaus 'kampftext' schaltet den
+// Endpunkt zur Laufzeit ab.
+//
+// GEGENPROBE zu 12/13 (04.09.2026, Pruefnamen per diff): Am Stand vor E1b (origin/master b516f45)
+// fallen genau 12a, 12d, 12g, 13a, 13b, 13c, 13d. Ohne den Aufruf von kampftextAnBerichtHaengen
+// fallen genau 12d und 12g. Wird die Eigentumspruefung an BEIDEN Stellen entfernt (Annahme UND
+// Anhaengen suchen ueber alle Spieler), faellt genau 12g - Fridas Text landet auf Emils Bericht.
+// BEFUND dabei: Wird nur die Vorpruefung bei der Annahme (kampftextEigenerBericht) entfernt, faellt
+// NICHTS - das Anhaengen sucht ohnehin nur in der Liste des Auftraggebers und ist damit die
+// wirksame Sperre; die Vorpruefung haelt lediglich fremde IDs aus db.kampftexte heraus.
+// 13c brauchte eine Pause: Der Aufruf an AI Core geht NACH der 503/202-Antwort raus; ohne die
+// 400 ms war 13c am alten Stand gruen, bevor der Aufruf unterwegs war.
 //
 // Port 3240 (Server) und 3241 (gefaelschter AI Core); 3195-3231 sind belegt, gemessen mit
 // `grep -hoE "3[12][0-9][0-9]" tests/*.js | sort -un`.
@@ -32,6 +47,9 @@ const crypto = require('crypto');
 const hash = bcrypt.hashSync('test1234', 10);
 const ANNA = crypto.randomUUID(), BEN = crypto.randomUUID();
 const CARA = crypto.randomUUID(), DORA = crypto.randomUUID();
+// Zwei frische Konten fuer Abschnitt 12 - der Tagesdeckel (10) ist bei den vier oberen nach
+// Abschnitt 10 fast oder ganz verbraucht.
+const EMIL = crypto.randomUUID(), FRIDA = crypto.randomUUID(), ADMIN = crypto.randomUUID();
 
 function grunddb() {
   return {
@@ -39,7 +57,11 @@ function grunddb() {
       anna: { userId: ANNA, username: 'anna', passwordHash: hash, emailVerified: true, createdAt: Date.now() },
       ben:  { userId: BEN,  username: 'ben',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
       cara: { userId: CARA, username: 'cara', passwordHash: hash, emailVerified: true, createdAt: Date.now() },
-      dora: { userId: DORA, username: 'dora', passwordHash: hash, emailVerified: true, createdAt: Date.now() }
+      dora: { userId: DORA, username: 'dora', passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      emil: { userId: EMIL, username: 'emil', passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      frida: { userId: FRIDA, username: 'frida', passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      // Der Admin heisst in diesem Repo immer gamegeeeeek (isAdmin) - Abschnitt 13 liest die Schalter-Uebersicht.
+      gamegeeeeek: { userId: ADMIN, username: 'gamegeeeeek', passwordHash: hash, emailVerified: true, createdAt: Date.now() }
     },
     private: {}, shared: {}, resetTokens: {},
     galaxy: { npcEmpireStrength: 1, marketTrend: 1, collapsedSystems: {}, controlledSystems: {},
@@ -50,6 +72,7 @@ function grunddb() {
 const dbPfad = path.join(os.tmpdir(), 'kepler-kampftext-' + process.pid + '.json');
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kepler-kampftext-'));
 const kopiePfad = path.join(WURZEL, 'server.kampftext-test.js');
+const kopieAusPfad = path.join(WURZEL, 'server.kampftext-aus-test.js');
 let srv = null, aiSrv = null;
 
 function aufraeumen() {
@@ -57,6 +80,7 @@ function aufraeumen() {
   try { if (aiSrv) aiSrv.close(); } catch (e) {}
   try { fs.unlinkSync(dbPfad); } catch (e) {}
   try { fs.unlinkSync(kopiePfad); } catch (e) {}
+  try { fs.unlinkSync(kopieAusPfad); } catch (e) {}
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) {}
 }
 process.on('exit', aufraeumen);
@@ -173,11 +197,19 @@ const KAMPF = {
   fs.writeFileSync(dbPfad, JSON.stringify(grunddb(), null, 1));
   await starteAiCore();
 
+  // Beide Kopien aus derselben Quelle; der Schalter wird je Kopie gesetzt, unabhaengig davon,
+  // wie er gerade committet ist (Muster aus test_hort_meldung_http.js).
+  const quelle = fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8');
+  const schalter = /const KAMPFTEXT_AKTIV = (true|false);/;
+  check('0-vorab: der Schalter ist im Quelltext auffindbar', schalter.test(quelle), { ausgeliefert: (quelle.match(schalter) || [])[1] });
+  fs.writeFileSync(kopieAusPfad, quelle.replace(schalter, 'const KAMPFTEXT_AKTIV = false;'));
+  fs.writeFileSync(kopiePfad, quelle.replace(schalter, 'const KAMPFTEXT_AKTIV = true;'));
+
   // ---------------------------------------------------------------------------------------
-  // 1 - der Schalter (an der ECHTEN server.js)
+  // 1 - der Schalter (Kopie mit KAMPFTEXT_AKTIV=false)
   // ---------------------------------------------------------------------------------------
   {
-    const api = await starteServer(path.join(WURZEL, 'server.js'));
+    const api = await starteServer(kopieAusPfad);
     const tok = await api.anmelden('anna');
     check('1-vorab: Anmeldung klappt', !!tok);
     const r = await api.auftrag(tok, KAMPF);
@@ -188,11 +220,6 @@ const KAMPF = {
   }
 
   // ab hier die Kopie mit umgelegtem Schalter
-  const quelle = fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8');
-  check('2-vorab: der Schalter steht im Quelltext auf false',
-    quelle.indexOf('const KAMPFTEXT_AKTIV = false;') >= 0);
-  fs.writeFileSync(kopiePfad, quelle.replace('const KAMPFTEXT_AKTIV = false;', 'const KAMPFTEXT_AKTIV = true;'));
-
   const api = await starteServer(kopiePfad);
   const anna = await api.anmelden('anna');
   const ben = await api.anmelden('ben');
@@ -403,6 +430,90 @@ const KAMPF = {
     check('11a: ohne Gegnernamen 400', ohneGegner.status === 400, { status: ohneGegner.status });
     const ohneFlotte = await api.auftrag(anna, Object.assign({}, KAMPF, { fleet: {} }));
     check('11b: ohne eigenes Schiff 400', ohneFlotte.status === 400, { status: ohneFlotte.status });
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // 12 - der fertige Text haengt am Bericht (E1b)
+  // ---------------------------------------------------------------------------------------
+  {
+    const auth = (tok) => ({ 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok });
+    const berichtAnlegen = (tok) => api.j('/reports', { method: 'POST', headers: auth(tok),
+      body: JSON.stringify({ report: Object.assign({ type: 'npc-attack' }, KAMPF) }) });
+    const berichte = async (tok) => ((await api.j('/reports', { headers: auth(tok) })).body.reports || []);
+    const emil = await api.anmelden('emil');
+    const frida = await api.anmelden('frida');
+    check('12-vorab: zwei frische Konten angemeldet', !!emil && !!frida);
+
+    const b = await berichtAnlegen(emil);
+    check('12a: POST /api/reports nennt die ID des neuen Berichts',
+      b.status === 200 && !!b.body && typeof b.body.id === 'string' && b.body.id.length >= 16, b.body);
+    const berichtId = b.body && b.body.id;
+
+    ai.antwort = () => 'Der Verband kehrte mit Narben heim.';
+    const r = await api.auftrag(emil, Object.assign({}, KAMPF, { reportId: berichtId }));
+    check('12b: ein Auftrag MIT Berichts-ID wird angenommen', r.status === 202, { status: r.status });
+    const ende = await warteAufEnde(api, emil, r.body.auftragId);
+    check('12c: und wird fertig', ende.body && ende.body.status === 'fertig', ende.body);
+    const meiner = (await berichte(emil)).find(x => x.id === berichtId);
+    check('12d: der Text haengt als kiText am Bericht - dort holt ihn jedes Geraet des Spielers ab',
+      !!meiner && meiner.kiText === 'Der Verband kehrte mit Narben heim.', meiner && { kiText: meiner.kiText });
+
+    // Die Gegenrichtung als PAAR: Frida bestellt mit EMILS Berichts-ID. Angenommen wird das (der
+    // Text bleibt fuer sie abholbar), aber Emils Bericht bekommt ihn nicht.
+    ai.antwort = () => 'Fridas Verband kehrte heim.';
+    const fremd = await api.auftrag(frida, Object.assign({}, KAMPF, { reportId: berichtId }));
+    check('12e: ein Auftrag mit FREMDER Berichts-ID wird trotzdem angenommen', fremd.status === 202, { status: fremd.status });
+    const endeF = await warteAufEnde(api, frida, fremd.body.auftragId);
+    check('12f: ... und der Text ist fuer Frida abholbar', endeF.body && endeF.body.status === 'fertig' && /Fridas/.test(endeF.body.text || ''), endeF.body);
+    const meiner2 = (await berichte(emil)).find(x => x.id === berichtId);
+    check('12g: Emils Bericht traegt weiter SEINEN Text, nicht Fridas',
+      !!meiner2 && meiner2.kiText === 'Der Verband kehrte mit Narben heim.', meiner2 && { kiText: meiner2.kiText });
+    check('12h: und Frida hat dadurch keinen Bericht bekommen', (await berichte(frida)).length === 0);
+
+    const unbekannt = await api.auftrag(frida, Object.assign({}, KAMPF, { reportId: 'gibt-es-nicht' }));
+    check('12i: eine unbekannte Berichts-ID ist kein Fehler (202)', unbekannt.status === 202, { status: unbekannt.status });
+    const endeU = await warteAufEnde(api, frida, unbekannt.body.auftragId);
+    check('12j: ... der Auftrag wird trotzdem fertig', endeU.body && endeU.body.status === 'fertig', endeU.body);
+
+    // Bericht geloescht, WAEHREND der Text entsteht: kein Absturz, kein wiederauferstandener Bericht.
+    const b2 = await berichtAnlegen(emil);
+    ai.verzoegerung = 600;
+    const r2 = await api.auftrag(emil, Object.assign({}, KAMPF, { reportId: b2.body.id }));
+    await api.j('/reports/' + b2.body.id, { method: 'DELETE', headers: auth(emil) });
+    const ende2 = await warteAufEnde(api, emil, r2.body.auftragId);
+    ai.verzoegerung = 0;
+    check('12k: Bericht waehrend der Arbeit geloescht - der Auftrag wird ohne Fehler fertig', ende2.body && ende2.body.status === 'fertig', ende2.body);
+    check('12l: ... und der geloeschte Bericht taucht nicht wieder auf', !(await berichte(emil)).some(x => x.id === b2.body.id));
+    const health = await api.j('/health');
+    check('12m: das Ganze hinterlaesst keinen Takt-Fehler', health.body && health.body.taktFehler === 0, { taktFehler: health.body && health.body.taktFehler });
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // 13 - der Notaus 'kampftext' (Betreiber schaltet zur Laufzeit ab)
+  // ---------------------------------------------------------------------------------------
+  {
+    await stoppeServer();
+    // DB-Aenderung nur bei gestopptem Server (der Flush ueberschreibt sie sonst).
+    const dbj = JSON.parse(fs.readFileSync(dbPfad, 'utf8'));
+    dbj.notAus = { kampftext: { aus: true, seit: Date.now(), grund: 'Test' } };
+    fs.writeFileSync(dbPfad, JSON.stringify(dbj));
+    const api2 = await starteServer(kopiePfad);
+    const tok = await api2.anmelden('cara');
+    const vorher = ai.prompts.length;
+    const r = await api2.auftrag(tok, KAMPF);
+    check('13a: mit gesetztem Notaus lehnt der Endpunkt ab (503), obwohl der Schalter im Code an ist', r.status === 503, { status: r.status });
+    check('13b: die Ablehnung nennt den Grund', /abgeschaltet/i.test(JSON.stringify(r.body)), r.body);
+    // Der Aufruf an AI Core ginge NACH der Antwort raus (die Warteschlange arbeitet asynchron) -
+    // ohne diese Pause waere die Pruefung am alten Stand gruen, bevor der Aufruf ueberhaupt
+    // unterwegs ist (so gemessen in der Gegenprobe: 13c blieb faelschlich gruen).
+    await warte(400);
+    check('13c: und es geht KEIN Aufruf an AI Core raus', ai.prompts.length === vorher, { aufrufe: ai.prompts.length - vorher });
+    const admin = await api2.anmelden('gamegeeeeek');
+    const uebersicht = await api2.j('/admin/schalter', { headers: { Authorization: 'Bearer ' + admin } });
+    const eintrag = ((uebersicht.body && uebersicht.body.schalter) || []).find(x => x.name === 'kampftext');
+    check('13d: der Schalter steht in der Admin-Uebersicht - im Code an, per Notaus aus, also nicht wirksam',
+      !!eintrag && eintrag.imCode === true && eintrag.notAus === true && eintrag.wirksam === false && !!eintrag.beschreibung,
+      eintrag || { status: uebersicht.status });
   }
 
   await stoppeServer();

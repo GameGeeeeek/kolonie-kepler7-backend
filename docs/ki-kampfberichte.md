@@ -27,6 +27,9 @@ Eine Env-Änderung verlangt ein Neuerzeugen des Containers – der Webhook-Pull 
 aussteht. Und **ob der Pi den M715q überhaupt erreicht, ist bis heute nicht gemessen** – der
 Endpunkt meldet einen Fehlversuch benannt (`fehlgeschlagen` mit Grund), aber die erste Messung
 gehört vor das Umlegen des Schalters.
+**Nachtrag 04.09.2026: Diese Messung macht der Server jetzt selbst** – `/api/health` → `kampftext`,
+siehe den Abschnitt „Die Selbstprüfung" am Ende dieser Datei. Am Pi bleibt nur das Setzen der zwei
+Werte im Portainer-Stack.
 
 ### Sieben Entscheidungen, die man kennen muss
 
@@ -103,3 +106,59 @@ geschrieben ist: eine Aufzählung neben der Liste wird still falsch.
 **Und eine dritte Lehre zur Fixture:** Der erste Entwurf benutzte für alle Abschnitte dasselbe
 Konto – bei einem Tagesdeckel von 10 verbrauchten sie ihn gegenseitig, und vier Prüfungen maßen
 danach den Deckel statt ihres eigenen Gegenstands. Es gibt jetzt vier Konten.
+
+## Die Selbstprüfung (04.09.2026)
+
+Anlass: Die drei Vorbedingungen der Etappe E1b standen als drei SSH-Befehle für Sascha in der
+Roadmap (Schlüssellänge zählen, Erreichbarkeit **aus dem Container heraus** messen). Der Server kann
+beides selbst – und tut es seither beim Start und alle zehn Minuten, unabhängig von
+`KAMPFTEXT_AKTIV`: Gemessen wird, **bevor** der Schalter umgelegt wird. Das Ergebnis steht in
+`GET /api/health` unter `kampftext`, von außen ohne Anmeldung lesbar (dasselbe Prinzip wie
+`commit`/`checkout`/`blob`/`offsiteAlterMin`):
+
+```
+"kampftext": {
+  "aktiv": false, "modell": "qwen3.5:4b", "gemessenVorSek": 37,
+  "aiCore":     { "erreichbar": true, "ollamaOnline": true, "modellVorhanden": true, "fehler": "" },
+  "schluessel": { "zeichen": 64, "befund": "passt", "hinweis": "" }
+}
+```
+
+**Was die Felder bedeuten, in Laiensprache:** `erreichbar` – kommt der Pi überhaupt bis zum M715q
+(Netz, Firewall, Docker-Netz). `ollamaOnline` – läuft dort das Sprachmodell-Programm.
+`modellVorhanden` – ist genau das Modell geladen, das der Kampftext benutzt. `schluessel.befund` –
+`passt`, `falsch` (mit der Zeichenzahl, die AI Core empfangen hat), `fehlt` (0 Zeichen, es wird gar
+nicht erst gefragt), `ungeprueft` (AI Core nicht erreichbar, niemand konnte gefragt werden) oder
+`unklar` (AI Core selbst meldet einen Fehler, steht im `hinweis`). `zeichen` ist die Länge des
+gesetzten Schlüssels: 64 ist richtig, 65 ist das Leerzeichen hinter dem `=` (AI-Core-Lektion 7).
+`null` bei `ollamaOnline`/`modellVorhanden` heißt „nicht messbar", nicht „nein".
+
+**Drei Entscheidungen:**
+
+1. **Der Schlüssel wird an `/ai/embed` geprüft, nie an `/ai/chat`.** Embedding ist der billige Pfad
+   und von AI Core bewusst ungedrosselt; AI Core prüft den Schlüssel vor jedem Ollama-Aufruf, also ist
+   401 eindeutig „falsch" – auch wenn Ollama gerade nicht läuft. Eine Prüfung über `/ai/chat` kostete
+   70 s Textgenerierung alle zehn Minuten und wäre selbst die Last, vor der der Tagesdeckel schützt.
+2. **Nichts in der Antwort nennt Adresse oder Schlüssel.** Node-Systemfehler tragen die Zieladresse
+   im Text (`connect ECONNREFUSED 192.168.178.45:8000`); gemeldet wird nur der Code
+   (`ECONNREFUSED`: nichts hört auf dem Port, `EHOSTUNREACH`: kein Weg zur Maschine, `ETIMEDOUT`:
+   keine Antwort). Der Code allein ist die Diagnose.
+3. **Ein Transport für beide Wege.** `kampftextHttp()` bedient den Textauftrag und die Prüfung; der
+   Aufruf war vorher fest an `/ai/chat` gebunden. Ein zweiter Client daneben wäre die Vervielfachung,
+   die Social Hub bis PR #12 vier Fassungen derselben Timeout-Logik eingebracht hat. Die 57 Prüfungen
+   von `test_kampftext_http.js` decken den Umbau.
+
+**Was am Pi bleibt – einmalig, im Portainer-Stack des Backends:** `AI_CORE_API_KEY` (derselbe Wert wie
+`API_KEY` in AI Cores `.env`; er liegt auch schon in Social Hubs `server/.env` auf dem Pi) und
+`AI_CORE_URL` nur, falls die Vorgabe `http://192.168.178.45:8000` nicht stimmt. „Update the stack"
+erzeugt den Container neu; Sekunden später steht der Befund in `/api/health`. Im selben Schritt
+lassen sich `BACKUP_PULL_TOKEN` (Off-Site-Sicherung) und `DEPLOY_ALARM_MAIL` (Deploy-Alarm) setzen,
+die aus demselben Grund seit dem 02.09. bzw. 22.08. ausstehen.
+
+Wächter: `tests/test_kampftext_selbstpruefung_http.js` (Port 3258/3259; 20 Prüfungen, vier
+Serverstände, weil der Schlüssel nur über die Umgebung wechselt; vier Gegenproben mit gemessenen
+Ausfall-Listen im Dateikopf). Der Takt ist per `KAMPFTEXT_PRUEF_TAKT_MS` stellbar (Untergrenze 1 s),
+damit der Test die **Wiederholung** messen kann – eine Messung, die nach dem Start nie mehr nachschaut,
+meldete „erreichbar" noch lange, nachdem es das nicht mehr ist (Abschnitt A: Modell weg, AI Core
+weg, AI Core zurück). Der Fake im älteren `test_kampftext_http.js` zählt seither nur `/ai/chat` als
+Auftrag; `/health` und `/ai/embed` landen in `ai.sonstige`.

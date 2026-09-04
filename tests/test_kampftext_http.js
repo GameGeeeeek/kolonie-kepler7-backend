@@ -64,13 +64,21 @@ process.on('exit', aufraeumen);
 // --- der gefaelschte AI Core ----------------------------------------------------------------
 // Er schreibt jeden Prompt mit und antwortet mit dem, was `ai.antwort` gerade liefert. `ai.gleich`
 // zaehlt die GLEICHZEITIG offenen Anfragen - daran haengt Abschnitt 7 (die Warteschlange).
-const ai = { prompts: [], antwort: () => 'Der Verband kehrte zurueck.', verzoegerung: 0, gleich: 0, maxGleich: 0, status: 200 };
+const ai = { prompts: [], sonstige: [], antwort: () => 'Der Verband kehrte zurueck.', verzoegerung: 0, gleich: 0, maxGleich: 0, status: 200 };
 function starteAiCore() {
   return new Promise(resolve => {
     aiSrv = http.createServer((req, res) => {
       let roh = '';
       req.on('data', d => { roh += d; });
       req.on('end', async () => {
+        // Die Selbstpruefung des Servers (04.09.2026) fragt /health und /ai/embed - das sind keine
+        // Textauftraege. `ai.prompts` misst weiterhin nur /ai/chat, sonst zaehlten 1c/2e/2f die
+        // Pruefung als Auftrag; gemessen wird sie in test_kampftext_selbstpruefung_http.js.
+        if (req.url !== '/ai/chat') {
+          ai.sonstige.push(req.url);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ ok: true, ollama_online: true, models: [], embeddings: [[0]] }));
+        }
         ai.gleich++;
         ai.maxGleich = Math.max(ai.maxGleich, ai.gleich);
         let prompt = '';

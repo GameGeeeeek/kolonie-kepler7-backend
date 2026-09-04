@@ -69,3 +69,102 @@ Zwei Punkte, die sich beim Bauen als tragend erwiesen haben:
   verschickt — der Weg über die Platte überlebt den Neustart, ein offener Versand nicht.
 
 Einzelheiten: `docs/betriebsnetz.md`.
+
+## Eine Rechteprüfung altert mit ihrer Begründung (04.09.2026)
+
+`checkVorpostenKeyPermission` ließ das Lesen offen, und der Kommentar begründete das: im Dokument
+stehe nichts Schützenswertes. Das stimmte am Tag, an dem es geschrieben wurde. Drei Etappen später
+enthielt dasselbe Dokument den Anflug eines Dritten, die Aufschlüsselung fremder Beiträge und die
+Kampfvermerke — und die Sperre stand unverändert da, mit ihrer inzwischen falschen Begründung.
+
+**Wer einem geteilten Dokument ein Feld hinzufügt, prüft die Rechteregel dieses Dokuments neu.**
+Die Regel ist keine Eigenschaft des Schlüssels, sondern seines Inhalts, und der wächst.
+
+## Eine Sabotage, die nichts trifft, sieht aus wie eine bestandene Gegenprobe (04.09.2026)
+
+An einem Tag dreimal passiert: Eine Gegenprobe ersetzt eine Zeichenkette im Quelltext, die es nach
+einer späteren Änderung nicht mehr gibt. `String.replace` meldet keinen Fehler, die Kopie läuft
+unverändert, nichts fällt — und die Auswertung meldet „genau die erwarteten Prüfungen sind
+gefallen", wenn die Liste zufällig leer ist.
+
+**Jede Sabotage muss belegen, dass sie gegriffen hat** — entweder durch eine Prüfung auf den
+veränderten Text (wie `0-kopie` es für die Schalter tut), oder dadurch, dass ihre Pflichtliste
+nicht leer ist. Eine leere Erwartungsliste ist nie ein gültiges Ergebnis einer Gegenprobe.
+
+## Eine Benachrichtigung nach `saveDb()` ist eine Benachrichtigung auf Verdacht (04.09.2026)
+
+`/api/musterattack/create` reihte seine Push-Meldungen **nach** `await saveDb()` ein.
+`pushNotificationEvent` mutiert `db` — der Flush war zu dem Zeitpunkt aber schon durch, die
+Meldungen lagen also nur im Speicher und erreichten die Platte erst, wenn zufällig ein fremder
+Schreibvorgang nachkam. Meistens kam einer. Ein Neustart dazwischen verschluckte den Aufruf
+lautlos, und der Deploy startet den Prozess bei jedem Push neu.
+
+Der Fehler ist deshalb so zäh, weil er **im Normalbetrieb funktioniert**: Auf einem belebten Server
+schreibt binnen Sekunden irgendwer irgendetwas. Er schlägt genau dann zu, wenn am wenigsten los ist
+— und dann fehlt eine Meldung, die niemand vermisst, weil niemand weiß, dass sie kommen sollte.
+
+**Die Hausregel „`db` immer synchron vor `saveDb()` mutieren" gilt auch für alles, was nur
+nebenbei schreibt.** Wer in einer Route eine Nebenwirkung hinter den Flush hängt — Meldung,
+Protokoll, Zähler —, hat sie nicht persistiert, sondern nur gehofft. Gefunden wurde es nicht im
+Spiel, sondern weil ein neuer Test den Posteingang **nachgelesen** hat statt nur den Rückgabewert.
+
+## Ein Schalter, der nur die Anzeige einer Wahl gattert, ist kein Schalter (04.09.2026)
+
+`VP_ENDPROJEKTE_AKTIV` stand an zwei Stellen: an der Liste, die dem Client die möglichen Projekte
+nennt, und an der Formel, die ihre Wirkung rechnet. Die Stelle dazwischen — der Endpunkt, der die
+Wahl **ausführt** — kannte ihn nicht. Ein Client, der den Schlüssel selbst schickt, kam also durch,
+obwohl dasselbe Backend ihm diesen Schlüssel nie angeboten hätte.
+
+Die Doku hat den Fehler mitgetragen und dabei verdeckt: Sie sagte, der Schalter gattere „die Wahl"
+und „die Wirkung" — beide Male in dem Ton, in dem man eine vollständige Aufzählung schreibt. Die
+Wahl war aber die *Anzeige* der Wahl. Wer den Absatz las, hatte keinen Grund nachzusehen.
+
+**Ein Notausschalter gehört an die Stelle, die HANDELT, nicht an die, die anbietet.** Anzeige und
+Ausführung sind zwei Stellen, auch wenn sie im Kopf eine sind; nur der Client, der sich an die
+Anzeige hält, sieht sie als eine. Und die Prüffrage dazu ist billig: *Was passiert, wenn jemand
+genau das schickt, was ich ihm nicht angeboten habe?*
+
+Der Schaden war hier auch nicht auf „ein Vorhaben ohne Wirkung" begrenzt: Weil ein späteres
+Umlegen des Schalters die schon vergangene Wartezeit als Fortschritt las, lag beim Einschalten
+sofort der volle Deckel an Schiffen bereit. **Ein Zustand, der heute nur nutzlos aussieht, kann
+beim Einschalten rückwirkend wertvoll werden.**
+
+## „Backend zuerst live" deckt nur das Hinzufügen ab (04.09.2026)
+
+Die Regel dieses Projekts lautet: Ändert ein Backend-Merge eine spielersichtbare Zahl, geht das
+Backend zuerst live, dann das Frontend. Sie ist richtig — aber sie beschreibt nur eine Richtung.
+
+Eine Sammelzeit-Liste wurde von `[30, 60, 120]` auf `[15, 30, 45, 60]` umgestellt. Die neuen Werte
+hinzuzufügen ist unproblematisch: Ein altes Frontend schickt sie nicht. Den Wert 120 zu **entfernen**
+ist die Gegenrichtung — das live stehende Frontend bot ihn weiterhin an, und der Server hätte ihn
+mit 400 abgelehnt. Der Fehler wäre im laufenden Spiel aufgetreten, hätte nur eine von drei Optionen
+betroffen und deshalb nach einem Zufallsfehler ausgesehen, nicht nach einer Versionslücke.
+
+**Die akzeptierte Menge eines Servers darf nur wachsen, solange ein älteres Frontend live ist. Nur
+die Anzeige darf vorauseilen.** Wer einen Wert wegnimmt, braucht die Vereinigungsmenge für genau
+eine Auslieferung — und einen Wächter, der beim Aufräumen bewusst rot wird, damit die Übergangsmenge
+als Entscheidung erkennbar bleibt und nicht als Versehen stehen bleibt.
+
+Der eigene Dokumentationstext behauptete zu diesem Punkt ausdrücklich das Gegenteil („kein
+Zwischenzustand, in dem ein Client etwas Unmögliches schickt"). Er war beim Schreiben plausibel und
+falsch: Geprüft worden war, dass 30 und 60 in *beiden* Listen stehen — nicht, was mit dem dritten
+Wert passiert, den nur eine Seite kennt. **Bei einer geänderten Wertemenge zählt der Wert, der
+wegfällt, nicht die, die bleiben.**
+
+## Ein Recht, das jeder sich selbst geben kann, wird durch jede neue Fähigkeit teurer (04.09.2026)
+
+Die Allianz-Mitgliedschaft ist in diesem Projekt bewusst offen: `checkAllianceKeyPermission` lässt
+jedes Konto `alliance:<TAG>:role:<eigene id>` mit `'member'` schreiben, ohne Einladung. Das war
+jahrelang folgenlos, weil daran nichts Wertvolles hing.
+
+Dann bekam die Mitgliedschaft eine neue Fähigkeit — Garnison an einem fremden Vorposten. Damit
+konnte ein Fremder den **gemeinsamen** Deckel mit den billigsten Schiffen füllen, und der Besitzer
+hatte keinen Weg zurück: Der Rückruf löscht nur die eigenen Schiffe, einen Rauswurf gibt es nicht.
+Die Lücke lag nicht in der neuen Fähigkeit und nicht in der alten Regel, sondern in ihrer
+Kombination.
+
+**Wer einem bestehenden Recht eine neue Fähigkeit anhängt, prüft die Erwerbsregel dieses Rechts neu —
+nicht die Fähigkeit.** Und die Frage dazu ist immer dieselbe: *Was kann jemand anrichten, der sich
+dieses Recht in fünf Sekunden selbst gibt, und wie bekommt der Betroffene ihn wieder los?* Fehlt
+die zweite Hälfte der Antwort, ist ein Deckel nötig — einer, der nichts löscht, sondern nur das
+Wachstum begrenzt.

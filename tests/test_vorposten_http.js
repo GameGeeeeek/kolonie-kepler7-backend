@@ -300,8 +300,18 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     Array.isArray(get0.body.zweige) && get0.body.zweige.length === 3 && get0.body.zweigAb >= 2
     && get0.body.zweige.every(z => z.key && z.name && z.kurz && z.mult && z.namen && Object.keys(z.namen).length === (get0.body.maxStufe - get0.body.zweigAb + 1)),
     get0.body.zweige && get0.body.zweige.map(z => z.key));
+  /* 1d hielt bis zum 04.09.2026 fest, dass LESEN offen bleibt - mit der Begruendung, im Dokument
+     stehe nichts Schuetzenswertes. Das stimmte nicht mehr: Es enthaelt `anflug` (den
+     vorpostenFuerClient ausdruecklich NUR dem Besitzer schickt, weil er den Plan eines Dritten
+     verraet), seit Etappe V5 `garnisonVon`, dazu `beitraege` und `schlaege`. Ein GET auf den
+     geteilten Speicher hebelte damit jede dieser Entscheidungen aus. Aufgefallen bei einem
+     Audit der Vorposten-Etappen; die Sperre ist die Korrektur, dieser Test ihre Wache. */
   const lese = await s.j('/storage/vorposten:' + SYS1 + '?shared=true', { headers: kopf(tokB) });
-  check('1d: Lesen bleibt offen (kein 403)', lese.status !== 403, { status: lese.status });
+  check('1d: das Rohdokument ist auch fuer Fremde NICHT lesbar - die gefilterte Sicht kommt nur ueber /api/vorposten',
+    lese.status === 403, { status: lese.status, fehler: lese.body && lese.body.error });
+  const leseEigen = await s.j('/storage/vorposten:' + SYS1 + '?shared=true', { headers: kopf(tokA) });
+  check('1d2: auch der Besitzer liest es nicht roh - eine Ausnahme waere eine zweite Sicht auf dieselben Daten',
+    leseEigen.status === 403, { status: leseEigen.status });
 
   // ---- 2) Bauen --------------------------------------------------------------------------------
   const ohne = await post(tokA, '/vorposten/bauen', { system: SYS1, missionId: 'gibtsnicht' });

@@ -16,7 +16,8 @@ entsteht. Wer das ändern will, ändert eine Sascha-Entscheidung.
 
 **Ein Vorposten je System, `db.shared['vorposten:<sysId>']`.** Die generische Storage-Route schreibt
 ihn nie (`checkVorpostenKeyPermission`, in BEIDEN Rechte-Ketten der Storage-Route eingetragen – dieselbe
-Sperre wie `asteroids:*`); Lesen bleibt offen, und `GET /api/vorposten` liefert die Liste aller
+Sperre wie `asteroids:*`); seit dem Audit ist ueber die Storage-Route auch das **Lesen** zu
+(Befund 1 unter den sieben weiter unten), und `GET /api/vorposten` liefert die Liste aller
 Vorposten mit allem, was das Frontend zum Zeichnen braucht. Das ist die Grenze, die dieses Projekt
 verteidigt: Ohne die Sperre setzte jeder Beliebige einen fremden Kern mit einer Anfrage auf null.
 
@@ -532,3 +533,293 @@ nachrechnet, prüft seine eigene Formel. Gegenproben `verkaeufer` (2a, 2c), `geb
 `slots` deckte dabei einen echten Testfehler auf: Prüfung 3a ließ nur den Vorpostenlosen seine
 Plätze füllen und fragte dann den Handelsknoten — der hatte nach dem Verkauf aber null offene
 Angebote, sein Angebot ging mit und ohne Bonus durch. Jetzt füllen beide erst die Grundzahl.
+
+## Etappe V4: Das Lager am Vorposten und die Beute beim Fall (03.09.2026)
+
+Bis hierher war ein Vorposten ein Bonus auf Zahlen — Flugzeit, Produktion, Aufklärung. Man flog nie
+hin, holte nie etwas ab, und sein Verlust kostete nur diesen Bonus. Jetzt fördert er.
+
+**Kein Ticken.** Der Stand wird beim Lesen und beim Abholen aus der verstrichenen Zeit *gerechnet*,
+nicht laufend gutgeschrieben — dieselbe Entscheidung wie bei den Projekten: kein Zustandsübergang,
+der verlorengehen könnte, kein Schreiben beim Lesen. `doc.lagerSeit` ist der einzige Zustand, und er
+fällt auf `doc.seit` zurück, damit ein Dokument von vor dieser Etappe korrekt weiterrechnet statt
+seit 1970 zu sammeln.
+
+**Der Deckel ist die ganze Balance.** `VP_LAGER_STUNDEN = 12`. Ohne ihn wäre ein vergessener
+Vorposten eine Bank, die mit der Abwesenheit wächst. Beim Abholen wird `lagerSeit` auf **jetzt**
+gesetzt, nicht um die geholten Stunden zurückgedreht — ein Zurückdrehen machte den Deckel wirkungslos.
+
+**Die Aufteilung ist gemessen, nicht erfunden:** die `baseRate`-Werte der drei Fördergebäude des
+Spiels (Erzmine 0,225, Kristallraffinerie 0,075, Deuteriumsynthetisierer 0,06). Ein Vorposten fördert
+im selben Verhältnis wie eine Kolonie; eine eigene Mischung wäre eine zweite Wirtschaftsaussage über
+dieselbe Welt.
+
+**Kalibriert gegen die eigene Förderung des Spiels.** Stufe 8 trägt 25.000 Erz-Äquivalent je Stunde,
+ein Handelsknoten 45.000 (Multiplikator 1,80 — dieselben Zahlen wie `prod`, denn wer Ertrag macht,
+macht auch Vorrat). Ein Spätspieler fördert selbst rund 145.000 Erz je Stunde (Mine 45,
+Multiplikator 4, gemessen an `ratesPerSecond` im Frontend). Das Lager ist damit eine Beigabe, kein
+Ersatz — drei volle Vorposten bleiben unter dem, was er in derselben Zeit selbst fördert.
+
+**Das Lager ist offen sichtbar**, wie Verteidigung und Garnisonszahl. Das ist der Zweck: Wer stürmt,
+soll riechen können, wo sich der Flug lohnt. Die Spannung zur älteren Regel „Beute hängt an der Stufe,
+nicht am Zubehör" ist gewollt und auflösbar: **Module sind Investition** und bleiben ungestraft,
+**das Lager ist Versäumnis** — bestraft wird, wer hortet, nicht wer ausbaut.
+
+**Beim Fall** wandert das Lager nach demselben Schadensanteil an die Angreifer wie Kampfpunkte, XP
+und Kredite (`lagerBeute`); der Besitzer erfährt in seiner Verlust-Meldung, *was* er verloren hat
+(`lagerVerloren`), nicht nur *dass*. Der Stand wird dafür gemessen, **bevor** das Dokument
+verschwindet.
+
+Der Schalter `VP_LAGER_AKTIV` steht ausgeliefert auf `false`; dann ist die Rate 0, das Lager bleibt
+leer, und `POST /api/vorposten/lager/holen` antwortet mit 404 und `inaktiv`. Der Endpunkt-Riegel ist
+mit Absicht eine zweite Stelle: Er gibt eine verständliche Auskunft statt der irreführenden „Im Lager
+liegt noch nichts".
+
+Wächter: `tests/test_vorposten_lager_http.js` (Port 3257, 17 Prüfungen). Gegenproben `deckel` (2b),
+`zurueckdrehen` (3a), `beute` (4a) und `schalter` (5a).
+
+### Zwei Testfehler, die diese Etappe aufgedeckt hat
+
+1. **Prüfung 3a war zeitabhängig.** Sie holte zweimal hintereinander ab und erwartete beim zweiten
+   Mal „leer" — ein Handelsknoten der Stufe 8 fördert aber 7,8 Erz je *Sekunde*, nach einer
+   Zehntelsekunde ist das Lager nicht mehr leer. Aufgefallen ist es daran, dass die Gegenprobe
+   `beute` 3a mitriss, obwohl sie mit dem Abholen nichts zu tun hat. Gemessen wird jetzt der
+   Zustand: `lagerSeit` steht danach auf jetzt.
+2. **Anker und Sabotagen von V2 und V3 hingen daran, dass ein Wert der letzte im `mult`-Objekt ist**
+   (`werft: 2.20 \}`). Der neue Kanal `lager` dahinter hat sie gebrochen — die Anker fielen laut, die
+   *Sabotage* aber still: Sie griff ins Leere, und die Gegenprobe belegte nichts mehr. Beide greifen
+   den Wert jetzt innerhalb des `mult`-Objekts, ohne seine Position festzuhalten.
+
+## Etappe V5: Der Verbündete darf etwas (03.09.2026)
+
+Bis hierher stand an **jeder** Vorposten-Route `doc.besitzer !== req.userId` → 403. Ein
+Allianzpartner konnte nichts: nicht beisteuern, nicht mitnutzen, nicht mitbauen. Reines
+Einzeleigentum in einem Allianzspiel.
+
+**Die Mechanik ist eine Datenfrage.** `doc.garnisonVon` schlüsselt auf, **wer** was gestellt hat,
+und ist die Quelle; `doc.garnison` wird daraus nachgezogen — bei jedem `vorpostenSchreib`, wie das
+Kern-Dach. Zwei Zahlen über denselben Bestand wären sonst eine Frage der Zeit. Ein Dokument von vor
+dieser Etappe schreibt seine ganze Garnison dem Besitzer zu (Migration in `vorpostenGarnisonVon`).
+
+**Was der Verbündete darf:** Garnison beisteuern und **nur seine eigenen** Schiffe zurückrufen. Der
+Besitzer kann fremde Schiffe nicht einziehen. Ausbauen, abbauen, Projekte starten und das Lager
+abholen bleiben beim Besitzer.
+
+**Verluste treffen jeden Beitragenden mit derselben Quote**, nicht die Gesamtzahl mit
+anschließender Verteilung. Der Unterschied ist eine Rundung je Konto und Schiffstyp; dafür ist die
+Rechnung nachvollziehbar und niemand verliert Schiffe, die er nie gestellt hat.
+
+**Beim Fall und beim Abbau bekommt jeder seine eigene Meldung** (`alsVerbuendeter`) mit *seinen*
+Schiffen — ohne sie wäre die Garnison eines Verbündeten eines Tages einfach nicht mehr da, ohne dass
+irgendetwas es gesagt hätte. Die Module gehen weiterhin nur an den Besitzer.
+
+**Die Rechteprüfung liest den geteilten Speicher** (`allianceTagOf`, jede aktive Rolle), **nicht**
+`save.player.allianceTag`: Der Spielstand ist klientenautoritativ, und eine Rechteprüfung, die ihn
+glaubt, ist keine. Prüfung 2e misst genau das mit einem Konto, das den Tag im Spielstand trägt und
+keine Rolle im geteilten Speicher hat.
+
+Schalter: `VP_ALLIANZ_AKTIV` (ausgeliefert `false` — dann verhält sich alles wie vorher).
+
+Wächter: `tests/test_vorposten_allianz_http.js` (Port 3258, 14 Prüfungen). Gegenproben `schalter`
+(1a), `rueckruf` (3a, 3b), `spielstand` (2e, 3b) und `nachziehen` (2b, 2c).
+
+**Zwei Sabotagen griffen im ersten Entwurf ins Leere** und sind deshalb erwähnenswert: `schalter`
+setzte den Schalter, den Abschnitt 1 ohnehin selbst schreibt — er muss die *Gatterung* brechen;
+und `nachziehen` entfernte nur das Sicherheitsnetz in `vorpostenSchreib`, während der gemessene Weg
+die zweite, ausdrückliche Stelle im Stationieren benutzt. Eine Sabotage, die nichts trifft, sieht
+aus wie ein bestandener Test.
+
+### Offen aus der Auswahl: der Allianz-Vorposten mit geteilten Kosten
+
+Punkt (c) der Allianz-Frage — ein Vorposten, den mehrere gemeinsam bezahlen — ist bewusst **nicht**
+Teil dieser Etappe. Er ändert das Eigentumsmodell (heute genau ein `besitzer`) und braucht eine
+Treuhand für Baubeiträge in `db.shared`. Das ist eine eigene Etappe, keine Zeile mehr an dieser.
+
+## Etappe V6: Die Endprojekte und die Dominanz (03.09.2026)
+
+Ab Stufe 7 gab es nichts mehr zu entscheiden: Die drei Zweige unterschieden sich in Multiplikatoren
+und je einem Projekt der Stufe 5. Jetzt hat jeder Zweig auf der **Endstufe** etwas, das nur er kann —
+und jedes ist eine andere **Art** von Wirkung, nicht ein weiterer Prozentpunkt. Drei Prozentpunkte
+mehr wären keine Entscheidung gewesen.
+
+| Projekt | Zweig | Art | Wirkung |
+|---|---|---|---|
+| **Sternendock** | Werft | produziert | ein Kreuzer je 24 h, höchstens sieben gestapelt |
+| **Sternenmarkt** | Handel | erweitert | zwei Angebotsplätze **über** dem Deckel |
+| **Sperrfeuerleitstand** | Festung | kostet | jeder Angriff kostet den Angreifer 8 Punkte mehr Verluste |
+
+**Das Sternendock tickt nicht** — wie das Lager wird beim Abholen aus der verstrichenen Zeit
+gerechnet. `doc.dockSeit` fällt auf die *Fertigstellung des Projekts* zurück, nicht auf `doc.seit`:
+Sonst hätte eine alte Station am Tag der Fertigstellung sofort den vollen Stapel. Abgeholt wird an
+**demselben Griff** wie das Lager — zwei Endpunkte für denselben Handgriff wären zwei Stellen, an
+denen man den Zeitstempel vergessen kann.
+
+**Der Sternenmarkt hebt eine Grenze, statt sie auszureizen.** Seine zwei Plätze kommen *zusätzlich*
+und außerhalb von `VP_MARKT_SLOTS_MAX` — das ist der Sinn eines Endprojekts.
+
+**Das Sperrfeuer schlägt vor dem Deckel auf**, nicht daneben: Auch eine Endstufe soll einen Angriff
+nicht unbezahlbar machen.
+
+**Die Dominanz ist abgeleitet, nicht gespeichert.** `dominiert` ist wahr, sobald die Endstufe steht —
+sichtbar für alle. In `db.galaxy.controlledSystems` gehört das ausdrücklich **nicht**: Dort hängt die
+Eroberungsmechanik samt NPC-Rückeroberung, und ein Vorposten hätte dort nichts zu suchen. Kein neuer
+Zustand, keine Verflechtung zweier Systeme.
+
+Der Schalter `VP_ENDPROJEKTE_AKTIV` deckt alle drei ab — sie kommen zusammen, weil sie zusammen die
+Entscheidung sind, welchen Zweig man auf der Endstufe hält. Er gattert **drei** Stellen: die
+angebotene Wahl (`vpProjektVerfuegbar`), die **Ausführung** der Wahl
+(`POST /api/vorposten/projekt/starten`) und die **Wirkung** (`vpProjektBoni`), damit ein bereits
+gebautes Endprojekt nicht wirkt, bevor das Frontend es erklären kann.
+
+**Die mittlere fehlte bis zum 04.09.2026, und dieser Absatz behauptete das Gegenteil.** Er sagte,
+der Schalter gattere „die Wahl" — er gatterte nur die *Anzeige* der Wahl. Wer den Schlüssel direkt
+an den Endpunkt schickte, startete im Auslieferungsstand ein Endprojekt, obwohl derselbe Vorposten
+in `projektMoeglich` nur `["dockring","tiefenhorchen","sprungtor"]` nennt. Gemessen: 200 mit
+`{ok:true, projekt:'sternendock'}`. Zwei Folgen, und die zweite ist die schlimmere:
+
+1. Der **einzige** Projektplatz der Station ist 36 Stunden lang für ein Vorhaben ohne Wirkung
+   blockiert — Abbrechen gibt es bewusst nicht.
+2. Wird der Schalter später umgelegt, fällt `vorpostenDockAb()` mangels `doc.dockSeit` auf
+   `p.fertigAb` zurück. Die ganze aufgelaufene Wartezeit wäre rückwirkend Baufortschritt: gemessen
+   mit einem 30 Tage alten `fertigAb` lag sofort `dockBereit = 7` — der volle Deckel — bereit, und
+   `POST /api/vorposten/lager/holen` gab die sieben Kreuzer heraus.
+
+Der Endpunkt prüft jetzt selbst (`if (!VP_ENDPROJEKTE_AKTIV && vpIstEndprojekt(key))` → 404 mit
+`inaktiv`). Gefunden hat es die nachgeholte Rechnungs-Perspektive des Audits.
+
+Wächter: `tests/test_vorposten_endprojekte_http.js` (Port 3259).
+
+## Sieben Befunde aus dem Audit der Etappen V4–V6 (04.09.2026)
+
+Vor dem Merge haben sechs unabhängige Prüfer die noch nicht ausgelieferten Etappen durchgesehen.
+Zwei kamen durch (Rechte, Datenkonsistenz), vier scheiterten an einem Kontingent — und schon diese
+zwei fanden **sieben echte Fehler**. Alle sind behoben.
+
+1. **Das Rohdokument war für jeden lesbar.** `checkVorpostenKeyPermission` sperrte nur das
+   Schreiben, mit der Begründung, im Dokument stehe nichts Schützenswertes. Das stimmte einmal.
+   Inzwischen enthält es `anflug` (das `vorpostenFuerClient` ausdrücklich **nur** dem Besitzer
+   schickt, weil es den Plan eines Dritten verrät), seit V5 `garnisonVon`, dazu `beitraege` und
+   `schlaege`. Ein einziger `GET /api/storage/vorposten:<sys>` hebelte jede dieser Entscheidungen
+   aus. **Lesen ist jetzt ebenfalls zu** — gemessen, dass weder Frontend noch Test das je roh liest.
+2. **`/stationieren` gab die volle Garnisonszusammensetzung heraus**, auch an einen Verbündeten.
+   Ein einziges stationiertes Schiff genügte, um die Flottenaufstellung eines Fremden zu lesen — und
+   die Allianz-Mitgliedschaft dafür kann sich im geteilten Speicher jeder selbst geben (siehe unten).
+   Die Antwort zeigt jetzt dem Nicht-Besitzer nur seinen eigenen Anteil und die Summen.
+3. **Der Rückruf hing an der aktuellen Mitgliedschaft.** Wer die Allianz verließ oder hinausgeworfen
+   wurde, kam nie wieder an seine Schiffe — sie wären im Vorposten eines Fremden gefangen gewesen,
+   ohne dass irgendetwas es gesagt hätte. Er hängt jetzt am **Beitrag**.
+4. **Das Sternendock hing am falschen Schalter.** Mit `VP_ENDPROJEKTE_AKTIV` an und
+   `VP_LAGER_AKTIV` aus hätte es Kreuzer produziert, die niemand abholen kann. Der Griff bedient
+   beides und prüft beide Schalter.
+5. **Jedes Abholen löschte den angefangenen Baufortschritt** des Docks — bis zu 23 Stunden.
+   `dockSeit` rückt jetzt um genau die abgeholten Perioden vor, und der Rest wird am **Deckel**
+   gemessen, damit ein lange nicht besuchtes Dock nicht sofort wieder voll ist.
+6. **Der Ausbau bewertete das Lager rückwirkend zum neuen Satz.** Es wird jetzt abgerechnet, *bevor*
+   die Stufe steigt — nichts geht verloren, die neue Stufe fängt bei null an.
+7. **`allianceTagOf` durchsuchte `db.shared` zweimal je fremdem Vorposten**, also bei jedem
+   `GET /api/vorposten` einmal je Listeneintrag. Auf dem Pi ist das der Unterschied zwischen einer
+   Antwort und einer Pause. Die Zuordnung wird jetzt **einmal** gebaut und durchgereicht.
+
+Dazu ein achter, den erst der V6-Wächter fand: **`vpProjektBoni` prüfte die Ausrichtung nicht.**
+Starten kann man ein zweiggebundenes Projekt nur an seinem Zweig, aber die *Wirkung* hing allein am
+fertigen Eintrag — spätestens mit der Umrüstung (V8, die den Zweig neu wählen lässt) hätte ein als
+Werft gebautes Sternendock an einer Festung weitergeliefert.
+
+### Was daran offen bleibt
+
+Die Rolle `member` darf sich im geteilten Speicher **jeder für sich selbst schreiben** — davor
+stehen nur die Rauswurf-Sperrfrist und das Mitgliederlimit, keine Zustimmung. Das ist eine
+bestehende Eigenschaft des Allianz-Systems, nicht von V5, und ihre Änderung wäre eine eigene
+Produktentscheidung. V5 ist deshalb so gebaut, dass sie nichts hergibt: Beisteuern schadet niemandem,
+zurückgerufen wird nur der eigene Beitrag, und die Zusammensetzung sieht seit Befund 2 nur der
+Besitzer.
+
+## Vier weitere Befunde der adversarischen Durchsicht (04.09.2026)
+
+Acht Perspektiven über den ganzen Änderungssatz, 67 Befunde, 33 nach dreifacher Gegenprüfung
+bestätigt. Diese vier betrafen das Backend.
+
+**1. Die Sammelzeit-Liste durfte nicht schrumpfen.** Fünf der acht Perspektiven fanden unabhängig
+denselben Fehler: Der Merge verengt `ALLIANCE_MUSTER_DURATIONS` von `[30, 60, 120]` auf
+`[15, 30, 45, 60]` — und das **live stehende** Frontend führt weiterhin `[30, 60, 120]` und baut
+daraus sein Auswahlfeld. Ein Backend-Merge *ist* die Auslieferung: Wer danach im Spiel „2 Std"
+gewählt hätte, bekäme 400 „Ungültige Anfrage", während 30 und 60 Minuten weiter durchgehen. Der
+Fehler hätte nach einem Zufallsfehler ausgesehen, nicht nach einer Versionslücke. Der Abschnitt in
+`docs/asteroidenfestungen.md` behauptete ausdrücklich, es gebe keinen Zwischenzustand.
+
+> **Die Lehre, die hier fehlte:** „Backend zuerst live" deckt nur das **Hinzufügen** von Werten ab.
+> Das **Entfernen** eines akzeptierten Werts ist die Gegenrichtung und braucht die Vereinigungsmenge
+> für genau eine Auslieferung. Nur die *Anzeige* darf vorauseilen; die *akzeptierte* Menge darf
+> währenddessen nur wachsen.
+
+`ALLIANCE_MUSTER_DURATIONS_AKZEPTIERT` ist diese Vereinigung und trägt ihr Ablaufdatum im
+Kommentar. Der Merker dafür ist Prüfung **8f** in `tests/test_muster_festung_http.js`: Sie wird
+bewusst rot, sobald jemand die Konstante entfernt, und wird dann mitgelöscht. Prüfung 8d testete
+vorher genau die zwei Stunden — sie wäre still grün geblieben und nimmt jetzt 90 Minuten, einen
+Wert außerhalb **beider** Listen.
+
+**2. Der Notaus `angriffe` gatterte den Verband nicht.** `spawnAktiv('angriffe')` stand an den fünf
+Einzelangriffen; `POST /api/musterattack/resolve` führt aber genau dieselben Rechenkerne aus
+(`nestSchlagAusfuehren`, `festungSchlagAusfuehren`, `vorpostenSchlagAusfuehren`) und dazu den Schlag
+auf eine fremde Allianzbasis. Die Beschreibung des Schalters zählt selbst auf, was er decken soll
+(„PvP, Festung, Nest, Konvoi, Vorposten") — drei dieser Zielarten kann ein Verband treffen. Für eine
+Rücksicherung ist der Verband sogar der wichtigere Fall: Er löst sich bei Ankunft **selbsttätig**
+auf und zahlt an alle Beteiligten aus. Dieselbe Bauart wie der behobene
+`VP_ENDPROJEKTE_AKTIV`-Befund: gattert war der Weg, den man anklickt, nicht der, der ausführt.
+
+Die Prüfung steht bewusst **nach** dem Ankunfts-Rückfall, nicht am Routenkopf: Weiter oben bekäme
+auch das bloße Nachfragen eine 503, und das Kartenmenü verlöre seinen Zustand. So wird nur der
+*Schlag* aufgeschoben — Wächter 9a–9d messen genau das: 503, Kern unberührt, Verband weiter
+`enroute`, und nach dem Fenster löst derselbe Verband regulär auf.
+
+**3. Ein Verbündeter konnte die ganze Garnison belegen — und war nicht mehr zu entfernen.** Das
+Recht kommt aus `allianceTagOf`, also aus `db.shared['alliance:<TAG>:role:<uid>']`. Genau diesen
+Schlüssel darf **jedes** eingeloggte Konto für sich selbst schreiben: `checkAllianceKeyPermission`
+erlaubt `role:<eigene id>` mit `'member'` und prüft dabei nur Rauswurf-Sperrfrist und
+Mitgliederlimit — keine Einladung, keine Zustimmung. Das ist eine bewusste Produktentscheidung des
+Allianz-Systems, aber sie hatte vor V5 keine Folgen. Mit V5 füllt ein Fremder den **gemeinsamen**
+Deckel `garnisonMax` mit den billigsten Schiffen, und der Besitzer bekommt sie nicht mehr heraus:
+`rueckruf` löscht ausschließlich `von[req.userId]`, einen Rauswurf gibt es nicht. Der einzige Ausweg
+wäre gewesen, den eigenen Vorposten 24 Stunden lang abzubauen.
+
+`VP_ALLIANZ_GARNISON_ANTEIL = 0.5` deckelt den Anteil **aller** Nicht-Besitzer zusammen (nicht je
+Konto — sonst umgeht man ihn mit einem zweiten Konto, das sich die Mitgliedschaft genauso selbst
+gibt). Der Deckel **löscht nichts**, er begrenzt nur das Wachstum. Die Ablehnung nennt den Grund,
+sonst läse der Verbündete die verdeckte Zusammensetzung aus dem Unterschied zwischen 400 und 200
+heraus. Wächter 2f–2h, gemessen an einem Vorposten der Stufe 1 (150 von 300 Plätzen): Der erste
+Entwurf maß an Stufe 6 mit 10.150 Plätzen — Bens ganze Flotte hat 1.820 Schiffe, der Anteil war dort
+nie die Grenze, und die Messung meldete grün, ohne etwas zu belegen.
+
+**4. Beim Umlegen von `VP_LAGER_AKTIV` stünde jeder Vorposten sofort am Deckel.**
+`vorpostenLagerStand` fällt mangels `doc.lagerSeit` auf `doc.seit` zurück — das Baudatum, oft Wochen
+alt —, und die Stunden werden nur nach *oben* geklemmt. In der Sekunde des Einschaltens läge für eine
+Bastion mit Handelsknoten sofort der volle Deckel bereit: 337.500 Erz, 112.500 Kristalle, 90.000
+Deuterium je Vorposten, bis zu drei je Konto. Genau die Fehlerklasse, die dieser Änderungssatz
+selbst in `PROJECT_MEMORY.md` notiert hat („Ein Zustand, der heute nur nutzlos aussieht, kann beim
+Einschalten rückwirkend wertvoll werden") — für das Sternendock wurde sie behandelt, für das Lager
+nicht. `VP_LAGER_AB` zieht eine Untergrenze ein: kein Schreiben beim Lesen, keine Migration, nichts
+gelöscht — die Zeit vor der Aktivierung zählt einfach nicht. **Beim Umlegen des Schalters auf den
+Deploy-Zeitstempel setzen.**
+
+### Zwei stumpfe Gegenproben, gefunden und geschärft
+
+- **Die Sabotage `spielstand` griff ins Leere.** Sie ersetzte `const meiner = allianceTagOf(userId);`
+  — eine Zeile, die derselbe Änderungssatz drei Commits vorher zu
+  `const meiner = karte ? karte[userId] : allianceTagOf(userId);` gemacht hatte. `String.replace`
+  meldet keinen Fehler; es lief ein **unsabotierter** Server, und die einzige Gegenprobe für die
+  Kernaussage dieser Etappe („die Rechteprüfung liest den geteilten Speicher, nicht den
+  klientenautoritativen Spielstand") belegte nichts mehr. Nach der Angleichung fällt sie wieder
+  genau auf 2e und 3b.
+- **Die Anker `multHandel`/`multFestung` hingen daran, dass `lager` der letzte Schlüssel im
+  `mult`-Objekt ist.** Genau diese Fragilität wurde im selben Änderungssatz in den beiden
+  Geschwistertests mit ausdrücklicher Begründung beseitigt („Ein Anker, der die Reihenfolge
+  festhält, ist eine Momentaufnahme, keine Regel") — im Lager-Test blieb die alte Form stehen, und
+  Etappe V7 schreibt absehbar einen Kanal dahinter.
+
+### Und zwei eigene Fehler beim Nachbauen der Wächter
+
+Beide Male eine **geratene** statt gemessene Pflichtliste: `anteil` reißt `2h` mit (ohne Deckel
+füllt der Verbündete alles, die Besitzerin bekommt danach keinen Platz), `nachziehen` ebenfalls
+(2h liest die Gesamtgarnison aus dem Dokument). Beides ist Folge, nicht Nebenschaden — und beide
+Listen fielen selbst durch, bevor sie stimmten. Zum wiederholten Mal in dieser Sitzung: **Eine
+Pflichtliste ist selbst eine Behauptung, bis die Gegenprobe sie gemessen hat.**

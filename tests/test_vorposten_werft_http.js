@@ -94,21 +94,24 @@ async function stoppeServer() { if (!srv) return; srv.kill('SIGTERM'); await war
   /* ANKER unabhaengig von der API-Antwort: Leiter und Multiplikator kommen aus dem QUELLTEXT.
      Eine Erwartung, die aus derselben Antwort stammt, die sie pruefen soll, belegt nichts. */
   const leiter = [...roh.matchAll(/\{ stufe: (\d), name: '[^']*',[^}]*werft: ([\d.]+),/g)].map(m => [Number(m[1]), Number(m[2])]);
-  /* GEMESSEN 04.09.2026: Diese beiden Anker suchten `werft: X }` - also den Multiplikator als
-     LETZTEN Eintrag seines Objekts. Seit dort `markt` dahintersteht (`werft: 2.20, markt: 0.50 }`)
-     fanden sie nichts mehr, und 0a wie 1b waren still rot, ohne dass sich am Verhalten etwas
-     geaendert haette. Der Anker liest jetzt den Wert unabhaengig davon, was ihm folgt - genau die
-     Fehlerklasse, vor der CLAUDE.md warnt: "Such-/Slice-Anker vor Benutzung explizit auf Existenz
-     pruefen", und ein Anker, der an der Reihenfolge seiner Nachbarn haengt, ist keiner. */
-  const multWerft = Number((roh.match(/key: 'werft',[\s\S]{0,400}?[,{]\s*werft: ([\d.]+)/) || [])[1]);
-  const multFestung = Number((roh.match(/key: 'festung',[\s\S]{0,400}?[,{]\s*werft: ([\d.]+)/) || [])[1]);
+  /* BEIDE SEITEN HABEN AM 04.09.2026 DIESELBE FRAGILITAET BEHOBEN, verschieden formuliert.
+     Uebernommen ist die allgemeinere Fassung: ein Helfer multVon(zweig, kanal), der den Wert
+     INNERHALB des mult-Objekts greift, ohne zu verlangen, dass er dort der letzte ist. Der
+     urspruengliche Anker endete auf „werft: 2.20 \}" und fiel, sobald ein Kanal dahinterkam -
+     erst `markt`, dann `lager`. Ein Anker, der die Reihenfolge festhaelt, ist eine
+     Momentaufnahme, keine Regel; mit dem Helfer gilt das fuer JEDEN Kanal, nicht nur fuer werft. */
+  const multVon = (zweig, kanal) => Number((roh.match(new RegExp("key: '" + zweig + "',[\\s\\S]{0,600}?mult: \\{[^}]*" + kanal + ": ([\\d.]+)")) || [])[1]);
+  const multWerft = multVon('werft', 'werft');
+  const multFestung = multVon('festung', 'werft');
   const deckel = Number((roh.match(/const VP_WERFT_DECKEL = ([\d.]+);/) || [])[1]);
   check('0a: Leiter, Multiplikatoren und Deckel sind im Quelltext auffindbar',
     leiter.length === 8 && multWerft > 0 && multFestung > 0 && deckel > 0,
     { stufen: leiter.length, werft: multWerft, festung: multFestung, deckel });
 
   let basis = roh.replace(/const VORPOSTEN_AKTIV = (true|false);/, 'const VORPOSTEN_AKTIV = true;');
-  if (SAB === 'zweigmult') basis = basis.replace(/(key: 'werft',[\s\S]{0,400}?)werft: [\d.]+ \}/, '$1werft: 0.50 }');
+  // Auch die SABOTAGE darf nicht daran haengen, dass der Wert der letzte im Objekt ist - sonst
+  // greift sie eines Tages ins Leere und die Gegenprobe belegt nichts mehr (03.09.2026 passiert).
+  if (SAB === 'zweigmult') basis = basis.replace(/(key: 'werft',[\s\S]{0,600}?mult: \{[^}]*)werft: [\d.]+/, '$1werft: 0.50');
   if (SAB === 'leiter') basis = basis.replace(/werft: [\d.]+,/g, 'werft: 0.02,');
   const an = basis.replace(/const VP_WERFT_AKTIV = (true|false);/, 'const VP_WERFT_AKTIV = true;');
   check('0b: der Werft-Schalter liess sich in der Kopie umlegen', /const VP_WERFT_AKTIV = true;/.test(an),

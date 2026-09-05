@@ -144,12 +144,16 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
   check('0a: Schwelle, Laenge, Frist und Muster stehen im Quelltext',
     abStufe >= 2 && maxLen >= 12 && !!abklingRoh && !!musterRoh,
     { abStufe, maxLen, abkling: abklingRoh, muster: musterRoh });
-  /* 0b: DIE AUSLIEFERUNGSREIHENFOLGE. Solange das Spiel den Namen nicht anzeigt, waere ein
-     eingeschalteter Server ein Feld ohne Nutzen - und schlimmer: ein Spieler koennte einen Namen
-     setzen, den niemand sieht und niemand melden kann. Der Schalter wird im Frontend-PR umgelegt;
-     bis dahin ist genau DAS hier die Wache. */
-  check('0b: der Schalter ist ausgeliefert AUS - er wird im Frontend-PR umgelegt',
-    schalter === 'false', { gefunden: schalter });
+  /* 0b HAT SEINE RICHTUNG GEWECHSELT (05.09.2026) - wie zuvor bei den Modul-Sets und der
+     Umruestung. Bis zum Umlegen stand hier „der Schalter ist false": die Wache ueber die
+     Auslieferungsreihenfolge (ein Server, der Namen fuehrt, die niemand sieht und niemand melden
+     kann, waere kein Nutzen, sondern eine Falle). Sie ist eingehalten, das Spiel zeigt und bedient
+     den Namen seit v8.686.0, und ab jetzt waere ein zurueckgefallener Schalter der Fehler.
+     Die beiden Laeufe unten erzwingen ihren Zustand ohnehin SELBST (ausQuelle/anQuelle) - ohne
+     diese Bauart haette genau dieser Commit den Aus-Lauf still in einen zweiten An-Lauf
+     verwandelt. */
+  check('0b: der Schalter steht ausgeliefert auf true - die Frontend-Haelfte ist live',
+    schalter === 'true', { gefunden: schalter });
   /* Das Muster darf NICHT `NAME_MUSTER` sein: Das gehoert den Konten und kennt kein Leerzeichen.
      Ein Stationsname mit zwei Woertern ist der Fall, fuer den es diese Etappe gibt. */
   const muster = new RegExp(musterRoh.slice(1, -1));

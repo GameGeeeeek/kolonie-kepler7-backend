@@ -45,6 +45,8 @@ const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const { execSync } = require('child_process');
 
 const PORT = process.env.TEST_PORT || 3223;
 const BASIS = 'http://127.0.0.1:' + PORT;
@@ -180,6 +182,45 @@ const signiere = (body) => 'sha256=' + crypto.createHmac('sha256', SECRET).updat
   // Quelltext-Pruefung, weil der Versand selbst hier ohne Schluessel nicht messbar ist.
   check('8c die Stundendrossel sitzt HINTER der Protokollzeile, nicht davor',
     (() => { const i1 = S.indexOf("console.error('Deploy-Alarm für '"); const i2 = S.indexOf('DEPLOY_ALARM_PAUSE_MS)', i1); return i1 > 0 && i2 > i1; })());
+
+
+  // ---------------------------------------------------------------------------------------
+  // 9) "detected dubious ownership" (Ausfall vom 05.09.2026)
+  //
+  // Git verweigert seit 2.35.2 die Arbeit in einem Verzeichnis, das einem anderen Benutzer gehoert
+  // als dem laufenden Prozess. Der Container laeuft als root, /deploy/kolonie-kepler7 gehoert auf
+  // dem Host Sascha - ab da schlug JEDER Frontend-Pull fehl, waehrend dasselbe Log fuer das Backend
+  // "erfolgreich" meldete. Drei Spielversionen lagen gemergt, aber nicht ausgeliefert; aufgefallen
+  // ist es an der Versionsnummer der Live-Seite, nicht an einer Meldung.
+  //
+  // 9a misst den Fehler ECHT nach (Repo anlegen, auf eine fremde uid chownen, beide Befehlsformen
+  // laufen lassen) - das geht nur als root und wird sonst deutlich als nicht gemessen ausgewiesen.
+  // 9b prueft, dass beide fest verdrahteten Befehle die Ausnahme tragen, und 9c die Selbstheilung
+  // davor: ohne sie scheitert genau der Weg, den man im Fehlerfall am dringendsten braucht.
+  // GEGENPROBE (gemessen): ohne `gitIn` in DEPLOY_TARGETS faellt 9b, ohne `gitIn` in
+  // deployAufraeumen faellt 9c; 9a faellt an einem Git ohne diese Sicherung gar nicht erst an.
+  // ---------------------------------------------------------------------------------------
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    const wurzel = fs.mkdtempSync(path.join(os.tmpdir(), 'kepler-dubious-'));
+    const repo = path.join(wurzel, 'r');
+    const sh = (cmd, cwd) => { try { return { aus: execSync(cmd, { cwd, encoding: 'utf8', stdio: ['ignore','pipe','pipe'] }), code: 0 }; } catch (e) { return { aus: String(e.stderr || e.message), code: e.status || 1 }; } };
+    sh('git init -q r && cd r && git config user.email t@t && git config user.name t && echo a > a.txt && git add . && git commit -qm x', wurzel);
+    sh('chown -R 1000:1000 r', wurzel);
+    const ohne = sh('git status --short', repo);
+    const mit = sh('git -c safe.directory=' + repo + ' status --short', repo);
+    check('9a der Fehler ist echt nachgemessen: ohne die Ausnahme scheitert git, mit ihr laeuft es',
+      ohne.code !== 0 && /dubious ownership/.test(ohne.aus) && mit.code === 0,
+      { ohne: ohne.aus.split('\n')[0], mitCode: mit.code });
+    fs.rmSync(wurzel, { recursive: true, force: true });
+  } else {
+    console.log('HINWEIS - 9a NICHT gemessen (nur als root moeglich); 9b und 9c laufen trotzdem.');
+  }
+  check('9b beide fest verdrahteten Deploy-Befehle tragen safe.directory fuer ihr eigenes Verzeichnis',
+    /command: 'cd \/deploy\/kolonie-kepler7 && ' \+ gitIn\('\/deploy\/kolonie-kepler7'\)/.test(S) &&
+    /command: 'cd \/app && ' \+ gitIn\('\/app'\)/.test(S) &&
+    /const gitIn = \(dir\) => 'git -c safe\.directory=' \+ dir;/.test(S));
+  check('9c auch die Selbstheilung (deployAufraeumen) ruft git mit der Ausnahme auf',
+    /const git = \(args\) => execSync\(gitIn\(dir\) \+ ' ' \+ args,/.test(S));
 
   console.log(fehl ? 'FEHLGESCHLAGEN' : 'ALLES GRUEN');
   process.exit(fehl);

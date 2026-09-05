@@ -607,8 +607,17 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     check('9f: das eingebaute Modul hebt die Verteidigung ueber den reinen Stufenwert',
       ein.body.vorposten.verteidigung > nurStufe && ein.body.vorposten.modulBoni && ein.body.vorposten.modulBoni.verteidigung > 0,
       { verteidigung: ein.body.vorposten.verteidigung, nurStufe, boni: ein.body.vorposten.modulBoni });
-    check('9g: die Steckplatzzahl kommt vom Server und waechst mit der Stufe (hier zwei)',
-      ein.body.vorposten.slots === 2, ein.body.vorposten.slots);
+    /* GEGEN DIE MOMENTAUFNAHME (05.09.2026): Hier stand `slots === 2`, und Etappe V7 hat die Zahl
+       geaendert - der Festungsring bekommt seit dem einen Platz mehr. Eine feste Zahl haelt einen
+       Zustand fest, keine Regel. Geprueft wird jetzt die REGEL: Leiter (einer je Stufe ab der
+       Wahlstufe) plus der Zuschlag der Ausrichtung, beides aus der Serverangabe - und dass die
+       Leiter an dieser Stelle wirklich zwei ergibt, damit die Aussage „waechst mit der Stufe"
+       nicht verlorengeht. */
+    const leiterSlots9 = ein.body.vorposten.stufe - get0.body.zweigAb + 1;
+    const zuschlag9 = get0.body.modulSetsAktiv ? ((get0.body.zweigSlots || {})[ein.body.vorposten.zweig] || 0) : 0;
+    check('9g: die Steckplatzzahl kommt vom Server: Leiter (hier zwei) plus Zuschlag der Ausrichtung',
+      leiterSlots9 === 2 && ein.body.vorposten.slots === leiterSlots9 + zuschlag9,
+      { slots: ein.body.vorposten.slots, leiter: leiterSlots9, zuschlag: zuschlag9, zweig: ein.body.vorposten.zweig });
 
     // Ausbauen kostet eine Kleinigkeit - und gibt das Modul heil zurueck.
     let krediteVorher = 0;

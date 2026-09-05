@@ -921,3 +921,18 @@ Drei eigene Messfehler, alle im Test dokumentiert:
 misst genau das). Der Schalter wird in einem eigenen Backend-PR umgelegt, sobald die
 Frontend-Hälfte steht: Ein Set, das der Server rechnet und das Spiel nicht zeigt, wäre angezeigter
 Nutzen ohne Anzeige — genau die Sorte, die es hier nicht geben soll.
+
+### Umgelegt am 05.09.2026
+
+`VP_MODUL_SETS_AKTIV = true`. Die Frontend-Hälfte ist fertig gemessen: Das Steckplatz-Fenster hat
+einen eigenen Set-Abschnitt (und nennt bei einem offenen Set, **welches** Stück fehlt), die
+Stationstafel zeigt die stehenden Sets für jeden Betrachter, und die Steckplatz-Zeile sagt, wieviel
+Platz die Ausrichtung beisteuert.
+
+Prüfung `0c` hat dabei ihre Richtung gewechselt — sie wachte über die Auslieferungsreihenfolge und
+wacht jetzt darüber, dass der Schalter nicht zurückfällt. Wichtiger: **beide Läufe erzwingen ihren
+Schalterzustand seitdem selbst** (`ausQuelle`/`anQuelle`). Ohne diese Umstellung hätte das Umlegen
+den Aus-Lauf still in einen zweiten An-Lauf verwandelt, und `1a` („mit liegendem Schalter ändert
+sich nichts") hätte fortan ihre eigene Aussage geprüft statt der Mechanik. Das ist derselbe
+Fehlertyp wie eine Vorlage, die ein Feld erfindet: ein Test, der seine Voraussetzung vom Prüfling
+bezieht.

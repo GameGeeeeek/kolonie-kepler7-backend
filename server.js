@@ -13833,7 +13833,12 @@ const VP_MODUL_BAUBAR = ['gewoehnlich', 'ungewoehnlich'];
    Ein Set wirkt auf DIESELBEN Kanaele wie Module und Projekte und wird dort addiert; ein eigener
    Rechenweg waere eine zweite Stelle, an der ein Kanal vergessen werden kann (dieselbe Begruendung
    wie bei den Projekten). */
-const VP_MODUL_SETS_AKTIV = false;
+/* UMGELEGT AM 05.09.2026 (Frontend-Haelfte ist fertig gemessen). Das Spiel liest jetzt
+   `modulSetDefs`, `modulSetsAktiv`, `zweigSlots` und je Vorposten `sets`: Das Steckplatz-Fenster
+   hat einen eigenen Set-Abschnitt (und nennt bei einem offenen Set, WELCHES Stueck fehlt), die
+   Stationstafel zeigt die stehenden Sets fuer jeden Betrachter, und die Steckplatz-Zeile sagt,
+   wieviel Platz die Ausrichtung beisteuert. */
+const VP_MODUL_SETS_AKTIV = true;
 const VP_MODUL_SET_DEFS = [
   { key: 'bollwerk', name: 'Bollwerk', icon: 'ti-shield',
     teile: ['kernpanzer', 'geschuetz'],

@@ -131,7 +131,7 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
     .replace(/([a-z]+):/g, '"$1":'));
   const slotsMax = Number((roh.match(/const VP_MODUL_SLOTS_MAX = (\d+);/) || [])[1]);
   const zweigAb = Number((roh.match(/const VORPOSTEN_ZWEIG_AB = (\d+);/) || [])[1]);
-  const schalterAusgeliefert = /const VP_MODUL_SETS_AKTIV = false;/.test(roh);
+  const schalterAusgeliefert = /const VP_MODUL_SETS_AKTIV = true;/.test(roh);
   check('0a: Set-Tabelle, Zweig-Zuschlaege, Deckel und Wahlstufe sind im Quelltext auffindbar',
     setKeys.length >= 3 && Object.keys(zweigSlots).length === 3 && slotsMax > 5 && zweigAb > 0,
     { sets: setKeys, zweigSlots, slotsMax, zweigAb });
@@ -139,11 +139,21 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
      dasselbe an der Antwort). Ein negativer Wert waere ein Deckel, der Daten unsichtbar macht. */
   check('0b: kein Zweig-Zuschlag ist negativ',
     Object.values(zweigSlots).every(n => Number(n) >= 0), zweigSlots);
-  check('0c: der Schalter steht ausgeliefert auf false (Backend zuerst live, Frontend danach)',
+  /* 0c HAT SEINE RICHTUNG GEWECHSELT (05.09.2026). Bis zum Umlegen stand hier „der Schalter ist
+     false" - die Wache ueber die Auslieferungsreihenfolge: Backend zuerst live, Frontend danach.
+     Die Reihenfolge ist eingehalten, das Spiel liest die Felder, und ab jetzt waere ein
+     zurueckgefallener Schalter der Fehler. Die zwei Laeufe unten erzwingen ihren Zustand seitdem
+     SELBST (`ausQuelle`/`anQuelle`), damit dieser Test nicht mehr am ausgelieferten Wert haengt. */
+  check('0c: der Schalter steht ausgeliefert auf true - die Frontend-Haelfte ist live',
     schalterAusgeliefert, { gefunden: (roh.match(/const VP_MODUL_SETS_AKTIV = (\w+);/) || [])[1] });
 
   const basis = roh.replace(/const VORPOSTEN_AKTIV = (true|false);/, 'const VORPOSTEN_AKTIV = true;');
-  let anQuelle = basis.replace(/const VP_MODUL_SETS_AKTIV = false;/, 'const VP_MODUL_SETS_AKTIV = true;');
+  /* BEIDE Laeufe erzwingen ihren Schalterzustand, statt einen davon vom ausgelieferten Wert zu
+     erben: Sonst haette das Umlegen des Schalters den Aus-Lauf still in einen zweiten An-Lauf
+     verwandelt, und Pruefung 1a („mit liegendem Schalter aendert sich nichts") haette ihre eigene
+     Aussage geprueft. */
+  const ausQuelle = basis.replace(/const VP_MODUL_SETS_AKTIV = (true|false);/, 'const VP_MODUL_SETS_AKTIV = false;');
+  let anQuelle = basis.replace(/const VP_MODUL_SETS_AKTIV = (true|false);/, 'const VP_MODUL_SETS_AKTIV = true;');
   if (SAB === 'abzug') {
     /* ZWEI Handgriffe: die Tabelle UND die Klemme in vpModulSlots. Mit nur der Tabelle laeuft ein
        unsabotierter Server - `Math.max(0, ...)` faengt den negativen Wert ab, und die Gegenprobe
@@ -172,12 +182,12 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
   // (gemessener Fehler im Lager-Test, 04.09.2026: `String.replace` meldet keinen Treffer).
   if (SAB) {
     check('0d: die Sabotage „' + SAB + '" hat den Quelltext wirklich veraendert',
-      anQuelle !== basis.replace(/const VP_MODUL_SETS_AKTIV = false;/, 'const VP_MODUL_SETS_AKTIV = true;'), { SAB });
+      anQuelle !== basis.replace(/const VP_MODUL_SETS_AKTIV = (true|false);/, 'const VP_MODUL_SETS_AKTIV = true;'), { SAB });
   }
 
   // ---- 1. Der Schalter liegt: alles rechnet wie vor V7 -----------------------------------------
   fs.writeFileSync(dbPfad, JSON.stringify(grunddb(), null, 1));
-  fs.writeFileSync(QUELLE, basis);
+  fs.writeFileSync(QUELLE, ausQuelle);
   let api = await starteServer();
   let tok = await api.anmelden('anna');
   /* GEMISCHTE SELTENHEITEN mit Absicht: Traegen alle Vorlagen gewoehnliche Module, reisst die

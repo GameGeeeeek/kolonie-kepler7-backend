@@ -55,6 +55,10 @@ const bcrypt = require(path.join(WURZEL, 'node_modules', 'bcryptjs'));
 const crypto = require('crypto');
 const hash = bcrypt.hashSync('test1234', 10);
 const ANNA = crypto.randomUUID();
+/* Ein ZWEITES Konto, seit die Modulliste zwei Sichten hat (05.09.2026): Der Besitzer sieht ALLES,
+   was in seiner Station steckt, ein Fremder nur die WIRKENDEN Stuecke. Ohne diesen Fremden misst
+   4b nur noch die Besitzersicht - und die Scheibe waere unbeobachtet. */
+const BEN = crypto.randomUUID();
 const dbPfad = path.join(os.tmpdir(), 'kepler-vpsets-' + process.pid + '.json');
 let srv = null;
 
@@ -63,8 +67,11 @@ const save = (id, name) => ({ resources: { energie: 5e5, erz: 5e5, kristalle: 5e
   player: { id, name }, credits: 9000, xp: 1000, prestige: 0, battlePoints: 0, lastTick: Date.now() });
 function grunddb() {
   return {
-    users: { anna: { userId: ANNA, username: 'anna', passwordHash: hash, createdAt: Date.now() } },
-    private: { [ANNA]: { 'kepler7-save-v3': JSON.stringify(save(ANNA, 'anna')) } },
+    users: { anna: { userId: ANNA, username: 'anna', passwordHash: hash, createdAt: Date.now() },
+             ben:  { userId: BEN,  username: 'ben',  passwordHash: hash, createdAt: Date.now() } },
+    private: { [ANNA]: { 'kepler7-save-v3': JSON.stringify(save(ANNA, 'anna')),
+               },
+               [BEN]:  { 'kepler7-save-v3': JSON.stringify(save(BEN, 'ben')) } },
     shared: {}, resetTokens: {},
     galaxy: { npcEmpireStrength: 1, marketTrend: 1, collapsedSystems: {}, controlledSystems: {},
       news: [], activeWar: null, activeWormhole: null, lastTick: Date.now(), factions: {},
@@ -246,6 +253,8 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
   });
   r = await api.hole('/vorposten', tok);
   const liste = (r.body && r.body.liste) || [];
+  const tokFremd = await api.anmelden('ben');
+  const listeFremd = ((await api.hole('/vorposten', tokFremd)).body || {}).liste || [];
   const slotsVon = (z, st) => (vpVon(liste, 's-' + z + '-' + st) || {}).slots;
   const leiterSlots = st => Math.max(0, Math.min(5, st - zweigAb + 1));
   check('2-anker: alle 24 Zweig/Stufe-Kombinationen sind gemessen',
@@ -295,11 +304,17 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
     { module: festVoll && festVoll.module.length, sets: festVoll && festVoll.sets });
   /* Gemessen wird die SCHEIBE, nicht die Ablehnung des Einbau-Endpunkts (die steht in
      test_vorposten_http.js, Abschnitt 9): Das sechste Modul liegt hier absichtlich im Dokument,
-     damit sichtbar wird, dass ein Modul ohne Steckplatz weder gezaehlt noch gezeigt wird. */
-  check('4b: auf der Werft faellt das sechste Modul aus der Anzeige, und die Sternwacht fehlt',
-    !!werftVoll && werftVoll.module.length === 5 && !werftVoll.sets.includes('sternwacht')
-    && werftVoll.sets.includes('trutzring'),
-    { module: werftVoll && werftVoll.module.length, sets: werftVoll && werftVoll.sets });
+     damit sichtbar wird, dass ein Modul ohne Steckplatz weder gezaehlt noch gezeigt wird.
+     DIE SCHEIBE HAT SEIT 05.09.2026 ZWEI SEITEN. Sie begrenzt weiterhin die WIRKUNG (die
+     Sternwacht steht nicht) und die Sicht eines FREMDEN - nur die wirkenden Stuecke erklaeren die
+     Staerke. Der BESITZER dagegen sieht auch das ueberzaehlige Stueck: Es gehoert ihm weiter,
+     /vorposten/modul/ausbauen gibt es heraus, und ohne die Zeile haette er dafuer keinen Knopf. */
+  const werftFremd = vpVon(listeFremd, 'an-werft-voll');
+  check('4b: die Wirkung und die Fremdsicht sind auf fuenf geschnitten, die Besitzersicht nicht',
+    !!werftVoll && !!werftFremd && werftVoll.module.length === 6 && werftFremd.module.length === 5
+    && !werftVoll.sets.includes('sternwacht') && werftVoll.sets.includes('trutzring'),
+    { besitzer: werftVoll && werftVoll.module.length, fremd: werftFremd && werftFremd.module.length,
+      sets: werftVoll && werftVoll.sets });
 
   // ---- 5. Was nicht in einem Steckplatz steckt, zaehlt auch nicht zum Set -----------------------
   check('5a: das sechste Modul einer Werft zaehlt nicht zum Set',

@@ -1041,3 +1041,77 @@ laufende Frist jedem Betrachter.
 Prüfung `0c` hat dabei ihre Richtung gewechselt — wie schon bei den Modul-Sets. Beide Läufe
 erzwingen ihren Schalterzustand ohnehin selbst (`ausQuelle`/`anQuelle`); ohne diese Bauart hätte
 genau dieser Commit den Aus-Lauf still in einen zweiten An-Lauf verwandelt.
+
+### Die adversarische Durchsicht der Umrüstung (05.09.2026)
+
+Neun Befunde, sieben davon echt. Die Umrüstung prüfte beim **Start** sauber — und ließ die
+24 Stunden danach völlig unbewacht. Alles, was hier steht, ist Folge derselben Frage: *Was kann in
+der Frist passieren, was der Start gerade verhindert hat?*
+
+**Drei Riegel während der Frist.** `/vorposten/umruesten` lehnt eine Station mit sechs Modulen ab,
+weil eines wirkungslos zurückbliebe — genau das ließ sich danach von Hand herstellen:
+
+- `modul/einbauen` rechnet jetzt mit der **kleineren** der beiden Steckplatzzahlen (heutiger Zweig,
+  Zielzweig). Ohne diese Zeile wanderte in den 24 Stunden ein sechstes Modul in einen Ring, der
+  gerade Handelsknoten wird — danach wirkungslos, unsichtbar und bis zum Abbau nicht mehr
+  herauszuholen.
+- `aufgeben` weist eine laufende Umrüstung ab. Der Riegel galt bisher nur in eine Richtung
+  („eine Station, die verschwindet, wird nicht umgebaut"); andersherum verlor der Besitzer die
+  teuerste Investition des Features ersatzlos.
+- `projekt/starten` weist ein **zweiggebundenes** Vorhaben ab, dessen Zweig nicht das Umbauziel
+  ist. Ein Projekt ohne Bindung (Tiefenhorchposten) bleibt erlaubt. Kein Datenverlust, aber
+  verbrannte Rohstoffe für etwas, das vom ersten Tag an nicht wirkt — und abbrechen gibt es
+  bewusst nicht.
+
+**Der Garnisonsdeckel kann jetzt SINKEN.** Die Umrüstung ist der erste Weg dorthin: Ein
+Festungsring auf Stufe 8 hält 20 300 Schiffe, derselbe Bau als Handelsknoten 11 900. Ohne
+Gegenmaßnahme stünde die Garnison nach dem Wechsel dauerhaft über ihrem Deckel und verteidigte
+weiter — ein Wert, den `/vorposten/stationieren` nie zugelassen hätte. Gelöscht wird nichts
+(„Deckel dürfen niemals Daten löschen"): Was nicht mehr hineinpasst, geht über `pushPendingReward`
+zurück an den, der es gestellt hat, im selben `vorposten-umruestung`-Bündel. **Der Besitzer gibt
+zuerst ab** — es ist seine Entscheidung; erst wenn sein Anteil nicht reicht, gibt der Verbündete
+den Rest, und er erfährt davon (`alsVerbuendeter: true`). Innerhalb eines Kontos wird anteilig
+genommen, die Rundungsreste aus den größten Stapeln, damit die Zahl exakt stimmt.
+
+**Der Server bucht die Kosten selbst ab.** Ausbau und Projekt überlassen das dem Client — dort
+begrenzt eine Abklingzeit bzw. „jedes Vorhaben nur einmal", wie oft die Handlung überhaupt geht.
+Die Umrüstung hat keine solche Grenze und ändert mit dem Zweig genau die Zahlen, für die der
+Server Autorität ist. Vorbild ist `modul/ausbauen`: prüfen, abbuchen, `newResources` und
+`saveVersion` zurückmelden. Die Prüfung steht am **Ende** der Riegelkette — eine aus einem anderen
+Grund abgelehnte Umrüstung darf nichts kosten.
+
+**Der Besitzer sieht seine Module vollständig.** `vorpostenFuerClient` schnitt die Liste für alle
+auf `slots`. Für Fremde ist das richtig (nur die wirkenden Stücke erklären die Stärke), für den
+Besitzer war es ein Sackgassen-Zustand: `modul/ausbauen` gibt das überzählige Stück heraus, aber
+er sah es nicht und hatte keinen Knopf dafür. Die Zeile „Kein Steckplatz mehr dafür" im Spiel war
+unerreichbar.
+
+### Die Gegenproben nach der Durchsicht
+
+`tests/test_vorposten_umruesten_http.js` (34 Prüfungen), Port 3264, **dreizehn** Gegenproben:
+
+| Sabotage | fällt | Mitläufer und warum |
+|---|---|---|
+| `schalter` | `1a` | |
+| `module` | `3d` | `3e`, `3f`: die Umrüstung gelingt statt abgelehnt zu werden und kostet |
+| `sofort` | `4a`, `5a`, `5b` | `5d`: der Zweig steht schon beim Start, das Lager wird zum neuen Satz abgerechnet |
+| `projektweg` | `5c` | |
+| `lager` | `5d` | |
+| `lagerreihenfolge` | `5d` | der Zweig wechselt VOR der Abrechnung |
+| `kosten` | `3e`, `3f` | `3a`: ohne Ablehnung in `3e` läuft die Umrüstung schon |
+| `garnison` | `6a`, `6b`, `6c` | |
+| `reihenfolge` | `6a` | `6c`: die Rückgabe des Besitzers deckt die Summe nicht mehr |
+| `modulscheibe` | `7a` | |
+| `einbau` | `2f` | |
+| `abbauriegel` | `2g` | |
+| `projektriegel` | `2h` | |
+
+**Prüfung `5d` maß vorher nichts.** Sie fragte „ist irgendetwas angekommen?" — und das ist auch
+dann wahr, wenn zum **falschen Satz** abgerechnet wurde. Jetzt stehen zwei Referenz-Stationen mit
+identischem `lagerSeit` daneben, eine je Zweig; die Meldung muss am Festungssatz liegen und
+deutlich unter dem Handelssatz (gemessen: 46 884 gegen 46 882 und 168 767). Die Gegenprobe
+`lagerreihenfolge` — der Zweig wechselt vor der Abrechnung — fällt seither, vorher nicht.
+
+Und `tests/test_vorposten_sets_http.js`, Prüfung `4b`, hat ein zweites Konto bekommen: Die Scheibe
+hat seit dieser Durchsicht zwei Seiten, und ohne einen Fremden im Test wäre die eine davon
+unbeobachtet.

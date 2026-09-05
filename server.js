@@ -13771,6 +13771,66 @@ function vorpostenGarnisonNachziehen(doc) {
   }
   doc.garnison = summe;
 }
+/* WAS NICHT MEHR HINEINPASST, FLIEGT ZURUECK (Durchsicht 05.09.2026, V8). Die Umruestung ist der
+   erste Weg, auf dem `garnisonMax` SINKEN kann: Ein Festungsring auf Stufe 8 haelt 20300 Schiffe,
+   derselbe Bau als Handelsknoten nur 11900. Ohne diese Kappung stuende die Garnison nach dem
+   Wechsel dauerhaft ueber ihrem Deckel und verteidigte munter weiter - ein Wert, den
+   /vorposten/stationieren nie zugelassen haette, und eine Station, die als Handelsknoten haerter
+   ist als jeder ehrlich gebaute. Wegwerfen kommt nicht in Frage („Deckel duerfen niemals Daten
+   loeschen"), also gehen die ueberzaehligen Schiffe denselben Weg wie beim Abbau: ueber
+   pushPendingReward zurueck an den, der sie gestellt hat.
+   DER BESITZER GIBT ZUERST ab. Es ist seine Entscheidung und sein Vorposten; ein Verbuendeter,
+   der gestern Schiffe geschickt hat, soll sie nicht als Erster verlieren, weil jemand anders
+   umbaut. Innerhalb eines Kontos wird ANTEILIG genommen (wie beim Kampfverlust), damit keine
+   Schiffsklasse ganz verschwindet, solange es Alternativen gibt; die Rundungsreste kommen aus den
+   groessten Stapeln, damit die Zahl am Ende EXAKT stimmt. */
+function vorpostenGarnisonAbziehen(teil, n) {
+  const raus = {};
+  const typen = Object.keys(teil || {}).filter(t => (Math.round(Number(teil[t]) || 0)) > 0);
+  const summe = typen.reduce((a, t) => a + Math.round(Number(teil[t]) || 0), 0);
+  const nimm = Math.min(Math.floor(n) || 0, summe);
+  if (!(nimm > 0)) return raus;
+  let offen = nimm;
+  for (const t of typen) {
+    const hat = Math.round(Number(teil[t]) || 0);
+    const weg = Math.min(hat, Math.floor(hat * nimm / summe));
+    if (weg <= 0) continue;
+    teil[t] = hat - weg;
+    raus[t] = (raus[t] || 0) + weg;
+    offen -= weg;
+  }
+  /* Nach der anteiligen Runde fehlen hoechstens `typen.length - 1` Schiffe (jede Abrundung
+     verschluckt weniger als eines) - die Schleife laeuft also ein paar Dutzend Mal, nicht
+     zwanzigtausend. */
+  while (offen > 0) {
+    const t = typen.filter(x => (Math.round(Number(teil[x]) || 0)) > 0)
+      .sort((a, b) => (Math.round(Number(teil[b]) || 0)) - (Math.round(Number(teil[a]) || 0)))[0];
+    if (!t) break;
+    teil[t] = Math.round(Number(teil[t]) || 0) - 1;
+    raus[t] = (raus[t] || 0) + 1;
+    offen--;
+  }
+  for (const t of Object.keys(teil)) if (!((Math.round(Number(teil[t]) || 0)) > 0)) delete teil[t];
+  return raus;
+}
+/* Kappt die Garnison auf `max` und meldet je Konto, was herausgenommen wurde. Ruft NICHT
+   vorpostenSchreib - der Aufrufer schreibt ohnehin, und `doc.garnison` zieht dort nach. */
+function vorpostenGarnisonKappen(doc, max) {
+  const deckel = Math.max(0, Math.floor(Number(max) || 0));
+  let rest = vorpostenGarnisonAnzahl(doc) - deckel;
+  if (!(rest > 0)) return null;
+  const von = vorpostenGarnisonVon(doc);
+  const raus = {};
+  const reihenfolge = Object.keys(von).sort((a, b) => (a === doc.besitzer ? -1 : (b === doc.besitzer ? 1 : 0)));
+  for (const uid of reihenfolge) {
+    if (rest <= 0) break;
+    const weg = vorpostenGarnisonAbziehen(von[uid] || {}, rest);
+    const anzahl = Object.values(weg).reduce((a, n) => a + n, 0);
+    if (anzahl > 0) { raus[uid] = weg; rest -= anzahl; }
+    if (!Object.keys(von[uid] || {}).length) delete von[uid];
+  }
+  return Object.keys(raus).length ? raus : null;
+}
 /* Verluste treffen JEDEN Beitragenden mit derselben QUOTE, nicht die Gesamtzahl mit anschliessender
    Verteilung. Der Unterschied ist eine Rundung je Konto und Schiffstyp; dafuer ist die Rechnung
    nachvollziehbar und niemand verliert Schiffe, die er nie gestellt hat. */
@@ -14208,7 +14268,17 @@ function vorpostenFuerClient(doc, userId, jetzt, karte) {
        Angreifer soll sehen koennen, warum diese Station haerter ist als ihre Stufe vermuten laesst
        (dieselbe Offenheit wie bei Verteidigung und Garnisonszahl). */
     slots: vpModulSlotsVon(doc),
-    module: (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlotsVon(doc)),
+    /* DER BESITZER SIEHT ALLES, was in seiner Station steckt - auch was ueber `slots` hinausragt
+       (Durchsicht 05.09.2026). Fremde sehen nur die WIRKENDEN Stuecke, denn nur die erklaeren die
+       Staerke. Faellt die Steckplatzzahl je unter die Zahl der eingebauten Module (Umruestung zu
+       einem Zweig ohne Festungs-Zuschlag, oder ein zurueckgelegter Schalter), dann wirkt das
+       ueberzaehlige Stueck nicht mehr - es gehoert dem Besitzer aber weiter, und
+       /vorposten/modul/ausbauen gibt es auch heraus (die Route liest `doc.module[platz]` ohne
+       Steckplatzgrenze). Mit der Scheibe fuer alle haette er dafuer keinen Knopf und saehe es gar
+       nicht: die Zeile „Kein Steckplatz mehr dafuer" im Frontend waere unerreichbar. */
+    module: eigener
+      ? (Array.isArray(doc.module) ? doc.module : []).slice()
+      : (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlotsVon(doc)),
     modulBoni: st.modulBoni || null,
     /* V7: Welche Sets vollstaendig stecken und was sie zusaetzlich bringen - fuer JEDEN sichtbar,
        wie Steckplaetze, Verteidigung und Garnisonszahl. Ein Angreifer soll sehen koennen, warum
@@ -14556,6 +14626,17 @@ app.post('/api/vorposten/projekt/starten', authMiddleware, async (req, res) => {
     return res.status(404).json({ error: 'Dieses Vorhaben steht noch nicht zur Verfügung.', inaktiv: true });
   }
   const jetzt = Date.now();
+  /* Ein ZWEIGGEBUNDENES Vorhaben, waehrend die Station gerade den Zweig wechselt, waere ab der
+     ersten Sekunde wirkungslos (vpProjektBoni haengt an Projekt UND Ausrichtung). Kein
+     Datenverlust - aber verbrannte Rohstoffe, und abbrechen gibt es bewusst nicht. Ein Projekt
+     OHNE Zweigbindung (Tiefenhorchposten) bleibt erlaubt. */
+  const umbauProj = vorpostenUmruestenLaeuft(doc);
+  if (def.zweig && umbauProj && umbauProj.ziel !== def.zweig) {
+    return res.status(400).json({ error: '„' + def.name + '" gehört zur Ausrichtung „' +
+      (VORPOSTEN_ZWEIGE[def.zweig] || {}).name + '", und diese Station wird gerade zum „' +
+      (VORPOSTEN_ZWEIGE[umbauProj.ziel] || {}).name + '" umgerüstet - es wäre vom ersten Tag an wirkungslos.',
+      umruestung: true, umruestenAb: umbauProj.ab, umruestenZiel: umbauProj.ziel });
+  }
   const laeuft = vpProjektLaeuft(doc, jetzt);
   if (laeuft) {
     return res.status(400).json({ error: 'An dieser Station läuft bereits „' + (vpProjektDef(laeuft.key) || {}).name +
@@ -14617,10 +14698,21 @@ app.post('/api/vorposten/modul/einbauen', authMiddleware, async (req, res) => {
   const doc = vorpostenLies(sys);
   if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
   if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer bestückt seinen Vorposten.' });
-  const slots = vpModulSlotsVon(doc);
+  /* WAEHREND EINER UMRUESTUNG GILT DIE KLEINERE ZAHL (Durchsicht 05.09.2026). Ohne diese Zeile
+     liess sich in den 24 Stunden ein sechstes Modul in einen Festungsring bauen, der gerade zur
+     Werft wird - nach dem Wechsel waere es wirkungslos, unsichtbar (vorpostenFuerClient schneidet)
+     und bis zum Abbau nicht mehr herauszuholen. Genau der Schaden, den die Ablehnung in
+     /vorposten/umruesten verhindern soll; sie prueft nur den Stand BEIM START. */
+  const zielUmbau = (vorpostenUmruestenLaeuft(doc) || {}).ziel;
+  const slots = Math.min(vpModulSlotsVon(doc), zielUmbau ? vpModulSlots(doc.stufe, zielUmbau) : Infinity);
   if (slots < 1) return res.status(400).json({ error: 'Steckplätze gibt es erst ab Stufe ' + VORPOSTEN_ZWEIG_AB + '.', keineSlots: true, abStufe: VORPOSTEN_ZWEIG_AB });
   if (!Array.isArray(doc.module)) doc.module = [];
-  if (doc.module.length >= slots) return res.status(400).json({ error: 'Alle ' + slots + ' Steckplätze sind belegt - bau erst eines aus.', voll: true, slots });
+  if (doc.module.length >= slots) return res.status(400).json({
+    error: zielUmbau && slots < vpModulSlotsVon(doc)
+      ? 'Nach der Umrüstung zum „' + VORPOSTEN_ZWEIGE[zielUmbau].name + '" gibt es nur noch ' + slots +
+        ' Steckplätze - so lange nimmt die Station nicht mehr auf.'
+      : 'Alle ' + slots + ' Steckplätze sind belegt - bau erst eines aus.',
+    voll: true, slots, umruestung: !!zielUmbau });
   const user = findUserById(req.userId);
   if (!user || !vpModulNehmen(user, instKey)) return res.status(400).json({ error: 'Dieses Modul liegt nicht in deinem Bestand.' });
   doc.module.push(instKey);
@@ -14816,8 +14908,9 @@ async function vorpostenAbbauTick() {
   return fertig;
 }
 
-/* V8: UMRUESTEN. Der Server prueft, WAS moeglich ist, und wann es fertig ist; die Rohstoffe bucht
-   der Client aus seinem Spielstand ab - dasselbe Muster wie Ausbau und Projekt. */
+/* V8: UMRUESTEN. Der Server prueft, WAS moeglich ist, wann es fertig ist - und bucht die
+   Rohstoffe SELBST ab (anders als Ausbau und Projekt; die Begruendung steht unten an der
+   Pruefung). */
 app.post('/api/vorposten/umruesten', authMiddleware, async (req, res) => {
   if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
   /* Der Schalter steht HIER, an der Stelle, die die Wahl AUSFUEHRT - nicht nur an der Anzeige.
@@ -14866,13 +14959,34 @@ app.post('/api/vorposten/umruesten', authMiddleware, async (req, res) => {
         ' Module. Bau erst ' + (drinU - plaetzeZiel) + ' aus - sonst läge es hier wirkungslos.',
       zuVieleModule: true, module: drinU, plaetze: plaetzeZiel });
   }
+  /* DER SERVER ZAEHLT NACH UND BUCHT SELBST AB (Durchsicht 05.09.2026). Ausbau und Projekt
+     ueberlassen die Buchung dem Client - dort begrenzt eine Abklingzeit bzw. das „jedes Vorhaben
+     nur einmal", wie oft die Handlung ueberhaupt geht. Die Umruestung hat keine solche Grenze: Sie
+     ist beliebig oft wiederholbar und aendert mit dem Zweig GENAU die Zahlen, fuer die der Server
+     Autoritaet ist (Verteidigung, Kern, Garnisonsdeckel). Eine Kostenangabe, die nur das Frontend
+     durchsetzt, waere hier keine. Vorbild ist /vorposten/modul/ausbauen: pruefen, abbuchen, den
+     neuen Stand samt `saveVersion` zurueckmelden - der Client gleicht sich an, statt selbst zu
+     zahlen. Die Pruefung steht ganz am Ende: Eine aus einem anderen Grund abgelehnte Umruestung
+     darf nichts kosten. */
+  const saveU = astLeseSave(req.userId);
+  if (!saveU) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern, dann umrüsten.' });
+  saveU.resources = saveU.resources || {};
+  for (const [r, menge] of Object.entries(VP_UMRUESTEN_KOSTEN)) {
+    if ((Number(saveU.resources[r]) || 0) < menge) {
+      return res.status(400).json({ error: 'Die Umrüstung kostet mehr, als du hast - es fehlt ' + r + '.',
+        kosten: VP_UMRUESTEN_KOSTEN, fehlt: r });
+    }
+  }
+  for (const [r, menge] of Object.entries(VP_UMRUESTEN_KOSTEN)) saveU.resources[r] = (Number(saveU.resources[r]) || 0) - menge;
   doc.umruestenAb = jetztU + VP_UMRUESTEN_MS;
   doc.umruestenZiel = ziel;
   vorpostenSchreib(doc);
+  const saveVersionU = setSaveValue(req.userId, JSON.stringify(saveU));
   console.log('[vorposten] umruestung gestartet userId=' + req.userId + ' sys=' + sys + ' von=' + doc.zweig + ' nach=' + ziel);
   await saveDb();
   res.json({ ok: true, umruestenAb: doc.umruestenAb, umruestenZiel: ziel, dauerMs: VP_UMRUESTEN_MS,
-    kosten: VP_UMRUESTEN_KOSTEN, vorposten: vorpostenFuerClient(doc, req.userId, jetztU) });
+    kosten: VP_UMRUESTEN_KOSTEN, newResources: saveU.resources, saveVersion: saveVersionU,
+    vorposten: vorpostenFuerClient(doc, req.userId, jetztU) });
 });
 
 /* Schliesst fertige Umruestungen ab - im galaxyTick, wie der Abbau. Die WERTE aendern sich erst
@@ -14903,10 +15017,26 @@ async function vorpostenUmruestenTick() {
        Ausbau. Wer von der Festung weggeht, verliert Kern-Maximum und damit auch LP; wer zur
        Festung wird, bekommt ein hoeheres Dach, aber keine Reparatur. */
     const st = vorpostenStufeVon(doc);
+    /* Der neue Garnisonsdeckel gilt ab JETZT, und was nicht mehr hineinpasst, fliegt zurueck
+       (Begruendung bei vorpostenGarnisonKappen). Gerechnet wird mit vorpostenWerte, also MIT
+       Modulen, Projekten und Sets - derselben Zahl, gegen die /vorposten/stationieren prueft. */
+    const stNeu = vorpostenWerte(doc);
+    const zurueck = vorpostenGarnisonKappen(doc, stNeu.garnisonMax) || {};
     vorpostenSchreib(doc);
-    pushPendingReward(doc.besitzer, { type: 'vorposten-umruestung', system: doc.sys, stufe: doc.stufe || 1,
+    const meldung = { type: 'vorposten-umruestung', system: doc.sys, stufe: doc.stufe || 1,
       name: st.name, vonZweig: vorher, vonZweigName: (VORPOSTEN_ZWEIGE[vorher] || {}).name || vorher,
-      zweig: l.ziel, zweigName: (VORPOSTEN_ZWEIGE[l.ziel] || {}).name || l.ziel, zeit: jetzt });
+      zweig: l.ziel, zweigName: (VORPOSTEN_ZWEIGE[l.ziel] || {}).name || l.ziel,
+      garnisonMax: stNeu.garnisonMax, zeit: jetzt };
+    /* Der Besitzer bekommt seine Meldung IMMER - es ist sein Umbau, auch wenn nichts zurueckkommt.
+       Ein Verbuendeter hoert nur dann davon, wenn er wirklich Schiffe zurueckbekommt: Er hat den
+       Umbau nicht bestellt, und eine Meldung ohne Inhalt waere blosses Rauschen. */
+    for (const uid of new Set(Object.keys(zurueck).concat([doc.besitzer]))) {
+      if (!uid) continue;
+      if (uid !== doc.besitzer && !zurueck[uid]) continue;
+      pushPendingReward(uid, Object.assign({}, meldung, {
+        garnisonZurueck: Object.assign({}, zurueck[uid] || {}),
+        alsVerbuendeter: uid !== doc.besitzer }));
+    }
     fertig++;
     console.log('[vorposten] umruestung fertig sys=' + doc.sys + ' von=' + vorher + ' nach=' + l.ziel);
   }
@@ -14934,6 +15064,18 @@ app.post('/api/vorposten/aufgeben', authMiddleware, async (req, res) => {
   if (laeuft) {
     return res.status(400).json({ error: 'Der Abbau läuft bereits - noch ' + Math.ceil((laeuft - jetzt) / 60000) + ' Minuten.',
       laeuft: true, abbauAb: laeuft });
+  }
+  /* DER RIEGEL GILT IN BEIDE RICHTUNGEN (Durchsicht 05.09.2026). /vorposten/umruesten weist einen
+     laufenden Abbau ab („eine Station, die verschwindet, wird nicht umgebaut") - hier fehlte die
+     Gegenrichtung. Wer die teuerste Investition des Features bezahlt und dann abbaut, verliert sie
+     ersatzlos: Entweder meldet der Umruest-Tick stolz einen fertigen Sternenmarkt, den es eine
+     Stunde spaeter nicht mehr gibt, oder der Abbau-Tick loescht das Dokument zuerst und die
+     Umruestung verschwindet ohne jede Meldung. */
+  const umbauLaeuft = vorpostenUmruestenLaeuft(doc);
+  if (umbauLaeuft) {
+    return res.status(400).json({ error: 'Die Umrüstung läuft - noch ' + Math.ceil((umbauLaeuft.ab - jetzt) / 60000) +
+      ' Minuten. Erst wenn sie fertig ist, lässt sich der Vorposten abbauen.',
+      umruestung: true, umruestenAb: umbauLaeuft.ab, umruestenZiel: umbauLaeuft.ziel });
   }
   doc.abbauAb = jetzt + VORPOSTEN_ABBAU_MS;
   vorpostenSchreib(doc);

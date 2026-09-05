@@ -17724,7 +17724,7 @@ const KAMPFTEXT_AKTIV = true;
 // Umgelegt wird per Merge, unmittelbar vor dem Frontend-PR (Hausregel: Backend zuerst live). Solange
 // er aus ist, lehnt die Route jede Art ausser npc mit 503 ab, und /api/attack bestellt nichts -
 // der Kampf selbst laeuft unveraendert. Der Notaus 'kampftext' schaltet zur Laufzeit alles ab.
-const KAMPFTEXT_E2_AKTIV = false;
+const KAMPFTEXT_E2_AKTIV = true;
 const KAMPFTEXT_AI_CORE_URL = (process.env.AI_CORE_URL || 'http://192.168.178.45:8000').replace(/\/+$/, '');
 const KAMPFTEXT_AI_CORE_KEY = process.env.AI_CORE_API_KEY || '';
 // Modellwahl aus E0 (28.08.2026): qwen3.5:4b. 2b war unbrauchbar - erfundene Schiffsnamen, ein

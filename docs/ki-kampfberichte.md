@@ -357,3 +357,27 @@ bleibt grün, das ist die Gegenrichtung. 122 Prüfungen.
 **Offen: die Temperatur der Auslieferung.** `kampftextAnfrage` schickt fest `temperature: 0.7`. Die
 Messung spricht für 0.2, betraf aber nur die E2-Arten; `npc` ist live und dort nicht gemessen. Vor
 der Umstellung ein Lauf über `--arten npc --alle-faelle --temperaturen 0.7,0.2`.
+
+### npc-Temperaturvergleich (05.09.2026): Temperatur 0.2, und drei Befunde
+
+`npc` ist live, deshalb wurde er vor der Temperaturumstellung eigens nachgemessen (vier Fälle je
+Temperatur): **je 1 von 4 verworfen, kein Ausgang verdreht, 0.2 nicht schlechter als 0.7.** Zusammen
+mit dem E2-Vergleich (dort 2 von 8 falsch bei 0.7 gegen 0 von 8 bei 0.2) ist die Umstellung damit
+gedeckt: `KAMPFTEXT_TEMPERATUR = 0.2`, ein benannter Wert mit der Messung im Kommentar.
+
+Drei Befunde aus denselben acht Texten:
+
+1. **Ein Fehlalarm der Zahlen-Sperre.** „ein Sieg für Kolonie Kepler-7" wurde mit „erfundene Zahl 7"
+   verworfen – ein sauberer Text, weggeworfen für den Namen des Spiels, in dem er steht.
+   `kampftextOhneSpielnamen` entfernt den **Namen** vor dem Zählen, nicht die Ziffer: „7 Wellen"
+   fällt weiter auf. Wächter 14u (die Gegenrichtung: der Text muss durchkommen).
+2. **Stückzahl vor dem allgemeinen Wort für Schiffe.** „Zwei Schiffe gegen einen Gegner" bei 45
+   Quantenkreuzern und 30 Wächtern, „zwei unserer Einheiten" bei zwei verlorenen *Typen*. Die Sperre
+   kennt jetzt `schiff/schiffe/schiffen/einheit/einheiten`, mit höchstens **einem** Besitz- oder
+   Artikelwort dazwischen. Wächter 14v.
+3. **Fremde Schriftzeichen.** „Unsere Treffer landeten精准 auf den Panzerplatten" – zwei chinesische
+   Zeichen im deutschen Text. Keine Falschaussage, aber im Spiel unlesbar. Die sechste Sperre
+   erlaubt deutsche Buchstaben, Ziffern und die üblichen Satzzeichen; alles andere fällt auf
+   (Zeichenklasse, keine Liste). Wächter 14w.
+
+126 Prüfungen. Gegenprobe: am Stand davor fallen genau 14u, 14v, 14w und 14x (die Temperatur).

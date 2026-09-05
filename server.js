@@ -13246,7 +13246,15 @@ const VP_LAGER_ANTEILE = { erz: 0.225, kristalle: 0.075, deuterium: 0.06 };
 
    Etappe a: Verbuendete duerfen GARNISON beisteuern und nur ihre eigenen Schiffe zurueckrufen.
    Etappe b: Verbuendete nutzen den Flugzeit-Bonus mit (`verbuendet` im Client-Dokument). */
-const VP_ALLIANZ_AKTIV = false;
+/* UMGELEGT AM 05.09.2026 (Etappe V5, Frontend-Haelfte). Das Frontend liest `verbuendet` und
+   `garnisonVon` jetzt: Der Allianzpartner sieht am fremden Vorposten zwei zusaetzliche
+   Menueeintraege (Garnison beisteuern, seine eigenen Schiffe zurueckrufen), erfaehrt in der
+   Stationstafel, wie viele der Schiffe dort seine sind, nutzt den Flugzeit-Bonus mit und bekommt
+   beim Fall und beim Abbau seine EIGENE Meldung (`alsVerbuendeter`) statt einer ueber fremdes
+   Eigentum. Die Eintraege kommen zum Angriff DAZU: Diese Route weist nur den eigenen Vorposten ab,
+   eine Allianzsperre gibt es dort nicht - ein Menue, das dem Verbuendeten das Angreifen naehme,
+   naehme ihm eine Moeglichkeit, die der Server erlaubt. */
+const VP_ALLIANZ_AKTIV = true;
 /* WIEVIEL DER GARNISON EIN VERBUENDETER HOECHSTENS BELEGT (Durchsicht 04.09.2026).
    Der Befund: `vorpostenVerbuendet` leitet das Recht aus `allianceTagOf` ab, also aus
    `db.shared['alliance:<TAG>:role:<uid>']` - und genau diesen Schluessel darf JEDES eingeloggte

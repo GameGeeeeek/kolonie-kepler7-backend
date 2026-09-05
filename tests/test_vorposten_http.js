@@ -47,6 +47,10 @@ const SAB = process.env.KEPLER_VP_SABOTAGE || '';
    damals nur, ob das Erwartete faellt, also fiel es nicht auf. Seit sie beide Richtungen misst,
    gehoert jede gemessene Folge in die Liste. */
 const MUSS_FALLEN = { schaden: ['4c'], abkling: ['4d'], rechte: ['1a', '1b', '2b'], typ: ['5b', '5c'], meldung: ['4h', '4h2'],
+  /* #50: `meinPlatz` ignoriert den Fremdanteil - Anzeige und Annahme laufen auseinander.
+     12d faellt MIT, und das ist Folge, kein Nebenschaden: Ohne den Anteil meldet die Anzeige nach
+     150 angenommenen Schiffen wieder 150 freie statt 0. GEMESSEN, nicht geschaetzt. */
+  meinplatz: ['12b', '12c', '12d'],
   kerndach: ['10a'], kerndachab: ['10c'], abbaufrist: ['6b', '6c', '6d', '6e', '6f'], abbaumodule: ['6g'], projektwirkung: ['11f', '11h'], projektzeit: ['11d'],
   zweigwahl: ['7e', '7f', '7g', '7h'], zweigwerte: ['7g'],
   // Etappe 3 (Stationsmodule): Die Listen sind gemessen, siehe Abschnitt 9.
@@ -215,6 +219,10 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
     else if (SAB === 'zweigwahl') geflippt = geflippt.replace('  const brauchtZweig = zielStufe === VORPOSTEN_ZWEIG_AB && !vorpostenZweigOk(doc.zweig);', '  const brauchtZweig = false;');
 
     else if (SAB === 'zweigwerte') geflippt = geflippt.replace('  if (!z || basis.stufe < VORPOSTEN_ZWEIG_AB) return basis;', '  return basis;');
+    /* #50: Die Anzeige rechnet den Fremdanteil NICHT mit - genau der Zustand vor dieser Etappe,
+       nur dass er jetzt auch in der gemeldeten Zahl steht. Anzeige und Annahme laufen auseinander. */
+    else if (SAB === 'meinplatz') geflippt = geflippt.replace('    meinPlatz: vorpostenFreierPlatz(doc, userId, st),',
+      '    meinPlatz: Math.max(0, st.garnisonMax - vorpostenGarnisonAnzahl(doc)),');
     // Stationsmodule (02.09.2026), zwei Haelften: der BESTAND (nimmt der Einbau wirklich eines weg?)
     // und die WIRKUNG (aendert ein eingebautes Modul die Werte?). Letztere reisst seit dem
     // 03.09.2026 auch 10a mit: Ohne Modulwirkung hebt die Kernpanzerung auch das Kern-Dach nicht.
@@ -747,6 +755,58 @@ const angriffMission = (id, sys) => ({ id, type: 'vorposten-angriff', targetId: 
   await stoppeServer();
 
   // ---- Auswertung: Gruen-Lauf ODER Gegenprobe (Regel 71) --------------------------------------
+  // ---- 12. #50: `meinPlatz` ist genau die Zahl, die stationieren auch annimmt ------------------
+  /* WARUM DAS DIE RICHTIGE EIGENSCHAFT IST. Die Rechnung „wieviel darf ICH noch schicken" stand
+     bisher nur im Endpunkt; der Client kannte sie nicht und zeigte einem Verbuendeten
+     `garnisonAnzahl von garnisonMax` - bei ihm die falsche Grenze, weil zusaetzlich der Fremdanteil
+     gilt. Er schickte, bekam „Nichts stationiert" und erfuhr den Grund nicht (#50).
+     Gemessen wird deshalb nicht die Formel, sondern die BINDUNG: Wer mehr schickt, als `meinPlatz`
+     sagt, bekommt genau `meinPlatz` angenommen. Laufen Anzeige und Annahme je auseinander, faellt
+     das hier - und zwar egal, welche der beiden sich geirrt hat. */
+  const SYSP = 'platzsys';
+  const ANTEIL = Number((roh.match(/const VP_ALLIANZ_GARNISON_ANTEIL = ([\d.]+);/) || [])[1]);
+  check('12-anker: der Fremdanteil steht im Quelltext (sonst misst 12b nichts)',
+    ANTEIL > 0 && ANTEIL < 1, { anteil: ANTEIL });
+  await aendereDb(d => {
+    // Allianz: ein Schluessel je Konto, genau wie allianceTagOf ihn liest.
+    d.shared['alliance:TST:role:' + ANNA] = JSON.stringify({ role: 'leader' });
+    d.shared['alliance:TST:role:' + BEN] = JSON.stringify({ role: 'member' });
+    schreibDoc(d, doc(SYSP, ANNA, 'anna', { stufe: 1, garnison: {}, garnisonVon: {} }));
+    for (const uid of [ANNA, BEN]) {
+      const sv = liesSave(d, uid);
+      sv.fleet = Object.assign({}, sv.fleet, { cruisers: 100000 });
+      sv.fleet.missions = [];
+      schreibSave(d, uid, sv);
+    }
+  });
+  const listeA = await s.j('/vorposten', { headers: kopf(tokA) });
+  const listeB = await s.j('/vorposten', { headers: kopf(tokB) });
+  const vpA = (listeA.body.liste || []).find(v => v.sys === SYSP) || null;
+  const vpB = (listeB.body.liste || []).find(v => v.sys === SYSP) || null;
+  check('12a: der Besitzer bekommt seinen freien Platz gemeldet - den ganzen Deckel',
+    !!vpA && vpA.meinPlatz === GARN_MAX1 && vpA.garnisonMax === GARN_MAX1,
+    { meinPlatz: vpA && vpA.meinPlatz, max: vpA && vpA.garnisonMax });
+  /* 12b: FUER DEN VERBUENDETEN IST ES WENIGER, naemlich der Fremdanteil - nicht der ganze Deckel.
+     Genau diese Zahl fehlte ihm bisher. */
+  check('12b: der Verbuendete bekommt den Fremdanteil gemeldet, nicht den ganzen Deckel',
+    !!vpB && vpB.meinPlatz === Math.floor(GARN_MAX1 * ANTEIL) && vpB.meinPlatz < (vpA ? vpA.meinPlatz : 0),
+    { verbuendet: vpB && vpB.meinPlatz, besitzer: vpA && vpA.meinPlatz, erwartet: Math.floor(GARN_MAX1 * ANTEIL) });
+  const vielB = await post(tokB, '/vorposten/stationieren', { system: SYSP, planetKey: 'home', composition: { cruisers: 99999 } });
+  const summeB = Object.values((vielB.body && vielB.body.angenommen) || {}).reduce((a, n) => a + n, 0);
+  check('12c: wer mehr schickt als `meinPlatz`, bekommt GENAU `meinPlatz` angenommen',
+    vielB.status === 200 && summeB === (vpB ? vpB.meinPlatz : -1),
+    { status: vielB.status, angenommen: summeB, gemeldet: vpB && vpB.meinPlatz });
+  const listeB2 = await s.j('/vorposten', { headers: kopf(tokB) });
+  const vpB2 = (listeB2.body.liste || []).find(v => v.sys === SYSP) || null;
+  check('12d: danach ist sein Platz aufgebraucht - die Anzeige zieht mit',
+    !!vpB2 && vpB2.meinPlatz === 0, { danach: vpB2 && vpB2.meinPlatz });
+  const listeA2 = await s.j('/vorposten', { headers: kopf(tokA) });
+  const vpA2 = (listeA2.body.liste || []).find(v => v.sys === SYSP) || null;
+  check('12e: der Besitzer hat weiter Platz - der Fremdanteil begrenzt nur Fremde',
+    !!vpA2 && vpA2.meinPlatz === GARN_MAX1 - summeB && vpA2.meinPlatz > 0,
+    { besitzer: vpA2 && vpA2.meinPlatz, erwartet: GARN_MAX1 - summeB });
+
+
   if (SAB) {
     /* BEIDE Richtungen, gemessen (03.09.2026): Bis hierher prueft die Auswertung nur, ob das
        Erwartete gefallen IST - und meldete danach "genau [...] gefallen", wobei sie die ERWARTUNG

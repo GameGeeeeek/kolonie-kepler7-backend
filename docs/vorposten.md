@@ -1206,3 +1206,24 @@ Kartenbeschriftung, Listenzeile) nur der eigene, **weit** (Menükopf, Tafel, Too
 **Satz** (Meldung) nur der eigene. Der Befund, der zu dieser Regel geführt hat, kam von einer
 Codex-Durchsicht: Kartenbeschriftung, Tooltip und der Schnappschuss der Angriffsmission trugen
 zunächst nur den Stufennamen.
+
+## #50: `meinPlatz` — wieviel DIESER Betrachter noch schicken darf (05.09.2026)
+
+Die Rechnung „wieviel darf ich noch stationieren" stand nur in `/vorposten/stationieren`. Der
+Client kannte sie nicht und zeigte einem Verbündeten `garnisonAnzahl von garnisonMax` — bei ihm die
+**falsche** Grenze, weil zusätzlich der Fremdanteil gilt. Er schickte Schiffe, bekam „Nichts
+stationiert" zurück und erfuhr den Grund nicht.
+
+`vorpostenFreierPlatz(doc, userId, werte)` ist jetzt die **eine** Stelle; der Endpunkt und
+`vorpostenFuerClient` nehmen dieselbe Funktion. Sie ein zweites Mal aufzuschreiben wäre die
+Kopie-Familie, die in diesem Projekt schon mehrfach auseinandergelaufen ist.
+
+Zwei Deckel, der zweite nur für Fremde: der freie Platz bis `garnisonMax`, und für Nicht-Besitzer
+zusätzlich der Anteil **aller** Fremden zusammen (nicht je Konto — sonst umgeht man ihn mit einem
+zweiten Konto, das sich die Mitgliedschaft genauso selbst gibt). Der Besitzer ist unbegrenzt.
+
+**Gemessen wird nicht die Formel, sondern die Bindung** (`test_vorposten_http.js`, Abschnitt 12):
+Wer mehr schickt, als `meinPlatz` sagt, bekommt genau `meinPlatz` angenommen. Laufen Anzeige und
+Annahme je auseinander, fällt das — egal, welche der beiden sich geirrt hat. Gegenprobe
+`meinplatz` (die Anzeige ignoriert den Fremdanteil) lässt `12b`, `12c` und `12d` fallen; `12d` ist
+Folge, kein Nebenschaden, und steht gemessen in der Pflichtliste.

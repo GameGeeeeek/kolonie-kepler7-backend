@@ -13821,6 +13821,28 @@ function vorpostenGarnisonVon(doc) {
   }
   return doc.garnisonVon;
 }
+/* WIEVIEL DIESER BETRACHTER NOCH STATIONIEREN DARF - die EINE Stelle (#50, 05.09.2026).
+   Die Rechnung stand bisher nur in /vorposten/stationieren, und der Client kannte sie nicht: Ein
+   Verbuendeter schickte Schiffe, bekam „Nichts stationiert" zurueck und erfuhr nicht, dass der
+   Fremdanteil laengst voll war. Sie hier ein zweites Mal aufzuschreiben waere die Kopie-Familie,
+   die in diesem Projekt schon mehrfach auseinandergelaufen ist - also nimmt der Endpunkt dieselbe
+   Funktion wie die Client-Sicht.
+   ZWEI DECKEL, und der zweite gilt nur fuer Fremde: der freie Platz bis `garnisonMax`, und fuer
+   Nicht-Besitzer zusaetzlich der Anteil ALLER Fremden zusammen (nicht je Konto - sonst umgeht man
+   ihn mit einem zweiten Konto, das sich die Mitgliedschaft genauso selbst gibt). Der Besitzer ist
+   unbegrenzt; es ist sein Vorposten. */
+function vorpostenFreierPlatz(doc, userId, werte) {
+  const st = werte || vorpostenWerte(doc);
+  let platz = Math.max(0, st.garnisonMax - vorpostenGarnisonAnzahl(doc));
+  if (doc.besitzer !== userId) {
+    const von = vorpostenGarnisonVon(doc);
+    const fremd = Object.keys(von).filter(uid => uid !== doc.besitzer)
+      .reduce((a, uid) => a + Object.keys(von[uid] || {})
+        .reduce((b, typ) => b + (Number(von[uid][typ]) || 0), 0), 0);
+    platz = Math.min(platz, Math.max(0, Math.floor(st.garnisonMax * VP_ALLIANZ_GARNISON_ANTEIL) - fremd));
+  }
+  return platz;
+}
 function vorpostenGarnisonNachziehen(doc) {
   const von = vorpostenGarnisonVon(doc);
   const summe = {};
@@ -14329,6 +14351,11 @@ function vorpostenFuerClient(doc, userId, jetzt, karte) {
        Leiter OHNE Zweig-Multiplikatoren - ein Festungsring haette dort eine um 45 % zu kleine
        Grenze angezeigt, und der Spieler haette Schiffe geschickt, die der Server ablehnt. */
     garnisonMax: st.garnisonMax,
+    /* #50: WIEVIEL DIESER BETRACHTER NOCH SCHICKEN DARF. Ohne diese Zahl sah ein Verbuendeter nur
+       `garnisonAnzahl von garnisonMax` - und das ist bei ihm die falsche Grenze, weil zusaetzlich
+       der Fremdanteil gilt. Er schickte, bekam „Nichts stationiert" und erfuhr den Grund nicht.
+       Aus derselben Funktion wie die Annahme im Endpunkt, damit die beiden nicht auseinanderlaufen. */
+    meinPlatz: vorpostenFreierPlatz(doc, userId, st),
     /* Steckplaetze und was drinsteckt - fuer JEDEN sichtbar, nicht nur fuer den Besitzer: Ein
        Angreifer soll sehen koennen, warum diese Station haerter ist als ihre Stufe vermuten laesst
        (dieselbe Offenheit wie bei Verteidigung und Garnisonszahl). */
@@ -14846,21 +14873,13 @@ app.post('/api/vorposten/stationieren', authMiddleware, async (req, res) => {
   const fleetObj = planetKey === 'home' ? save.fleet : (save.colonies && save.colonies[planetKey] && save.colonies[planetKey].fleet);
   if (!fleetObj) return res.status(404).json({ error: 'Kein Flottenstandort gefunden.' });
   const st = vorpostenWerte(doc);
-  let platz = Math.max(0, st.garnisonMax - vorpostenGarnisonAnzahl(doc));
+  /* Beide Deckel stecken in vorpostenFreierPlatz - derselben Funktion, aus der `meinPlatz` in der
+     Client-Sicht kommt. Zwei Rechnungen fuer dieselbe Zahl waren der Grund fuer #50. */
+  let platz = vorpostenFreierPlatz(doc, req.userId, st);
   const angenommen = {};
   // V5: Gebucht wird auf das eigene Konto in der Aufschluesselung; `doc.garnison` zieht
   // vorpostenSchreib daraus nach.
   const von = vorpostenGarnisonVon(doc);
-  /* DER FREMDANTEIL IST GEDECKELT (Durchsicht 04.09.2026, Begruendung bei
-     VP_ALLIANZ_GARNISON_ANTEIL). Gerechnet wird gegen die SUMME aller Nicht-Besitzer, nicht je
-     Konto - sonst umgeht man den Deckel mit einem zweiten Konto, das sich die Mitgliedschaft
-     genauso selbst gibt. Der Besitzer selbst ist unbegrenzt; es ist sein Vorposten. */
-  if (doc.besitzer !== req.userId) {
-    const fremd = Object.keys(von).filter(uid => uid !== doc.besitzer)
-      .reduce((a, uid) => a + Object.keys(von[uid] || {})
-        .reduce((b, typ) => b + (Number(von[uid][typ]) || 0), 0), 0);
-    platz = Math.min(platz, Math.max(0, Math.floor(st.garnisonMax * VP_ALLIANZ_GARNISON_ANTEIL) - fremd));
-  }
   if (!von[req.userId]) von[req.userId] = {};
   for (const typ of Object.keys(composition)) {
     if (!vorpostenKampfschiff(typ)) continue;

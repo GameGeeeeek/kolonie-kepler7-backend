@@ -17890,7 +17890,9 @@ function kampftextFremdeSchiffe(text, daten) {
 // Kopie-Familie mit UNVERSEHRT_MUSTER in AI Cores kampftext_messlauf.py.
 const KAMPFTEXT_UNVERSEHRT = [
   /unbeschadet/, /ungeschoren/, /unversehrt/, /verlustfrei/, /ohne (?:[\wäöü]+ )?verluste?\b/,
-  /keine verluste/, /keinen verlust/, /kein (?:einziges )?schiff (?:ging )?verloren/, /\bheil\b/,
+  // "geht" ist die GEMESSENE Form (Koeniginnen-Text, Temperaturvergleich 05.09.2026); die
+  // anderen Zeitformen sagen dieselbe Erfindung.
+  /keine verluste/, /keinen verlust/, /kein (?:einziges )?schiff (?:geht |ging |wird |wurde )?verloren/, /\bheil\b/,
 ];
 // Die Gegenrichtung, gemessen im DRITTEN Lauf (05.09.2026) - und zwar als Folge der Regel, die der
 // zweite erzwungen hatte: Der Satz "Steht bei verluste 'nicht bekannt' ..." stand in den GEMEINSAMEN
@@ -17915,14 +17917,26 @@ function kampftextTreffer(t, muster) {
 }
 
 function kampftextVerlustaussage(text, daten) {
-  // Liest das DATUM, nicht die Kampfart - und sperrt in beide Richtungen. Steht "nicht bekannt", ist
-  // jede Aussage ueber Unversehrtheit eine Erfindung; nennt der Block verlorene Schiffstypen (auch
-  // eine leere Liste), sind die Verluste BEKANNT - dann ist "Verluste sind nicht bekannt" die Erfindung.
+  // Liest das DATUM, nicht die Kampfart. Drei Faelle, alle aus dem Datenblock abgeleitet:
+  //   verluste = 'nicht bekannt'         -> jede Aussage ueber Unversehrtheit ist eine Erfindung
+  //   verlorene Schiffstypen, NICHT leer -> "unbekannt" ist falsch UND "unbeschadet" ist falsch
+  //   verlorene Schiffstypen, leer       -> nur "unbekannt" ist falsch; "unbeschadet" ist die Wahrheit
+  // Der dritte Fall ist der gemessene Anlass (Temperaturvergleich 05.09.2026 bei 0.7): Der
+  // Koeniginnen-Text schrieb "Die eigenen Bomber fallen in den Kampf; kein Schiff geht verloren" -
+  // er widersprach sich im selben Satz und den Daten. Die Sperre sah nichts, weil sie
+  // Unversehrtheit nur im ersten Fall verbot.
   if (!daten) return [];
   const t = kampftextNorm(text);
   if (daten.verluste === 'nicht bekannt') return kampftextTreffer(t, KAMPFTEXT_UNVERSEHRT);
-  if ('verlorene_schiffstypen' in daten || 'verlorene_schiffe' in daten) return kampftextTreffer(t, KAMPFTEXT_UNBEKANNT);
-  return [];
+  let verloren = null;
+  if ('verlorene_schiffstypen' in daten) verloren = daten.verlorene_schiffstypen;
+  else if ('verlorene_schiffe' in daten) verloren = daten.verlorene_schiffe;
+  if (verloren === null) return [];
+  const raus = kampftextTreffer(t, KAMPFTEXT_UNBEKANNT);
+  if (verloren.length) {
+    for (const s of kampftextTreffer(t, KAMPFTEXT_UNVERSEHRT)) if (raus.indexOf(s) < 0) raus.push(s);
+  }
+  return raus.sort();
 }
 
 // Die fuenfte Sperre - die von E0 BENANNTE Zahlwort-Luecke, vom dritten E2-Lauf ein zweites Mal

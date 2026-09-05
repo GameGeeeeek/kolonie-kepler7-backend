@@ -1030,3 +1030,14 @@ Ertrags), wechselt dann den Zweig und schreibt. `vorpostenSchreib` deckelt die L
 - `0b` selbst maß dann falsch: Sie nahm den **letzten** Kostenblock der Datei statt des teuersten
   (6 Mio Erz statt 9 Mio). Wieder eine Momentaufnahme statt einer Regel, diesmal in der eigenen
   Messvorrichtung. Sie bildet jetzt das Maximum je Rohstoff über alle Blöcke.
+
+### Umgelegt am 05.09.2026
+
+`VP_UMRUESTEN_AKTIV = true`. Die Frontend-Hälfte ist fertig gemessen: Das Kartenmenü bietet die
+Wahl an, sperrt sie mit dem Grund im Klartext, wenn dieser Server sie ohnehin ablehnen würde, nennt
+die Folgen **vor** dem Klick (Dauer, Unumkehrbarkeit, das schlafende Projekt) und zeigt die
+laufende Frist jedem Betrachter.
+
+Prüfung `0c` hat dabei ihre Richtung gewechselt — wie schon bei den Modul-Sets. Beide Läufe
+erzwingen ihren Schalterzustand ohnehin selbst (`ausQuelle`/`anQuelle`); ohne diese Bauart hätte
+genau dieser Commit den Aus-Lauf still in einen zweiten An-Lauf verwandelt.

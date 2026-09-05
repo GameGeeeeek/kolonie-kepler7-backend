@@ -131,7 +131,7 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
   const dauerRoh = (roh.match(/const VP_UMRUESTEN_MS = ([^;]+);/) || [])[1];
   const kostenRoh = (roh.match(/const VP_UMRUESTEN_KOSTEN = (\{[^}]*\});/) || ['', '{}'])[1];
   const kosten = JSON.parse(kostenRoh.replace(/([a-z]+):/g, '"$1":'));
-  const schalterAus = /const VP_UMRUESTEN_AKTIV = false;/.test(roh);
+  const schalterAn = /const VP_UMRUESTEN_AKTIV = true;/.test(roh);
   const zweigAb = Number((roh.match(/const VORPOSTEN_ZWEIG_AB = (\d+);/) || [])[1]);
   check('0a: Stufe, Dauer und Kosten der Umruestung sind im Quelltext auffindbar',
     abStufe > zweigAb && !!dauerRoh && Object.keys(kosten).length >= 3,
@@ -156,8 +156,14 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
     { bloecke: alleKosten.length, hoechste });
   check('0b: sie kostet in JEDEM Rohstoff mehr als der teuerste Posten der Vorposten-Tabellen',
     zuBillig.length === 0, { zuBillig, umruesten: kosten, hoechste });
-  check('0c: der Schalter steht ausgeliefert auf false (Backend zuerst live, Frontend danach)',
-    schalterAus, { gefunden: (roh.match(/const VP_UMRUESTEN_AKTIV = (\w+);/) || [])[1] });
+  /* 0c HAT SEINE RICHTUNG GEWECHSELT (05.09.2026). Bis zum Umlegen stand hier „der Schalter ist
+     false" - die Wache ueber die Auslieferungsreihenfolge. Sie ist eingehalten, das Spiel bietet
+     die Wahl an, und ab jetzt waere ein zurueckgefallener Schalter der Fehler. Die beiden Laeufe
+     unten erzwingen ihren Zustand ohnehin SELBST (ausQuelle/anQuelle) - dieselbe Umstellung wie
+     bei den Modul-Sets, und aus demselben Grund: Sonst haette genau dieser Commit den Aus-Lauf
+     still in einen zweiten An-Lauf verwandelt. */
+  check('0c: der Schalter steht ausgeliefert auf true - die Frontend-Haelfte ist live',
+    schalterAn, { gefunden: (roh.match(/const VP_UMRUESTEN_AKTIV = (\w+);/) || [])[1] });
 
   const basis = roh.replace(/const VORPOSTEN_AKTIV = (true|false);/, 'const VORPOSTEN_AKTIV = true;')
     .replace(/const VP_ENDPROJEKTE_AKTIV = (true|false);/, 'const VP_ENDPROJEKTE_AKTIV = true;')

@@ -168,3 +168,17 @@ nicht die Fähigkeit.** Und die Frage dazu ist immer dieselbe: *Was kann jemand 
 dieses Recht in fünf Sekunden selbst gibt, und wie bekommt der Betroffene ihn wieder los?* Fehlt
 die zweite Hälfte der Antwort, ist ein Deckel nötig — einer, der nichts löscht, sondern nur das
 Wachstum begrenzt.
+
+## Eine Regel, die ein Datum beschreibt, gehört nur dorthin, wo das Datum steht (05.09.2026)
+
+Gemessen an den KI-Kampfberichten: Ein Prompt-Satz („Steht bei `verluste` ‚nicht bekannt', dann sage
+nichts über Verluste") stand in den **gemeinsamen** Regeln aller Kampfarten. Bei den Arten, die
+dieses Datum gar nicht haben, lieferte er dem Modell die Formulierung für einen Fehler, den er
+anderswo verhindern sollte – der Königinnen-Text schrieb „Verluste sind nicht bekannt", obwohl die
+Daten die Verluste nannten. **Die Regel war die Ursache, nicht die Abhilfe.**
+
+Übertragbar auf jeden geteilten Anweisungstext, jede geteilte Konstante, jeden gemeinsamen
+Hilfstext: Vor dem Einfügen in einen gemeinsamen Block die Frage stellen, ob die Aussage für
+**jeden** Fall gilt, der ihn bekommt. Gilt sie nur für einen Teil, gehört sie in dessen eigenen
+Abschnitt. Und die Prüfung dazu misst beide Hälften – dass der Satz da ist, wo er hingehört, **und**
+dass er dort fehlt, wo er nicht hingehört; die zweite Hälfte ist die, die den Fehler gefunden hätte.

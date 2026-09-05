@@ -41,7 +41,11 @@
 // Datenblock fallen genau 14e2 und 15d2. Abschnitt 17 (Codex-Befund an #237, zwei
 // Texte oder keiner auch am Rand des Gesamtdeckels): ohne die Vorpruefung beider Plaetze in
 // kampftextPvpBestellen fallen genau 17a, 17b und 17c. Abschnitt 15k-15m (vierte Sperre, zweite
-// Messung 05.09.2026): am alten Server fallen genau 15l und 15m. BEFUND aus 14m: Die Sperre fand
+// Messung 05.09.2026): am alten Server fallen genau 15l und 15m. Abschnitt 14o-14q und 15n
+// (dritte Messung, 05.09.2026): am Stand davor fallen genau 14o, 14p, 14q und 15m. Gruen bleiben
+// dort 15l (der Satz war da, nur an der falschen Stelle - 14p misst die Stelle) und 15n (die
+// Gegenrichtung). 14p prueft bewusst 'NICHTS ueber Verluste' ohne 'sagst du': mit dem vollen
+// Wortlaut war es am alten Stand aus dem falschen Grund gruen. BEFUND aus 14m: Die Sperre fand
 // "Mondzerstoerer" (oe) nicht, weil sie nur die Umlaut-Schreibweise suchte - seit E2 wird auch der
 // Text normalisiert; der Messlauf von AI Core kannte beide Schreibweisen schon immer.
 //
@@ -644,6 +648,27 @@ const KAMPF = {
     const k2Ende = await warteAufEnde(api, ines, k2.body && k2.body.auftragId);
     check('14m: ein fremdes Schiff im Weltboss-Text wird verworfen', w2Ende.body && w2Ende.body.status === 'verworfen' && /Mondzerst/.test(w2Ende.body.grund || ''), w2Ende.body);
     check('14n: eine Zahl im Koeniginnen-Text ist zwangslaeufig erfunden - verworfen', k2Ende.body && k2Ende.body.status === 'verworfen' && /erfundene Zahl 40/.test(k2Ende.body.grund || ''), k2Ende.body);
+
+    // 14o-14q: die zwei Befunde des DRITTEN Messlaufs (05.09.2026).
+    // (a) Die Verlust-Regel stand in den gemeinsamen Regeln und ging damit auch an die Arten, die
+    //     das Datum gar nicht haben - der Koeniginnen-Text schrieb sie woertlich ab, obwohl die
+    //     Daten Bomber als verloren nannten. Der Satz steht seither NUR in den PvP-Einleitungen,
+    //     und wo die Verluste bekannt sind, ist "unbekannt" ein Mangel.
+    // (b) Zahlwort statt Ziffer: "ein Jaeger" fuer 65 verlorene Jaeger.
+    ai.antwort = () => 'Die Koenigin ist gefallen, ihr Schwarm zerfaellt. Verluste sind nicht bekannt.';
+    const k3 = await api.auftrag(ines, Object.assign({}, koenigin, { schwarmGefallen: true }));
+    const k3Ende = await warteAufEnde(api, ines, k3.body && k3.body.auftragId);
+    check('14o: "Verluste sind nicht bekannt" wird verworfen, wo die Daten die Verluste NENNEN',
+      k3Ende.body && k3Ende.body.status === 'verworfen' && /falsche Verlustaussage: verluste sind nicht bekannt/.test(k3Ende.body.grund || ''), k3Ende.body);
+    check('14p: und die Einleitung dieser Art bietet die Formulierung gar nicht erst an - der Satz steht nur beim Spielerkampf',
+      letzterPrompt().indexOf('NICHTS ueber Verluste') < 0 && /Nest einer Alien-Koenigin/.test(letzterPrompt()),
+      { anfang: letzterPrompt().slice(0, 100) });
+    ai.antwort = () => 'Der Schlag sass, doch ein Jaeger und ein Schlachtschiff kehrten nicht zurueck.';
+    const w3 = await api.auftrag(ines, weltboss);
+    const w3Ende = await warteAufEnde(api, ines, w3.body && w3.body.auftragId);
+    check('14q: eine Stueckzahl als WORT wird verworfen - eine Ziffernpruefung sieht sie nicht',
+      w3Ende.body && w3Ende.body.status === 'verworfen' && /Stueckzahl als Wort: ein jäger/.test(w3Ende.body.grund || '') &&
+      !/erfundene Zahl/.test(w3Ende.body.grund || ''), w3Ende.body);
     ai.antwort = () => 'Der Verband kehrte zurueck.';
   }
 
@@ -716,7 +741,7 @@ const KAMPF = {
     const rita = await api.anmelden('rita');
     const vor2 = ai.prompts.length;
     ai.antwort = (n) => n - vor2 === 1
-      ? 'Unsere Kreuzer stiessen auf die Waechter der Station.'
+      ? 'Unsere Kreuzer stiessen auf die Waechter der Station. Verluste bleiben unbekannt.'
       : 'Die Waechter hielten die Linie, und wir blieben unbeschadet.';
     const angriff2 = await api.j('/attack', { method: 'POST', headers: auth(paul), body: JSON.stringify({ targetUserId: RITA }) });
     check('15k: der zweite Spielerkampf kommt zustande (200)', angriff2.status === 200, { status: angriff2.status, body: angriff2.body && angriff2.body.error });
@@ -730,12 +755,19 @@ const KAMPF = {
       await warte(100);
     }
     check('15l: der Prompt bittet ausdruecklich, bei unbekannten Verlusten NICHTS darueber zu sagen',
-      ai.prompts.length - vor2 === 2 && [vor2, vor2 + 1].every(i => /sage NICHTS ueber Verluste/.test((ai.prompts[i] || {}).prompt || '')),
+      ai.prompts.length - vor2 === 2 && [vor2, vor2 + 1].every(i => /NICHTS ueber Verluste/.test((ai.prompts[i] || {}).prompt || '')),
       { aufrufe: ai.prompts.length - vor2 });
     check('15m: "unbeschadet" bei "verluste: nicht bekannt" wird verworfen - der Grund nennt beides, der Angreifer-Text haengt trotzdem',
-      !!verworfen && /Aussage ueber Verluste trotz 'nicht bekannt': unbeschadet/.test(verworfen.grund || '') &&
+      !!verworfen && /falsche Verlustaussage: unbeschadet/.test(verworfen.grund || '') &&
       !!empfangen2 && !empfangen2.kiText && !!gesendet2 && /Waechter der Station/.test(gesendet2.kiText || ''),
       { verworfen: verworfen && verworfen.grund, verteidiger: empfangen2 && empfangen2.kiText, angreifer: gesendet2 && gesendet2.kiText });
+    // 15n: die Gegenrichtung zu 14o, aus DEMSELBEN Angriff - im Spielerkampf ist "unbekannt" die
+    // richtige Wiedergabe des Datums und muss durchkommen. Ohne diese Haelfte waere 14o auch mit
+    // einer Sperre gruen, die jede Verlustaussage verwirft. Kein zweiter Angriff: der erste schenkt
+    // dem Opfer einen Schutzschild, ein Nachtreten prallte mit 403 ab (gemessen).
+    check('15n: derselbe Datensatz, zwei Urteile - "Verluste bleiben unbekannt" kommt durch, "unbeschadet" nicht',
+      !!gesendet2 && /Verluste bleiben unbekannt/.test(gesendet2.kiText || '') && !!verworfen,
+      { angreifer: gesendet2 && gesendet2.kiText, verworfen: verworfen && verworfen.grund });
     ai.antwort = () => 'Der Verband kehrte zurueck.';
   }
 

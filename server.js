@@ -13313,6 +13313,46 @@ const VP_UMRUESTEN_MS = 24 * 3600 * 1000;
 const VP_UMRUESTEN_AB_STUFE = 8;
 const VP_UMRUESTEN_KOSTEN = { erz: 10500000, kristalle: 7500000, deuterium: 4900000, nanolegierungen: 6400,
   quantenchips: 3500, metamaterial: 1200, singularitaetskern: 140 };
+/* ETAPPE V9: EIN EIGENER NAME FUER DIE STATION (05.09.2026).
+   Bis hierher hiess jeder Vorposten nach seiner Stufe und seinem Zweig - „Sternenfestung",
+   „Sternenmarkt". Das sagt, WAS er ist, nie WELCHER er ist; wer drei hat, unterscheidet sie am
+   Systemnamen. Ein selbst vergebener Name macht aus einer Zahlenkarte einen Ort.
+
+   FUENF ENTSCHEIDUNGEN, die man beim Anfassen kennen muss:
+   1. DER STUFENNAME BLEIBT. `name` ist weiterhin „Sternenfestung" und wird weiter ueberall
+      gerechnet und gemeldet; der eigene Name kommt als EIGENES Feld daneben. Ihn zu ersetzen
+      hiesse, die Stufe unsichtbar zu machen - und die ist die Information, die ein Angreifer
+      braucht.
+   2. ER IST TEXT VOR ANDEREN, also gilt die Stummschaltung. Wer stumm ist, taufte sonst seine
+      Station und stellte damit denselben Satz vor dieselben Leute, den ihm der Chat gerade
+      verwehrt. Die Pruefung ist fail-closed: Ohne Nutzerobjekt keine Taufe.
+   3. LOESCHEN GEHT IMMER. Die Abklingzeit bremst das SETZEN, nicht das Zuruecknehmen: Wer seinen
+      eigenen Text entfernt, missbraucht nichts, und eine Sperre daraus zu machen hiesse, jemanden
+      sechs Stunden an einem Namen festzuhalten, den er bereut.
+   4. ERST AB EINER STUFE. Ein Ankerkern, der in Minuten steht und faellt, braucht keinen Namen -
+      und ohne Schwelle waere die Taufe der billigste Weg, Text in die Galaxie zu stellen.
+   5. DER ADMIN KANN IHN ENTFERNEN, im selben Handgriff mit einer Stummschaltung (Vorbild
+      /api/admin/chat/loeschen: „Wer eine Zeile entfernt, will den Verfasser meistens auch
+      bremsen"). Ohne diesen Weg waere ein beleidigender Name nur ueber die Datenbank zu loeschen.
+
+   Der Schalter wird im FRONTEND-PR umgelegt, wie bei jeder Mechanik, die das Spiel noch nicht
+   kennt: Ein Name, den der Server fuehrt und niemand sieht, ist kein Nutzen, sondern ein Feld. */
+const VP_NAME_AKTIV = false;
+const VP_NAME_AB_STUFE = 3;
+const VP_NAME_MAX = 24;
+const VP_NAME_ABKLING_MS = 6 * 3600 * 1000;
+/* Das Muster ist NICHT `NAME_MUSTER` (das gehoert den Konten und kennt kein Leerzeichen). Ein
+   Stationsname darf mehrere Woerter haben - „Roter Hafen" ist genau der Fall, fuer den es diese
+   Etappe gibt. Erstes Zeichen ist Buchstabe oder Ziffer, damit kein Name mit Satzzeichen beginnt
+   und sich in einer Liste vordraengt. */
+const VP_NAME_MUSTER = /^[A-Za-z0-9äöüÄÖÜß][A-Za-z0-9 .,'\-äöüÄÖÜß]{2,23}$/;
+/* Steuerzeichen raus, Weissraum zusammen, getrimmt - DANN erst gemessen. Ohne diesen Schritt
+   kaeme ein Name mit Zeilenumbruch oder doppelten Leerzeichen durch das Muster und stuende
+   danach zerrissen in der Karte. Dieselbe Saeuberung wie beim Chat-Autor (Push-Titel). */
+function vpNameSauber(roh) {
+  return String(roh || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, VP_NAME_MAX);
+}
+function vpNameOk(name) { return VP_NAME_MUSTER.test(name); }
 /* ETAPPE V2: DER WERFTRABATT (03.09.2026). Auftrag Sascha: alle Punkte der Vorposten-Auswahl
    umsetzen. Dieser hier stand als Schuld im Quelltext: Der Kommentar ueber VORPOSTEN_ZWEIGE nennt
    seit dem 02.09.2026 „Werftrabatt" und „Marktgebuehr" als Kanaele, die spaeter ZUSAMMEN mit ihrer
@@ -14272,6 +14312,10 @@ function vorpostenFuerClient(doc, userId, jetzt, karte) {
   const out = {
     id: doc.id, sys: doc.sys, besitzer: doc.besitzer, besitzerName: doc.besitzerName || 'Kommandant',
     seit: doc.seit || 0, stufe: doc.stufe || 1, name: st.name,
+    /* V9: DER EIGENE NAME steht NEBEN dem Stufennamen, nicht an seiner Stelle - `name` bleibt
+       „Sternenfestung" und wird weiter ueberall gerechnet und gemeldet. Sichtbar ist er fuer
+       JEDEN, wie `besitzerName`: Ein Name, den nur der Besitzer sieht, ist kein Name. */
+    eigenName: doc.eigenName || null,
     zweig: vorpostenZweigOk(doc.zweig) ? doc.zweig : null,
     zweigName: vorpostenZweigOk(doc.zweig) ? VORPOSTEN_ZWEIGE[doc.zweig].name : null,
     maxStufe: VORPOSTEN_STUFEN.length,
@@ -14358,6 +14402,10 @@ function vorpostenFuerClient(doc, userId, jetzt, karte) {
   // Zusammensetzung und Verlauf sieht nur der Besitzer; Fremde sehen die Zahl (wie die Eskorte am
   // Vorkommen ihre Staerke zeigt, ohne dass jemand die Liste braucht).
   if (eigener) {
+    /* V9: WANN DER NAME WIEDER GEWECHSELT WERDEN DARF - nur fuer den Besitzer. Ein Fremder soll
+       den Namen sehen, aber nicht, wann der naechste faellig ist; das sagt nichts ueber die
+       Staerke der Station und waere blosse Innerei. */
+    out.nameFreiAb = doc.eigenName ? (doc.nameSeit || 0) + VP_NAME_ABKLING_MS : 0;
     out.garnison = Object.assign({}, doc.garnison || {});
     out.projektLaeuft = vpProjektLaeuft(doc, jetzt);
     out.projektMoeglich = vpProjektVerfuegbar(doc, jetzt);
@@ -14447,7 +14495,8 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
       anteile[uid] = anteil;
       pushPendingReward(uid, {
         type: 'vorposten',           // eigener Typ, sonst Bug-Report-Rueckfall im Client
-        system: doc.sys, stufe: doc.stufe, name: st.name, besitzerName: doc.besitzerName || 'Kommandant',
+        system: doc.sys, stufe: doc.stufe, name: st.name, eigenName: doc.eigenName || null,
+        besitzerName: doc.besitzerName || 'Kommandant',
         anteil: Math.round(anteil * 1000) / 1000,
         kampfpunkte: Math.max(1, Math.round(st.kampfpunkte * anteil)),
         xp: Math.max(1, Math.round(st.xp * anteil)),
@@ -14462,7 +14511,7 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
     // Der Besitzer erfaehrt vom Fall ueber seine Warteschlange - das Dokument, aus dem er sonst
     // liest, gibt es gleich nicht mehr. Die Restgarnison ist mit dem Vorposten verloren.
     pushPendingReward(doc.besitzer, {
-      type: 'vorposten-verlust', system: doc.sys, stufe: doc.stufe, name: st.name,
+      type: 'vorposten-verlust', system: doc.sys, stufe: doc.stufe, name: st.name, eigenName: doc.eigenName || null,
       angreiferName: vermerk.angreiferName, teilnehmer, lagerVerloren: lagerBeimFall,
       alsVerbuendeter: false,
       garnisonVerloren: Object.assign({}, (vorpostenGarnisonVon(doc))[doc.besitzer] || {}), zeit: jetzt
@@ -14473,7 +14522,7 @@ function vorpostenSchlagAusfuehren(doc, kraft, composition, beteiligte, jetzt) {
     for (const [uid, teil] of Object.entries(vorpostenGarnisonVon(doc))) {
       if (!uid || uid === doc.besitzer || !Object.keys(teil || {}).length) continue;
       pushPendingReward(uid, {
-        type: 'vorposten-verlust', system: doc.sys, stufe: doc.stufe, name: st.name,
+        type: 'vorposten-verlust', system: doc.sys, stufe: doc.stufe, name: st.name, eigenName: doc.eigenName || null,
         angreiferName: vermerk.angreiferName, teilnehmer, lagerVerloren: null,
         alsVerbuendeter: true, besitzerName: doc.besitzerName || 'Kommandant',
         garnisonVerloren: Object.assign({}, teil), zeit: jetzt
@@ -14508,6 +14557,11 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
     modulSetDefs: VP_MODUL_SET_DEFS, modulSetsAktiv: VP_MODUL_SETS_AKTIV, zweigSlots: VP_ZWEIG_SLOTS,
     umruestenAktiv: VP_UMRUESTEN_AKTIV && !notAusGesetzt('vorposten'),
     umruestenAbStufe: VP_UMRUESTEN_AB_STUFE, umruestenMs: VP_UMRUESTEN_MS, umruestenKosten: VP_UMRUESTEN_KOSTEN,
+    /* V9: Muster und Grenzen kommen VOM SERVER - das Spiel haelt keine zweite Kopie der Regel.
+       `nameMuster` ist die Quelle des regulaeren Ausdrucks, damit die Oberflaeche dieselbe Regel
+       pruefen kann, die der Endpunkt durchsetzt, ohne sie abzuschreiben. */
+    nameAktiv: VP_NAME_AKTIV, nameAbStufe: VP_NAME_AB_STUFE, nameMax: VP_NAME_MAX,
+    nameAbklingMs: VP_NAME_ABKLING_MS, nameMuster: VP_NAME_MUSTER.source,
     modulAusbauKosten: VP_MODUL_AUSBAU_KREDITE, modulBauAbklingMs: VP_MODUL_BAU_ABKLING_MS,
     modulBestand: vpModulBestand(findUserById(req.userId) || {}),
     modulBauAb: (findUserById(req.userId) || {}).vpModulBauAb || 0,
@@ -14593,7 +14647,7 @@ app.post('/api/vorposten/ausbauen', authMiddleware, async (req, res) => {
   const standVorAusbau = vorpostenLagerStand(doc, Date.now());
   if (!vorpostenLagerLeer(standVorAusbau)) {
     pushPendingReward(req.userId, Object.assign({ type: 'vorposten-lager', system: doc.sys,
-      name: vorpostenWerte(doc).name, zeit: Date.now() }, standVorAusbau));
+      name: vorpostenWerte(doc).name, eigenName: doc.eigenName || null, zeit: Date.now() }, standVorAusbau));
   }
   doc.lagerSeit = Date.now();
   doc.stufe = zielStufe;
@@ -14912,6 +14966,7 @@ async function vorpostenAbbauTick() {
       if (!uid) continue;
       pushPendingReward(uid, {
         type: 'vorposten-abbau', system: doc.sys, stufe: doc.stufe || 1, name: st.name,
+        eigenName: doc.eigenName || null,
         garnison: Object.assign({}, vonAbbau[uid] || {}),
         module: uid === doc.besitzer ? module : [],
         alsVerbuendeter: uid !== doc.besitzer, zeit: jetzt
@@ -15029,7 +15084,7 @@ async function vorpostenUmruestenTick() {
     const standVor = vorpostenLagerStand(doc, jetzt);
     if (!vorpostenLagerLeer(standVor)) {
       pushPendingReward(doc.besitzer, Object.assign({ type: 'vorposten-lager', system: doc.sys,
-        name: vorpostenWerte(doc).name, zeit: jetzt }, standVor));
+        name: vorpostenWerte(doc).name, eigenName: doc.eigenName || null, zeit: jetzt }, standVor));
     }
     doc.lagerSeit = jetzt;
     doc.zweig = l.ziel;
@@ -15046,7 +15101,8 @@ async function vorpostenUmruestenTick() {
     const zurueck = vorpostenGarnisonKappen(doc, stNeu.garnisonMax) || {};
     vorpostenSchreib(doc);
     const meldung = { type: 'vorposten-umruestung', system: doc.sys, stufe: doc.stufe || 1,
-      name: st.name, vonZweig: vorher, vonZweigName: (VORPOSTEN_ZWEIGE[vorher] || {}).name || vorher,
+      name: st.name, eigenName: doc.eigenName || null,
+      vonZweig: vorher, vonZweigName: (VORPOSTEN_ZWEIGE[vorher] || {}).name || vorher,
       zweig: l.ziel, zweigName: (VORPOSTEN_ZWEIGE[l.ziel] || {}).name || l.ziel,
       garnisonMax: stNeu.garnisonMax, zeit: jetzt };
     /* Der Besitzer bekommt seine Meldung IMMER - es ist sein Umbau, auch wenn nichts zurueckkommt.
@@ -15065,6 +15121,70 @@ async function vorpostenUmruestenTick() {
   if (fertig) await saveDb();
   return fertig;
 }
+
+/* V9: TAUFEN. Der Server fuehrt den Namen, prueft ihn und raeumt ihn weg; die Begruendung fuer
+   Muster, Schwelle, Stummschaltung und Abklingzeit steht bei VP_NAME_AKTIV. Ein LEERER Name
+   loescht - und zwar ohne jede Sperre, denn wer seinen eigenen Text zuruecknimmt, missbraucht
+   nichts. */
+app.post('/api/vorposten/name', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  /* Der Schalter steht an der Stelle, die die Handlung AUSFUEHRT, nicht nur an der Anzeige - die
+     Lehre steht in PROJECT_MEMORY und ist am Projekt-Endpunkt teuer bezahlt worden. */
+  if (!VP_NAME_AKTIV || notAusGesetzt('vorposten')) {
+    return res.status(404).json({ error: 'Vorposten benennen ist derzeit nicht verfügbar.', inaktiv: true });
+  }
+  const sys = String((req.body && req.body.system) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer benennt seinen Vorposten.' });
+  const name = vpNameSauber(req.body && req.body.name);
+  /* LOESCHEN STEHT VOR ALLEM ANDEREN: keine Stufenschwelle, keine Stummschaltung, keine
+     Abklingzeit. Sonst haelt eine der drei Sperren jemanden an einem Namen fest, den er
+     zuruecknehmen will - und genau das waere die Sperre, die Schaden anrichtet statt ihn zu
+     verhindern. */
+  if (!name) {
+    if (!doc.eigenName) return res.status(400).json({ error: 'Diese Station trägt keinen eigenen Namen.', schonLeer: true });
+    const vorher = doc.eigenName;
+    delete doc.eigenName;
+    delete doc.nameSeit;
+    vorpostenSchreib(doc);
+    console.log('[vorposten] name geloescht userId=' + req.userId + ' sys=' + sys + ' war=' + vorher);
+    await saveDb();
+    return res.json({ ok: true, eigenName: null, geloescht: true,
+      vorposten: vorpostenFuerClient(doc, req.userId, Date.now()) });
+  }
+  if ((doc.stufe || 1) < VP_NAME_AB_STUFE) {
+    return res.status(400).json({ error: 'Einen eigenen Namen gibt es ab Stufe ' + VP_NAME_AB_STUFE + '.',
+      abStufe: VP_NAME_AB_STUFE });
+  }
+  /* FAIL-CLOSED: ohne Nutzerobjekt keine Taufe. Ein Name ist Text vor anderen, und eine Sicherung,
+     deren Ausfall wie Normalbetrieb aussieht, ist keine. */
+  const userN = findUserById(req.userId);
+  if (!userN) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+  if (stummAktiv(userN)) return res.status(403).json({ error: stummText(userN), stumm: true });
+  if (!vpNameOk(name)) {
+    return res.status(400).json({ error: 'Der Name braucht 3 bis ' + VP_NAME_MAX +
+      ' Zeichen: Buchstaben, Ziffern, Leerzeichen und . , \' -, und er beginnt mit einem Buchstaben oder einer Ziffer.',
+      musterFehlt: true, max: VP_NAME_MAX });
+  }
+  if (name === doc.eigenName) return res.status(400).json({ error: 'So heißt diese Station bereits.', schonSo: true });
+  /* Die Abklingzeit bremst den WECHSEL, nicht die erste Taufe: Wer noch keinen Namen hat, wartet
+     auf nichts. */
+  const jetztN = Date.now();
+  const freiAb = (doc.nameSeit || 0) + VP_NAME_ABKLING_MS;
+  if (doc.eigenName && jetztN < freiAb) {
+    return res.status(429).json({ error: 'Der nächste Namenswechsel ist in ' +
+      Math.ceil((freiAb - jetztN) / 60000) + ' Minuten möglich.', abklingzeit: true, nameFreiAb: freiAb });
+  }
+  doc.eigenName = name;
+  doc.nameSeit = jetztN;
+  vorpostenSchreib(doc);
+  console.log('[vorposten] getauft userId=' + req.userId + ' sys=' + sys + ' name=' + name);
+  await saveDb();
+  res.json({ ok: true, eigenName: name, nameFreiAb: jetztN + VP_NAME_ABKLING_MS,
+    vorposten: vorpostenFuerClient(doc, req.userId, jetztN) });
+});
 
 app.post('/api/vorposten/aufgeben', authMiddleware, async (req, res) => {
   if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
@@ -17445,6 +17565,38 @@ app.get('/api/admin/chat', authMiddleware, (req, res) => {
   out.sort((a, b) => (b.zeit || 0) - (a.zeit || 0));
   res.json({ nachrichten: out.slice(0, grenze), gesamt: out.length, konto: ziel ? ziel.username : null });
 });
+/* V9: EINEN VORPOSTEN-NAMEN ENTFERNEN. Bauart und Begruendung von /api/admin/chat/loeschen
+   uebernommen: Wer einen Text entfernt, will den Verfasser meistens auch bremsen - zwei
+   Handgriffe daraus zu machen heisst, dass der zweite vergessen wird. Der Vorposten selbst bleibt
+   unangetastet; entfernt wird nur der Name. */
+app.post('/api/admin/vorposten/name-loeschen', authMiddleware, async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const sys = String((req.body && req.body.system) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (!doc.eigenName) return res.status(404).json({ error: 'Diese Station trägt keinen eigenen Namen.', schonLeer: true });
+  const war = doc.eigenName;
+  delete doc.eigenName;
+  /* `nameSeit` BLEIBT STEHEN. Sonst waere die Loeschung durch den Admin zugleich ein Geschenk:
+     Die Abklingzeit faengt von vorn an, und der Besitzer taufte sofort neu. */
+  vorpostenSchreib(doc);
+  const stunden = Math.max(0, Math.min(720, Math.floor(Number((req.body && req.body.stummStunden) || 0))));
+  let stummBis = 0, stummKonto = null;
+  if (stunden > 0 && doc.besitzer) {
+    const u = findUserById(doc.besitzer);
+    if (u) {
+      u.stummBis = Date.now() + stunden * 3600000;
+      u.stummGrund = String((req.body && req.body.grund) || '').trim().slice(0, 200) || 'Entfernter Vorposten-Name';
+      u.stummSeit = Date.now();
+      stummBis = u.stummBis; stummKonto = u.username;
+    }
+  }
+  console.log('[admin] vorposten-name geloescht sys=' + sys + ' war=' + war + ' stumm=' + (stummKonto || '-'));
+  await saveDb();
+  res.json({ ok: true, system: sys, war, besitzer: doc.besitzerName || null, stummKonto, stummBis });
+});
+
 app.post('/api/admin/chat/loeschen', authMiddleware, async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
   const key = String((req.body && req.body.key) || '');

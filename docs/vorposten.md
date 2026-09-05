@@ -1130,3 +1130,63 @@ deutlich unter dem Handelssatz (gemessen: 46 884 gegen 46 882 und 168 767). Die 
 Und `tests/test_vorposten_sets_http.js`, Prüfung `4b`, hat ein zweites Konto bekommen: Die Scheibe
 hat seit dieser Durchsicht zwei Seiten, und ohne einen Fremden im Test wäre die eine davon
 unbeobachtet.
+
+## V9: ein eigener Name für die Station (05.09.2026)
+
+Bis hierher hieß jeder Vorposten nach Stufe und Zweig — „Sternenfestung", „Sternenmarkt". Das sagt,
+**was** er ist, nie **welcher** er ist; wer drei hält, unterscheidet sie am Systemnamen. Ein selbst
+vergebener Name macht aus einer Zahlenkarte einen Ort.
+
+`POST /api/vorposten/name` mit `{ system, name }`, hinter `VP_NAME_AKTIV` (ausgeliefert **aus**,
+umgelegt im Frontend-PR). Ein **leerer** Name löscht.
+
+**Fünf Entscheidungen, die man beim Anfassen kennen muss:**
+
+1. **Der Stufenname bleibt.** `name` ist weiterhin „Sternenfestung" und wird weiter überall
+   gerechnet und gemeldet; `eigenName` kommt als eigenes Feld daneben. Ihn zu ersetzen hieße, die
+   Stufe unsichtbar zu machen — und die ist die Information, die ein Angreifer braucht.
+2. **Er ist Text vor anderen**, also gilt die Stummschaltung, fail-closed (ohne Nutzerobjekt keine
+   Taufe). Wer stumm ist, stellte sonst denselben Satz vor dieselben Leute, den ihm der Chat gerade
+   verwehrt.
+3. **Löschen geht immer** — ohne Stufenschwelle, ohne Stummschaltung, ohne Abklingzeit. Die Frist
+   bremst das *Setzen*, nicht das Zurücknehmen; eine Sperre, die jemanden an einem Namen festhält,
+   den er bereut, richtet Schaden an, statt ihn zu verhindern.
+4. **Erst ab Stufe 3.** Ein Ankerkern, der in Minuten steht und fällt, braucht keinen Namen — und
+   ohne Schwelle wäre die Taufe der billigste Weg, Text in die Galaxie zu stellen.
+5. **Der Admin kann ihn entfernen**, im selben Handgriff mit einer Stummschaltung
+   (`POST /api/admin/vorposten/name-loeschen`, Vorbild `/api/admin/chat/loeschen`). `nameSeit`
+   bleibt dabei stehen: Sonst wäre die Löschung zugleich ein Geschenk — die Abklingzeit finge von
+   vorn an und der Besitzer taufte sofort neu.
+
+**Das Muster ist ein eigenes**, nicht `NAME_MUSTER`: Das gehört den Konten und kennt kein
+Leerzeichen. `VP_NAME_MUSTER` lässt mehrere Wörter zu („Roter Hafen" ist der Fall, für den es diese
+Etappe gibt), verlangt Buchstabe oder Ziffer als erstes Zeichen (kein Name drängelt sich mit einem
+Satzzeichen in einer Liste vor) und deckelt bei 24 Zeichen. `vpNameSauber()` zieht **vorher**
+Steuerzeichen und doppelten Weißraum zusammen — ohne diesen Schritt käme ein Name mit Tabulator
+durch das Muster und stünde danach zerrissen in der Karte.
+
+**Der Name reist in den Meldungen mit** (`vorposten-abbau`, `-verlust`, `-umruestung`, `-lager` und
+der Beute des Angreifers). Beim Abbau gibt es die Station nicht mehr; der Client kann den Namen
+dann nirgends nachschlagen.
+
+`nameFreiAb` sieht nur der Besitzer. Ein Fremder soll den Namen sehen, aber nicht, wann der nächste
+Wechsel fällig ist — das sagt nichts über die Stärke und wäre bloße Innerei.
+
+### Gegenproben
+
+`tests/test_vorposten_name_http.js` (19 Prüfungen), Port 3265, **neun** Gegenproben mit gemessener
+Pflichtliste. Die Mitläufer in Klammern sind ebenfalls gemessen: Wo ein Riegel fällt, geht die in
+dieser Prüfung abgewiesene Taufe durch, und die Station trägt danach einen Namen samt laufender
+Abklingzeit — die späteren Prüfungen messen dann einen anderen Ausgangszustand.
+
+| Sabotage | fällt |
+|---|---|
+| `schalter` (Schalterprüfung im Endpunkt entfernt) | `1a` |
+| `stufe` (Stufenschwelle ausgehebelt) | `2a` |
+| `muster` (Musterprüfung ausgehebelt) | `2c` (+ `3a`, `3b`, `3c`, `4c`) |
+| `stumm` (Stummschaltung entfernt) | `2d` (+ `3a`, `4c`) |
+| `abkling` (Abklingzeit ausgehebelt) | `3d` |
+| `loeschsperre` (Löschen hinter die drei Riegel geschoben) | `4a` (+ `4b`) |
+| `saeuberung` (`vpNameSauber` schneidet nur noch ab) | `4c` (+ `3a`, `3b`, `3c`) |
+| `adminfrist` (die Admin-Löschung entfernt auch `nameSeit`) | `5b` |
+| `meldung` (`eigenName` fehlt in der Abbau-Meldung) | `6a` |

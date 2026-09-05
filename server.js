@@ -13516,22 +13516,25 @@ function vorpostenWerte(doc) {
   // Fertige Projekte wirken auf DIESELBEN Kanaele wie die Module und werden vorher addiert - ein
   // eigener Rechenweg waere eine zweite Stelle, an der ein Kanal vergessen werden kann.
   const pr = vpProjektBoni(doc);
+  /* V7: Set-Boni wirken auf DIESELBEN Kanaele und werden hier addiert - aus demselben Grund wie
+     die Projekte. Solange VP_MODUL_SETS_AKTIV liegt, sind alle Werte null. */
+  const se = vpModulSetBoni(doc);
   return Object.assign({}, st, {
-    kernLp: Math.round(st.kernLp * (1 + b.kern + pr.kern)),
-    verteidigung: Math.round(st.verteidigung * (1 + b.verteidigung + pr.verteidigung)),
-    garnisonMax: Math.round(st.garnisonMax * (1 + b.garnison + pr.garnison)),
-    flug: Math.round(st.flug * (1 + b.flug + pr.flug) * 1000) / 1000,
-    prod: Math.round(st.prod * (1 + b.prod + pr.prod) * 1000) / 1000,
-    scan: st.scan + Math.round(b.scan) + Math.round(pr.scan),
+    kernLp: Math.round(st.kernLp * (1 + b.kern + pr.kern + se.kern)),
+    verteidigung: Math.round(st.verteidigung * (1 + b.verteidigung + pr.verteidigung + se.verteidigung)),
+    garnisonMax: Math.round(st.garnisonMax * (1 + b.garnison + pr.garnison + se.garnison)),
+    flug: Math.round(st.flug * (1 + b.flug + pr.flug + se.flug) * 1000) / 1000,
+    prod: Math.round(st.prod * (1 + b.prod + pr.prod + se.prod) * 1000) / 1000,
+    scan: st.scan + Math.round(b.scan) + Math.round(pr.scan) + Math.round(se.scan),
     /* DER WERFTRABATT. Er steht hinter VP_WERFT_AKTIV, weil das Frontend ihn erst mit seiner
        eigenen Etappe liest: Ein Kanal, der eine Zahl meldet, die nirgends wirkt, waere genau die
        Sorte angezeigter Nutzen, die es in diesem Projekt nicht geben soll. */
-    werft: VP_WERFT_AKTIV ? Math.round((st.werft || 0) * (1 + b.werft + pr.werft) * 1000) / 1000 : 0,
+    werft: VP_WERFT_AKTIV ? Math.round((st.werft || 0) * (1 + b.werft + pr.werft + se.werft) * 1000) / 1000 : 0,
     werftDeckel: VP_WERFT_DECKEL,
-    markt: VP_MARKT_AKTIV ? Math.round((st.markt || 0) * (1 + b.markt + pr.markt) * 1000) / 1000 : 0,
+    markt: VP_MARKT_AKTIV ? Math.round((st.markt || 0) * (1 + b.markt + pr.markt + se.markt) * 1000) / 1000 : 0,
     marktDeckel: VP_MARKT_DECKEL,
     flugDeckel: pr.flugDeckel,
-    modulBoni: b, projektBoni: pr
+    modulBoni: b, projektBoni: pr, setBoni: se, sets: vpModulSetsErfuellt(doc)
   });
 }
 function vorpostenSysOk(sys) { return typeof sys === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(sys); }
@@ -13805,6 +13808,54 @@ const VP_MODUL_SELTENHEIT = {
 };
 // Gebaut wird nur bis 'ungewoehnlich' - der Rest kommt aus dem Fall von PvE-Zielen.
 const VP_MODUL_BAUBAR = ['gewoehnlich', 'ungewoehnlich'];
+
+/* ETAPPE V7: MODUL-SETS UND EIN STECKPLATZ JE ZWEIG (05.09.2026)
+
+   Bis hierher war jedes Modul fuer sich allein wirksam, und die Steckplatzzahl haing nur an der
+   Stufe. Beides zusammen hiess: Wer eine Bestueckung waehlt, waehlt sechsmal dieselbe Frage
+   („welcher Kanal ist mir am meisten wert?") und nie eine Kombination. Zwei Ergaenzungen:
+
+   1. SETS. Zwei zusammengehoerende Module ergeben ein Set mit einem ZUSAETZLICHEN Bonus. Die
+      Seltenheit zaehlt dabei NICHT - ein Set belohnt Breite, waehrend die Seltenheit weiter Tiefe
+      belohnt. Wer beides will, braucht Steckplaetze, und die kosten Stufen.
+   2. EIN STECKPLATZ MEHR FUER DEN FESTUNGSRING. Er ist der Zweig, dessen Identitaet die STATION
+      ist (die anderen beiden wirken nach aussen: Flugzeit, Boerse, Ertrag). Der sechste Platz ist
+      zugleich der einzige Weg zur „Sternwacht", die alle sechs Module verlangt.
+
+   DIE ZWEIG-STECKPLAETZE ADDIEREN NUR, SIE ZIEHEN NIE AB. Das ist keine Schoenheit, sondern die
+   Hausregel „Deckel duerfen niemals Daten loeschen" in ihrer Wirkung: `vpModulBoni` schneidet die
+   Modulliste auf die Steckplatzzahl (`slice(0, slots)`), und `vorpostenFuerClient` tut dasselbe.
+   Ein Zweig mit WENIGER Plaetzen haette ein bereits eingebautes Modul still wirkungslos gemacht
+   und es dem Besitzer aus der Anzeige genommen - ohne Meldung, ohne Rueckgabe in den Bestand.
+
+   Ein Set wirkt auf DIESELBEN Kanaele wie Module und Projekte und wird dort addiert; ein eigener
+   Rechenweg waere eine zweite Stelle, an der ein Kanal vergessen werden kann (dieselbe Begruendung
+   wie bei den Projekten). */
+const VP_MODUL_SETS_AKTIV = false;
+const VP_MODUL_SET_DEFS = [
+  { key: 'bollwerk', name: 'Bollwerk', icon: 'ti-shield',
+    teile: ['kernpanzer', 'geschuetz'],
+    boni: { kern: 0.10, verteidigung: 0.10 },
+    desc: 'Kernpanzerung und Geschützbank greifen ineinander: der Kern hält länger, und die Station schießt härter zurück.' },
+  { key: 'flottenbasis', name: 'Flottenbasis', icon: 'ti-rocket',
+    teile: ['hangar', 'sprungrechner'],
+    boni: { garnison: 0.10, flug: 0.03 },
+    desc: 'Liegeplätze und Sprungbahnen aus einer Hand: mehr Garnison, und der Anflug wird noch etwas kürzer.' },
+  { key: 'umschlagplatz', name: 'Umschlagplatz', icon: 'ti-building-factory-2',
+    teile: ['raffinerie', 'horchposten'],
+    boni: { prod: 0.10, scan: 1 },
+    desc: 'Raffinerie und Horchposten teilen sich die Energie: mehr Ertrag, und eine Aufklärungsstufe obendrauf.' },
+  /* DIE STERNWACHT verlangt alle sechs Module und damit sechs Steckplaetze - erreichbar nur auf der
+     Endstufe eines Festungsrings. Sie ist bewusst das einzige Set, das eine ZWEIGWAHL voraussetzt:
+     Wer sie will, gibt Flugzeit, Boerse und Ertrag dafuer auf. */
+  { key: 'sternwacht', name: 'Sternwacht', icon: 'ti-antenna-bars-5',
+    teile: ['kernpanzer', 'geschuetz', 'hangar', 'sprungrechner', 'raffinerie', 'horchposten'],
+    boni: { kern: 0.10, verteidigung: 0.10, garnison: 0.10 },
+    desc: 'Alle sechs Systeme laufen zusammen. Braucht sechs Steckplätze – die hat nur ein voll ausgebauter Festungsring.' }
+];
+// Wieviel Steckplaetze ein Zweig ZUSAETZLICH gibt. Nur Werte >= 0 sind zulaessig (siehe oben).
+const VP_ZWEIG_SLOTS = { werft: 0, handel: 0, festung: 1 };
+const VP_MODUL_SLOTS_MAX = 6;
 /* ETAPPE 4: STATIONSPROJEKTE (03.09.2026)
    Auftrag Sascha: "dass man von dort aus Projekte starten kann, dass man von dort aus vielleicht
    auch eine Art Ueberraumtor bauen kann. Also auch noch mehr Projekte quasi macht."
@@ -13946,7 +13997,42 @@ function vpModulFundwurf(schwere, anteil) {
   const def = VP_MODUL_DEFS[Math.floor(Math.random() * VP_MODUL_DEFS.length)];
   return def.key + ':' + seltenheit;
 }
-function vpModulSlots(stufe) { return Math.max(0, Math.min(5, (Number(stufe) || 1) - VORPOSTEN_ZWEIG_AB + 1)); }
+/* Steckplaetze: einer je Stufe ab der Wahlstufe, dazu der Zuschlag des Zweigs (V7). Der Zuschlag
+   haengt an VP_MODUL_SETS_AKTIV - solange der Schalter liegt, rechnet diese Funktion Zahl fuer
+   Zahl wie vor V7. `VP_ZWEIG_SLOTS` darf nur addieren; ein Abzug naehme einem bestehenden
+   Vorposten ein eingebautes Modul aus der Wirkung und aus der Anzeige. */
+function vpModulSlots(stufe, zweig) {
+  const basis = Math.max(0, Math.min(5, (Number(stufe) || 1) - VORPOSTEN_ZWEIG_AB + 1));
+  if (!basis || !VP_MODUL_SETS_AKTIV) return basis;
+  const dazu = Math.max(0, (vorpostenZweigOk(zweig) ? VP_ZWEIG_SLOTS[zweig] : 0) || 0);
+  return Math.min(VP_MODUL_SLOTS_MAX, basis + dazu);
+}
+/* IMMER DIESE FORM, wenn ein Dokument zur Hand ist - dieselbe Lehre wie bei vorpostenStufeVon
+   (GR-7): Fuenf Stellen riefen dort die Stufenform ohne Zweig und fielen still auf den Basiswert
+   zurueck. Ein Steckplatz, den die eine Stelle kennt und die andere nicht, waere genau das. */
+function vpModulSlotsVon(doc) { return vpModulSlots(doc && doc.stufe, doc && doc.zweig); }
+/* Welche Sets vollstaendig eingebaut sind. Gezaehlt wird der MODULSCHLUESSEL, nicht die Seltenheit:
+   Ein Set belohnt Breite, die Seltenheit belohnt Tiefe. Gelesen wird nur, was in einem Steckplatz
+   steckt - dieselbe Scheibe wie in vpModulBoni, sonst zaehlte ein Modul zum Set, das gar nicht
+   wirkt. */
+function vpModulSetsErfuellt(doc) {
+  if (!VP_MODUL_SETS_AKTIV) return [];
+  const drin = new Set();
+  for (const instKey of (doc && Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlotsVon(doc))) {
+    const teil = vpModulTeile(instKey);
+    if (teil) drin.add(teil.key);
+  }
+  return VP_MODUL_SET_DEFS.filter(d => d.teile.every(k => drin.has(k))).map(d => d.key);
+}
+function vpModulSetBoni(doc) {
+  const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0, markt: 0 };
+  const erfuellt = new Set(vpModulSetsErfuellt(doc));
+  for (const d of VP_MODUL_SET_DEFS) {
+    if (!erfuellt.has(d.key)) continue;
+    for (const [kanal, wert] of Object.entries(d.boni)) aus[kanal] = (aus[kanal] || 0) + wert;
+  }
+  return aus;
+}
 function vpModulDef(key) { return VP_MODUL_DEFS.find(d => d.key === key) || null; }
 function vpModulTeile(instKey) {
   const [key, seltenheit] = String(instKey || '').split(':');
@@ -13957,7 +14043,7 @@ function vpModulTeile(instKey) {
    waere hier falsch: die Steckplaetze SIND der Deckel (hoechstens fuenf, und jeder kostet). */
 function vpModulBoni(doc) {
   const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0, markt: 0 };
-  const slots = vpModulSlots(doc && doc.stufe);
+  const slots = vpModulSlotsVon(doc);
   for (const instKey of (doc && Array.isArray(doc.module) ? doc.module : []).slice(0, slots)) {
     const teil = vpModulTeile(instKey);
     if (!teil) continue;
@@ -14049,9 +14135,14 @@ function vorpostenFuerClient(doc, userId, jetzt, karte) {
     /* Steckplaetze und was drinsteckt - fuer JEDEN sichtbar, nicht nur fuer den Besitzer: Ein
        Angreifer soll sehen koennen, warum diese Station haerter ist als ihre Stufe vermuten laesst
        (dieselbe Offenheit wie bei Verteidigung und Garnisonszahl). */
-    slots: vpModulSlots(doc.stufe),
-    module: (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlots(doc.stufe)),
+    slots: vpModulSlotsVon(doc),
+    module: (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlotsVon(doc)),
     modulBoni: st.modulBoni || null,
+    /* V7: Welche Sets vollstaendig stecken und was sie zusaetzlich bringen - fuer JEDEN sichtbar,
+       wie Steckplaetze, Verteidigung und Garnisonszahl. Ein Angreifer soll sehen koennen, warum
+       diese Station haerter ist, als ihre Stufe und ihre Modulliste vermuten lassen. */
+    sets: Array.isArray(st.sets) ? st.sets : [],
+    setBoni: st.setBoni || null,
     /* Projekte stehen jedem offen wie die Steckplaetze - ein Bollwerk erklaert dem Angreifer, warum
        dieser Kern haerter ist als die Stufe verspricht. Das LAUFENDE Vorhaben sieht nur der
        Besitzer (weiter unten): Es sagt nichts ueber die heutige Staerke, verraet aber, wann diese
@@ -14244,6 +14335,11 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
     /* Der Modulkatalog reist mit - wie die Stufentabelle. Er hat damit keine Kopie im Frontend,
        und `baubar` sagt dem Spiel, welche Seltenheiten die Schmiede annimmt. */
     modulDefs: VP_MODUL_DEFS, modulSeltenheiten: VP_MODUL_SELTENHEIT, modulBaubar: VP_MODUL_BAUBAR,
+    /* Die Set-Tabelle reist MIT, sie wird im Frontend nicht kopiert - dieselbe Entscheidung wie bei
+       der Stufentabelle und den Moduldefinitionen. Eine Kopie waere eine Kopie-Familie mehr, und
+       davon hat dieses Projekt genug. `modulSetsAktiv` sagt dem Client, ob er sie ueberhaupt
+       zeigen darf; liegt der Schalter, rechnet der Server ohne sie. */
+    modulSetDefs: VP_MODUL_SET_DEFS, modulSetsAktiv: VP_MODUL_SETS_AKTIV, zweigSlots: VP_ZWEIG_SLOTS,
     modulAusbauKosten: VP_MODUL_AUSBAU_KREDITE, modulBauAbklingMs: VP_MODUL_BAU_ABKLING_MS,
     modulBestand: vpModulBestand(findUserById(req.userId) || {}),
     modulBauAb: (findUserById(req.userId) || {}).vpModulBauAb || 0,
@@ -14441,7 +14537,7 @@ app.post('/api/vorposten/modul/einbauen', authMiddleware, async (req, res) => {
   const doc = vorpostenLies(sys);
   if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
   if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer bestückt seinen Vorposten.' });
-  const slots = vpModulSlots(doc.stufe);
+  const slots = vpModulSlotsVon(doc);
   if (slots < 1) return res.status(400).json({ error: 'Steckplätze gibt es erst ab Stufe ' + VORPOSTEN_ZWEIG_AB + '.', keineSlots: true, abStufe: VORPOSTEN_ZWEIG_AB });
   if (!Array.isArray(doc.module)) doc.module = [];
   if (doc.module.length >= slots) return res.status(400).json({ error: 'Alle ' + slots + ' Steckplätze sind belegt - bau erst eines aus.', voll: true, slots });
@@ -14606,7 +14702,7 @@ async function vorpostenAbbauTick() {
     const ab = vorpostenAbbauLaeuft(doc);
     if (!ab || ab > jetzt) continue;
     const user = findUserById(doc.besitzer);
-    const module = (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlots(doc.stufe));
+    const module = (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlotsVon(doc));
     if (user) for (const instKey of module) if (vpModulTeile(instKey)) vpModulGeben(user, instKey, 1);
     const st = vorpostenStufeVon(doc);
     /* V5: JEDER Beitragende bekommt SEINE Schiffe zurueck, nicht der Besitzer alle. Der Besitzer

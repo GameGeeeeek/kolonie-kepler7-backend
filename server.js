@@ -17557,6 +17557,12 @@ const KAMPFTEXT_GESAMT_PRO_TAG = 300;
 // Laengendeckel aus dem Konzept. Der Text ist Serverdaten im Client und darf die Berichtskarte
 // nicht sprengen - derselbe Grund wie escapeHtml.
 const KAMPFTEXT_MAX_ZEICHEN = 600;
+// Gemessen am M715q (05.09.2026, qwen3.5:4b): Bei 0.7 drehten zwei von acht E2-Texten den Ausgang
+// um ("ein kollektives Versagen unserer Linien", obwohl der Titan vernichtet war), bei 0.2 keiner;
+// die Dauer ist praktisch gleich (Median 38,2 s gegen 38,9 s). Der npc-Pfad wurde eigens
+// nachgemessen, weil er live ist: je 1 von 4 verworfen, kein Ausgang verdreht, 0.2 nicht
+// schlechter. E0 bis E2 sind mit 0.7 gemessen worden - wer den Wert wieder anfasst, misst neu.
+const KAMPFTEXT_TEMPERATUR = 0.2;
 // Wie lange ein fertiger Auftrag zum Abholen bereitliegt. Der Client fragt im 30-s-Takt; eine
 // Stunde ist grosszuegig und haelt db.kampftexte klein.
 const KAMPFTEXT_AUFBEWAHRUNG_MS = 3600 * 1000;
@@ -17837,7 +17843,7 @@ function kampftextPromptFuer(art, daten) {
   return KAMPFTEXT_EINLEITUNGEN[art] + KAMPFTEXT_E2_REGELN + kampftextDatenText(daten);
 }
 
-// --- Die fuenf Sperren -----------------------------------------------------------------------
+// --- Die sechs Sperren -----------------------------------------------------------------------
 //
 // Sie sind die WAHRHEIT, der Prompt ist nur die Bitte (AI-Core-Lektion 10). Am 28.08.2026 am
 // echten Modell gemessen: Von acht Texten verwarf die Sperre zwei - nachgelesen trugen alle acht
@@ -17850,13 +17856,22 @@ function kampftextZahlen(text) {
   return raus;
 }
 
+// Der EIGENE Name des Spiels traegt eine Ziffer, und sie ist keine Behauptung ueber den Kampf.
+// Gemessen am 05.09.2026 (npc-Temperaturvergleich): "ein Sieg fuer Kolonie Kepler-7" wurde mit
+// "erfundene Zahl 7" verworfen - ein sauberer Text, weggeworfen fuer den Namen des Spiels, in dem
+// er steht. Entfernt wird der NAME vor dem Zaehlen, nicht die Ziffer: "7 Wellen" faellt weiter auf.
+const KAMPFTEXT_SPIELNAME = /(?:kolonie[\s-]+)?kepler[\s-]*7/gi;
+function kampftextOhneSpielnamen(text) {
+  return String(text || '').replace(KAMPFTEXT_SPIELNAME, ' ');
+}
+
 function kampftextErfundeneZahlen(text, daten) {
   // Verglichen wird gegen den DATENBLOCK, nicht gegen den ganzen Prompt. Gemessen erlaubte der
   // ganze Prompt drei Zahlen statt einer - die 500 aus "hoechstens 500 Zeichen" und die 7 aus
   // "Kolonie Kepler-7". Ein Text mit "500 Jaeger fielen in 7 Wellen" kam damit sauber durch.
   const erlaubt = kampftextZahlen(kampftextDatenText(daten));
   const raus = [];
-  for (const z of kampftextZahlen(text)) if (!erlaubt.has(z)) raus.push(z);
+  for (const z of kampftextZahlen(kampftextOhneSpielnamen(text))) if (!erlaubt.has(z)) raus.push(z);
   return raus.sort((a, b) => a.length - b.length || a.localeCompare(b));
 }
 
@@ -17949,9 +17964,18 @@ function kampftextVerlustaussage(text, daten) {
 const KAMPFTEXT_ZAHLWOERTER = ('ein eine einen einem einer zwei drei vier fünf sechs sieben acht neun ' +
   'zehn elf zwölf zwanzig dreissig dreißig vierzig fünfzig sechzig siebzig achtzig neunzig hundert ' +
   'tausend dutzend beide beiden').split(' ');
+// Nicht nur der Schiffstyp zaehlt, sondern auch das allgemeine Wort dafuer: Gemessen (npc,
+// 05.09.2026) sagte das Modell "Zwei Schiffe gegen einen Gegner" bei 45 Quantenkreuzern und 30
+// Waechtern und "zwei unserer Einheiten" bei zwei verlorenen TYPEN. Beides liest der Spieler als
+// Stueckzahl, und der Bericht daneben widerspricht ihm. Dazwischen darf EIN Besitz- oder
+// Artikelwort stehen ("zwei unserer Schiffe") - mehr nicht, sonst faengt das Muster ganze Saetze.
+const KAMPFTEXT_ALLGEMEINE_SCHIFFSWOERTER = 'schiff schiffe schiffen einheit einheiten'.split(' ');
+const KAMPFTEXT_FUELLWOERTER = 'unser unsere unserer unseren unserem eigene eigenen der die das den dem'.split(' ');
 const KAMPFTEXT_STUECKZAHL = new RegExp(
   '\\b(?:' + KAMPFTEXT_ZAHLWOERTER.slice().sort((a, b) => b.length - a.length).join('|') + ')\\b\\s+' +
-  '(?:' + Object.values(KAMPFTEXT_SCHIFFSNAMEN).map(kampftextNorm).sort((a, b) => b.length - a.length)
+  '(?:(?:' + KAMPFTEXT_FUELLWOERTER.slice().sort((a, b) => b.length - a.length).join('|') + ')\\s+)?' +
+  '(?:' + Object.values(KAMPFTEXT_SCHIFFSNAMEN).map(kampftextNorm).concat(KAMPFTEXT_ALLGEMEINE_SCHIFFSWOERTER)
+    .sort((a, b) => b.length - a.length)
     .map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b', 'g');
 function kampftextStueckzahlAlsWort(text) {
   // Braucht den Datenblock nicht: Der Prompt nennt seit dem Zuschnitt GAR KEINE Anzahl mehr, also ist
@@ -17959,6 +17983,18 @@ function kampftextStueckzahlAlsWort(text) {
   const raus = [];
   for (const m of kampftextNorm(text).match(KAMPFTEXT_STUECKZAHL) || []) if (raus.indexOf(m) < 0) raus.push(m);
   return raus.sort();
+}
+
+// Die sechste Sperre: fremde Schriftzeichen. Gemessen am 05.09.2026 (npc bei 0.7): "Unsere Treffer
+// landeten\u7cbe\u51c6 auf den feindlichen Panzerplatten" - zwei chinesische Zeichen mitten im deutschen
+// Text. Keine Falschaussage, aber im Spiel unlesbar. Erlaubt sind deutsche Buchstaben, Ziffern und
+// die ueblichen Satzzeichen; abgeleitet aus einer Zeichenklasse, nicht aus einer Liste.
+const KAMPFTEXT_ERLAUBTE_ZEICHEN =
+  /[A-Za-z\u00C4\u00D6\u00DC\u00E4\u00F6\u00FC\u00DF0-9\s.,;:!?\-\u2013\u2014\u2026'"\u201E\u201C\u201D\u201A\u2018\u2019()[\]\/%&+*]/;
+function kampftextFremdeZeichen(text) {
+  const fremd = [];
+  for (const z of String(text || '')) if (!KAMPFTEXT_ERLAUBTE_ZEICHEN.test(z) && fremd.indexOf(z) < 0) fremd.push(z);
+  return fremd.sort().map(z => "fremdes Zeichen '" + z + "'");
 }
 
 function kampftextMaengel(text, daten) {
@@ -17970,6 +18006,7 @@ function kampftextMaengel(text, daten) {
   for (const s of kampftextFremdeSchiffe(t, daten)) raus.push('fremdes Schiff ' + s);
   for (const s of kampftextVerlustaussage(t, daten)) raus.push('falsche Verlustaussage: ' + s);
   for (const s of kampftextStueckzahlAlsWort(t)) raus.push('Stueckzahl als Wort: ' + s);
+  for (const s of kampftextFremdeZeichen(t)) raus.push(s);
   return raus;
 }
 
@@ -18019,7 +18056,7 @@ function kampftextHttp(methode, pfad, koerperObj, timeoutMs, mitSchluessel) {
 
 async function kampftextAnfrage(prompt) {
   const { status, roh } = await kampftextHttp('POST', '/ai/chat',
-    { prompt, model: KAMPFTEXT_MODELL, temperature: 0.7, num_predict: 400 }, KAMPFTEXT_TIMEOUT_MS, true);
+    { prompt, model: KAMPFTEXT_MODELL, temperature: KAMPFTEXT_TEMPERATUR, num_predict: 400 }, KAMPFTEXT_TIMEOUT_MS, true);
   if (status !== 200) throw new Error('AI Core antwortete HTTP ' + status + ': ' + roh.slice(0, 200));
   let text;
   try { text = String(JSON.parse(roh).response || '').trim(); }

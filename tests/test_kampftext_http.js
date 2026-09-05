@@ -44,7 +44,8 @@
 // Messung 05.09.2026): am alten Server fallen genau 15l und 15m. Abschnitt 14o-14q und 15n
 // (dritte Messung, 05.09.2026): am Stand davor fallen genau 14o, 14p, 14q und 15m. Abschnitt
 // 14r-14t (dritte Richtung der Verlust-Sperre, Temperaturvergleich): am Stand davor fallen genau
-// 14r und 14s - 14t bleibt gruen, das ist die Gegenrichtung. Gruen bleiben
+// 14r und 14s - 14t bleibt gruen, das ist die Gegenrichtung. Abschnitt 14u-14x (npc-Vergleich,
+// 05.09.2026): am Stand davor fallen genau 14u, 14v, 14w und 14x. Gruen bleiben
 // dort 15l (der Satz war da, nur an der falschen Stelle - 14p misst die Stelle) und 15n (die
 // Gegenrichtung). 14p prueft bewusst 'NICHTS ueber Verluste' ohne 'sagst du': mit dem vollen
 // Wortlaut war es am alten Stand aus dem falschen Grund gruen. BEFUND aus 14m: Die Sperre fand
@@ -173,9 +174,9 @@ function starteAiCore() {
         }
         ai.gleich++;
         ai.maxGleich = Math.max(ai.maxGleich, ai.gleich);
-        let prompt = '';
-        try { prompt = JSON.parse(roh).prompt || ''; } catch (e) {}
-        ai.prompts.push({ pfad: req.url, prompt, auth: req.headers.authorization || '' });
+        let prompt = '', temperatur = null;
+        try { const j = JSON.parse(roh); prompt = j.prompt || ''; temperatur = j.temperature; } catch (e) {}
+        ai.prompts.push({ pfad: req.url, prompt, temperatur, auth: req.headers.authorization || '' });
         if (ai.verzoegerung) await warte(ai.verzoegerung);
         ai.gleich--;
         res.writeHead(ai.status, { 'Content-Type': 'application/json' });
@@ -700,6 +701,33 @@ const KAMPF = {
     check('14t: bei LEERER Verlustliste ist "unbeschadet" die Wahrheit - der Text kommt durch',
       w4Ende.body && w4Ende.body.status === 'fertig' && /unbeschadet/.test(w4Ende.body.text || ''),
       { status: w4Ende.body && w4Ende.body.status, grund: w4Ende.body && w4Ende.body.grund });
+
+    // 14u-14x: die drei Befunde des npc-Temperaturvergleichs (05.09.2026) und die Temperatur selbst.
+    // (a) Der Name des Spiels traegt eine Ziffer: "ein Sieg fuer Kolonie Kepler-7" wurde gemessen mit
+    //     "erfundene Zahl 7" verworfen - ein sauberer Text, weggeworfen fuer den Namen des Spiels,
+    //     in dem er steht. 14u ist die Gegenrichtung dazu und muss DURCHkommen.
+    // (b) "Zwei Schiffe gegen einen Gegner" bei 45 Quantenkreuzern und 30 Waechtern - eine
+    //     Stueckzahl vor dem allgemeinen Wort fuer Schiffe, nicht vor einem Schiffstyp.
+    // (c) Zwei chinesische Zeichen mitten im deutschen Text.
+    ai.antwort = () => 'Der Schwarm zerfiel im Feuer unserer Bomber - ein Sieg fuer Kolonie Kepler-7.';
+    const k6 = await api.auftrag(quirin, Object.assign({}, koenigin, { schwarmGefallen: true }));
+    const k6Ende = await warteAufEnde(api, quirin, k6.body && k6.body.auftragId);
+    check('14u: der NAME des Spiels ist keine erfundene Zahl - der Text kommt durch',
+      k6Ende.body && k6Ende.body.status === 'fertig' && /Kepler-7/.test(k6Ende.body.text || ''),
+      { status: k6Ende.body && k6Ende.body.status, grund: k6Ende.body && k6Ende.body.grund });
+    check('14x: der Auftrag geht mit der gemessenen Temperatur 0.2 an AI Core, nicht mehr mit 0.7',
+      (ai.prompts[ai.prompts.length - 1] || {}).temperatur === 0.2,
+      { temperatur: (ai.prompts[ai.prompts.length - 1] || {}).temperatur });
+    ai.antwort = () => 'Zwei Schiffe stellten sich dem Nest entgegen; der Schwarm zerfiel.';
+    const k7 = await api.auftrag(quirin, Object.assign({}, koenigin, { schwarmGefallen: true }));
+    const k7Ende = await warteAufEnde(api, quirin, k7.body && k7.body.auftragId);
+    check('14v: eine Stueckzahl vor dem allgemeinen Wort fuer Schiffe wird verworfen',
+      k7Ende.body && k7Ende.body.status === 'verworfen' && /Stueckzahl als Wort: zwei schiffe/.test(k7Ende.body.grund || ''), k7Ende.body);
+    ai.antwort = () => 'Unsere Treffer landeten\u7cbe\u51c6 auf den Panzerplatten; der Schwarm zerfiel.';
+    const k8 = await api.auftrag(quirin, Object.assign({}, koenigin, { schwarmGefallen: true }));
+    const k8Ende = await warteAufEnde(api, quirin, k8.body && k8.body.auftragId);
+    check('14w: fremde Schriftzeichen im deutschen Text werden verworfen',
+      k8Ende.body && k8Ende.body.status === 'verworfen' && /fremdes Zeichen/.test(k8Ende.body.grund || ''), k8Ende.body);
     ai.antwort = () => 'Der Verband kehrte zurueck.';
   }
 

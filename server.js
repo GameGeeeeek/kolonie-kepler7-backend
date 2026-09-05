@@ -13216,7 +13216,12 @@ const VP_MARKT_SLOTS_MAX = 3;
    (Mine Stufe 45, Multiplikator 4, gemessen an ratesPerSecond im Frontend). Das Lager ist damit
    eine Beigabe, kein Ersatz - und drei volle Vorposten bleiben unter dem, was er in derselben
    Zeit selbst foerdert. */
-const VP_LAGER_AKTIV = false;
+/* UMGELEGT AM 05.09.2026 (Etappe V4, Frontend-Haelfte). Das Frontend zeigt den Lagerstand an der
+   Station - auch an fremden, denn das Lager ist offen sichtbar (der Zweck: wer stuermt, soll
+   riechen koennen, wo sich der Flug lohnt) - und hat endlich einen Knopf, der
+   POST /api/vorposten/lager/holen ruft. Bis heute gab es den Belohnungszweig `vorposten-lager` im
+   Spiel, aber keine einzige Stelle, die den Endpunkt aufrief: Das Lager war unerreichbar. */
+const VP_LAGER_AKTIV = true;
 const VP_LAGER_STUNDEN = 12;
 /* AB WANN UEBERHAUPT GESAMMELT WIRD (Durchsicht 04.09.2026). Ohne diese Untergrenze stuende in der
    Sekunde, in der VP_LAGER_AKTIV auf true kippt, JEDER bestehende Vorposten sofort am Deckel:
@@ -13227,10 +13232,13 @@ const VP_LAGER_STUNDEN = 12;
    Genau diese Fehlerklasse steht seit heute in PROJECT_MEMORY („Ein Zustand, der heute nur nutzlos
    aussieht, kann beim Einschalten rueckwirkend wertvoll werden") - fuer das Sternendock wurde sie
    behandelt, fuer das Lager nicht.
-   0 heisst „keine Untergrenze". BEIM UMLEGEN DES SCHALTERS auf den Deploy-Zeitstempel setzen, z. B.
-   Date.parse('2026-09-05T18:00:00Z'). Kein Schreiben beim Lesen, keine Migration, nichts geloescht -
-   die Zeit vor der Aktivierung zaehlt einfach nicht. */
-const VP_LAGER_AB = 0;
+   0 heisst „keine Untergrenze". BEIM UMLEGEN DES SCHALTERS auf den Deploy-Zeitstempel setzen. Kein
+   Schreiben beim Lesen, keine Migration, nichts geloescht - die Zeit vor der Aktivierung zaehlt
+   einfach nicht.
+   GESETZT AM 05.09.2026 mit dem Umlegen des Schalters. Ohne diese Zahl haette in derselben
+   Sekunde jeder bestehende Vorposten am Deckel gestanden: fuer eine Bastion mit Handelsknoten
+   337.500 Erz, 112.500 Kristalle und 90.000 Deuterium, bis zu drei je Konto. */
+const VP_LAGER_AB = Date.parse('2026-09-05T05:00:00Z');   // 1788584400000
 const VP_LAGER_ANTEILE = { erz: 0.225, kristalle: 0.075, deuterium: 0.06 };
 /* ETAPPE V5: DER VERBUENDETE DARF ETWAS (03.09.2026). Bis hierher stand an jeder Vorposten-Route
    `doc.besitzer !== req.userId` -> 403: Ein Allianzpartner konnte nichts. Kein Beisteuern, keine
@@ -13452,12 +13460,21 @@ function vorpostenLagerRate(doc, werte) {
    damit ein Dokument aus der Zeit vor dieser Etappe korrekt weiterrechnet (und nicht seit 1970
    sammelt). Der Deckel steht in Stunden, nicht in absoluten Mengen: So waechst er von selbst mit,
    wenn die Leiter sich aendert. */
+/* SEIT WANN DIESES LAGER SAMMELT - die EINE Stelle (05.09.2026). Bis hierher rechneten
+   `vorpostenLagerStand` und `vorpostenLagerVoll` dasselbe `seit` getrennt, und nur der Stand kannte
+   VP_LAGER_AB. Beim Umlegen des Schalters waere das sofort sichtbar geworden: Der Stand faengt bei
+   null an (richtig), aber `lagerVollAb` stuende bei `doc.seit + 12 h` - fuer jeden bestehenden
+   Vorposten Wochen in der Vergangenheit. Die Anzeige haette „Lager voll" ueber ein leeres Lager
+   geschrieben, und zwar am Tag der Aktivierung fuer JEDEN Spieler mit Vorposten.
+   Der Rueckfall auf `doc.seit` haelt alte Dokumente am Rechnen (statt seit 1970 zu sammeln);
+   VP_LAGER_AB zieht die Aktivierungs-Untergrenze ein, damit die Zeit VOR dem Umlegen nicht
+   rueckwirkend zaehlt - siehe die Begruendung an der Konstante. */
+function vorpostenLagerSeit(doc, jetzt) {
+  return Math.max(VP_LAGER_AB, (doc && doc.lagerSeit) || (doc && doc.seit) || jetzt || Date.now());
+}
 function vorpostenLagerStand(doc, jetzt, werte) {
   const t = jetzt || Date.now();
-  /* Der Rueckfall auf `doc.seit` haelt alte Dokumente korrekt am Rechnen (statt seit 1970 zu
-     sammeln); VP_LAGER_AB zieht darunter die Aktivierungs-Untergrenze ein, damit die Zeit VOR dem
-     Umlegen des Schalters nicht rueckwirkend zaehlt - siehe die Begruendung an der Konstante. */
-  const seit = Math.max(VP_LAGER_AB, (doc && doc.lagerSeit) || (doc && doc.seit) || t);
+  const seit = vorpostenLagerSeit(doc, t);
   const stunden = Math.max(0, Math.min(VP_LAGER_STUNDEN, (t - seit) / 3600000));
   const rate = vorpostenLagerRate(doc, werte);
   const aus = {};
@@ -13482,8 +13499,7 @@ function vorpostenDockStand(doc, jetzt, werte) {
   return Math.max(0, Math.min(VP_DOCK_MAX, Math.floor(stunden / VP_DOCK_STUNDEN)));
 }
 function vorpostenLagerVoll(doc) {
-  const seit = (doc && doc.lagerSeit) || (doc && doc.seit) || Date.now();
-  return seit + VP_LAGER_STUNDEN * 3600000;
+  return vorpostenLagerSeit(doc) + VP_LAGER_STUNDEN * 3600000;
 }
 function vorpostenLagerLeer(stand) { return !stand || Object.values(stand).every(v => !(v > 0)); }
 

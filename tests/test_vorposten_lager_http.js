@@ -25,7 +25,7 @@ const SAB = process.env.KEPLER_VPLAGER_SABOTAGE || '';
    deshalb nur 5a mit: 5b prueft den EIGENEN Riegel des Abhol-Endpunkts, und der ist mit Absicht
    eine zweite Stelle - er gibt eine verstaendliche Auskunft („Vorposten fuehren derzeit kein
    Lager") statt der irrefuehrenden „Im Lager liegt noch nichts". */
-const MUSS_FALLEN = { deckel: ['2b'], zurueckdrehen: ['3a'], beute: ['4a'], schalter: ['5a'] };
+const MUSS_FALLEN = { deckel: ['2b'], zurueckdrehen: ['3a'], beute: ['4a'], schalter: ['5a'], vollab: ['6b'] };
 
 let fail = false;
 const ergebnis = {};
@@ -147,10 +147,21 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
     { stufen: leiter.length, handel: multHandel, festung: multFestung, stunden, anteile });
 
   let basis = roh.replace(/const VORPOSTEN_AKTIV = (true|false);/, 'const VORPOSTEN_AKTIV = true;');
+  /* DIE UNTERGRENZE IN DER KOPIE AUF NULL. Sie steht ausgeliefert auf dem Aktivierungs-Zeitstempel
+     (05.09.2026); die Abschnitte 1 bis 5 datieren `lagerSeit` aber zurueck, und gegen eine echte
+     Untergrenze waere jeder dieser Staende null. Ohne diese Zeile prueft der Test die AUSLIEFERUNG
+     statt die Regel - und faellt bei genau der Aenderung, die er begleiten soll (dieselbe Lehre wie
+     bei test_hort_meldung_http). Abschnitt 6 setzt sie sich anschliessend selbst und ausdruecklich. */
+  basis = basis.replace(/const VP_LAGER_AB = [^;]+;/, 'const VP_LAGER_AB = 0;');
   if (SAB === 'deckel') basis = basis.replace('Math.max(0, Math.min(VP_LAGER_STUNDEN, (t - seit) / 3600000))', 'Math.max(0, (t - seit) / 3600000)');
   if (SAB === 'zurueckdrehen') basis = basis.replace('  doc.lagerSeit = jetzt;', '  doc.lagerSeit = (doc.lagerSeit || doc.seit || jetzt);');
   if (SAB === 'beute') basis = basis.replace(/lagerBeute: lagerBeimFall \? [^\n]*,\n/, 'lagerBeute: null,\n');
   if (SAB === 'schalter') basis = basis.replace('const basis = VP_LAGER_AKTIV ? (st.lager || 0) : 0;', 'const basis = (st.lager || 0);');
+  /* `vollab` stellt den Stand vom 04.09.2026 wieder her: zwei getrennte `seit`-Rechnungen, und nur
+     der Stand kennt VP_LAGER_AB. Genau der Fehler, den Abschnitt 6 seitdem festhaelt. */
+  if (SAB === 'vollab') basis = basis.replace(
+    'return vorpostenLagerSeit(doc) + VP_LAGER_STUNDEN * 3600000;',
+    'return ((doc && doc.lagerSeit) || (doc && doc.seit) || Date.now()) + VP_LAGER_STUNDEN * 3600000;');
   const an = basis.replace(/const VP_LAGER_AKTIV = (true|false);/, 'const VP_LAGER_AKTIV = true;');
   check('0b: der Lager-Schalter liess sich in der Kopie umlegen', /const VP_LAGER_AKTIV = true;/.test(an),
     { gefunden: /const VP_LAGER_AKTIV = (true|false);/.test(roh) });
@@ -274,6 +285,56 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
   const holenAus = await s.sende('/vorposten/lager/holen', tokA2, { system: 'h-acht' });
   check('5b: und der Abhol-Endpunkt sagt, dass es ihn noch nicht gibt',
     holenAus.status === 404 && holenAus.body.inaktiv === true, { status: holenAus.status, body: holenAus.body });
+  await stoppeServer();
+
+  /* ---- 6) Die Aktivierungs-Untergrenze VP_LAGER_AB (05.09.2026) -------------------------------
+     Beim Umlegen des Schalters faellt `vorpostenLagerStand` mangels `doc.lagerSeit` auf `doc.seit`
+     zurueck - das Baudatum, oft Wochen alt. VP_LAGER_AB zieht darunter die Untergrenze ein, damit
+     die Zeit VOR der Aktivierung nicht rueckwirkend zaehlt.
+     GEMESSEN WIRD HIER BEIDES ZUSAMMEN: Der Stand faengt bei null an UND `lagerVollAb` liegt in
+     der ZUKUNFT. Bis zum 05.09.2026 rechneten die beiden Funktionen `seit` getrennt, und nur der
+     Stand kannte die Untergrenze - `lagerVollAb` stand bei `doc.seit + 12 h`, also Wochen in der
+     Vergangenheit. Die Anzeige haette „Lager voll" ueber ein leeres Lager geschrieben, am Tag der
+     Aktivierung fuer jeden Spieler mit Vorposten. Kein Test deckte das ab.
+     Der zweite Vorposten steht mit einem `lagerSeit` NACH der Untergrenze da: Ohne ihn waere nicht
+     belegt, dass die Grenze nur die Vergangenheit abschneidet und nicht alles auf null zwingt. */
+  await stoppeServer();
+  /* Die Untergrenze liegt FUENF STUNDEN in der Vergangenheit - so, als waere der Schalter vor fuenf
+     Stunden umgelegt worden. Damit ist beides deterministisch messbar: Der alte Vorposten hat
+     genau fuenf Stunden gesammelt (nicht die zwoelf des Deckels, die dreissig Tage ergaeben), und
+     ein danach geleerter hat seine eigenen zwei.
+     Der erste Entwurf setzte die Grenze auf `Date.now()` und verlangte Stand NULL - er fiel an den
+     paar Sekunden, die der Serverstart braucht. Eine Regel, die „genau null" verlangt, wo die Zeit
+     laeuft, misst die Startdauer mit. */
+  const abZeit = Date.now() - 5 * 3600 * 1000;
+  fs.writeFileSync(QUELLE, an.replace(/const VP_LAGER_AB = [^;]+;/, 'const VP_LAGER_AB = ' + abZeit + ';'));
+  const db3 = grunddb();
+  // Alt: gebaut und zuletzt geleert lange VOR der Aktivierung.
+  db3.shared['vorposten:h-acht'] = JSON.stringify(vpDoc('h-acht', 8, 'handel',
+    { seit: abZeit - 30 * 24 * 3600 * 1000, lagerSeit: abZeit - 30 * 24 * 3600 * 1000 }));
+  // Frisch: NACH der Aktivierung geleert, hat seitdem zwei Stunden gesammelt.
+  db3.shared['vorposten:f-acht'] = JSON.stringify(vpDoc('f-acht', 8, 'handel',
+    { seit: abZeit, lagerSeit: Date.now() - 2 * 3600 * 1000 }));
+  fs.writeFileSync(dbPfad, JSON.stringify(db3, null, 1));
+  s = await starteServer();
+  const tokA3 = await s.anmelden('anna');
+  const katAb = await s.hole('/vorposten', tokA3);
+  const altVp = (katAb.body.liste || []).find(x => x.sys === 'h-acht') || {};
+  const neuVp = (katAb.body.liste || []).find(x => x.sys === 'f-acht') || {};
+  const stundenAus = (vp) => ((vp.lagerRate || {}).erz > 0) ? (vp.lager || {}).erz / vp.lagerRate.erz : -1;
+  check('6-anker: der Lauf mit gesetzter Untergrenze liefert beide Vorposten mit Rate',
+    katAb.status === 200 && (altVp.lagerRate || {}).erz > 0 && (neuVp.lagerRate || {}).erz > 0,
+    { status: katAb.status, rateAlt: (altVp.lagerRate||{}).erz, rateNeu: (neuVp.lagerRate||{}).erz });
+  check('6a: dreissig Tage alt, aber erst seit der Aktivierung am Sammeln - fuenf Stunden, nicht der Deckel',
+    Math.abs(stundenAus(altVp) - 5) < 0.2,
+    { gemesseneStunden: Math.round(stundenAus(altVp) * 100) / 100, erwartet: 5, deckel: stunden });
+  check('6b: und sein „voll ab" liegt in der ZUKUNFT, nicht in der Vergangenheit',
+    (altVp.lagerVollAb || 0) > Date.now(),
+    { vollAb: altVp.lagerVollAb, jetzt: Date.now(),
+      differenzStunden: Math.round(((altVp.lagerVollAb || 0) - Date.now()) / 36000) / 100 });
+  check('6c: die Untergrenze schneidet NUR die Vergangenheit ab - ein danach geleerter sammelt normal',
+    Math.abs(stundenAus(neuVp) - 2) < 0.2,
+    { gemesseneStunden: Math.round(stundenAus(neuVp) * 100) / 100, erwartet: 2 });
   await stoppeServer();
 
   // ---- Auswertung: Gruen-Lauf ODER Gegenprobe --------------------------------------------------

@@ -1190,3 +1190,19 @@ Abklingzeit — die späteren Prüfungen messen dann einen anderen Ausgangszusta
 | `saeuberung` (`vpNameSauber` schneidet nur noch ab) | `4c` (+ `3a`, `3b`, `3c`) |
 | `adminfrist` (die Admin-Löschung entfernt auch `nameSeit`) | `5b` |
 | `meldung` (`eigenName` fehlt in der Abbau-Meldung) | `6a` |
+
+### Umgelegt am 05.09.2026
+
+`VP_NAME_AKTIV = true`. Die Frontend-Hälfte ist ausgeliefert (v8.686.0): Das Kartenmenü bietet die
+Taufe an, sperrt sie mit dem Grund im Klartext, zeigt **immer beide** Namen — den eigenen und den
+der Stufe — und trägt den eigenen in Karte, Fortschrittsleiste, Meldungen und Berichte.
+
+Prüfung `0b` hat dabei ihre Richtung gewechselt, wie schon bei den Modul-Sets und der Umrüstung.
+Beide Läufe erzwingen ihren Schalterzustand ohnehin selbst (`ausQuelle`/`anQuelle`); ohne diese
+Bauart hätte genau dieser Commit den Aus-Lauf still in einen zweiten An-Lauf verwandelt.
+
+Welche Anzeigestelle welchen Namen trägt, steht als Regel im Spiel (bei `vpTitel`): **eng** (Knopf,
+Kartenbeschriftung, Listenzeile) nur der eigene, **weit** (Menükopf, Tafel, Tooltip, Bericht) beide,
+**Satz** (Meldung) nur der eigene. Der Befund, der zu dieser Regel geführt hat, kam von einer
+Codex-Durchsicht: Kartenbeschriftung, Tooltip und der Schnappschuss der Angriffsmission trugen
+zunächst nur den Stufennamen.

@@ -13337,7 +13337,10 @@ const VP_UMRUESTEN_KOSTEN = { erz: 10500000, kristalle: 7500000, deuterium: 4900
 
    Der Schalter wird im FRONTEND-PR umgelegt, wie bei jeder Mechanik, die das Spiel noch nicht
    kennt: Ein Name, den der Server fuehrt und niemand sieht, ist kein Nutzen, sondern ein Feld. */
-const VP_NAME_AKTIV = false;
+/* UMGELEGT AM 05.09.2026 (Frontend-Haelfte ist ausgeliefert, v8.686.0). Das Spiel bietet die Taufe
+   im Kartenmenue an, sperrt sie mit dem Grund im Klartext, zeigt IMMER beide Namen (den eigenen und
+   den der Stufe) und traegt den eigenen in Karte, Leiste, Meldungen und Berichte. */
+const VP_NAME_AKTIV = true;
 const VP_NAME_AB_STUFE = 3;
 const VP_NAME_MAX = 24;
 const VP_NAME_ABKLING_MS = 6 * 3600 * 1000;

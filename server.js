@@ -13840,7 +13840,12 @@ const VP_MODUL_BAUBAR = ['gewoehnlich', 'ungewoehnlich'];
    wieviel Platz die Ausrichtung beisteuert. */
 const VP_MODUL_SETS_AKTIV = true;
 const VP_MODUL_SET_DEFS = [
-  { key: 'bollwerk', name: 'Bollwerk', icon: 'ti-shield',
+  /* NICHT „Bollwerk" (Durchsicht 05.09.2026): So heisst bereits das Stationsprojekt des
+     Festungsrings ab Stufe 5 - gleicher Zweig, dieselben zwei Kanaele, und in der Stationstafel
+     stuenden „Projekte: Bollwerk" und „Sets: Bollwerk" direkt untereinander. Zwei Dinge mit
+     demselben Namen am selben Objekt sind kein Rechenfehler, aber eine Falle fuer jeden Leser und
+     fuer jede kuenftige Textpruefung. */
+  { key: 'trutzring', name: 'Trutzring', icon: 'ti-shield',
     teile: ['kernpanzer', 'geschuetz'],
     boni: { kern: 0.10, verteidigung: 0.10 },
     desc: 'Kernpanzerung und Geschützbank greifen ineinander: der Kern hält länger, und die Station schießt härter zurück.' },
@@ -14047,7 +14052,8 @@ function vpModulTeile(instKey) {
   return (def && sel) ? { key, seltenheit, def, sel } : null;
 }
 /* Die Summe der eingebauten Module je Kanal. Ein Kanal mit zwei Modulen addiert - ein Deckel
-   waere hier falsch: die Steckplaetze SIND der Deckel (hoechstens fuenf, und jeder kostet). */
+   waere hier falsch: die Steckplaetze SIND der Deckel (hoechstens VP_MODUL_SLOTS_MAX, und jeder
+   kostet). Bis V7 stand hier „hoechstens fuenf"; der Festungsring hat seitdem sechs. */
 function vpModulBoni(doc) {
   const aus = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0, markt: 0 };
   const slots = vpModulSlotsVon(doc);
@@ -14709,7 +14715,15 @@ async function vorpostenAbbauTick() {
     const ab = vorpostenAbbauLaeuft(doc);
     if (!ab || ab > jetzt) continue;
     const user = findUserById(doc.besitzer);
-    const module = (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlotsVon(doc));
+    /* OHNE SCHEIBE (Durchsicht 05.09.2026). Hier stand `.slice(0, vpModulSlotsVon(doc))` - und das
+       war ein Weg, auf dem ein Modul VERNICHTET wird: Faellt die Steckplatzzahl je unter die Zahl
+       der eingebauten Module (etwa weil VP_MODUL_SETS_AKTIV zurueckgelegt wird, nachdem ein
+       Festungsring sechs Stueck trug), verliert der Besitzer beim Abbau das ueberzaehlige Stueck
+       ersatzlos. Die Scheibe gehoert in die ANZEIGE und in die WIRKUNG - dort begrenzt sie, was
+       zaehlt. Beim Abbau geht es um Eigentum, und Eigentum begrenzt kein Deckel: Was im Dokument
+       steckt, gehoert dem Besitzer und kommt zurueck. Genau das meint die Hausregel „Deckel
+       duerfen niemals Daten loeschen". */
+    const module = (Array.isArray(doc.module) ? doc.module : []).slice();
     if (user) for (const instKey of module) if (vpModulTeile(instKey)) vpModulGeben(user, instKey, 1);
     const st = vorpostenStufeVon(doc);
     /* V5: JEDER Beitragende bekommt SEINE Schiffe zurueck, nicht der Besitzer alle. Der Besitzer

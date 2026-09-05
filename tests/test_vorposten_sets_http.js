@@ -39,7 +39,8 @@ const SAB = process.env.KEPLER_VPSETS_SABOTAGE || '';
    weil 3a auch den BONUS las statt nur das Zustandekommen des Sets; und `abzug` fiel ins Leere,
    weil vpModulSlots den Zuschlag selbst auf >= 0 klemmt - die Sabotage muss diese Klemme mit
    entfernen, sonst laeuft ein unsabotierter Server. */
-const MUSS_FALLEN = { abzug: ['2a', '2b'], seltenheit: ['3b'], scheibe: ['4b', '5a'], kanal: ['6a', '6b'] };
+const MUSS_FALLEN = { abzug: ['2a', '2b'], seltenheit: ['3b'], scheibe: ['4b', '5a'], kanal: ['6a', '6b'],
+  abbauscheibe: ['8a'] };
 
 let fail = false;
 const ergebnis = {};
@@ -152,7 +153,7 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
      erben: Sonst haette das Umlegen des Schalters den Aus-Lauf still in einen zweiten An-Lauf
      verwandelt, und Pruefung 1a („mit liegendem Schalter aendert sich nichts") haette ihre eigene
      Aussage geprueft. */
-  const ausQuelle = basis.replace(/const VP_MODUL_SETS_AKTIV = (true|false);/, 'const VP_MODUL_SETS_AKTIV = false;');
+  let ausQuelle = basis.replace(/const VP_MODUL_SETS_AKTIV = (true|false);/, 'const VP_MODUL_SETS_AKTIV = false;');
   let anQuelle = basis.replace(/const VP_MODUL_SETS_AKTIV = (true|false);/, 'const VP_MODUL_SETS_AKTIV = true;');
   if (SAB === 'abzug') {
     /* ZWEI Handgriffe: die Tabelle UND die Klemme in vpModulSlots. Mit nur der Tabelle laeuft ein
@@ -174,6 +175,17 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
       "for (const instKey of (doc && Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlotsVon(doc))) {\n    const teil = vpModulTeile(instKey);\n    if (teil) drin.add(teil.key);",
       "for (const instKey of (doc && Array.isArray(doc.module) ? doc.module : [])) {\n    const teil = vpModulTeile(instKey);\n    if (teil) drin.add(teil.key);");
   }
+  /* DIE SCHEIBE BEIM ABBAU. Sie stand dort und war der eine Weg, auf dem ein Modul VERNICHTET
+     wird - siehe Abschnitt 8. */
+  if (SAB === 'abbauscheibe') {
+    /* IN BEIDE KOPIEN. Abschnitt 8 laeuft im AUS-Lauf - eine Sabotage nur in `anQuelle` haette dort
+       einen unsabotierten Server laufen lassen und nichts belegt (gemessen 05.09.2026, derselbe
+       Fehler wie bei `abzug`, nur an der anderen Kopie). */
+    const mitScheibe = q => q.replace('const module = (Array.isArray(doc.module) ? doc.module : []).slice();',
+      'const module = (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlotsVon(doc));');
+    anQuelle = mitScheibe(anQuelle);
+    ausQuelle = mitScheibe(ausQuelle);
+  }
   if (SAB === 'kanal') {
     anQuelle = anQuelle.replace('const se = vpModulSetBoni(doc);',
       "const se = { kern: 0, verteidigung: 0, garnison: 0, flug: 0, prod: 0, scan: 0, werft: 0, markt: 0 };");
@@ -181,8 +193,11 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
   // Eine Sabotage, die NICHTS ersetzt, laesst einen unsabotierten Server laufen und belegt nichts
   // (gemessener Fehler im Lager-Test, 04.09.2026: `String.replace` meldet keinen Treffer).
   if (SAB) {
+    /* Beide Kopien pruefen: `abbauscheibe` trifft den AUS-Lauf, alle anderen den AN-Lauf. */
+    const anRein = basis.replace(/const VP_MODUL_SETS_AKTIV = (true|false);/, 'const VP_MODUL_SETS_AKTIV = true;');
+    const ausRein = basis.replace(/const VP_MODUL_SETS_AKTIV = (true|false);/, 'const VP_MODUL_SETS_AKTIV = false;');
     check('0d: die Sabotage „' + SAB + '" hat den Quelltext wirklich veraendert',
-      anQuelle !== basis.replace(/const VP_MODUL_SETS_AKTIV = (true|false);/, 'const VP_MODUL_SETS_AKTIV = true;'), { SAB });
+      anQuelle !== anRein || ausQuelle !== ausRein, { SAB });
   }
 
   // ---- 1. Der Schalter liegt: alles rechnet wie vor V7 -----------------------------------------
@@ -260,11 +275,14 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
   /* NUR das Zustandekommen - der Bonus ist die Aussage von 6a. Mit der Bonus-Bedingung hier fiel
      3a bei jeder Sabotage mit, die den Kanal betrifft, und sagte damit nichts Eigenes mehr. */
   check('3a: zwei zusammengehoerende Module ergeben das Set',
-    !!anFest && anFest.sets.includes('bollwerk'), { sets: anFest && anFest.sets });
+    !!anFest && anFest.sets.includes('trutzring'), { sets: anFest && anFest.sets });
   check('3b: die Seltenheit zaehlt dabei nicht - zwei gewoehnliche Module reichen',
-    !!anSelten && anSelten.sets.includes('bollwerk'), { sets: anSelten && anSelten.sets });
-  check('3c: ein halbes Set gibt nichts',
-    !!anHalb && anHalb.sets.length === 0 && (!anHalb.setBoni || anHalb.setBoni.verteidigung === 0),
+    !!anSelten && anSelten.sets.includes('trutzring'), { sets: anSelten && anSelten.sets });
+  /* `setBoni` muss DA SEIN und null sein - nicht fehlen. Die erste Fassung liess `!anHalb.setBoni`
+     durchgehen; ein Feld, das gar nicht mehr geschickt wird, haette diese Pruefung bestanden. */
+  check('3c: ein halbes Set gibt nichts - und `setBoni` steht trotzdem in der Antwort',
+    !!anHalb && anHalb.sets.length === 0 && !!anHalb.setBoni
+    && Object.values(anHalb.setBoni).every(w => w === 0),
     { sets: anHalb && anHalb.sets, boni: anHalb && anHalb.setBoni });
 
   // ---- 4. Die Sternwacht braucht den sechsten Platz ---------------------------------------------
@@ -280,7 +298,7 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
      damit sichtbar wird, dass ein Modul ohne Steckplatz weder gezaehlt noch gezeigt wird. */
   check('4b: auf der Werft faellt das sechste Modul aus der Anzeige, und die Sternwacht fehlt',
     !!werftVoll && werftVoll.module.length === 5 && !werftVoll.sets.includes('sternwacht')
-    && werftVoll.sets.includes('bollwerk'),
+    && werftVoll.sets.includes('trutzring'),
     { module: werftVoll && werftVoll.module.length, sets: werftVoll && werftVoll.sets });
 
   // ---- 5. Was nicht in einem Steckplatz steckt, zaehlt auch nicht zum Set -----------------------
@@ -296,7 +314,45 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
   check('6b: und die Sternwacht hebt zusaetzlich die Garnisonsgrenze',
     !!festVoll && festVoll.garnisonMax > garnAus, { mit: festVoll && festVoll.garnisonMax, ohne: garnAus });
 
+  /* ---- 7. Was der Client zum Anzeigen braucht, liegt WIRKLICH auf der Leitung ------------------
+     0a liest die Tabelle aus dem QUELLTEXT - das belegt nicht, dass sie auch verschickt wird. Das
+     Spiel hat keine eigene Set-Tabelle; faellt `modulSetDefs` aus der Antwort, kennt es die Namen
+     nicht mehr, und beide Test-Suiten blieben gruen (die Frontend-Vorlage liefert sie selbst). */
+  const defs = (r.body && r.body.modulSetDefs) || null;
+  check('7a: die Set-Tabelle kommt mit der Antwort, nicht nur aus dem Quelltext',
+    Array.isArray(defs) && defs.length === setKeys.length
+    && defs.every(d => d && d.key && d.name && Array.isArray(d.teile) && d.teile.length && d.boni)
+    && defs.map(d => d.key).join() === setKeys.join(),
+    { gesendet: Array.isArray(defs) ? defs.map(d => d && d.key) : defs, imQuelltext: setKeys });
+  check('7b: und die Zweig-Zuschlaege ebenso',
+    r.body && r.body.zweigSlots && Object.keys(r.body.zweigSlots).join() === Object.keys(zweigSlots).join(),
+    { gesendet: r.body && r.body.zweigSlots, imQuelltext: zweigSlots });
+
+  /* ---- 8. DER ABBAU GIBT ALLES ZURUECK, auch was in keinem Steckplatz mehr steckt --------------
+     Der gefaehrlichste Fall der ganzen Etappe, gefunden in der adversarischen Durchsicht: Faellt
+     die Steckplatzzahl unter die Zahl der eingebauten Module - der Schalter zurueckgelegt,
+     nachdem ein Festungsring sechs Stueck trug -, dann schnitt der Abbau-Tick das ueberzaehlige
+     Stueck ab und der Besitzer verlor es ERSATZLOS. Gemessen wird deshalb im AUS-Lauf mit sechs
+     eingebauten Modulen: alle sechs muessen im Bestand ankommen. */
   await stoppeServer();
+  fs.writeFileSync(dbPfad, JSON.stringify(grunddb(), null, 1));
+  fs.writeFileSync(QUELLE, ausQuelle);
+  api = await starteServer();
+  tok = await api.anmelden('anna');
+  api = await schreibeDb(d => {
+    const doc = vpDoc('abbau-fest', 8, 'festung', ALLE.slice());
+    doc.abbauAb = Date.now() - 1000;
+    setzeDoc(d, doc);
+  });
+  await warte(4000);
+  await stoppeServer();
+  const nachher = JSON.parse(fs.readFileSync(dbPfad, 'utf8'));
+  const bestand = (nachher.users.anna && nachher.users.anna.vpModule) || {};
+  const fehlen = ALLE.filter(k => !bestand[k]);
+  check('8-anker: der Abbau-Tick hat wirklich aufgeraeumt (sonst misst 8a nichts)',
+    !nachher.shared['vorposten:abbau-fest'], { docDanach: !!nachher.shared['vorposten:abbau-fest'] });
+  check('8a: ALLE sechs Module kommen zurueck - auch das, fuer das es keinen Steckplatz mehr gibt',
+    fehlen.length === 0, { fehlen, bestand });
 
   if (SAB) {
     const soll = MUSS_FALLEN[SAB] || [];
@@ -327,6 +383,16 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
                Steckplatz-Scheibe                                       -> 4b und 5a fallen (die
                Werft zeigt dann die Sternwacht, die sie nicht tragen kann).
    kanal       Die Set-Boni werden in vorpostenWerte nicht addiert      -> 6a UND 6b fallen.
+   abbauscheibe Der Abbau-Tick schneidet die Modulliste wieder auf die
+               Steckplatzzahl                                          -> 8a faellt.
+               Das ist der gefaehrlichste Fall der Etappe, gefunden in der adversarischen
+               Durchsicht: Faellt die Steckplatzzahl unter die Zahl der eingebauten Module (der
+               Schalter zurueckgelegt, nachdem ein Festungsring sechs Stueck trug), verlor der
+               Besitzer beim Abbau das ueberzaehlige Stueck ERSATZLOS. Die Scheibe gehoert in die
+               Anzeige und in die Wirkung; beim Abbau geht es um Eigentum, und Eigentum begrenzt
+               kein Deckel.
+               DIESE SABOTAGE MUSS IN BEIDE KOPIEN - Abschnitt 8 laeuft im AUS-Lauf. Nur in
+               `anQuelle` gesetzt, lief dort ein unsabotierter Server und nichts fiel.
 
    Ein Wort zu 0d: Eine Sabotage, die nichts ersetzt, laesst einen UNSABOTIERTEN Server laufen und
    sieht wie eine bestandene Gegenprobe aus. Genau das ist am 04.09.2026 im Lager-Test passiert,

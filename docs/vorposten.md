@@ -247,7 +247,8 @@ Seiten nachgelesen und korrigiert. Kredite kostet nur das **Ausbauen**.
 
 Sechs Module (Kernpanzerung, Geschützbank, Hangarerweiterung, Sprungrechner, Umlaufraffinerie,
 Horchposten) wirken ausschließlich auf Kanäle, die es **schon gibt** — Kern, Verteidigung, Garnison,
-Flug, Produktion, Aufklärung. Steckplätze: einer je Stufe ab der Wahlstufe, höchstens fünf. Die
+Flug, Produktion, Aufklärung. Steckplätze: einer je Stufe ab der Wahlstufe, höchstens fünf — seit
+Etappe V7 sechs für den Festungsring (`VP_MODUL_SLOTS_MAX`). Die
 Steckplätze **sind** der Deckel; ein zusätzlicher Deckel je Kanal wäre doppelt.
 
 **`vorpostenWerte(doc)` ist die eine Stelle**, die Stufe und Module zusammensetzt. Alles, was Werte
@@ -859,7 +860,7 @@ wert?" — und nie eine Kombination. Zwei Ergänzungen, beide hinter `VP_MODUL_S
 
 | Set | Module | Bonus |
 |---|---|---|
-| **Bollwerk** | Kernpanzerung + Geschützbank | Kern +10 %, Verteidigung +10 % |
+| **Trutzring** | Kernpanzerung + Geschützbank | Kern +10 %, Verteidigung +10 % |
 | **Flottenbasis** | Hangarerweiterung + Sprungrechner | Garnison +10 %, Flugzeit +3 % |
 | **Umschlagplatz** | Umlaufraffinerie + Horchposten | Produktion +10 %, Aufklärung +1 |
 | **Sternwacht** | alle sechs | Kern, Verteidigung und Garnison je +10 % |
@@ -895,8 +896,8 @@ nehmen jetzt das Dokument.
 
 ### Wächter
 
-`tests/test_vorposten_sets_http.js` (19 Prüfungen), Port 3263. Vier Gegenproben mit **gemessener**
-Pflichtliste — die erste Liste war dreimal falsch, und jeder dieser Fehler ist im Test festgehalten:
+`tests/test_vorposten_sets_http.js` (24 Prüfungen), Port 3263. Fünf Gegenproben mit **gemessener**
+Pflichtliste — die erste Liste war viermal falsch, und jeder dieser Fehler ist im Test festgehalten:
 
 | Sabotage | fällt |
 |---|---|
@@ -904,6 +905,7 @@ Pflichtliste — die erste Liste war dreimal falsch, und jeder dieser Fehler ist
 | `seltenheit` (ein Set verlangt mehr als „gewöhnlich") | `3b` |
 | `scheibe` (die ganze Modulliste statt der Steckplatz-Scheibe) | `4b`, `5a` |
 | `kanal` (Set-Boni nicht addiert) | `6a`, `6b` |
+| `abbauscheibe` (der Abbau schneidet wieder auf die Steckplätze) | `8a` |
 
 Drei eigene Messfehler, alle im Test dokumentiert:
 
@@ -936,3 +938,27 @@ den Aus-Lauf still in einen zweiten An-Lauf verwandelt, und `1a` („mit liegend
 sich nichts") hätte fortan ihre eigene Aussage geprüft statt der Mechanik. Das ist derselbe
 Fehlertyp wie eine Vorlage, die ein Feld erfindet: ein Test, der seine Voraussetzung vom Prüfling
 bezieht.
+
+
+### Der gefährlichste Befund der Etappe (adversarische Durchsicht, 05.09.2026)
+
+**Der Abbau vernichtete ein Modul, für das es keinen Steckplatz mehr gab.** `vorpostenAbbauTick`
+gab die Modulliste `slice(0, vpModulSlotsVon(doc))` zurück — dieselbe Scheibe wie Anzeige und
+Wirkung. Der auslösende Fall ist ausgerechnet das Sicherheitsnetz dieser Etappe: Wird
+`VP_MODUL_SETS_AKTIV` zurückgelegt, nachdem ein Festungsring sechs Module trug, fällt die
+Steckplatzzahl auf fünf, und beim Abbau ist das sechste Stück ersatzlos weg — ohne Meldung, ohne
+Rückgabe. Genau der Schaden, den der V7-Commit-Text ausschließt.
+
+Die drei Sicherungen (`Math.max(0, …)` in `vpModulSlots`, Prüfung `0b`, Prüfung `2b`) wachten
+ausschließlich über einen **negativen `VP_ZWEIG_SLOTS`-Wert**. Keine von ihnen sah den Schalter.
+
+**Die Lehre, und sie ist übertragbar: Eine Scheibe gehört in die Anzeige und in die Wirkung. Beim
+Abbau geht es um Eigentum, und Eigentum begrenzt kein Deckel.** Was im Dokument steckt, gehört dem
+Besitzer und kommt zurück. Wächter: Abschnitt 8 misst im **Aus**-Lauf mit sechs eingebauten
+Modulen, dass alle sechs im Bestand ankommen; Gegenprobe `abbauscheibe` stellt die Scheibe wieder
+her und lässt `8a` fallen.
+
+Zwei weitere Befunde derselben Durchsicht sind hier mit behoben: Das Set hieß **Bollwerk** wie das
+Stationsprojekt des Festungsrings ab Stufe 5 — gleicher Zweig, dieselben zwei Kanäle, in der
+Stationstafel direkt untereinander; es heißt jetzt **Trutzring**. Und der Kommentar über
+`vpModulBoni` behauptete weiter „höchstens fünf" Steckplätze.

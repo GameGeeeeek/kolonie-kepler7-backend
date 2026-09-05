@@ -274,7 +274,12 @@ Feldnamen. Wächter 14e2 und 15d2; ob die Änderung reicht, sagt die zweite Mess
 
 ### Der Schalter `KAMPFTEXT_E2_AKTIV`
 
-Grundstellung **aus**, wie `FESTUNG_SPAWN_AKTIV` vor seiner Etappe: Die Roadmap verlangt, jede neue
+**Seit dem 05.09.2026 an** – nach vier Messläufen am M715q und dem Frontend-PR
+(`kolonie-kepler7` #581, v8.682.0), der die Anzeige mitbringt. Der Absatz darunter beschreibt die
+Grundstellung, mit der er bis dahin lag; sie bleibt die Stellung, mit der E2 **allein** abgeschaltet
+werden kann, ohne E1 mitzunehmen (Wächter: Abschnitt 16).
+
+Ursprüngliche Grundstellung **aus**, wie `FESTUNG_SPAWN_AKTIV` vor seiner Etappe: Die Roadmap verlangt, jede neue
 Kampfart **vor** der Auslieferung am M715q zu messen (Befehl in AI Cores README, PR #42). Solange er
 aus ist, lehnt die Route jede Art außer `npc` mit 503 ab, `/api/attack` bestellt nichts, und
 `/api/health` zeigt `kampftext.e2: false` – daran sieht das Frontend, dass es noch nicht bestellen

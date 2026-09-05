@@ -42,7 +42,9 @@
 // Texte oder keiner auch am Rand des Gesamtdeckels): ohne die Vorpruefung beider Plaetze in
 // kampftextPvpBestellen fallen genau 17a, 17b und 17c. Abschnitt 15k-15m (vierte Sperre, zweite
 // Messung 05.09.2026): am alten Server fallen genau 15l und 15m. Abschnitt 14o-14q und 15n
-// (dritte Messung, 05.09.2026): am Stand davor fallen genau 14o, 14p, 14q und 15m. Gruen bleiben
+// (dritte Messung, 05.09.2026): am Stand davor fallen genau 14o, 14p, 14q und 15m. Abschnitt
+// 14r-14t (dritte Richtung der Verlust-Sperre, Temperaturvergleich): am Stand davor fallen genau
+// 14r und 14s - 14t bleibt gruen, das ist die Gegenrichtung. Gruen bleiben
 // dort 15l (der Satz war da, nur an der falschen Stelle - 14p misst die Stelle) und 15n (die
 // Gegenrichtung). 14p prueft bewusst 'NICHTS ueber Verluste' ohne 'sagst du': mit dem vollen
 // Wortlaut war es am alten Stand aus dem falschen Grund gruen. BEFUND aus 14m: Die Sperre fand
@@ -80,9 +82,13 @@ const INES = crypto.randomUUID(), GERD = crypto.randomUUID(), HANNA = crypto.ran
 const JONAS = crypto.randomUUID(), KARLA = crypto.randomUUID();
 const LARS = crypto.randomUUID(), MIA = crypto.randomUUID();
 const NILS = crypto.randomUUID(), OLGA = crypto.randomUUID();
+// 14r-14t (dritte Richtung der Verlust-Sperre) bestellen mit quirin statt ines: der Tagesdeckel je
+// Konto ist 10, und ines hat in Abschnitt 14 fast alle verbraucht - drei weitere Auftraege liefen
+// in den 429 und rissen nebenbei 16b, 16c und 17c mit (gemessen).
 // 15k-15m (vierte Sperre): paul greift rita an - ein eigenes Paar, weil ein Angriff dem Opfer einen
 // Schutzschild schenkt (grantAttackShield) und lars/mia in Abschnitt 16 noch frei sein muessen (gemessen: 16c fiel mit 403).
 const PAUL = crypto.randomUUID(), RITA = crypto.randomUUID();
+const QUIRIN = crypto.randomUUID();
 const angreiferSave = JSON.stringify({
   resources: { erz: 1e5, kristalle: 1e5, deuterium: 1e5, energie: 1e5 }, credits: 1000,
   buildings: { lager: 60, werft: 10 }, research: {}, fleet: { cruisers: 40, bomber: 12 }, colonies: {}
@@ -113,7 +119,8 @@ function grunddb() {
       nils:  { userId: NILS,  username: 'nils',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
       olga:  { userId: OLGA,  username: 'olga',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
       paul:  { userId: PAUL,  username: 'paul',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
-      rita:  { userId: RITA,  username: 'rita',  passwordHash: hash, emailVerified: true, createdAt: Date.now() }
+      rita:  { userId: RITA,  username: 'rita',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      quirin: { userId: QUIRIN, username: 'quirin', passwordHash: hash, emailVerified: true, createdAt: Date.now() }
     },
     private: {
       [GERD]: { 'kepler7-save-v3': angreiferSave }, [HANNA]: { 'kepler7-save-v3': verteidigerSave },
@@ -669,6 +676,30 @@ const KAMPF = {
     check('14q: eine Stueckzahl als WORT wird verworfen - eine Ziffernpruefung sieht sie nicht',
       w3Ende.body && w3Ende.body.status === 'verworfen' && /Stueckzahl als Wort: ein jäger/.test(w3Ende.body.grund || '') &&
       !/erfundene Zahl/.test(w3Ende.body.grund || ''), w3Ende.body);
+
+    // 14r-14t: die dritte Richtung der Verlust-Sperre (Temperaturvergleich 05.09.2026 bei 0.7).
+    // Der Koeniginnen-Text schrieb "Die eigenen Bomber fallen in den Kampf; kein Schiff geht
+    // verloren" - er widersprach sich im selben Satz und den Daten. Die Sperre sah nichts, weil sie
+    // Unversehrtheit nur bei "verluste: nicht bekannt" verbot. 14t ist die Gegenrichtung: Ist die
+    // Verlustliste LEER, ist "unbeschadet" die Wahrheit und muss durchkommen - ohne sie waere die
+    // Sperre auch dann gruen, wenn sie jede Unversehrtheitsaussage verwuerfe.
+    const quirin = await api.anmelden('quirin');
+    ai.antwort = () => 'Die eigenen Bomber fallen in den Kampf; kein Schiff geht verloren.';
+    const k4 = await api.auftrag(quirin, Object.assign({}, koenigin, { schwarmGefallen: true }));
+    const k4Ende = await warteAufEnde(api, quirin, k4.body && k4.body.auftragId);
+    check('14r: "kein Schiff geht verloren" wird verworfen, wo die Daten Verluste NENNEN',
+      k4Ende.body && k4Ende.body.status === 'verworfen' && /falsche Verlustaussage: kein schiff geht verloren/.test(k4Ende.body.grund || ''), k4Ende.body);
+    ai.antwort = () => 'Der Schwarm zerfiel, und wir kehrten unbeschadet heim.';
+    const k5 = await api.auftrag(quirin, Object.assign({}, koenigin, { schwarmGefallen: true }));
+    const k5Ende = await warteAufEnde(api, quirin, k5.body && k5.body.auftragId);
+    check('14s: ... und "unbeschadet" dort genauso',
+      k5Ende.body && k5Ende.body.status === 'verworfen' && /falsche Verlustaussage: unbeschadet/.test(k5Ende.body.grund || ''), k5Ende.body);
+    const ohneVerluste = Object.assign({}, weltboss, { bossZerstoert: true, ownLostShips: {} });
+    const w4 = await api.auftrag(quirin, ohneVerluste);
+    const w4Ende = await warteAufEnde(api, quirin, w4.body && w4.body.auftragId);
+    check('14t: bei LEERER Verlustliste ist "unbeschadet" die Wahrheit - der Text kommt durch',
+      w4Ende.body && w4Ende.body.status === 'fertig' && /unbeschadet/.test(w4Ende.body.text || ''),
+      { status: w4Ende.body && w4Ende.body.status, grund: w4Ende.body && w4Ende.body.grund });
     ai.antwort = () => 'Der Verband kehrte zurueck.';
   }
 

@@ -327,3 +327,33 @@ Spielerkampf ist „unbekannt" die richtige Wiedergabe) bleibt dort grün und mi
 Nicht gebaut, weil mit einer Sperre nicht erreichbar: Der Königinnen-Text machte den eigenen Verband
 zum Verband des Gegner-Volks, ein Verteidiger-Text widersprach sich im selben Absatz. Rollen- und
 Kohärenzfehler ohne Zahl und ohne Schlüsselwort.
+
+### Temperaturvergleich (05.09.2026): die dritte Richtung der Verlust-Sperre
+
+Gemessen wurden dieselben acht Fälle bei `temperature` 0.7 und 0.2 (`--temperaturen 0.7,0.2` in AI
+Cores Messlauf). Beide Male 0 von 8 verworfen, praktisch gleiche Dauer – nachgelesen aber **2 von 8
+fehlerhaft bei 0.7 gegen 0 von 8 bei 0.2**. Einer der zwei Fehler war eine Lücke in dieser Sperre:
+
+> Die eigenen Bomber fallen in den Kampf; **kein Schiff geht verloren**.
+
+Der Text widerspricht sich im selben Satz und den Daten (`verlorene_schiffstypen: [Bomber]`).
+`kampftextVerlustaussage` verbot Unversehrtheit bisher nur bei `verluste: nicht bekannt`. Sie kennt
+jetzt drei Fälle, alle aus dem Datenblock abgeleitet:
+
+| Datenblock | verboten |
+|---|---|
+| `verluste: nicht bekannt` | jede Aussage über Unversehrtheit |
+| verlorene Schiffstypen, **nicht leer** | „unbekannt" **und** „unbeschadet" |
+| verlorene Schiffstypen, **leer** | nur „unbekannt" – „unbeschadet" ist dann die Wahrheit |
+
+Dazu die gemessene Zeitform: „kein Schiff **geht** verloren" fehlte im Muster.
+
+Wächter 14r (der Anlassfall), 14s („unbeschadet" bei genannten Verlusten) und 14t (die
+Gegenrichtung: leere Liste, der Text kommt durch). Sie bestellen mit dem Konto `quirin`, nicht mit
+`ines` – der Tagesdeckel je Konto ist 10, und drei weitere Aufträge für `ines` liefen gemessen in
+den 429 und rissen 16b, 16c und 17c mit. Gegenprobe: am Stand davor fallen genau 14r und 14s; 14t
+bleibt grün, das ist die Gegenrichtung. 122 Prüfungen.
+
+**Offen: die Temperatur der Auslieferung.** `kampftextAnfrage` schickt fest `temperature: 0.7`. Die
+Messung spricht für 0.2, betraf aber nur die E2-Arten; `npc` ist live und dort nicht gemessen. Vor
+der Umstellung ein Lauf über `--arten npc --alle-faelle --temperaturen 0.7,0.2`.

@@ -139,7 +139,9 @@ const dbPfad = path.join(os.tmpdir(), 'kepler-kampftext-' + process.pid + '.json
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kepler-kampftext-'));
 const kopiePfad = path.join(WURZEL, 'server.kampftext-test.js');
 const kopieAusPfad = path.join(WURZEL, 'server.kampftext-aus-test.js');
-// E2: eine dritte Kopie - E1 an, E2 aus (die Grundstellung bis zur Messung am M715q), Abschnitt 16.
+// E2: eine dritte Kopie - E1 an, E2 aus. Das WAR bis zum 05.09.2026 die Grundstellung; seit der
+// vierten Messung steht der Schalter im Repo auf true. Abschnitt 16 misst weiter die Stellung AUS,
+// denn sie bleibt der Weg, E2 abzuschalten, ohne E1 mitzunehmen - die Kopie stellt sie selbst her.
 const kopieE2AusPfad = path.join(WURZEL, 'server.kampftext-e2aus-test.js');
 let srv = null, aiSrv = null;
 
@@ -867,7 +869,8 @@ const KAMPF = {
   await stoppeServer();
 
   // ---------------------------------------------------------------------------------------
-  // 16 - E2 in Grundstellung AUS (E1 an): npc laeuft, jede andere Art wartet auf die Messung
+  // 16 - E2 AUS, E1 an: npc laeuft, jede andere Art wird abgelehnt (seit 05.09.2026 nicht mehr die
+  //      Grundstellung des Repos, aber weiterhin die Stellung, mit der E2 allein abgeschaltet wird)
   // ---------------------------------------------------------------------------------------
   {
     // Der Notaus aus Abschnitt 13 steht noch in der DB - bei gestopptem Server zuruecknehmen, sonst

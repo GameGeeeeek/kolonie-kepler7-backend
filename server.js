@@ -10481,8 +10481,24 @@ const DEPLOY_WEB_COPY = 'cp -f *.html /deploy/web/ && (cp -f *.png /deploy/web/ 
 // genau die Sorte Ableitung, die beim naechsten Umbau still danebengreift. Der `command` bleibt
 // unveraendert fest verdrahtet - er ist die Sicherheitsentscheidung, nichts daran kommt je aus
 // einem Request.
+// Git verweigert seit 2.35.2 jede Arbeit in einem Verzeichnis, das einem ANDEREN Benutzer gehoert
+// als dem laufenden Prozess ("fatal: detected dubious ownership") - eine Sicherung gegen
+// untergeschobene Repos in fremden Heimatverzeichnissen. Dieser Container laeuft als root,
+// /deploy/kolonie-kepler7 gehoert auf dem Host Sascha: Ab da schlug JEDER Frontend-Pull fehl.
+// Gemessen am 05.09.2026 - drei Spielversionen (8.680.0 bis 8.682.0) lagen gemergt, aber nicht
+// ausgeliefert, waehrend das Log fuer das Backend munter "erfolgreich" meldete. Das ist die
+// gefaehrliche Form: Der Ausfall betraf nur EINES der beiden Ziele und sah daneben wie Normalbetrieb
+// aus. Aufgefallen ist er, weil die Spielversion live drei Nummern zurueckhing, nicht durch eine
+// Meldung.
+// `-c safe.directory=<dir>` auf der Kommandozeile zaehlt zur GESCHUETZTEN Konfiguration (anders als
+// ein Eintrag in der Repo-Konfiguration, den Git hier bewusst ignoriert) und ist zustandslos: Es
+// ueberlebt jedes Neuerzeugen des Containers, im Gegensatz zu einem `git config --global` darin.
+// Auch das Backend bekommt es: Zwei Zeilen tiefer chownt der eigene Deploy `.git` auf 1000 - dass
+// es dort heute noch geht, haengt allein daran, dass Git das ARBEITSVERZEICHNIS prueft und /app
+// root gehoert. Ein chown davon entfernt, und der Webhook koennte sich nicht mehr selbst reparieren.
+const gitIn = (dir) => 'git -c safe.directory=' + dir;
 const DEPLOY_TARGETS = {
-  'kolonie-kepler7': { dir: '/deploy/kolonie-kepler7', command: 'cd /deploy/kolonie-kepler7 && git pull -q && ' + DEPLOY_WEB_COPY },
+  'kolonie-kepler7': { dir: '/deploy/kolonie-kepler7', command: 'cd /deploy/kolonie-kepler7 && ' + gitIn('/deploy/kolonie-kepler7') + ' pull -q && ' + DEPLOY_WEB_COPY },
   // `chown` nach dem Pull, weil dieser Container als root laeuft und /app per Bind-Mount
   // /DATA/kepler7/backend auf dem Host IST. Ohne die Zeile gehoeren die von hier erzeugten Objekte
   // in .git/objects root - und Sascha kann in seinem eigenen Repo kein git mehr ausfuehren
@@ -10491,7 +10507,7 @@ const DEPLOY_TARGETS = {
   // abgebrochener Webhook-Pull hinterliess Sperrdateien und einen halb angewendeten, vorgemerkten
   // Stand, den niemand mehr aufraeumen konnte. uid/gid 1000 ist Sascha (am Ausgabeverzeichnis
   // verifiziert). Numerisch und nicht per Name, weil der Container den Benutzer nicht kennt.
-  'kolonie-kepler7-backend': { dir: '/app', command: 'cd /app && git pull -q && (chown -R 1000:1000 .git || true)' }
+  'kolonie-kepler7-backend': { dir: '/app', command: 'cd /app && ' + gitIn('/app') + ' pull -q && (chown -R 1000:1000 .git || true)' }
 };
 // Der Deploy-Timeout darf NICHT knapp sein, und das ist keine Geschmacksfrage, sondern gemessen
 // (18.08.2026, Nachbau in Node): exec() schickt beim Ablauf SIGTERM an die SHELL - nicht an das
@@ -10710,7 +10726,9 @@ function deployAufraeumen(repoName, dir) {
   // Der halb angewendete Pull: geaenderte Dateien, deren Blob schon dem eingehenden Stand
   // entspricht. Der Vergleich laeuft gegen FETCH_HEAD, nicht gegen einen geratenen Commit -
   // und je Datei EINZELN, damit eine fremde Handaenderung daneben unangetastet bleibt.
-  const git = (args) => execSync('git ' + args, { cwd: dir, timeout: 60000, encoding: 'utf8', stdio: ['ignore','pipe','pipe'] }).trim();
+  // Auch hier mit safe.directory: Ohne das scheitert nicht nur der Pull, sondern auch die
+  // SELBSTHEILUNG davor - der Fall, in dem man sie am dringendsten braucht.
+  const git = (args) => execSync(gitIn(dir) + ' ' + args, { cwd: dir, timeout: 60000, encoding: 'utf8', stdio: ['ignore','pipe','pipe'] }).trim();
   try {
     git('fetch -q');
     const geaendert = git('diff --name-only -z').split('\0').filter(Boolean);

@@ -1328,4 +1328,42 @@ git checkout HEAD -- server.js CLAUDE.md && git merge --ff-only origin/master
 Danach von außen belegt: `{"commit":"0f1454b","checkout":"0f1454b","blob":"76c6e4e","uptimeSec":53}`
 — alle drei Felder einig, nodemon hat neu gestartet.
 
+### AUSFALL NR. 13 (bis 05.09.2026) – nur das FRONTEND, und das Log sagte trotzdem „erfolgreich"
 
+**Symptom:** Die Live-Seite stand auf `8.679.0`, während `main` bereits `8.682.0` trug. Drei
+Spielversionen (8.680.0, 8.681.0 und 8.682.0) waren gemergt, aber nicht ausgeliefert. Das Backend
+deployte in derselben Zeit normal – `/api/health` meldete jeden neuen Commit.
+
+**Ursache:** Git verweigert seit 2.35.2 die Arbeit in einem Verzeichnis, das einem **anderen**
+Benutzer gehört als dem laufenden Prozess:
+
+```
+fatal: detected dubious ownership in repository at '/deploy/kolonie-kepler7'
+```
+
+Der Container läuft als root, `/deploy/kolonie-kepler7` gehört auf dem Host Sascha. Ab da schlug
+jeder Frontend-Pull fehl. Das Backend-Ziel `/app` blieb heil, weil Git das **Arbeitsverzeichnis**
+prüft und `/app` root gehört – der eigene Deploy-Befehl chownt dort nur `.git`.
+
+**Warum es lange unbemerkt blieb.** Das Log führt beide Ziele zusammen. Zwischen den Zeilen
+„Deploy-Webhook Fehler für kolonie-kepler7" standen laufend „Deploy-Webhook erfolgreich für
+kolonie-kepler7-backend". Wer nur nach „erfolgreich" sieht, sieht Normalbetrieb. **Ein Ausfall, der
+neben einem funktionierenden zweiten Ziel steht, hat kein Symptom** – aufgefallen ist er an der
+Versionsnummer der Live-Seite, nicht an einer Meldung.
+
+**Behebung:** `git -c safe.directory=<dir>` in **beiden** fest verdrahteten Befehlen und in
+`deployAufraeumen`. Auf der Kommandozeile zählt das zur *geschützten* Konfiguration (ein Eintrag in
+der Repo-Konfiguration wird hier von Git bewusst ignoriert) und ist zustandslos – es überlebt jedes
+Neuerzeugen des Containers, anders als ein `git config --global` darin. Das Backend bekommt es mit,
+obwohl es heute noch geht: Ein `chown` von `/app` entfernt, und der Webhook könnte sich nicht mehr
+selbst reparieren.
+
+**Wächter:** `tests/test_deploy_webhook_http.js` Abschnitt 9. 9a misst den Fehler **echt** nach
+(Repo anlegen, auf eine fremde uid chownen, beide Befehlsformen laufen lassen) – nur als root
+möglich, sonst deutlich als nicht gemessen ausgewiesen. 9b prüft beide Befehle, 9c die
+Selbstheilung. Gegenprobe: am Stand davor fallen genau 9b und 9c; 9a bleibt grün, weil es Gits
+Verhalten misst und nicht die Änderung.
+
+**Übertragbar:** Nach einem Deploy nicht nur ins Log sehen, sondern **von außen die ausgelieferte
+Version messen**. Für das Backend tut das `/api/health`; für das Spiel ist es
+`https://gamegeeeeek.de/version.txt` gegen `git show origin/main:version.txt`.

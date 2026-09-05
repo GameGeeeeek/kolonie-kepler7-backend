@@ -182,3 +182,24 @@ Hilfstext: Vor dem Einfügen in einen gemeinsamen Block die Frage stellen, ob di
 **jeden** Fall gilt, der ihn bekommt. Gilt sie nur für einen Teil, gehört sie in dessen eigenen
 Abschnitt. Und die Prüfung dazu misst beide Hälften – dass der Satz da ist, wo er hingehört, **und**
 dass er dort fehlt, wo er nicht hingehört; die zweite Hälfte ist die, die den Fehler gefunden hätte.
+
+## Eine serverseitige Abbuchung am klientenautoritativen Spielstand ist fast immer falsch (05.09.2026)
+
+Die Umrüstung des Vorpostens (V8) ließ in ihrer ersten Fassung den Server die Rohstoffe abbuchen
+und den neuen Stand zurückmelden. Das Muster war von `modul/ausbauen` abgeschaut und wirkte
+sauber. Es ist trotzdem ein Fehler, und die Begründung stand **dreißig Zeilen weiter oben in
+derselben Datei**, seit V5, bei `/vorposten/stationieren`:
+
+> Er zieht NICHT vom Spielstand ab – der Client bucht genau `angenommen` ab, nachdem die Antwort da
+> ist. Andersherum (Server zieht ab) liefe die Abbuchung gegen den Autosave des Clients.
+
+Der Weg dorthin ist konkret und still: Der Autosave serialisiert seinen Wert **vor** der
+Abbuchung, fängt beim PUT ein 409, lädt in `saveGameStateVersioned` die neue Version nach – und
+schickt denselben, noch unbezahlten Wert erneut. Die Abbuchung ist erstattet, ohne dass irgendwo
+ein Fehler auftaucht. Gefunden hat es eine Codex-Durchsicht, nicht die eigenen Tests.
+
+**Die übertragbare Regel:** Bevor eine neue Route den gespeicherten Spielstand eines Nutzers
+schreibt, gilt die Frage „Wo steht in diesem Repo schon, warum das nicht geht?" – nicht „Welche
+Nachbarroute macht es auch so?". Die Nachbarroute kann dieselbe Lücke tragen; die Regel ist die
+Regel. Was der Server hier tun darf, ist **nachzählen** und ablehnen: Das ist eine Prüfung gegen
+den persistierten Stand, kein Schreibvorgang, und es kollidiert mit keinem Autosave.

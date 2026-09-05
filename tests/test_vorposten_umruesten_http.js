@@ -33,7 +33,16 @@ const SAB = process.env.KEPLER_VPUMR_SABOTAGE || '';
    Nebenschaden: Steht der Zweig schon beim Start, ist `vorher` im Tick bereits der neue (5a liest
    beide Namen), und das Kern-Dach ist schon vor der Vergleichsmessung gefallen (5b vergleicht
    gegen den Stand waehrend der Frist). */
-const MUSS_FALLEN = { schalter: ['1a'], module: ['3d'], sofort: ['4a', '5a', '5b'], projektweg: ['5c'], lager: ['5d'] };
+/* GEMESSEN, nicht geschaetzt - einschliesslich der MITLAEUFER. Mehrere Sabotagen reissen Pruefungen
+   mit, die nicht ihr Ziel sind, und das ist jedesmal eine Folge und kein Nebenschaden:
+     sofort      Der Zweig steht schon beim Start -> auch das Lager wird zum neuen Satz abgerechnet (5d).
+     kosten      3e lehnt nicht mehr ab, die Umruestung laeuft also schon -> 3a ist der ZWEITE Start.
+     reihenfolge Der Verbuendete gibt zuerst ab -> die Rueckgabe des Besitzers deckt die Summe in
+                 6c nicht mehr. */
+const MUSS_FALLEN = { schalter: ['1a'], module: ['3d'], sofort: ['4a', '5a', '5b', '5d'],
+  projektweg: ['5c'], lager: ['5d'], lagerreihenfolge: ['5d'], kosten: ['3e', '3a'], abbuchen: ['3f'],
+  garnison: ['6a', '6b', '6c'], reihenfolge: ['6a', '6c'], modulscheibe: ['7a'], einbau: ['2f'],
+  abbauriegel: ['2g'], projektriegel: ['2h'] };
 
 let fail = false;
 const ergebnis = {};
@@ -52,13 +61,21 @@ const BEN = crypto.randomUUID();    // Fremder
 const dbPfad = path.join(os.tmpdir(), 'kepler-vpumr-' + process.pid + '.json');
 let srv = null;
 
-const save = (id, name) => ({ resources: { energie: 5e6, erz: 5e6, kristalle: 5e6, deuterium: 5e6, antimaterie: 1000, forschungspunkte: 100 },
+/* DER SPIELSTAND MUSS DIE UMRUESTUNG BEZAHLEN KOENNEN, seit der Server selbst abbucht (05.09.2026).
+   Mit den alten 5 Mio Erz fielen 3a-5d samt Gegenproben - und zwar zu Recht: Die Route lehnte ab,
+   weil Anna sich den Umbau nicht leisten konnte. Die Zahlen liegen bewusst deutlich ueber
+   VP_UMRUESTEN_KOSTEN, damit 3f eine ECHTE Differenz misst und nicht einen Rest bei null. */
+const save = (id, name) => ({ resources: { energie: 5e6, erz: 5e7, kristalle: 5e7, deuterium: 5e7,
+  nanolegierungen: 20000, quantenchips: 20000, metamaterial: 20000, singularitaetskern: 1000,
+  antimaterie: 1000, forschungspunkte: 100 },
   buildings: {}, research: {}, colonies: {}, fleet: { missions: [] },
   player: { id, name }, credits: 9000, xp: 1000, prestige: 0, battlePoints: 0, lastTick: Date.now() });
 function grunddb() {
   return {
     users: {
-      anna: { userId: ANNA, username: 'anna', passwordHash: hash, createdAt: Date.now() },
+      // vpModule: der Bestand fuer 2f (Einbau waehrend einer laufenden Umruestung).
+      anna: { userId: ANNA, username: 'anna', passwordHash: hash, createdAt: Date.now(),
+        vpModule: { 'kernpanzer:selten': 3 } },
       ben:  { userId: BEN,  username: 'ben',  passwordHash: hash, createdAt: Date.now() }
     },
     private: {
@@ -123,6 +140,18 @@ async function schreibeDb(fn) {
 const setzeDoc = (d, doc) => { d.shared['vorposten:' + doc.sys] = JSON.stringify(doc); };
 const liesDoc = (d, sys) => { const r = d.shared['vorposten:' + sys]; return r ? JSON.parse(r) : null; };
 const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
+/* Der Spielstand liegt in ZWEI Formen vor - als Zeichenkette und als { value, version } (CLAUDE.md).
+   Wer nur die erste liest, misst nach dem ersten Serverschreiben nichts mehr. */
+const liesSave = (d, uid) => {
+  const r = d.private[uid]['kepler7-save-v3'];
+  return JSON.parse(typeof r === 'string' ? r : r.value);
+};
+const schreibSave = (d, uid, sv) => {
+  const r = d.private[uid]['kepler7-save-v3'];
+  d.private[uid]['kepler7-save-v3'] = typeof r === 'string'
+    ? JSON.stringify(sv) : { value: JSON.stringify(sv), version: r.version };
+};
+const summeSchiffe = o => Object.values(o || {}).reduce((a, n) => a + (Number(n) > 0 ? Number(n) : 0), 0);
 
 (async () => {
   const roh = fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8');
@@ -189,6 +218,49 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
   if (SAB === 'lager') {
     anQuelle = anQuelle.replace('    const standVor = vorpostenLagerStand(doc, jetzt);', '    const standVor = {};');
   }
+  /* Nicht „das Lager faellt aus", sondern „es wird zum FALSCHEN Satz abgerechnet": der Zweig
+     wechselt VOR der Abrechnung. Genau der Fehler, den 5d in seiner alten Fassung nicht sah. */
+  if (SAB === 'lagerreihenfolge') {
+    anQuelle = anQuelle.replace('    const standVor = vorpostenLagerStand(doc, jetzt);',
+      '    doc.zweig = l.ziel;\n    const standVor = vorpostenLagerStand(doc, jetzt);');
+  }
+  if (SAB === 'kosten') {
+    anQuelle = anQuelle.replace('    if ((Number(habenU[r]) || 0) < menge) {', '    if (false) {');
+  }
+  /* Die Gegenprobe zu 3f, und der Waechter gegen einen Rueckfall: Wer hier wieder abbucht, laesst
+     die Abbuchung gegen den Autosave des Clients laufen (Begruendung im Endpunkt). */
+  if (SAB === 'abbuchen') {
+    anQuelle = anQuelle.replace('  doc.umruestenAb = jetztU + VP_UMRUESTEN_MS;\n  doc.umruestenZiel = ziel;',
+      '  saveU.resources = habenU;\n' +
+      '  for (const [r, menge] of Object.entries(VP_UMRUESTEN_KOSTEN)) saveU.resources[r] = (Number(saveU.resources[r]) || 0) - menge;\n' +
+      '  setSaveValue(req.userId, JSON.stringify(saveU));\n' +
+      '  doc.umruestenAb = jetztU + VP_UMRUESTEN_MS;\n  doc.umruestenZiel = ziel;');
+  }
+  if (SAB === 'garnison') {
+    anQuelle = anQuelle.replace('    const zurueck = vorpostenGarnisonKappen(doc, stNeu.garnisonMax) || {};',
+      '    const zurueck = {};');
+  }
+  if (SAB === 'reihenfolge') {
+    anQuelle = anQuelle.replace('.sort((a, b) => (a === doc.besitzer ? -1 : (b === doc.besitzer ? 1 : 0)));', '.sort(() => 0);');
+  }
+  if (SAB === 'modulscheibe') {
+    anQuelle = anQuelle.replace(`    module: eigener
+      ? (Array.isArray(doc.module) ? doc.module : []).slice()
+      : (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlotsVon(doc)),`,
+      '    module: (Array.isArray(doc.module) ? doc.module : []).slice(0, vpModulSlotsVon(doc)),');
+  }
+  if (SAB === 'einbau') {
+    anQuelle = anQuelle.replace('  const slots = Math.min(vpModulSlotsVon(doc), zielUmbau ? vpModulSlots(doc.stufe, zielUmbau) : Infinity);',
+      '  const slots = vpModulSlotsVon(doc);');
+  }
+  if (SAB === 'abbauriegel') {
+    anQuelle = anQuelle.replace('  const umbauLaeuft = vorpostenUmruestenLaeuft(doc);\n  if (umbauLaeuft) {',
+      '  const umbauLaeuft = null;\n  if (umbauLaeuft) {');
+  }
+  if (SAB === 'projektriegel') {
+    anQuelle = anQuelle.replace('  if (def.zweig && umbauProj && umbauProj.ziel !== def.zweig) {',
+      '  if (false && umbauProj && umbauProj.ziel !== def.zweig) {');
+  }
   // Eine Sabotage, die NICHTS ersetzt, laesst einen unsabotierten Server laufen und belegt nichts.
   if (SAB) {
     const anRein = basis.replace(/const VP_UMRUESTEN_AKTIV = (true|false);/, 'const VP_UMRUESTEN_AKTIV = true;');
@@ -228,6 +300,36 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
       'raffinerie:selten', 'horchposten:selten'] }));
     setzeDoc(d, vpDoc('mit-projekt', 8, 'werft', {
       projekte: [{ key: 'sternendock', fertigAb: Date.now() - 3600000 }], dockSeit: Date.now() - 3600000 }));
+    /* ZWEI LAGER-MASSSTAEBE fuer 5d. Beide Stationen haben denselben `lagerSeit` wie 'normal'; die
+       eine sammelt zum Festungssatz, die andere zum Handelssatz. Damit misst 5d, zu WELCHEM Satz
+       abgerechnet wurde, statt nur „irgendetwas kam an". */
+    setzeDoc(d, vpDoc('ref-festung', 8, 'festung'));
+    setzeDoc(d, vpDoc('ref-handel', 8, 'handel'));
+    /* ZWEI GARNISONEN fuer Abschnitt 6. Beide liegen UNTER dem Festungsdeckel (20300) und ueber dem
+       Handelsdeckel - genau der Zustand, den eine Umruestung erzeugt.
+       BEN steht in 'garn-eigen' BEWUSST VORN in `garnisonVon`: Die Reihenfolge im Dokument ist die
+       Reihenfolge des Stationierens, und ein Verbuendeter kann sehr wohl vor dem Besitzer geflogen
+       sein. Stuende Anna vorn, waere die Gegenprobe „reihenfolge" wirkungslos - sie kaeme dann auch
+       ohne die Sortierung zuerst dran. */
+    setzeDoc(d, vpDoc('garn-eigen', 8, 'festung', {
+      garnisonVon: { [BEN]: { jaeger: 4000 }, [ANNA]: { jaeger: 11000, cruisers: 5000 } },
+      garnison: { jaeger: 15000, cruisers: 5000 } }));
+    setzeDoc(d, vpDoc('garn-beide', 8, 'festung', {
+      garnisonVon: { [ANNA]: { jaeger: 5000 }, [BEN]: { cruisers: 15000 } },
+      garnison: { jaeger: 5000, cruisers: 15000 } }));
+    /* Eine Station mit MEHR Modulen als Steckplaetzen - der Zustand nach einer Umruestung weg vom
+       Festungsring (oder nach einem zurueckgelegten Schalter). Fuer 7a. */
+    setzeDoc(d, vpDoc('ueberzaehlig', 8, 'handel', { module: [
+      'kernpanzer:selten', 'geschuetz:selten', 'hangar:selten', 'sprungrechner:selten',
+      'raffinerie:selten', 'horchposten:selten'] }));
+    /* Fuenf Module im Festungsring (sechs Plaetze) - waehrend der Umruestung zum Handelsknoten
+       (fuenf Plaetze) darf das sechste NICHT mehr hinein. Fuer 2f. */
+    setzeDoc(d, vpDoc('umbau-modul', 8, 'festung', { module: [
+      'geschuetz:selten', 'hangar:selten', 'sprungrechner:selten', 'raffinerie:selten', 'horchposten:selten'],
+      umruestenAb: Date.now() + 12 * 3600 * 1000, umruestenZiel: 'handel' }));
+    /* Eine Station mitten in der Umruestung - fuer die Riegel 2g (Abbau) und 2h (Projekt). */
+    setzeDoc(d, vpDoc('umbau-riegel', 8, 'festung', {
+      umruestenAb: Date.now() + 12 * 3600 * 1000, umruestenZiel: 'handel' }));
   });
   const zuKlein = await api.sende('/vorposten/umruesten', tokA, { system: 'zu-klein', zweig: 'handel' });
   check('2a: unter der Mindeststufe wird abgelehnt, mit der Stufe im Klartext',
@@ -244,6 +346,22 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
     { status: erfunden.status, zweige: (erfunden.body.zweige || []).map(z => z.key) });
   const fremd = await api.sende('/vorposten/umruesten', tokB, { system: 'normal', zweig: 'handel' });
   check('2e: ein Fremder kann den Vorposten nicht umruesten', fremd.status === 403, { status: fremd.status });
+  /* DIE DREI RIEGEL WAEHREND DER FRIST (Durchsicht 05.09.2026). /vorposten/umruesten prueft nur den
+     Stand BEIM START - in den 24 Stunden danach kann die Station weiter bedient werden, und drei
+     dieser Wege fuehrten in genau den Schaden, den die Ablehnung beim Start verhindern soll. */
+  const einbau = await api.sende('/vorposten/modul/einbauen', tokA, { system: 'umbau-modul', modul: 'kernpanzer:selten' });
+  check('2f: waehrend der Umruestung zu einem engeren Zweig nimmt die Station kein Modul mehr auf',
+    einbau.status === 400 && einbau.body.voll === true && einbau.body.umruestung === true && einbau.body.slots === 5,
+    { status: einbau.status, body: einbau.body });
+  const aufgeben = await api.sende('/vorposten/aufgeben', tokA, { system: 'umbau-riegel' });
+  check('2g: eine Station, die gerade umgebaut wird, laesst sich nicht abbauen',
+    aufgeben.status === 400 && aufgeben.body.umruestung === true && aufgeben.body.umruestenZiel === 'handel',
+    { status: aufgeben.status, body: aufgeben.body });
+  const projFalsch = await api.sende('/vorposten/projekt/starten', tokA, { system: 'umbau-riegel', projekt: 'bollwerk' });
+  const projFrei = await api.sende('/vorposten/projekt/starten', tokA, { system: 'umbau-riegel', projekt: 'tiefenhorchen' });
+  check('2h: ein zweiggebundenes Vorhaben zur ALTEN Ausrichtung wird abgelehnt, ein zweigfreies nicht',
+    projFalsch.status === 400 && projFalsch.body.umruestung === true && projFrei.status === 200,
+    { falsch: { status: projFalsch.status, body: projFalsch.body }, frei: projFrei.status });
 
   // ---- 3. Der Start, und die Steckplatz-Ablehnung -----------------------------------------------
   const imAbbau = await api.sende('/vorposten/umruesten', tokA, { system: 'im-abbau', zweig: 'handel' });
@@ -257,6 +375,22 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
     && zuViele.body.module === 6 && zuViele.body.plaetze === 5
     && /Bau erst 1 aus/.test(String(zuViele.body.error)),
     { status: zuViele.status, body: zuViele.body });
+  /* 3e: OHNE DIE ROHSTOFFE GEHT NICHTS. Der Server bucht selbst ab (Begruendung im Endpunkt), also
+     muss er auch selbst nachzaehlen. Gemessen wird beides: die Ablehnung UND dass sie nichts
+     kostet - eine Pruefung, die im Ablehnungsfall schon abgebucht hat, waere schlimmer als keine. */
+  const START = save(ANNA, 'anna').resources;
+  api = await schreibeDb(d => { const sv = liesSave(d, ANNA); sv.resources.erz = 1000; schreibSave(d, ANNA, sv); });
+  const arm = await api.sende('/vorposten/umruesten', tokA, { system: 'normal', zweig: 'handel' });
+  let armKristalle = null;
+  api = await schreibeDb(d => {
+    const sv = liesSave(d, ANNA);
+    armKristalle = sv.resources.kristalle;
+    sv.resources.erz = START.erz;
+    schreibSave(d, ANNA, sv);
+  });
+  check('3e: ohne die Rohstoffe wird abgelehnt, der fehlende genannt - und nichts abgebucht',
+    arm.status === 400 && arm.body.fehlt === 'erz' && armKristalle === START.kristalle,
+    { status: arm.status, fehlt: arm.body && arm.body.fehlt, kristalleDanach: armKristalle, vorher: START.kristalle });
   const start = await api.sende('/vorposten/umruesten', tokA, { system: 'normal', zweig: 'handel' });
   check('3a: der Start setzt Frist und Ziel und nennt die Kosten',
     start.status === 200 && start.body.umruestenAb > Date.now() && start.body.umruestenZiel === 'handel'
@@ -283,12 +417,34 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
   check('4b: und ein FREMDER sieht die laufende Umruestung - wie den Abbau',
     !!fuerBen && fuerBen.umruestenAb === laufend.umruestenAb && fuerBen.umruestenZiel === 'handel',
     { ab: fuerBen && fuerBen.umruestenAb, ziel: fuerBen && fuerBen.umruestenZiel });
+  /* 7a: WER SIEHT WELCHE MODULE. Der Besitzer sieht ALLES, was in seiner Station steckt - auch was
+     ueber die Steckplatzzahl hinausragt; sonst haette er dafuer keinen Knopf und saehe es gar
+     nicht (die Zeile „Kein Steckplatz mehr dafuer" im Spiel waere unerreichbar). Ein Fremder sieht
+     nur die WIRKENDEN: nur die erklaeren die Staerke. */
+  const ueberA = vpVon(g.body.liste, 'ueberzaehlig');
+  const ueberB = vpVon(fremdSicht.body.liste, 'ueberzaehlig');
+  check('7a: der Besitzer sieht alle sechs Module, der Fremde nur die fuenf wirkenden',
+    !!ueberA && !!ueberB && ueberA.slots === 5 && (ueberA.module || []).length === 6
+    && (ueberB.module || []).length === 5,
+    { slots: ueberA && ueberA.slots, besitzer: ueberA && (ueberA.module || []).length,
+      fremd: ueberB && (ueberB.module || []).length });
+  /* Die beiden Lager-Massstaebe fuer 5d, gelesen WAEHREND der Frist: gleicher `lagerSeit`, nur ein
+     anderer Zweig. Damit misst 5d, zu WELCHEM Satz abgerechnet wurde. */
+  const refFest = vpVon(g.body.liste, 'ref-festung');
+  const refHand = vpVon(g.body.liste, 'ref-handel');
+  check('5d-anker: die beiden Massstaebe stehen und unterscheiden sich deutlich (sonst misst 5d nichts)',
+    !!refFest && !!refHand && refFest.lager.erz > 0 && refHand.lager.erz > refFest.lager.erz * 1.5,
+    { festung: refFest && refFest.lager, handel: refHand && refHand.lager,
+      deckelHandel: refHand && refHand.garnisonMax });
 
   // ---- 5. Der Abschluss ------------------------------------------------------------------------
   const vorLpMax = laufend.kern.lpMax;
   api = await schreibeDb(d => {
     const a = liesDoc(d, 'normal'); a.umruestenAb = Date.now() - 1000; setzeDoc(d, a);
     const b = liesDoc(d, 'mit-projekt'); b.umruestenAb = Date.now() - 1000; b.umruestenZiel = 'festung'; setzeDoc(d, b);
+    for (const sys of ['garn-eigen', 'garn-beide']) {
+      const c = liesDoc(d, sys); c.umruestenAb = Date.now() - 1000; c.umruestenZiel = 'handel'; setzeDoc(d, c);
+    }
   });
   await warte(4500);
   await stoppeServer();
@@ -314,11 +470,77 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
     !!projNach && (projNach.projekte || []).some(p => p && p.key === 'sternendock'),
     { zweig: projNach && projNach.zweig, projekte: projNach && (projNach.projekte || []).map(p => p && p.key) });
   /* 5d: Das Lager wird VOR dem Wechsel abgerechnet - der Satz haengt am Zweig. Ohne diese
-     Abrechnung waeren die Stunden davor rueckwirkend zum neuen Satz bewertet. */
+     Abrechnung waeren die Stunden davor rueckwirkend zum neuen Satz bewertet.
+     GEMESSEN WIRD DER SATZ, NICHT DAS VORHANDENSEIN (Durchsicht 05.09.2026). Die erste Fassung
+     fragte nur „ist irgendetwas angekommen?" - und das ist auch dann wahr, wenn zum FALSCHEN Satz
+     abgerechnet wurde. Der Massstab sind die beiden Referenz-Stationen mit demselben `lagerSeit`:
+     die Meldung muss am Festungssatz liegen (ein paar Sekunden Vorsprung sind erlaubt, der Tick
+     laeuft spaeter) und deutlich unter dem Handelssatz. */
   const lagerMeldung = belohnungen.find(x => x.type === 'vorposten-lager' && x.system === 'normal') || null;
-  check('5d: das Lager wurde VOR dem Wechsel abgerechnet',
-    !!lagerMeldung && (lagerMeldung.erz > 0 || lagerMeldung.kristalle > 0 || lagerMeldung.deuterium > 0),
-    { meldung: lagerMeldung });
+  check('5d: das Lager wurde VOR dem Wechsel abgerechnet - zum FESTUNGSSATZ, nicht zum Handelssatz',
+    !!lagerMeldung && lagerMeldung.erz >= Math.floor(refFest.lager.erz * 0.98)
+    && lagerMeldung.erz <= Math.ceil(refFest.lager.erz * 1.15)
+    && lagerMeldung.erz < refHand.lager.erz * 0.6,
+    { gemeldet: lagerMeldung && lagerMeldung.erz, festungssatz: refFest.lager.erz,
+      handelssatz: refHand.lager.erz });
+  /* 3f: DER SERVER ZAEHLT NACH, ER BUCHT NICHT AB. Der Unterschied ist keine Feinheit: Bucht der
+     Server ab, laeuft die Abbuchung gegen den Autosave des Clients (die Regel steht seit V5 bei
+     /vorposten/stationieren). Der Weg ist konkret - der Autosave serialisiert seinen Wert VOR der
+     Abbuchung, faengt beim PUT ein 409, laedt die neue Version nach und schickt denselben, noch
+     unbezahlten Wert erneut; die Abbuchung waere still erstattet. Genau das hat eine Durchsicht am
+     05.09.2026 an der ersten Fassung dieser Etappe gefunden. Diese Pruefung ist der Waechter
+     dagegen: Nach einem ERFOLGREICHEN Start steht der gespeicherte Stand unveraendert da.
+     Gemessen wird nach dem Serverstopp, weil der Spielstand erst dann verlaesslich auf der Platte
+     liegt. */
+  const saveNach = liesSave(nach, ANNA);
+  const angetastet = Object.keys(kosten).filter(r => (saveNach.resources[r] || 0) !== (START[r] || 0));
+  check('3f: der erfolgreiche Start laesst den Spielstand unangetastet - abgebucht wird im Spiel',
+    angetastet.length === 0 && start.body.newResources === undefined
+    && start.body.saveVersion === undefined,
+    { angetastet, erzNachher: saveNach.resources.erz, erwartet: START.erz,
+      meldet: { newResources: start.body.newResources, saveVersion: start.body.saveVersion } });
+
+  // ---- 6. Der Garnisonsdeckel faellt mit dem Zweig ----------------------------------------------
+  /* Die Umruestung ist der erste Weg, auf dem `garnisonMax` SINKEN kann (Festungsring 1.45,
+     Handelsknoten 0.85). Was nicht mehr hineinpasst, muss zurueck - geloescht wird nichts. */
+  const deckel = refHand.garnisonMax;
+  const GARN_START = 20000;   // beide Vorlagen: 20000 Schiffe, unter dem Festungsdeckel
+  const garnE = liesDoc(nach, 'garn-eigen');
+  const garnB = liesDoc(nach, 'garn-beide');
+  const belohnB = (nach.private[BEN].__pendingRewards || []);
+  const umrE_A = belohnungen.find(x => x.type === 'vorposten-umruestung' && x.system === 'garn-eigen') || null;
+  const umrE_B = belohnB.find(x => x.type === 'vorposten-umruestung' && x.system === 'garn-eigen') || null;
+  const umrB_A = belohnungen.find(x => x.type === 'vorposten-umruestung' && x.system === 'garn-beide') || null;
+  const umrB_B = belohnB.find(x => x.type === 'vorposten-umruestung' && x.system === 'garn-beide') || null;
+  check('6-anker: die Vorlagen standen unter dem Festungs- und ueber dem Handelsdeckel (sonst misst 6 nichts)',
+    deckel > 0 && deckel < GARN_START && refFest.garnisonMax >= GARN_START,
+    { handel: deckel, festung: refFest.garnisonMax, gestellt: GARN_START });
+  check('6a: der Besitzer gibt zuerst ab - der Verbuendete behaelt jedes seiner Schiffe',
+    !!garnE && summeSchiffe(garnE.garnison) === deckel
+    && summeSchiffe((garnE.garnisonVon || {})[BEN]) === 4000
+    && summeSchiffe((garnE.garnisonVon || {})[ANNA]) === deckel - 4000
+    && !umrE_B,
+    { gesamt: garnE && summeSchiffe(garnE.garnison), deckel,
+      ben: garnE && summeSchiffe((garnE.garnisonVon || {})[BEN]),
+      anna: garnE && summeSchiffe((garnE.garnisonVon || {})[ANNA]), meldungBen: !!umrE_B });
+  check('6b: reicht der Besitzer nicht, gibt der Verbuendete den Rest - und erfaehrt davon',
+    !!garnB && summeSchiffe(garnB.garnison) === deckel
+    && !(garnB.garnisonVon || {})[ANNA]
+    && summeSchiffe((garnB.garnisonVon || {})[BEN]) === deckel
+    && !!umrB_B && umrB_B.alsVerbuendeter === true,
+    { gesamt: garnB && summeSchiffe(garnB.garnison), deckel,
+      anna: garnB && (garnB.garnisonVon || {})[ANNA],
+      ben: garnB && summeSchiffe((garnB.garnisonVon || {})[BEN]),
+      meldungBen: umrB_B && umrB_B.alsVerbuendeter });
+  check('6c: nichts wird geloescht - zurueckgegeben plus verblieben ist genau, was vorher da stand',
+    !!umrE_A && summeSchiffe(umrE_A.garnisonZurueck) + summeSchiffe(garnE.garnison) === GARN_START
+    && !!umrB_A && !!umrB_B
+    && summeSchiffe(umrB_A.garnisonZurueck) + summeSchiffe(umrB_B.garnisonZurueck)
+       + summeSchiffe(garnB.garnison) === GARN_START
+    && umrE_A.garnisonMax === deckel,
+    { eigenZurueck: umrE_A && summeSchiffe(umrE_A.garnisonZurueck),
+      beideZurueck: [umrB_A && summeSchiffe(umrB_A.garnisonZurueck), umrB_B && summeSchiffe(umrB_B.garnisonZurueck)],
+      gemeldeterDeckel: umrE_A && umrE_A.garnisonMax });
 
   if (SAB) {
     const soll = MUSS_FALLEN[SAB] || [];
@@ -347,4 +569,30 @@ const vpVon = (liste, sys) => (liste || []).find(v => v.sys === sys) || null;
                Kern-Dach ist schon vor der Vergleichsmessung gefallen.
    projektweg  Der Tick loescht zweiggebundene Projekte           -> 5c faellt.
    lager       Der Tick rechnet das Lager nicht ab                -> 5d faellt.
+   lagerreihenfolge  Der Zweig wechselt VOR der Lagerabrechnung   -> 5d faellt.
+               Der Fehler, den die alte Fassung von 5d nicht sah: Es KAM etwas an, nur zum falschen
+               Satz - ein Handelsknoten haette rueckwirkend das Dreieinhalbfache ausgeschuettet.
+   kosten      Die Kostenpruefung im Endpunkt ausgehebelt         -> 3e faellt (und 3a als Folge).
+               Die Umruestung ist beliebig oft wiederholbar und aendert genau die Zahlen, fuer die
+               der Server Autoritaet ist; ein Aufruf, dessen gespeicherter Stand die Kosten nicht
+               hergibt, muss abgewiesen werden.
+   abbuchen    Der Endpunkt bucht die Kosten wieder SELBST ab      -> 3f faellt.
+               Der Rueckfall, den eine Durchsicht am 05.09.2026 an der ersten Fassung gefunden hat:
+               Die Abbuchung liefe gegen den Autosave des Clients und waere bei einem 409 still
+               erstattet. Die Regel dazu steht seit V5 bei /vorposten/stationieren.
+   garnison    Der Tick kappt die Garnison nicht                  -> 6a, 6b und 6c fallen.
+               Ein Handelsknoten mit 20000 Schiffen im Bauch waere haerter als jeder ehrlich
+               gebaute - ein Wert, den /vorposten/stationieren nie zugelassen haette.
+   reihenfolge Die Sortierung „Besitzer zuerst" entfernt          -> 6a faellt.
+               Dann verliert der Verbuendete seine Schiffe an eine Entscheidung, die ein anderer
+               getroffen hat.
+   modulscheibe  Auch der Besitzer bekommt die geschnittene Liste -> 7a faellt.
+               Er saehe das ueberzaehlige Modul gar nicht und haette keinen Knopf, es auszubauen.
+   einbau      Die Steckplatzgrenze waehrend der Umruestung weg   -> 2f faellt.
+               In den 24 Stunden liesse sich ein sechstes Modul in einen Ring bauen, der gerade
+               zum Handelsknoten wird - genau der Schaden, den die Ablehnung beim Start verhindert.
+   abbauriegel Der Abbau waehrend der Umruestung wieder erlaubt   -> 2g faellt.
+               Die teuerste Investition des Features waere ersatzlos weg.
+   projektriegel  Zweiggebundene Vorhaben waehrend des Umbaus erlaubt -> 2h faellt.
+               Verbrannte Rohstoffe fuer ein Vorhaben, das vom ersten Tag an wirkungslos ist.
 */

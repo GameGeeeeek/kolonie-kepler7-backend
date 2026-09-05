@@ -120,6 +120,7 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/betriebsnetz.md` | `takt()`, Absturz-Handler mit Notfall-Flush, `taktFehler` in `/api/health` |
 | `docs/hort-meldung.md` | Der seltenste Expeditionsfund: Server würfelt, Meldung in der Weltlage, Schalter `HORT_BANNER_AKTIV` |
 | `docs/ki-kampfberichte.md` | Etappe E1a: Prompt-Zuschnitt, Wahrheits-Sperren, Warteschlange, `KAMPFTEXT_AKTIV` |
+| `docs/galaxie-chronik.md` | C1: das Ereignisbuch `db.galaxy.chronik` (feste Felder je Art, Deckel mit Wochenschutz, Admin- und Abhol-Route) |
 
 Der vollständige frühere Text dieser Datei liegt in der Git-Historie vor dem 01.09.2026.
 

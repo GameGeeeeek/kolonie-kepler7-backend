@@ -2011,6 +2011,11 @@ function handleSharedStorageWrite(key, prevRaw, newRaw) {
           }
         }
       }
+    } else if (/^alliance:[^:]+:info$/.test(key) && !prevRaw) {
+      // Chronik C1: eine neue Allianz - der info-Schluessel entsteht genau einmal.
+      let info = null;
+      try { info = JSON.parse(newRaw); } catch (e) { info = null; }
+      chronikVermerken('allianz-gegruendet', { tag: key.split(':')[1], name: (info && info.name) || '', gruender: (info && info.creatorName) || '' });
     } else if (key === 'worldboss:current') {
       let prev = null, next = null;
       try { prev = prevRaw ? JSON.parse(prevRaw) : null; } catch (e) {}
@@ -2020,6 +2025,9 @@ function handleSharedStorageWrite(key, prevRaw, newRaw) {
       if (next.defeatedAt && !wasDefeated) {
         const contributions = next.contributions || {};
         const total = Object.values(contributions).reduce((a, x) => a + (x.dmg || 0), 0) || 1;
+        // Chronik C1 (Altpfad: der Client schreibt das Dokument mit defeatedAt) - der Server-Weg
+        // in /api/worldboss/resolve hat dann schon vermerkt, und chronikWeltbossGefallen schweigt.
+        chronikWeltbossGefallen(next);
         for (const [contribUserId, contrib] of Object.entries(contributions)) {
           const user = findUserById(contribUserId);
           if (!user) continue;
@@ -4957,6 +4965,7 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
         gB.bounty.claimed = true; gB.bounty.claimedBy = req.username;
         pushPendingReward(req.userId, { type: 'bounty', targetName: gB.bounty.targetName, credits: gB.bounty.reward });
         pushGalaxyNews('ti-award', 'Kopfgeld kassiert: ' + req.username + ' hat ' + gB.bounty.targetName + ' bezwungen (+' + gB.bounty.reward + ' Kredite).');
+        chronikVermerken('kopfgeld-kassiert', { jaeger: req.username, ziel: gB.bounty.targetName, kredite: gB.bounty.reward });
       }
     }
 
@@ -5272,7 +5281,8 @@ app.get('/api/health', (req, res) => res.json({
   // laeuft dort Ollama, ist das Modell da, passt der Schluessel? Beantwortet die drei Vorbedingungen
   // der Etappe E1b von aussen - vorher waren das drei SSH-Befehle. Nennt weder Adresse noch
   // Schluessel, nur Befunde und Laengen (Definition am Dateiende).
-  kampftext: kampftextHealth()
+  kampftext: kampftextHealth(),
+  chronik: chronikHealth()
 }));
 
 // --- Andere Spieler in einem Sternensystem (für die Sektorkarte) ---
@@ -6110,6 +6120,7 @@ function loadOrInitGalaxy() {
       collapsedSystems: {},
       activeWormhole: null,
       news: [],
+      chronik: [],
       lastTick: Date.now()
     };
   }
@@ -6224,6 +6235,90 @@ function pushGalaxyNews(icon, text, art) {
   if (art) eintrag.art = art;
   g.news.unshift(eintrag);
   g.news = g.news.slice(0, 40);
+}
+// ===== Die Galaxie-Chronik, Etappe C1 (05.09.2026): das Ereignisbuch ===========================
+// Konzept: gamegeeeeek-ai-core/docs/AI-HUB-ROADMAP.md, Superprojekt 3 (Wochenzeitung aus echten
+// Ereignissen). pushGalaxyNews oben ist die Laufschrift fuer Spieler: fertige Saetze, 40 Eintraege,
+// Reichweite Tage. Die Chronik ist das BUCH fuer die Wochenzeitung des M715q: FESTE FELDER je Art,
+// nie Freitext, geschrieben ausschliesslich aus Server-Code an den Ereignisstellen - nie ueber
+// /api/storage. Sie liegt in db.galaxy (fuer Clients unerreichbar), nicht in db.shared: Die Roadmap
+// nannte db.shared, die Hausregel (CLAUDE.md) legt server-eigene Daten nach db.galaxy.
+// Jede Zeichenkette laeuft durch chronikText - Spieler-, Allianz- und Volksnamen sind die einzigen
+// client-staemmigen Werte und bekommen dieselbe 40-Zeichen-Whitelist wie der Gegnername der
+// Kampftexte (Punkt 3 im Kopf jenes Blocks): Der M715q baut daraus spaeter einen Prompt.
+const CHRONIK_MAX = 500;
+// Der Deckel begrenzt das Wachstum, loescht aber NIE, was die laufende Woche braucht (Hausregel:
+// Deckel loeschen keine Daten, die noch gebraucht werden): Eintraege juenger als acht Tage (eine
+// Woche plus Puffer fuer den Abhol-Takt) bleiben auch ueber 500 hinaus stehen.
+const CHRONIK_SCHUTZ_MS = 8 * 24 * 3600 * 1000;
+// Die Arten und ihre festen Felder - die Liste ist die Doku fuer Admin-Route und M715q.
+const CHRONIK_ARTEN = {
+  'weltboss-gefallen':     'stufe, teilnehmer, bester, anteil (Prozent des Schadens)',
+  'festung-gefallen':      'system, stufe (Name), teilnehmer',
+  'koenigin-gefallen':     'system, volk, mitgerissen (weitere Nester), teilnehmer',
+  'nest-gefallen':         'system, volk, stufe (Name), teilnehmer',
+  'vorposten-gefallen':    'system, stufe (Name), besitzer, angreifer, verband (Allianz-Muster)',
+  'hort-gefunden':         'spieler, ressource, betrag',
+  'system-erobert':        'system, spieler, von (NPC-Volk)',
+  'allianz-gegruendet':    'tag, name, gruender',
+  'allianzkrieg-beendet':  'sieger, verlierer, punkteSieger, punkteVerlierer - oder a, b, punkteA, punkteB, unentschieden',
+  'kopfgeld-kassiert':     'jaeger, ziel, kredite',
+  'saison-beendet':        'saison, champion, teilnehmer',
+  'front-durchbrochen':    'system, sieger, verlierer (NPC-Voelker der Randkriege)'
+};
+function chronikText(roh) {
+  return String(roh == null ? '' : roh).replace(/[^A-Za-z0-9ÄÖÜäöüß \-']/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+}
+function chronikVermerken(art, felder) {
+  const g = loadOrInitGalaxy();
+  if (!Array.isArray(g.chronik)) g.chronik = [];
+  const eintrag = { id: crypto.randomUUID(), zeit: Date.now(), art };
+  for (const [k, v] of Object.entries(felder || {})) {
+    if (typeof v === 'number') { if (Number.isFinite(v)) eintrag[k] = v; }
+    else if (typeof v === 'boolean') eintrag[k] = v;
+    else if (v !== null && v !== undefined) eintrag[k] = chronikText(v);
+  }
+  g.chronik.unshift(eintrag);
+  if (g.chronik.length > CHRONIK_MAX) {
+    // Von hinten (die aeltesten) kuerzen - aber nur ausserhalb des Schutzfensters. Die Liste ist
+    // neueste-zuerst; sobald ein Eintrag im Fenster liegt, liegen alle davor ebenfalls drin.
+    const grenze = Date.now() - CHRONIK_SCHUTZ_MS;
+    for (let i = g.chronik.length - 1; i >= 0 && g.chronik.length > CHRONIK_MAX; i--) {
+      if ((g.chronik[i].zeit || 0) >= grenze) break;
+      g.chronik.splice(i, 1);
+    }
+  }
+  return eintrag;
+}
+function chronikSeit(tage) {
+  const ab = Date.now() - Math.max(1, Math.min(60, Number(tage) || 7)) * 24 * 3600 * 1000;
+  return (loadOrInitGalaxy().chronik || []).filter(e => (e.zeit || 0) >= ab);
+}
+function chronikAntwort(tage) {
+  const g = loadOrInitGalaxy();
+  const eintraege = chronikSeit(tage);
+  return { tage: Math.max(1, Math.min(60, Number(tage) || 7)), anzahl: eintraege.length, gesamt: (g.chronik || []).length, arten: CHRONIK_ARTEN, eintraege };
+}
+// Der Weltboss-Fall aus dem Boss-Dokument: groesster Beitrag und sein Anteil. Aufgerufen an den
+// zwei Stellen, an denen der SERVER den Fall entscheidet (/api/worldboss/resolve und der Admin-
+// Eingriff), und - fuer den Altpfad, in dem der Client das Dokument mit defeatedAt schreibt - aus
+// dem Speicher-Hook. `chronikEintrag` im Dokument verhindert den Doppel-Eintrag: Der Hook sieht den
+// Vermerk des Servers und schweigt.
+function chronikWeltbossGefallen(boss) {
+  if (!boss || boss.chronikEintrag) return null;
+  const contributions = boss.contributions || {};
+  const total = Object.values(contributions).reduce((a, x) => a + (x.dmg || 0), 0) || 1;
+  let bester = null, besterDmg = -1;
+  for (const [uid, c] of Object.entries(contributions)) if ((c.dmg || 0) > besterDmg) { besterDmg = c.dmg || 0; bester = uid; }
+  const besterUser = bester ? findUserById(bester) : null;
+  const eintrag = chronikVermerken('weltboss-gefallen', { stufe: boss.level || 1, teilnehmer: Object.keys(contributions).length,
+    bester: besterUser ? besterUser.username : ((bester && contributions[bester].name) || ''), anteil: Math.round(Math.max(0, besterDmg) / total * 100) });
+  boss.chronikEintrag = eintrag.id;
+  return eintrag;
+}
+function chronikHealth() {
+  const liste = (db.galaxy && db.galaxy.chronik) || [];
+  return { eintraege: liste.length, letzterEintrag: liste.length ? liste[0].zeit : null, woche: chronikSeit(7).length };
 }
 // Nie ein System zerstören/besetzen, in dem tatsächlich ein Spieler zuhause ist - gilt für ALLE
 // ortsgebundenen Ereignisse (nicht nur Supernova), damit kein Spieler den Eindruck bekommt, sein
@@ -6641,6 +6736,7 @@ function rkTick(g) {
       verlierer.systems = verlierer.systems.filter(x => x !== e.sys);
       gewinner.systems.push(e.sys);
       pushGalaxyNews('ti-flag', gewinner.name + ' hat die Front bei ' + e.sys + ' durchbrochen und das System von ' + verlierer.name + ' übernommen.');
+      chronikVermerken('front-durchbrochen', { system: e.sys, sieger: gewinner.name, verlierer: verlierer.name });
     }
   }
 }
@@ -6908,6 +7004,7 @@ function resolveSeasonLeagueServer() {
       });
       const champ = participants[0];
       const champName = (() => { try { return JSON.parse(db.shared['leaderboard:' + champ.uid]).name || 'Unbekannt'; } catch (e) { return 'Unbekannt'; } })();
+      chronikVermerken('saison-beendet', { saison: sl.seasonKey, champion: champName, teilnehmer: total });
       pushGalaxyNews('ti-trophy', 'Saison ' + sl.seasonKey + ' beendet! ' + total + ' Kommandanten kämpften um den Aufstieg – Saison-Champion: ' + champName + '. Deine Saison-Belohnung wartet beim nächsten Login.');
     }
   }
@@ -6983,8 +7080,10 @@ function resolveAllianceWarsServer() {
         const members = warContributorIds(winner, loser);
         for (const uid of members) pushPendingReward(uid, { type: 'war-victory', enemyTag: loser, credits: WAR_VICTORY_CREDITS, myScore: wS, theirScore: lS });
         pushGalaxyNews('ti-trophy', 'Allianz-Krieg beendet: [' + winner + '] besiegt [' + loser + '] mit ' + wS + ':' + lS + ' Kriegspunkten.');
+        chronikVermerken('allianzkrieg-beendet', { sieger: winner, verlierer: loser, punkteSieger: wS, punkteVerlierer: lS });
       } else {
         pushGalaxyNews('ti-flag', 'Allianz-Krieg zwischen [' + A + '] und [' + B + '] endet unentschieden (' + scoreA + ':' + scoreB + ').');
+        chronikVermerken('allianzkrieg-beendet', { a: A, b: B, punkteA: scoreA, punkteB: scoreB, unentschieden: true });
       }
       removeWarEnemy(A, B); removeWarEnemy(B, A);
     }
@@ -7592,6 +7691,7 @@ app.post('/api/expedition/hort', authMiddleware, hortRateLimit, (req, res) => {
   // auseinandernehmen zu muessen - und erkennt die Meldung an der Art statt am Wortlaut.
   pushGalaxyNews('ti-trophy', 'Seltener Fund: ' + req.username + ' hat auf einer Expedition einen Hort entdeckt – '
     + betrag.toLocaleString('de-DE') + ' ' + label + '!', 'hort');
+  chronikVermerken('hort-gefunden', { spieler: req.username, ressource: label, betrag });
   saveDb();
   res.json({ hort: true, res: String(req.body.res), betrag });
 });
@@ -8111,7 +8211,7 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
     me.name = req.username || me.name;
     boss.contributions[req.userId] = me;
     killed = boss.hp <= 0;
-    if (killed) boss.defeatedAt = Date.now();
+    if (killed) { boss.defeatedAt = Date.now(); chronikWeltbossGefallen(boss); }   // Chronik C1
     bossHpAfter = boss.hp;
     bossMaxHp = boss.maxHp;
     db.shared[WORLDBOSS_KEY] = JSON.stringify(boss);
@@ -9773,6 +9873,7 @@ app.post('/api/musterattack/resolve', authMiddleware, async (req, res) => {
     // Den Besitzer benachrichtigen - derselbe Weg wie am Einzelendpunkt (siehe docs/vorposten.md).
     try {
       const besUser = besitzerV ? findUserById(besitzerV) : null;
+      if (ergV.gefallen) chronikVermerken('vorposten-gefallen', { system: doc.vorpostenSystem, stufe: stufeNameV, besitzer: besUser ? besUser.username : '', angreifer: tag, verband: true });
       if (besUser) {
         const bPrefs = getNotifPrefs(besUser);
         if (bPrefs.enabled && bPrefs.attack) {
@@ -10180,6 +10281,7 @@ app.post('/api/faction/attack', authMiddleware, async (req, res) => {
     attacker.credits = (attacker.credits || 0) + creditReward;
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     pushGalaxyNews('ti-flag', (req.username || 'Ein Kommandant') + ' hat ' + systemId + ' von den ' + owner.name + ' erobert!');
+    chronikVermerken('system-erobert', { system: systemId, spieler: req.username || '', von: owner.name });
     await saveDb();
     return res.json({ success: true, systemId, attackPower, factionDefense, creditReward, factionName: owner.name, saveVersion: mySaveVersion, front: rkErgebnis });
   } else {
@@ -12840,6 +12942,7 @@ function festungSchlagAusfuehren(feld, fest, sysId, kraft, composition, beteilig
     }
     delete feld.festung;
     feld.geraeumtBis = jetzt + FESTUNG_GERAEUMT_MS;
+    chronikVermerken('festung-gefallen', { system: sysId, stufe: st.name, teilnehmer });
     pushGalaxyNews('ti-building-fortress', 'Die ' + st.name + ' bei ' + sysId + ' ist gefallen - ' +
       teilnehmer + ' Kommandant' + (teilnehmer === 1 ? '' : 'en') + ' teilen sich den Hort. Der Gürtel ist ' +
       Math.round(FESTUNG_GERAEUMT_MS / 3600000) + ' Stunden lang frei, der Abbau dort um ' +
@@ -12972,10 +13075,12 @@ function nestSchlagAusfuehren(g, nest, kraft, composition, beteiligte, jetzt) {
       }
       g.alienPause = g.alienPause || {};
       g.alienPause[nest.volk] = jetzt + NEST_PAUSE_MS;
+      chronikVermerken('koenigin-gefallen', { system: nest.sys, volk: volk.name, mitgerissen, teilnehmer });
       pushGalaxyNews('ti-alien', 'Die Königin der ' + volk.name + ' bei ' + nest.sys + ' ist gefallen - ' +
         'der ganze Schwarm zerfällt' + (mitgerissen ? ' (' + mitgerissen + ' weitere Nester)' : '') + '. ' +
         'Das Volk sammelt sich für ' + Math.round(NEST_PAUSE_MS / 3600000) + ' Stunden.');
     } else {
+      chronikVermerken('nest-gefallen', { system: nest.sys, volk: volk.name, stufe: st.name, teilnehmer });
       pushGalaxyNews('ti-alien', 'Der ' + st.name + ' der ' + volk.name + ' bei ' + nest.sys +
         ' ist zerstört - ' + teilnehmer + ' Kommandant' + (teilnehmer === 1 ? '' : 'en') + ' teilen sich die Bergung.');
     }
@@ -14681,6 +14786,7 @@ app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
      eine Weg meldet sofort aufs Handy, der andere wirkt im Spielstand; sie ersetzen einander nicht. */
   try {
     const besitzerUser = doc.besitzer ? findUserById(doc.besitzer) : null;
+    if (erg.gefallen) chronikVermerken('vorposten-gefallen', { system: sys, stufe: vorpostenStufeVon(doc).name, besitzer: besitzerUser ? besitzerUser.username : '', angreifer: req.username || '', verband: false });
     if (besitzerUser) {
       const vPrefs = getNotifPrefs(besitzerUser);
       if (vPrefs.enabled && vPrefs.attack) {
@@ -15773,6 +15879,19 @@ function spawnAktiv(name) {
   return spawnAktivImCode(name) && !notAusGesetzt(name);
 }
 
+// Chronik C1: lesbar fuer den Admin (Sascha, im Browser) ...
+app.get('/api/admin/chronik', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  res.json(chronikAntwort(req.query.tage));
+});
+// ... und fuer den M715q ueber denselben Abhol-Weg wie die Off-Site-Sicherung (Etappe C2: der
+// M715q fragt, der Pi bekommt keinen Zugang dorthin). Fail-closed ohne BACKUP_PULL_TOKEN.
+app.get('/api/chronik/abholen', offsiteRateLimit, (req, res) => {
+  const fehler = offsiteTokenPruefen(req);
+  if (fehler) return res.status(fehler.status).json({ error: fehler.error });
+  res.json(chronikAntwort(req.query.tage));
+});
+
 app.get('/api/admin/schalter', authMiddleware, (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
   res.json({
@@ -16776,7 +16895,7 @@ app.post('/api/admin/galaxie', authMiddleware, async (req, res) => {
       if (!Number.isFinite(hp) || hp < 0 || hp > (boss.maxHp || 0)) return res.status(400).json({ error: 'Lebenspunkte zwischen 0 und ' + (boss.maxHp || 0) + ' angeben.' });
       boss.hp = hp;
       // Auf 0 gesetzt heisst besiegt - ohne defeatedAt bliebe ein Boss mit 0 LP angreifbar stehen.
-      if (hp === 0 && !boss.defeatedAt) boss.defeatedAt = jetzt;
+      if (hp === 0 && !boss.defeatedAt) { boss.defeatedAt = jetzt; chronikWeltbossGefallen(boss); }   // Chronik C1
       db.shared[WORLDBOSS_KEY] = JSON.stringify(boss);
       await saveDb();
       return res.json({ ok: true, bereich, aktion, hp, besiegt: !!boss.defeatedAt });

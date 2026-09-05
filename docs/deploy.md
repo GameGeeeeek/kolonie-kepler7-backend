@@ -60,6 +60,25 @@ Schritten (Container-Log, `/api/health`-Dreifelder-Vergleich, Rettungsweg-Abschn
 
 
 
+## Das Frontend-Ziel hat eine eigene Falle (05.09.2026)
+
+Beide Repos laufen über **denselben** Webhook, aber über getrennte Befehle. Das Frontend zieht nach
+`/deploy/kolonie-kepler7`, und dieses Verzeichnis gehört auf dem Host Sascha, während der Container
+als root läuft – Git lehnt das seit 2.35.2 mit `detected dubious ownership` ab. Beide Befehle und
+`deployAufraeumen` tragen deshalb `git -c safe.directory=<dir>`; auf der Kommandozeile zählt das zur
+geschützten Konfiguration und überlebt jedes Neuerzeugen des Containers.
+
+**Wichtig für die Diagnose:** Das Log führt beide Ziele zusammen. „Deploy-Webhook erfolgreich für
+kolonie-kepler7-backend" sagt **nichts** über das Spiel. Die Version der Live-Seite ist die einzige
+Aussage darüber:
+
+```bash
+curl -s https://gamegeeeeek.de/version.txt      # gegen: git show origin/main:version.txt
+```
+
+Ausfall Nr. 13 in `docs/deploy-historie.md` – drei Spielversionen lagen dadurch gemergt, aber nicht
+ausgeliefert.
+
 ## Diagnose in drei Schritten (Kurzfassung, 01.09.2026)
 
 Ausführlich mit allen Messungen: `docs/deploy-historie.md`.

@@ -17713,21 +17713,25 @@ const KAMPFTEXT_EINLEITUNGEN = {
     'Du bist der Bordschreiber eines Raumschiff-Verbands im Browsergame Kolonie Kepler-7. ' +
     'Verfasse einen kurzen, atmosphaerischen Logbucheintrag (hoechstens 500 Zeichen, Deutsch) ' +
     'ueber den folgenden Angriff deines Verbands auf den Standort eines anderen Kommandanten. ' +
-    'Du schreibst aus Sicht des Angreifers. ',
+    'Du schreibst aus Sicht des Angreifers. ' +
+    'Bei verluste \'nicht bekannt\' sagst du NICHTS ueber Verluste - weder dass Schiffe ' +
+    'verloren gingen, noch dass keine verloren gingen, jemand unbeschadet blieb oder ' +
+    'heil davonkam. ',
   'pvp-verteidigung':
     'Du bist der Chronist eines Standorts im Browsergame Kolonie Kepler-7. ' +
     'Verfasse einen kurzen, atmosphaerischen Logbucheintrag (hoechstens 500 Zeichen, Deutsch) ' +
     'ueber den folgenden Angriff eines anderen Kommandanten auf diesen Standort. ' +
-    'Du schreibst aus Sicht der Verteidiger. ',
+    'Du schreibst aus Sicht der Verteidiger. ' +
+    'Bei verluste \'nicht bekannt\' sagst du NICHTS ueber Verluste - weder dass Schiffe ' +
+    'verloren gingen, noch dass keine verloren gingen, jemand unbeschadet blieb oder ' +
+    'heil davonkam. ',
 };
 const KAMPFTEXT_E2_REGELN =
   'STRIKTE REGELN: Nutze ausschliesslich die untenstehenden Daten. Nenne KEINE Zahlen und KEINE ' +
   'Zeitangaben - die genauen Werte stehen im Bericht daneben, dein Text erzaehlt nur. Erfinde ' +
   'keine Schiffsnamen, keine Orte, keine Mechaniken und keine Verluste, die nicht in den Daten ' +
   'stehen. Die Listen nennen SCHIFFSTYPEN, keine Stueckzahlen - nenne keine Anzahl, auch nicht ' +
-  'als Wort (kein \'ein Kreuzer\', kein \'drei Bomber\'). Steht bei verluste \'nicht bekannt\', dann ' +
-  'sage NICHTS ueber Verluste - weder dass Schiffe verloren gingen, noch dass keine verloren ' +
-  'gingen oder alle heil blieben. Du entscheidest nichts - du beschreibst nur, ' +
+  'als Wort (kein \'ein Kreuzer\', kein \'drei Bomber\'). Du entscheidest nichts - du beschreibst nur, ' +
   'was geschehen ist.\n\n' +
   'KAMPFDATEN:\n';
 function kampftextPromptFuer(art, daten) {
@@ -17735,7 +17739,7 @@ function kampftextPromptFuer(art, daten) {
   return KAMPFTEXT_EINLEITUNGEN[art] + KAMPFTEXT_E2_REGELN + kampftextDatenText(daten);
 }
 
-// --- Die vier Sperren ------------------------------------------------------------------------
+// --- Die fuenf Sperren -----------------------------------------------------------------------
 //
 // Sie sind die WAHRHEIT, der Prompt ist nur die Bitte (AI-Core-Lektion 10). Am 28.08.2026 am
 // echten Modell gemessen: Von acht Texten verwarf die Sperre zwei - nachgelesen trugen alle acht
@@ -17790,16 +17794,58 @@ const KAMPFTEXT_UNVERSEHRT = [
   /unbeschadet/, /ungeschoren/, /unversehrt/, /verlustfrei/, /ohne (?:[\wäöü]+ )?verluste?\b/,
   /keine verluste/, /keinen verlust/, /kein (?:einziges )?schiff (?:ging )?verloren/, /\bheil\b/,
 ];
-function kampftextVerlustaussage(text, daten) {
-  // Liest das DATUM, nicht die Kampfart: Weltboss, Festung, Koenigin und npc nennen ihre verlorenen
-  // Schiffstypen - dort ist "unbeschadet" bei leerer Liste sogar richtig.
-  if (!daten || daten.verluste !== 'nicht bekannt') return [];
-  const t = String(text || '').replace(/ae/g, 'ä').replace(/oe/g, 'ö').replace(/ue/g, 'ü').toLowerCase();
+// Die Gegenrichtung, gemessen im DRITTEN Lauf (05.09.2026) - und zwar als Folge der Regel, die der
+// zweite erzwungen hatte: Der Satz "Steht bei verluste 'nicht bekannt' ..." stand in den GEMEINSAMEN
+// Regeln und ging damit auch an Weltboss, Festung und Koenigin, wo das Datum gar nicht vorkommt. Der
+// Koeniginnen-Text schrieb ihn woertlich ab ("Verluste sind nicht bekannt."), obwohl die Daten Bomber
+// als verloren nannten - die Regel hat den Fehler ERZEUGT, den sie anderswo verhindert. Seither steht
+// sie nur in den zwei PvP-Einleitungen, und wo die Verluste BEKANNT sind, ist "unbekannt" ein Mangel.
+const KAMPFTEXT_UNBEKANNT = [
+  /verlust\w*[^.!?]{0,30}?(?:nicht bekannt|unbekannt)/,
+  /(?:nicht bekannt|unbekannte?r?)[^.!?]{0,20}verlust/,
+];
+function kampftextNorm(text) {
+  return String(text || '').replace(/ae/g, 'ä').replace(/oe/g, 'ö').replace(/ue/g, 'ü').toLowerCase();
+}
+function kampftextTreffer(t, muster) {
   const raus = [];
-  for (const muster of KAMPFTEXT_UNVERSEHRT) {
-    const m = t.match(muster);
-    if (m && raus.indexOf(m[0]) < 0) raus.push(m[0]);
+  for (const m of muster) {
+    const treffer = t.match(m);
+    if (treffer && raus.indexOf(treffer[0]) < 0) raus.push(treffer[0]);
   }
+  return raus.sort();
+}
+
+function kampftextVerlustaussage(text, daten) {
+  // Liest das DATUM, nicht die Kampfart - und sperrt in beide Richtungen. Steht "nicht bekannt", ist
+  // jede Aussage ueber Unversehrtheit eine Erfindung; nennt der Block verlorene Schiffstypen (auch
+  // eine leere Liste), sind die Verluste BEKANNT - dann ist "Verluste sind nicht bekannt" die Erfindung.
+  if (!daten) return [];
+  const t = kampftextNorm(text);
+  if (daten.verluste === 'nicht bekannt') return kampftextTreffer(t, KAMPFTEXT_UNVERSEHRT);
+  if ('verlorene_schiffstypen' in daten || 'verlorene_schiffe' in daten) return kampftextTreffer(t, KAMPFTEXT_UNBEKANNT);
+  return [];
+}
+
+// Die fuenfte Sperre - die von E0 BENANNTE Zahlwort-Luecke, vom dritten E2-Lauf ein zweites Mal
+// geliefert ("ein Jaeger- und ein Schlachtschiff" fuer 65 und 3; E0: "vierzig Quantenkreuzer" fuer
+// 45). Eine Ziffernpruefung sieht ein Zahlwort nicht. Gefasst wird nur die gemessene Form: ein
+// Zahlwort UNMITTELBAR vor einem Schiffstyp - "einige Bomber" und "mehrere Kreuzer" bleiben erlaubt,
+// sie behaupten keine Anzahl. Das \b hinter dem Zahlwort haelt "einige" draussen, das hinter dem
+// Schiffsnamen "ein Bomberverband" (ein Verband, keine Stueckzahl). Kopie-Familie mit
+// ZAHLWOERTER/STUECKZAHL_MUSTER in AI Cores kampftext_messlauf.py.
+const KAMPFTEXT_ZAHLWOERTER = ('ein eine einen einem einer zwei drei vier fünf sechs sieben acht neun ' +
+  'zehn elf zwölf zwanzig dreissig dreißig vierzig fünfzig sechzig siebzig achtzig neunzig hundert ' +
+  'tausend dutzend beide beiden').split(' ');
+const KAMPFTEXT_STUECKZAHL = new RegExp(
+  '\\b(?:' + KAMPFTEXT_ZAHLWOERTER.slice().sort((a, b) => b.length - a.length).join('|') + ')\\b\\s+' +
+  '(?:' + Object.values(KAMPFTEXT_SCHIFFSNAMEN).map(kampftextNorm).sort((a, b) => b.length - a.length)
+    .map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b', 'g');
+function kampftextStueckzahlAlsWort(text) {
+  // Braucht den Datenblock nicht: Der Prompt nennt seit dem Zuschnitt GAR KEINE Anzahl mehr, also ist
+  // jede Anzahl vor einem Schiffstyp zwangslaeufig erfunden - genau wie jede Ziffernfolge.
+  const raus = [];
+  for (const m of kampftextNorm(text).match(KAMPFTEXT_STUECKZAHL) || []) if (raus.indexOf(m) < 0) raus.push(m);
   return raus.sort();
 }
 
@@ -17810,7 +17856,8 @@ function kampftextMaengel(text, daten) {
   if (t.length > KAMPFTEXT_MAX_ZEICHEN) raus.push('zu lang: ' + t.length + ' Zeichen (Deckel ' + KAMPFTEXT_MAX_ZEICHEN + ')');
   for (const z of kampftextErfundeneZahlen(t, daten)) raus.push('erfundene Zahl ' + z);
   for (const s of kampftextFremdeSchiffe(t, daten)) raus.push('fremdes Schiff ' + s);
-  for (const s of kampftextVerlustaussage(t, daten)) raus.push('Aussage ueber Verluste trotz \'nicht bekannt\': ' + s);
+  for (const s of kampftextVerlustaussage(t, daten)) raus.push('falsche Verlustaussage: ' + s);
+  for (const s of kampftextStueckzahlAlsWort(t)) raus.push('Stueckzahl als Wort: ' + s);
   return raus;
 }
 

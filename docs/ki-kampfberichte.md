@@ -66,7 +66,7 @@ Werte im Portainer-Stack.
 
 ### Die Sperren sind eine KOPIE-FAMILIE über drei Repos
 
-Prompt, Zuschnitt und die vier Sperren liegen hier **und** in
+Prompt, Zuschnitt und die fünf Sperren liegen hier **und** in
 `gamegeeeeek-ai-core/tools/kampftext_messlauf.py`; die Schiffsnamen zusätzlich in `SHIP_DEFS` der
 Spieldatei. Dort sind sie am echten Modell **gemessen** worden (E0, 28.08.2026: acht von acht
 Texten trugen eine Falschaussage), hier **entscheiden** sie. Laufen sie auseinander, misst das
@@ -302,3 +302,28 @@ mit AI Core, Paritätstest 6-regeln). Wächter 15k–15m mit eigenem Konto-Paar 
 schenkt dem Opfer einen Schutzschild, lars/mia müssen für Abschnitt 16 frei bleiben); am alten
 Server fallen genau 15l und 15m. 9b war doppelt so langsam und nicht wahrer („Ein Bomber fiel",
 „Verlust aller Bomber", „Nyx-Stock"); 4b bleibt.
+
+### Dritte Messung (05.09.2026): die Regel stand an der falschen Stelle
+
+Die vierte Sperre fing ihren Anlassfall (ein Text verworfen, „ungeschoren"). Zwei neue Befunde,
+nachgelesen trugen drei von acht Texten eine Falschaussage:
+
+1. **Die Regel des zweiten Laufs hat einen Fehler erzeugt.** Der Satz zu `verluste: nicht bekannt`
+   stand in `KAMPFTEXT_E2_REGELN` – also in den **gemeinsamen** Regeln, die jede Art bekommt. Der
+   Königinnen-Prompt hat das Datum gar nicht, das Modell schrieb die Formulierung trotzdem wörtlich
+   ab („Verluste sind nicht bekannt."), obwohl die Daten Bomber als verloren nannten. Der Satz steht
+   seither nur in den zwei PvP-Einleitungen (`KAMPFTEXT_EINLEITUNGEN`), und
+   `kampftextVerlustaussage` sperrt jetzt in **beide** Richtungen: „unbeschadet" wo die Verluste
+   unbekannt sind, „unbekannt" wo sie bekannt sind (Feld `verlorene_schiffstypen` vorhanden, auch
+   leer). Wächter 14o (die Sperre) und 14p (die Stelle).
+2. **Die Zahlwort-Lücke ist geschlossen** (`kampftextStueckzahlAlsWort`): „ein Jaeger und ein
+   Schlachtschiff" für 65 und 3. Nur ein Zahlwort **unmittelbar** vor einem Schiffstyp; „einige
+   Bomber" bleibt erlaubt, es behauptet keine Anzahl. Wächter 14q.
+
+Gegenprobe: am Stand davor fallen genau 14o, 14p, 14q und 15m; 15n (die Gegenrichtung: im
+Spielerkampf ist „unbekannt" die richtige Wiedergabe) bleibt dort grün und misst deshalb nicht die
+Änderung, sondern hält fest, dass die Sperre keinen richtigen Text kostet. 119 Prüfungen.
+
+Nicht gebaut, weil mit einer Sperre nicht erreichbar: Der Königinnen-Text machte den eigenen Verband
+zum Verband des Gegner-Volks, ein Verteidiger-Text widersprach sich im selben Absatz. Rollen- und
+Kohärenzfehler ohne Zahl und ohne Schlüsselwort.

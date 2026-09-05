@@ -7774,6 +7774,22 @@ app.post('/api/market/routen-erloes', authMiddleware, (req, res) => {
 // dort, berechnet Preis UND Rabatt selbst, schreibt das Ergebnis direkt in den Spielstand zurück und
 // gibt nur die neuen Gesamtwerte zurück - der Client übernimmt sie nur noch, rechnet nichts mehr
 // selbst nach (siehe Kommentar bei marketDiscountPctFor für den Grund dieses Umbaus).
+/* WARUM DIESE ABLEHNUNGEN SAGEN, WAS DER SERVER GESEHEN HAT (05.09.2026).
+   Anlass: Spieler-Report Hanson, "warum kann man Energie volles Lager mehrmals verkaufen
+   FEHLER". Diese Routen urteilen ueber den GESPEICHERTEN Spielstand (getSaveValue), der
+   Client speichert aber nur alle 10 Sekunden. "Nicht genug Energie zum Verkaufen" fasste
+   damit zwei verschiedene Ursachen zusammen: Der Spieler hat es wirklich nicht - oder er hat
+   es, und der gespeicherte Stand ist aelter als das, was er auf dem Bildschirm sieht.
+   Eine Meldung, die zwei Ursachen zusammenfasst, ist im Fehlerfall keine Diagnose: Weder der
+   Spieler noch der, der seinen Report liest, kann die Faelle auseinanderhalten. Deshalb nennt
+   jede dieser Ablehnungen jetzt die Zahl, die der Server TATSAECHLICH gesehen hat - dieselbe
+   Trennung, die die Auth-Antwort im AI Core mit der Schluessellaenge macht.
+   Das Frontend speichert seit v8.689.0 vor jedem Handel und laesst den Fall damit gar nicht
+   erst entstehen. Diese Meldungen sind die zweite Sicherung: fuer aeltere Clients, fuer
+   Fremdaufrufe und fuer den Tag, an dem jemand das Speichern dort wieder herausnimmt. */
+const STAND_HINWEIS = ' Der Server urteilt ueber deinen zuletzt GESPEICHERTEN Spielstand, und der wird alle 10 Sekunden gesichert - hast du gerade erst produziert oder verdient, versuch es in ein paar Sekunden noch einmal.';
+const zahl = (n) => Math.floor(Number(n) || 0).toLocaleString('de-DE');
+
 app.post('/api/market/trade', authMiddleware, async (req, res) => {
   const { action, resource, amount } = req.body || {};
   if (action !== 'buy' && action !== 'sell') return res.status(400).json({ error: 'ungültige Aktion' });
@@ -7819,7 +7835,8 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
   const MARKET_SELL_SPREAD = 0.55;
   let credits;
   if (action === 'sell') {
-    if ((save.resources[resource] || 0) < amt) return res.status(400).json({ error: 'Nicht genug ' + resource + ' zum Verkaufen.' });
+    if ((save.resources[resource] || 0) < amt) return res.status(400).json({
+      error: 'Nicht genug ' + resource + ' zum Verkaufen: dort liegen ' + zahl(save.resources[resource]) + ', verkaufen wolltest du ' + zahl(amt) + '.' + STAND_HINWEIS });
     credits = Math.round(avgPrice * amt * MARKET_SELL_SPREAD * (1 + discount));
     /* Tagesumsatz-Deckel (17.08.2026, Begruendung bei MARKT_TAGES_ERLOES_MAX). Der Zaehler lebt
        am user-Objekt nach dem staub-Muster: Stempel pruefen, bei Tageswechsel zuruecksetzen, dann
@@ -7852,7 +7869,8 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
     save.credits = (save.credits || 0) + credits;
   } else {
     credits = Math.round(avgPrice * amt * (1 - discount));
-    if ((save.credits || 0) < credits) return res.status(400).json({ error: 'Nicht genug Kredite.' });
+    if ((save.credits || 0) < credits) return res.status(400).json({
+      error: 'Nicht genug Kredite: dort liegen ' + zahl(save.credits) + ', der Kauf kostet ' + zahl(credits) + '.' + STAND_HINWEIS });
     save.credits -= credits;
     save.resources[resource] = (save.resources[resource] || 0) + amt;
   }
@@ -7973,7 +7991,8 @@ app.post('/api/modulemarket/list', authMiddleware, async (req, res) => {
   let save;
   try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
   const inv = moduleInvOf(save, !!isShip);
-  if ((inv[key] || 0) < 1) return res.status(400).json({ error: 'Dieses Modul liegt nicht (mehr) in deinem Inventar. Ausgerüstete Module musst du erst abnehmen.' });
+  if ((inv[key] || 0) < 1) return res.status(400).json({
+    error: 'Dieses Modul liegt nicht (mehr) in deinem Inventar. Ausgerüstete Module musst du erst abnehmen.' + STAND_HINWEIS });
   // Treuhand: erst aus dem Inventar nehmen, dann einstellen - in dieser Reihenfolge, damit ein
   // Fehler beim Speichern niemals ein Angebot ohne Gegenwert hinterlässt.
   inv[key] -= 1;
@@ -8027,7 +8046,8 @@ app.post('/api/modulemarket/buy', authMiddleware, async (req, res) => {
   if (!saveRaw) return res.status(404).json({ error: 'Spielstand nicht gefunden.' });
   let save;
   try { save = JSON.parse(saveRaw); } catch (e) { return res.status(500).json({ error: 'Spielstand beschädigt.' }); }
-  if ((save.credits || 0) < listing.price) return res.status(400).json({ error: 'Nicht genug Kredite (' + listing.price + ' nötig).' });
+  if ((save.credits || 0) < listing.price) return res.status(400).json({
+    error: 'Nicht genug Kredite: dort liegen ' + zahl(save.credits) + ', das Angebot kostet ' + zahl(listing.price) + '.' + STAND_HINWEIS });
   // Ab hier bis saveDb() kein await: der komplette Übergang (Angebot weg, Käufer zahlt und erhält,
   // Verkäufer bekommt seine Gutschrift eingereiht) passiert in einem Tick und ist damit unteilbar.
   listings.splice(idx, 1);

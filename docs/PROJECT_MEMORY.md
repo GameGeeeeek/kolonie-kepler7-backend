@@ -200,6 +200,40 @@ ein Fehler auftaucht. Gefunden hat es eine Codex-Durchsicht, nicht die eigenen T
 
 **Die übertragbare Regel:** Bevor eine neue Route den gespeicherten Spielstand eines Nutzers
 schreibt, gilt die Frage „Wo steht in diesem Repo schon, warum das nicht geht?" – nicht „Welche
-Nachbarroute macht es auch so?". Die Nachbarroute kann dieselbe Lücke tragen; die Regel ist die
-Regel. Was der Server hier tun darf, ist **nachzählen** und ablehnen: Das ist eine Prüfung gegen
-den persistierten Stand, kein Schreibvorgang, und es kollidiert mit keinem Autosave.
+Nachbarroute macht es auch so?". Was der Server hier tun darf, ist **nachzählen** und ablehnen: Das
+ist eine Prüfung gegen den persistierten Stand, kein Schreibvorgang, und es kollidiert mit keinem
+Autosave.
+
+### NACHTRAG 05.09.2026, gemessen: Die Überschrift war zu weit gefasst
+
+Der Abschnitt oben schrieb „Die Nachbarroute kann dieselbe Lücke tragen" und nannte
+`modul/ausbauen` als Vorbild, von dem abgeschaut wurde. Das las sich wie ein Verdacht gegen diese
+Route. **Nachgemessen trägt sie die Lücke nicht** – und die Markt-Routen auch nicht:
+
+| Stelle | gibt zurück | Client übernimmt |
+|---|---|---|
+| `/vorposten/modul/ausbauen` | `newCredits`, `saveVersion` | `state.credits`, `gameSaveVersion` |
+| `/market/trade` | `newCredits`, `newResourceAmount`, `saveVersion` | alle drei, mit `>`-Vergleich gegen verspätete Antworten |
+
+Es gibt also ein **etabliertes Protokoll**: 33 `setSaveValue`-Stellen im Server, 19
+`saveVersion`-Übernahmen im Client. Serverseitiges Schreiben des Spielstands ist in diesem Repo die
+Norm, kein Defekt. Der Client-Zweig bei `/market/trade` ist die sorgfältigste Fassung davon; seine
+Kommentare halten zwei echte Spieler-Fehlermeldungen fest, die zu ihm geführt haben – darunter der
+`>`-Vergleich, ohne den eine spät eintreffende Antwort die schon aktuelle Version zurückdreht.
+
+**Was V8 falsch machte, war also nicht „der Server bucht ab", sondern ein UNVOLLSTÄNDIGER Fall
+davon:** Die Route buchte ab, gab aber weder die neuen Werte noch `saveVersion` zurück – und der
+Client zahlte zusätzlich lokal mit `pay(kosten)`. Doppelt gebucht, Version nie übernommen. Der
+Rückbau auf „nur prüfen" war trotzdem richtig: Die Route hat keinen Grund zu schreiben, und die
+einfachere Lösung braucht kein Protokoll. Beides ist gangbar; falsch ist nur die halbe Fassung.
+
+**Die Regel, die übrig bleibt, ist schärfer als die alte:** Wer den Spielstand serverseitig
+schreibt, schuldet dem Client in derselben Antwort die **neuen Werte UND `saveVersion`** – und der
+Client darf dann nicht zusätzlich selbst zahlen. Wer das nicht liefern kann oder will, schreibt
+nicht, sondern **prüft nur**.
+
+**Und die Lehre über den Inhalt hinaus:** Ich hatte aus dieser Sitzung eine Aufgabe abgeleitet
+(„`modul/ausbauen` und die Markt-Routen tragen dieselbe Lücke"), ohne sie zu messen. Sie hätte die
+nächste Sitzung dazu gebracht, funktionierenden Code umzubauen. Aufgefallen ist es erst beim
+Nachmessen vor der Umsetzung. Dieselbe Fehlerklasse wie bei Aufgabe #52 am selben Tag, und derselbe
+Grund: **eine Vermutung, die in einen Text wandert, wird beim nächsten Lesen als Messung gelesen.**

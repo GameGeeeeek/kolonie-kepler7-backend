@@ -14908,9 +14908,9 @@ async function vorpostenAbbauTick() {
   return fertig;
 }
 
-/* V8: UMRUESTEN. Der Server prueft, WAS moeglich ist, wann es fertig ist - und bucht die
-   Rohstoffe SELBST ab (anders als Ausbau und Projekt; die Begruendung steht unten an der
-   Pruefung). */
+/* V8: UMRUESTEN. Der Server prueft, WAS moeglich ist, wann es fertig ist, und ob der gespeicherte
+   Stand die Kosten ueberhaupt hergibt; ABGEBUCHT wird vom Client - dasselbe Muster wie Ausbau und
+   Projekt, und aus dem Grund, der bei /vorposten/stationieren steht. */
 app.post('/api/vorposten/umruesten', authMiddleware, async (req, res) => {
   if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
   /* Der Schalter steht HIER, an der Stelle, die die Wahl AUSFUEHRT - nicht nur an der Anzeige.
@@ -14959,34 +14959,38 @@ app.post('/api/vorposten/umruesten', authMiddleware, async (req, res) => {
         ' Module. Bau erst ' + (drinU - plaetzeZiel) + ' aus - sonst läge es hier wirkungslos.',
       zuVieleModule: true, module: drinU, plaetze: plaetzeZiel });
   }
-  /* DER SERVER ZAEHLT NACH UND BUCHT SELBST AB (Durchsicht 05.09.2026). Ausbau und Projekt
-     ueberlassen die Buchung dem Client - dort begrenzt eine Abklingzeit bzw. das „jedes Vorhaben
-     nur einmal", wie oft die Handlung ueberhaupt geht. Die Umruestung hat keine solche Grenze: Sie
-     ist beliebig oft wiederholbar und aendert mit dem Zweig GENAU die Zahlen, fuer die der Server
-     Autoritaet ist (Verteidigung, Kern, Garnisonsdeckel). Eine Kostenangabe, die nur das Frontend
-     durchsetzt, waere hier keine. Vorbild ist /vorposten/modul/ausbauen: pruefen, abbuchen, den
-     neuen Stand samt `saveVersion` zurueckmelden - der Client gleicht sich an, statt selbst zu
-     zahlen. Die Pruefung steht ganz am Ende: Eine aus einem anderen Grund abgelehnte Umruestung
-     darf nichts kosten. */
+  /* DER SERVER ZAEHLT NACH - UND BUCHT NICHT AB (Durchsicht 05.09.2026, korrigiert nach einem
+     Befund von Codex am selben Tag).
+     Nachzaehlen gehoert hierher: Die Umruestung hat, anders als Ausbau (Abklingzeit) und Projekt
+     („jedes Vorhaben nur einmal"), keine Mengengrenze, und sie aendert mit dem Zweig genau die
+     Zahlen, fuer die der Server Autoritaet ist. Ein Aufruf, dessen GESPEICHERTER Stand die Kosten
+     nicht hergibt, wird abgewiesen.
+     ABBUCHEN gehoert NICHT hierher, und das ist in diesem Projekt schon einmal teuer gelernt und
+     dreissig Zeilen weiter oben aufgeschrieben worden (bei /vorposten/stationieren): „Andersherum
+     (Server zieht ab) liefe die Abbuchung gegen den Autosave des Clients." Der Weg dorthin ist
+     konkret: Der Autosave serialisiert seinen Wert VOR dieser Abbuchung, faengt sich beim PUT ein
+     409, laedt die neue Version nach - und schickt denselben, noch unbezahlten Wert erneut. Die
+     Abbuchung waere erstattet, und zwar still. Der Client bucht deshalb selbst, wie bei jeder
+     Baukosten-Buchung dieses Spiels.
+     Die Pruefung steht ganz am Ende der Riegelkette: Eine aus einem anderen Grund abgelehnte
+     Umruestung darf nichts kosten - und auch keine Kostenmeldung erzeugen, die den echten Grund
+     verdeckt. */
   const saveU = astLeseSave(req.userId);
   if (!saveU) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern, dann umrüsten.' });
-  saveU.resources = saveU.resources || {};
+  const habenU = saveU.resources || {};
   for (const [r, menge] of Object.entries(VP_UMRUESTEN_KOSTEN)) {
-    if ((Number(saveU.resources[r]) || 0) < menge) {
-      return res.status(400).json({ error: 'Die Umrüstung kostet mehr, als du hast - es fehlt ' + r + '.',
+    if ((Number(habenU[r]) || 0) < menge) {
+      return res.status(400).json({ error: 'Die Umrüstung kostet mehr, als dein gespeicherter Stand hergibt - es fehlt ' + r + '.',
         kosten: VP_UMRUESTEN_KOSTEN, fehlt: r });
     }
   }
-  for (const [r, menge] of Object.entries(VP_UMRUESTEN_KOSTEN)) saveU.resources[r] = (Number(saveU.resources[r]) || 0) - menge;
   doc.umruestenAb = jetztU + VP_UMRUESTEN_MS;
   doc.umruestenZiel = ziel;
   vorpostenSchreib(doc);
-  const saveVersionU = setSaveValue(req.userId, JSON.stringify(saveU));
   console.log('[vorposten] umruestung gestartet userId=' + req.userId + ' sys=' + sys + ' von=' + doc.zweig + ' nach=' + ziel);
   await saveDb();
   res.json({ ok: true, umruestenAb: doc.umruestenAb, umruestenZiel: ziel, dauerMs: VP_UMRUESTEN_MS,
-    kosten: VP_UMRUESTEN_KOSTEN, newResources: saveU.resources, saveVersion: saveVersionU,
-    vorposten: vorpostenFuerClient(doc, req.userId, jetztU) });
+    kosten: VP_UMRUESTEN_KOSTEN, vorposten: vorpostenFuerClient(doc, req.userId, jetztU) });
 });
 
 /* Schliesst fertige Umruestungen ab - im galaxyTick, wie der Abbau. Die WERTE aendern sich erst

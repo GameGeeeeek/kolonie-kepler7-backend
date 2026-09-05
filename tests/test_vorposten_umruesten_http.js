@@ -36,13 +36,11 @@ const SAB = process.env.KEPLER_VPUMR_SABOTAGE || '';
 /* GEMESSEN, nicht geschaetzt - einschliesslich der MITLAEUFER. Mehrere Sabotagen reissen Pruefungen
    mit, die nicht ihr Ziel sind, und das ist jedesmal eine Folge und kein Nebenschaden:
      sofort      Der Zweig steht schon beim Start -> auch das Lager wird zum neuen Satz abgerechnet (5d).
-     module      Die Umruestung in 3d gelingt statt abgelehnt zu werden -> sie kostet, und 3e/3f
-                 messen danach einen Spielstand, aus dem zweimal bezahlt wurde.
      kosten      3e lehnt nicht mehr ab, die Umruestung laeuft also schon -> 3a ist der ZWEITE Start.
      reihenfolge Der Verbuendete gibt zuerst ab -> die Rueckgabe des Besitzers deckt die Summe in
                  6c nicht mehr. */
-const MUSS_FALLEN = { schalter: ['1a'], module: ['3d', '3e', '3f'], sofort: ['4a', '5a', '5b', '5d'],
-  projektweg: ['5c'], lager: ['5d'], lagerreihenfolge: ['5d'], kosten: ['3e', '3f', '3a'],
+const MUSS_FALLEN = { schalter: ['1a'], module: ['3d'], sofort: ['4a', '5a', '5b', '5d'],
+  projektweg: ['5c'], lager: ['5d'], lagerreihenfolge: ['5d'], kosten: ['3e', '3a'], abbuchen: ['3f'],
   garnison: ['6a', '6b', '6c'], reihenfolge: ['6a', '6c'], modulscheibe: ['7a'], einbau: ['2f'],
   abbauriegel: ['2g'], projektriegel: ['2h'] };
 
@@ -227,17 +225,16 @@ const summeSchiffe = o => Object.values(o || {}).reduce((a, n) => a + (Number(n)
       '    doc.zweig = l.ziel;\n    const standVor = vorpostenLagerStand(doc, jetzt);');
   }
   if (SAB === 'kosten') {
-    anQuelle = anQuelle.replace(`  const saveU = astLeseSave(req.userId);
-  if (!saveU) return res.status(403).json({ error: 'Kein gespeicherter Spielstand - erst speichern, dann umrüsten.' });
-  saveU.resources = saveU.resources || {};
-  for (const [r, menge] of Object.entries(VP_UMRUESTEN_KOSTEN)) {
-    if ((Number(saveU.resources[r]) || 0) < menge) {
-      return res.status(400).json({ error: 'Die Umrüstung kostet mehr, als du hast - es fehlt ' + r + '.',
-        kosten: VP_UMRUESTEN_KOSTEN, fehlt: r });
-    }
+    anQuelle = anQuelle.replace('    if ((Number(habenU[r]) || 0) < menge) {', '    if (false) {');
   }
-  for (const [r, menge] of Object.entries(VP_UMRUESTEN_KOSTEN)) saveU.resources[r] = (Number(saveU.resources[r]) || 0) - menge;`,
-      '  const saveU = astLeseSave(req.userId) || { resources: {} };');
+  /* Die Gegenprobe zu 3f, und der Waechter gegen einen Rueckfall: Wer hier wieder abbucht, laesst
+     die Abbuchung gegen den Autosave des Clients laufen (Begruendung im Endpunkt). */
+  if (SAB === 'abbuchen') {
+    anQuelle = anQuelle.replace('  doc.umruestenAb = jetztU + VP_UMRUESTEN_MS;\n  doc.umruestenZiel = ziel;',
+      '  saveU.resources = habenU;\n' +
+      '  for (const [r, menge] of Object.entries(VP_UMRUESTEN_KOSTEN)) saveU.resources[r] = (Number(saveU.resources[r]) || 0) - menge;\n' +
+      '  setSaveValue(req.userId, JSON.stringify(saveU));\n' +
+      '  doc.umruestenAb = jetztU + VP_UMRUESTEN_MS;\n  doc.umruestenZiel = ziel;');
   }
   if (SAB === 'garnison') {
     anQuelle = anQuelle.replace('    const zurueck = vorpostenGarnisonKappen(doc, stNeu.garnisonMax) || {};',
@@ -486,16 +483,22 @@ const summeSchiffe = o => Object.values(o || {}).reduce((a, n) => a + (Number(n)
     && lagerMeldung.erz < refHand.lager.erz * 0.6,
     { gemeldet: lagerMeldung && lagerMeldung.erz, festungssatz: refFest.lager.erz,
       handelssatz: refHand.lager.erz });
-  /* 3f: DIE ABBUCHUNG. Sie wird hier gemessen und nicht direkt nach 3a, weil der Spielstand erst
-     nach dem Serverstopp verlaesslich auf der Platte steht. Gerechnet wird gegen den Ausgangsstand
-     der Vorlage - einmal Umruestung, kein zweites Mal (3b wurde abgelehnt, 3e ebenso). */
+  /* 3f: DER SERVER ZAEHLT NACH, ER BUCHT NICHT AB. Der Unterschied ist keine Feinheit: Bucht der
+     Server ab, laeuft die Abbuchung gegen den Autosave des Clients (die Regel steht seit V5 bei
+     /vorposten/stationieren). Der Weg ist konkret - der Autosave serialisiert seinen Wert VOR der
+     Abbuchung, faengt beim PUT ein 409, laedt die neue Version nach und schickt denselben, noch
+     unbezahlten Wert erneut; die Abbuchung waere still erstattet. Genau das hat eine Durchsicht am
+     05.09.2026 an der ersten Fassung dieser Etappe gefunden. Diese Pruefung ist der Waechter
+     dagegen: Nach einem ERFOLGREICHEN Start steht der gespeicherte Stand unveraendert da.
+     Gemessen wird nach dem Serverstopp, weil der Spielstand erst dann verlaesslich auf der Platte
+     liegt. */
   const saveNach = liesSave(nach, ANNA);
-  const abweichend = Object.keys(kosten).filter(r => (saveNach.resources[r] || 0) !== (START[r] || 0) - kosten[r]);
-  check('3f: der Start hat die Kosten im Spielstand abgebucht - in jedem Rohstoff genau einmal',
-    abweichend.length === 0 && !!start.body.newResources
-    && start.body.newResources.erz === START.erz - kosten.erz
-    && typeof start.body.saveVersion === 'number',
-    { abweichend, erzNachher: saveNach.resources.erz, erwartet: START.erz - kosten.erz });
+  const angetastet = Object.keys(kosten).filter(r => (saveNach.resources[r] || 0) !== (START[r] || 0));
+  check('3f: der erfolgreiche Start laesst den Spielstand unangetastet - abgebucht wird im Spiel',
+    angetastet.length === 0 && start.body.newResources === undefined
+    && start.body.saveVersion === undefined,
+    { angetastet, erzNachher: saveNach.resources.erz, erwartet: START.erz,
+      meldet: { newResources: start.body.newResources, saveVersion: start.body.saveVersion } });
 
   // ---- 6. Der Garnisonsdeckel faellt mit dem Zweig ----------------------------------------------
   /* Die Umruestung ist der erste Weg, auf dem `garnisonMax` SINKEN kann (Festungsring 1.45,
@@ -569,10 +572,14 @@ const summeSchiffe = o => Object.values(o || {}).reduce((a, n) => a + (Number(n)
    lagerreihenfolge  Der Zweig wechselt VOR der Lagerabrechnung   -> 5d faellt.
                Der Fehler, den die alte Fassung von 5d nicht sah: Es KAM etwas an, nur zum falschen
                Satz - ein Handelsknoten haette rueckwirkend das Dreieinhalbfache ausgeschuettet.
-   kosten      Pruefung und Abbuchung im Endpunkt entfernt        -> 3e und 3f fallen.
+   kosten      Die Kostenpruefung im Endpunkt ausgehebelt         -> 3e faellt (und 3a als Folge).
                Die Umruestung ist beliebig oft wiederholbar und aendert genau die Zahlen, fuer die
-               der Server Autoritaet ist. Eine Kostenangabe, die nur das Frontend durchsetzt, ist
-               hier keine.
+               der Server Autoritaet ist; ein Aufruf, dessen gespeicherter Stand die Kosten nicht
+               hergibt, muss abgewiesen werden.
+   abbuchen    Der Endpunkt bucht die Kosten wieder SELBST ab      -> 3f faellt.
+               Der Rueckfall, den eine Durchsicht am 05.09.2026 an der ersten Fassung gefunden hat:
+               Die Abbuchung liefe gegen den Autosave des Clients und waere bei einem 409 still
+               erstattet. Die Regel dazu steht seit V5 bei /vorposten/stationieren.
    garnison    Der Tick kappt die Garnison nicht                  -> 6a, 6b und 6c fallen.
                Ein Handelsknoten mit 20000 Schiffen im Bauch waere haerter als jeder ehrlich
                gebaute - ein Wert, den /vorposten/stationieren nie zugelassen haette.

@@ -1073,12 +1073,26 @@ zuerst ab** — es ist seine Entscheidung; erst wenn sein Anteil nicht reicht, g
 den Rest, und er erfährt davon (`alsVerbuendeter: true`). Innerhalb eines Kontos wird anteilig
 genommen, die Rundungsreste aus den größten Stapeln, damit die Zahl exakt stimmt.
 
-**Der Server bucht die Kosten selbst ab.** Ausbau und Projekt überlassen das dem Client — dort
-begrenzt eine Abklingzeit bzw. „jedes Vorhaben nur einmal", wie oft die Handlung überhaupt geht.
-Die Umrüstung hat keine solche Grenze und ändert mit dem Zweig genau die Zahlen, für die der
-Server Autorität ist. Vorbild ist `modul/ausbauen`: prüfen, abbuchen, `newResources` und
-`saveVersion` zurückmelden. Die Prüfung steht am **Ende** der Riegelkette — eine aus einem anderen
-Grund abgelehnte Umrüstung darf nichts kosten.
+**Der Server zählt die Kosten nach — und bucht sie nicht ab.** Nachzählen gehört hierher: Ausbau
+und Projekt haben eine Mengengrenze (Abklingzeit bzw. „jedes Vorhaben nur einmal"), die Umrüstung
+hat keine, und sie ändert mit dem Zweig genau die Zahlen, für die der Server Autorität ist. Ein
+Aufruf, dessen **gespeicherter** Stand die Kosten nicht hergibt, wird abgewiesen. Die Prüfung steht
+am **Ende** der Riegelkette — eine aus einem anderen Grund abgelehnte Umrüstung darf nichts kosten
+und auch keine Kostenmeldung erzeugen, die den echten Grund verdeckt.
+
+**Abbuchen gehört nicht hierher, und das stand schon dreißig Zeilen weiter oben.** Die erste
+Fassung dieser Etappe ließ den Server abbuchen und meldete `newResources` samt `saveVersion`
+zurück — Vorbild war `modul/ausbauen`. Eine Codex-Durchsicht hat es am selben Tag gefunden, und die
+Begründung dagegen steht seit V5 bei `/vorposten/stationieren`: *„Andersherum (Server zieht ab)
+liefe die Abbuchung gegen den Autosave des Clients."* Der Weg ist konkret: Der Autosave
+serialisiert seinen Wert **vor** der Abbuchung, fängt beim PUT ein 409, lädt in
+`saveGameStateVersioned` die neue Version nach — und schickt denselben, noch unbezahlten Wert
+erneut. Die Abbuchung wäre still erstattet. Zurückgenommen; der Client bucht, wie bei jeder
+Baukosten-Buchung dieses Spiels.
+
+`modul/ausbauen` (Kredite) und die Markt-Routen tragen dieselbe Bauart und damit dieselbe Lücke.
+Das ist **nicht** mit dieser Etappe entstanden und hier bewusst nicht mitgeändert — es gehört in
+einen eigenen Auftrag, der alle Stellen zusammen anfasst.
 
 **Der Besitzer sieht seine Module vollständig.** `vorpostenFuerClient` schnitt die Liste für alle
 auf `slots`. Für Fremde ist das richtig (nur die wirkenden Stücke erklären die Stärke), für den
@@ -1088,17 +1102,18 @@ unerreichbar.
 
 ### Die Gegenproben nach der Durchsicht
 
-`tests/test_vorposten_umruesten_http.js` (34 Prüfungen), Port 3264, **dreizehn** Gegenproben:
+`tests/test_vorposten_umruesten_http.js` (34 Prüfungen), Port 3264, **vierzehn** Gegenproben:
 
 | Sabotage | fällt | Mitläufer und warum |
 |---|---|---|
 | `schalter` | `1a` | |
-| `module` | `3d` | `3e`, `3f`: die Umrüstung gelingt statt abgelehnt zu werden und kostet |
+| `module` | `3d` | |
 | `sofort` | `4a`, `5a`, `5b` | `5d`: der Zweig steht schon beim Start, das Lager wird zum neuen Satz abgerechnet |
 | `projektweg` | `5c` | |
 | `lager` | `5d` | |
 | `lagerreihenfolge` | `5d` | der Zweig wechselt VOR der Abrechnung |
-| `kosten` | `3e`, `3f` | `3a`: ohne Ablehnung in `3e` läuft die Umrüstung schon |
+| `kosten` | `3e` | `3a`: ohne Ablehnung in `3e` läuft die Umrüstung schon |
+| `abbuchen` | `3f` | der Rückfall: der Endpunkt bucht wieder selbst ab |
 | `garnison` | `6a`, `6b`, `6c` | |
 | `reihenfolge` | `6a` | `6c`: die Rückgabe des Besitzers deckt die Summe nicht mehr |
 | `modulscheibe` | `7a` | |

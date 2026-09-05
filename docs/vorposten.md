@@ -962,3 +962,71 @@ Zwei weitere Befunde derselben Durchsicht sind hier mit behoben: Das Set hieß *
 Stationsprojekt des Festungsrings ab Stufe 5 — gleicher Zweig, dieselben zwei Kanäle, in der
 Stationstafel direkt untereinander; es heißt jetzt **Trutzring**. Und der Kommentar über
 `vpModulBoni` behauptete weiter „höchstens fünf" Steckplätze.
+
+## Etappe V8: Die Umrüstung (05.09.2026)
+
+Die Ausrichtung fiel bisher **einmal**, beim Sprung auf Stufe 4, und galt für immer — „die
+Entscheidung gilt für immer" steht wörtlich im Wahltext. Das war richtig, solange die Zweige sich
+nur in Multiplikatoren unterschieden. Seit V6 hängen **Endprojekte** daran und seit V7 sogar die
+**Steckplatzzahl**; eine Fehlwahl auf Stufe 4 kostet inzwischen ein halbes Spiel. Die Umrüstung
+nimmt der Wahl das Endgültige, ohne ihr das Gewicht zu nehmen.
+
+### Vier Entscheidungen
+
+1. **Eigener Endpunkt, kein Projekt.** Ein Projekt ist einmalig je Vorposten (`vpProjektVerfuegbar`
+   schließt begonnene aus) und belegt den einen Projektplatz; eine Umrüstung ist wiederholbar. Sie
+   in die Projektliste zu pressen hieße, deren Grundregel für sie zu brechen.
+2. **Teuer, langsam, und erst auf der Endstufe.** `VP_UMRUESTEN_AB_STUFE = 8`, 24 Stunden wie der
+   Abbau, und Kosten, die in **jedem** Rohstoff über dem teuersten Posten der Vorposten-Tabellen
+   liegen. V6 hat die Endstufe zu dem Ort gemacht, an dem die Zweigwahl wirklich etwas bedeutet —
+   die Umrüstung ist die Gegenfrage dazu und soll die Leiter davor nicht entwerten.
+3. **Für jeden sichtbar**, wie der Abbau. Eine Station, die in 24 Stunden ein Festungsring wird, ist
+   für einen Angreifer eine echte Information: Es lohnt sich, *vorher* zuzuschlagen. Genau das soll
+   die Frist bewirken. Das laufende **Projekt** bleibt dagegen beim Besitzer — es sagt nichts über
+   die heutige Stärke; die Umrüstung schon, sie sagt es nur mit Frist.
+4. **Kein Abbrechen**, aus demselben Grund wie beim Projekt: Ein Vorhaben, das man zurücknehmen
+   kann, wäre ein Zwischenlager für Rohstoffe.
+
+### Was bleibt, und was abgelehnt wird
+
+**Ein zweiggebundenes Projekt wird nicht gelöscht, es schläft.** `vpProjektBoni` hängt die Wirkung
+seit V6 an Projekt **und** Ausrichtung — ausdrücklich mit Blick auf diese Etappe. Wer zurückrüstet,
+hat sein Sternendock wieder. Die Hausregel „Deckel dürfen niemals Daten löschen" gilt hier wörtlich.
+
+**Die Umrüstung kann ablehnen.** Der Festungsring hat seit V7 sechs Steckplätze, die anderen fünf.
+Wer mit sechs eingebauten Modulen wegrüstet, hätte danach eines, das nicht mehr wirkt und aus der
+Anzeige fällt — genau der Schaden, den der Abbau-Befund desselben Tages an anderer Stelle
+angerichtet hat. Deshalb wird **vorher** geprüft und mit einer verständlichen Auskunft abgelehnt
+(„Ein Handelsknoten hat nur 5 Steckplätze, bei dir stecken 6 Module. Bau erst 1 aus"). Automatisch
+ausbauen wäre die andere Möglichkeit, nähme dem Besitzer aber die Wahl, *welches* Stück geht.
+
+### Der Ablauf im Tick
+
+`vorpostenUmruestenTick` läuft im `galaxyTick`, wie der Abbau. Er rechnet **erst das Lager ab** (der
+Satz hängt am Zweig — ohne die Abrechnung wären die Stunden davor rückwirkend zum neuen Satz
+bewertet; ein Handelsknoten, der zur Festung wird, verlöre so zwei Drittel des angefallenen
+Ertrags), wechselt dann den Zweig und schreibt. `vorpostenSchreib` deckelt die LP am neuen Dach und
+**heilt nicht** — dieselbe Regel wie beim Ausbau. Der Besitzer bekommt eine eigene Meldung
+(`vorposten-umruestung`) mit **beiden** Namen.
+
+### Wächter
+
+`tests/test_vorposten_umruesten_http.js` (22 Prüfungen), Port 3264. Fünf Gegenproben mit
+**gemessener** Pflichtliste:
+
+| Sabotage | fällt |
+|---|---|
+| `schalter` (Schalterprüfung im Endpunkt entfernt) | `1a` |
+| `module` (Steckplatz-Ablehnung ausgehebelt) | `3d` |
+| `sofort` (der Zweig wird schon beim Start gesetzt) | `4a`, `5a`, `5b` |
+| `projektweg` (der Tick löscht zweiggebundene Projekte) | `5c` |
+| `lager` (der Tick rechnet das Lager nicht ab) | `5d` |
+
+**Zwei eigene Fehler, beide von den eigenen Prüfungen gefangen, bevor etwas ausgeliefert war:**
+
+- Der erste Entwurf setzte die Umrüstung ab Stufe 6 an und ließ sie 2,4 Mio Erz kosten — **weniger
+  als der Ausbau auf Stufe 6 selbst** (3,4 Mio). Eine Umrüstung, die billiger ist als der Weg
+  dorthin, macht aus der einmaligen Wahl eine Voreinstellung. Prüfung `0b` hat es gefangen.
+- `0b` selbst maß dann falsch: Sie nahm den **letzten** Kostenblock der Datei statt des teuersten
+  (6 Mio Erz statt 9 Mio). Wieder eine Momentaufnahme statt einer Regel, diesmal in der eigenen
+  Messvorrichtung. Sie bildet jetzt das Maximum je Rohstoff über alle Blöcke.

@@ -7123,6 +7123,7 @@ function galaxyTick() {
   // Fertige Vorposten-Abbauten abschliessen (03.09.2026). Bewusst hier und nicht in einem eigenen
   // Takt: 24 Stunden brauchen keine feinere Aufloesung als 15 Minuten.
   vorpostenAbbauTick().catch(e => console.error('[vorposten] abbauTick:', e && e.message));
+  vorpostenUmruestenTick().catch(e => console.error('[vorposten] umruestenTick:', e && e.message));
   updateHallOfFameServer();
   resolveWeeklyLeagueServer();
   resolveSeasonLeagueServer();
@@ -13244,6 +13245,52 @@ const VORPOSTEN_AKTIV = true;   // umgelegt am 02.09.2026, unmittelbar nach dem 
    diesem Katalog und beschriftet den Eintrag danach - der Schalter ist an. */
 const VORPOSTEN_ABBAU_AKTIV = true;    // an seit Frontend v8.654.0
 const VORPOSTEN_ABBAU_MS = 24 * 3600 * 1000;
+
+/* ETAPPE V8: DIE UMRUESTUNG (05.09.2026)
+
+   Die Ausrichtung fiel bisher EINMAL, beim Sprung auf Stufe 4, und galt fuer immer („die
+   Entscheidung gilt fuer immer" steht woertlich im Wahltext). Das war richtig, solange die Zweige
+   sich nur in Multiplikatoren unterschieden. Seit V6 haengen Endprojekte daran und seit V7 sogar
+   die Steckplatzzahl - eine Fehlwahl auf Stufe 4 kostet inzwischen ein halbes Spiel. Die
+   Umruestung nimmt der Wahl das Endgueltige, ohne ihr das Gewicht zu nehmen.
+
+   VIER ENTSCHEIDUNGEN, und jede hat einen Grund:
+
+   1. EIGENER ENDPUNKT, KEIN PROJEKT. Ein Projekt ist EINMALIG je Vorposten (vpProjektVerfuegbar
+      schliesst begonnene aus) und belegt den einen Projektplatz; eine Umruestung ist wiederholbar.
+      Sie in die Projektliste zu pressen hiesse, deren Grundregel fuer sie zu brechen.
+   2. TEUER UND LANGSAM, UND ERST AUF DER ENDSTUFE. Der erste Entwurf setzte sie ab Stufe 6 an
+      und liess sie 2,4 Mio Erz kosten - weniger als der Ausbau auf Stufe 6 selbst (3,4 Mio). Die
+      eigene Pruefung 0b hat das gefangen: Eine Umruestung, die billiger ist als der Weg dorthin,
+      macht aus der einmaligen Wahl auf Stufe 4 eine Voreinstellung. Sie kostet jetzt in JEDEM
+      Rohstoff mehr als der teuerste Stufenausbau und braucht 24 Stunden wie der Abbau.
+      DASS SIE ERST AUF DER ENDSTUFE GEHT, ist dieselbe Entscheidung aus der anderen Richtung:
+      V6 hat die Endstufe zu dem Ort gemacht, an dem die Zweigwahl wirklich etwas bedeutet (jeder
+      Zweig kann dort etwas, das nur er kann). Die Umruestung ist die Gegenfrage dazu - „halte ich
+      diesen Zweig?" -, und sie soll nicht die Leiter davor entwerten. Der Preis ist die ganze
+      Bremse; eine zusaetzliche Abklingzeit waere ein zweiter Knopf fuer dieselbe Wirkung.
+   3. FUER JEDEN SICHTBAR, wie der Abbau. Eine Station, die in 24 Stunden ein Festungsring wird,
+      ist fuer einen Angreifer eine echte Information: Es lohnt sich, VORHER zuzuschlagen. Genau
+      das soll die Frist bewirken.
+   4. KEIN ABBRECHEN, aus demselben Grund wie beim Projekt: Ein Vorhaben, das man zuruecknehmen
+      kann, waere ein Zwischenlager fuer Rohstoffe.
+
+   WAS NICHT VERLORENGEHT: Ein zweiggebundenes Projekt wird beim Umruesten NICHT geloescht, es
+   SCHLAEFT. `vpProjektBoni` haengt die Wirkung seit V6 an Projekt UND Ausrichtung - wer
+   zurueckruestet, hat sein Sternendock wieder. Die Hausregel „Deckel duerfen niemals Daten
+   loeschen" gilt hier woertlich.
+
+   UND DER GRUND, WARUM DIE UMRUESTUNG ABLEHNEN KANN: Der Festungsring hat seit V7 sechs
+   Steckplaetze, die anderen fuenf. Wer mit sechs eingebauten Modulen wegruestet, haette danach
+   eines, das nicht mehr wirkt und aus der Anzeige faellt - genau der Schaden, den der Abbau-Befund
+   vom 05.09.2026 an anderer Stelle angerichtet hat. Deshalb wird hier VORHER geprueft und mit
+   einer verstaendlichen Auskunft abgelehnt, statt still etwas schlafen zu legen. Automatisch
+   ausbauen waere die andere Moeglichkeit, naehme dem Besitzer aber die Wahl, WELCHES Stueck geht. */
+const VP_UMRUESTEN_AKTIV = false;
+const VP_UMRUESTEN_MS = 24 * 3600 * 1000;
+const VP_UMRUESTEN_AB_STUFE = 8;
+const VP_UMRUESTEN_KOSTEN = { erz: 10500000, kristalle: 7500000, deuterium: 4900000, nanolegierungen: 6400,
+  quantenchips: 3500, metamaterial: 1200, singularitaetskern: 140 };
 /* ETAPPE V2: DER WERFTRABATT (03.09.2026). Auftrag Sascha: alle Punkte der Vorposten-Auswahl
    umsetzen. Dieser hier stand als Schuld im Quelltext: Der Kommentar ueber VORPOSTEN_ZWEIGE nennt
    seit dem 02.09.2026 „Werftrabatt" und „Marktgebuehr" als Kanaele, die spaeter ZUSAMMEN mit ihrer
@@ -14086,6 +14133,14 @@ function vorpostenAbbauLaeuft(doc) {
   const ab = (doc && doc.abbauAb) || 0;
   return ab > 0 ? ab : 0;
 }
+/* V8: Laeuft eine Umruestung, und auf welchen Zweig? Beides zusammen - ein Zeitstempel ohne Ziel
+   waere ein halber Zustand, und genau daraus entstehen die Faelle, in denen niemand mehr weiss,
+   was eigentlich fertig wird. */
+function vorpostenUmruestenLaeuft(doc) {
+  const ab = (doc && doc.umruestenAb) || 0;
+  const ziel = doc && doc.umruestenZiel;
+  return (ab > 0 && vorpostenZweigOk(ziel)) ? { ab, ziel } : null;
+}
 function vorpostenHeimatSystem(userId) {
   try { return JSON.parse(db.shared['leaderboard:' + userId] || '{}').homeSystem || null; } catch (e) { return null; }
 }
@@ -14181,6 +14236,12 @@ function vorpostenFuerClient(doc, userId, jetzt, karte) {
     dockSchiff: VP_DOCK_SCHIFF,
     dominiert: (doc.stufe || 1) >= VORPOSTEN_STUFEN.length,
     abbauAb: vorpostenAbbauLaeuft(doc) || null,
+    /* V8: Die laufende Umruestung ist fuer JEDEN sichtbar, wie der Abbau und aus demselben Grund -
+       eine Station, die in 24 Stunden ein Festungsring wird, ist fuer einen Angreifer eine echte
+       Information. Das laufende PROJEKT sieht dagegen weiterhin nur der Besitzer: Es sagt nichts
+       ueber die heutige Staerke. Die Umruestung schon, sie sagt es nur mit Frist. */
+    umruestenAb: (vorpostenUmruestenLaeuft(doc) || {}).ab || null,
+    umruestenZiel: (vorpostenUmruestenLaeuft(doc) || {}).ziel || null,
     schutzBis: (doc.seit || 0) + VORPOSTEN_SCHUTZ_MS,
     ausbauAb: (doc.ausbauSeit || doc.seit || 0) + VORPOSTEN_AUSBAU_MS,
     nutzen: { flug: st.flug, prod: st.prod, scan: st.scan, werft: st.werft, markt: st.markt, flugDeckel: st.flugDeckel, werftDeckel: st.werftDeckel, marktDeckel: VP_MARKT_DECKEL },
@@ -14353,6 +14414,8 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
        davon hat dieses Projekt genug. `modulSetsAktiv` sagt dem Client, ob er sie ueberhaupt
        zeigen darf; liegt der Schalter, rechnet der Server ohne sie. */
     modulSetDefs: VP_MODUL_SET_DEFS, modulSetsAktiv: VP_MODUL_SETS_AKTIV, zweigSlots: VP_ZWEIG_SLOTS,
+    umruestenAktiv: VP_UMRUESTEN_AKTIV && !notAusGesetzt('vorposten'),
+    umruestenAbStufe: VP_UMRUESTEN_AB_STUFE, umruestenMs: VP_UMRUESTEN_MS, umruestenKosten: VP_UMRUESTEN_KOSTEN,
     modulAusbauKosten: VP_MODUL_AUSBAU_KREDITE, modulBauAbklingMs: VP_MODUL_BAU_ABKLING_MS,
     modulBestand: vpModulBestand(findUserById(req.userId) || {}),
     modulBauAb: (findUserById(req.userId) || {}).vpModulBauAb || 0,
@@ -14744,6 +14807,104 @@ async function vorpostenAbbauTick() {
     fertig++;
     console.log('[vorposten] abbau fertig sys=' + doc.sys + ' userId=' + doc.besitzer +
       ' module=' + module.length);
+  }
+  if (fertig) await saveDb();
+  return fertig;
+}
+
+/* V8: UMRUESTEN. Der Server prueft, WAS moeglich ist, und wann es fertig ist; die Rohstoffe bucht
+   der Client aus seinem Spielstand ab - dasselbe Muster wie Ausbau und Projekt. */
+app.post('/api/vorposten/umruesten', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  /* Der Schalter steht HIER, an der Stelle, die die Wahl AUSFUEHRT - nicht nur an der Anzeige.
+     Die Lehre steht in PROJECT_MEMORY und ist am Projekt-Endpunkt teuer bezahlt worden. */
+  if (!VP_UMRUESTEN_AKTIV || notAusGesetzt('vorposten')) {
+    return res.status(404).json({ error: 'Umrüsten ist derzeit nicht verfügbar.', inaktiv: true });
+  }
+  const sys = String((req.body && req.body.system) || '');
+  const ziel = String((req.body && req.body.zweig) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer rüstet seinen Vorposten um.' });
+  if ((doc.stufe || 1) < VP_UMRUESTEN_AB_STUFE) {
+    return res.status(400).json({ error: 'Umrüsten geht erst ab Stufe ' + VP_UMRUESTEN_AB_STUFE + '.',
+      abStufe: VP_UMRUESTEN_AB_STUFE });
+  }
+  if (!vorpostenZweigOk(doc.zweig)) {
+    return res.status(400).json({ error: 'Dieser Vorposten hat noch gar keine Ausrichtung - wähle sie beim nächsten Ausbau.', ohneZweig: true });
+  }
+  if (!vorpostenZweigOk(ziel)) {
+    return res.status(400).json({ error: 'Wähle eine Ausrichtung.', zweigNoetig: true,
+      zweige: Object.values(VORPOSTEN_ZWEIGE).map(z => ({ key: z.key, name: z.name, kurz: z.kurz })) });
+  }
+  if (ziel === doc.zweig) {
+    return res.status(400).json({ error: 'Diese Ausrichtung hat der Vorposten bereits.', schonSo: true });
+  }
+  const jetztU = Date.now();
+  const laeuftU = vorpostenUmruestenLaeuft(doc);
+  if (laeuftU) {
+    return res.status(400).json({ error: 'Die Umrüstung läuft bereits - noch ' + Math.ceil((laeuftU.ab - jetztU) / 60000) + ' Minuten.',
+      laeuft: true, umruestenAb: laeuftU.ab, umruestenZiel: laeuftU.ziel });
+  }
+  if (vorpostenAbbauLaeuft(doc)) {
+    return res.status(400).json({ error: 'Dieser Vorposten wird abgebaut - eine Station, die verschwindet, wird nicht umgebaut.', abbau: true });
+  }
+  /* DIE STECKPLATZ-PRUEFUNG (siehe die Begruendung bei VP_UMRUESTEN_AKTIV). Der Festungsring hat
+     sechs Plaetze, die anderen fuenf: Wegruesten mit sechs eingebauten Modulen liesse eines
+     wirkungslos zurueck und aus der Anzeige fallen. Lieber eine verstaendliche Ablehnung als ein
+     stiller Verlust - und die Wahl, WELCHES Stueck geht, gehoert dem Besitzer. */
+  const drinU = (Array.isArray(doc.module) ? doc.module : []).length;
+  const plaetzeZiel = vpModulSlots(doc.stufe, ziel);
+  if (drinU > plaetzeZiel) {
+    return res.status(400).json({
+      error: 'Ein ' + VORPOSTEN_ZWEIGE[ziel].name + ' hat nur ' + plaetzeZiel + ' Steckplätze, bei dir stecken ' + drinU +
+        ' Module. Bau erst ' + (drinU - plaetzeZiel) + ' aus - sonst läge es hier wirkungslos.',
+      zuVieleModule: true, module: drinU, plaetze: plaetzeZiel });
+  }
+  doc.umruestenAb = jetztU + VP_UMRUESTEN_MS;
+  doc.umruestenZiel = ziel;
+  vorpostenSchreib(doc);
+  console.log('[vorposten] umruestung gestartet userId=' + req.userId + ' sys=' + sys + ' von=' + doc.zweig + ' nach=' + ziel);
+  await saveDb();
+  res.json({ ok: true, umruestenAb: doc.umruestenAb, umruestenZiel: ziel, dauerMs: VP_UMRUESTEN_MS,
+    kosten: VP_UMRUESTEN_KOSTEN, vorposten: vorpostenFuerClient(doc, req.userId, jetztU) });
+});
+
+/* Schliesst fertige Umruestungen ab - im galaxyTick, wie der Abbau. Die WERTE aendern sich erst
+   HIER, nicht beim Start: Wer eine Festung bestellt, hat 24 Stunden lang die alte Verteidigung,
+   und der Angreifer, der es sieht, hat genau dieses Fenster. */
+async function vorpostenUmruestenTick() {
+  if (!VP_UMRUESTEN_AKTIV) return 0;
+  const jetzt = Date.now();
+  let fertig = 0;
+  for (const doc of vorpostenAlle()) {
+    const l = vorpostenUmruestenLaeuft(doc);
+    if (!l || l.ab > jetzt) continue;
+    const vorher = doc.zweig;
+    /* Das Lager wird ABGERECHNET, bevor der Zweig wechselt - genau wie beim Ausbau: Der Satz haengt
+       am Zweig, und ohne diese Abrechnung waeren die Stunden davor rueckwirkend zum neuen Satz
+       bewertet. Ein Handelsknoten, der zur Festung wird, verloere sonst rueckwirkend zwei Drittel
+       des angefallenen Ertrags. */
+    const standVor = vorpostenLagerStand(doc, jetzt);
+    if (!vorpostenLagerLeer(standVor)) {
+      pushPendingReward(doc.besitzer, Object.assign({ type: 'vorposten-lager', system: doc.sys,
+        name: vorpostenWerte(doc).name, zeit: jetzt }, standVor));
+    }
+    doc.lagerSeit = jetzt;
+    doc.zweig = l.ziel;
+    delete doc.umruestenAb;
+    delete doc.umruestenZiel;
+    /* vorpostenSchreib deckelt die LP am neuen Dach und HEILT NICHT - dieselbe Regel wie beim
+       Ausbau. Wer von der Festung weggeht, verliert Kern-Maximum und damit auch LP; wer zur
+       Festung wird, bekommt ein hoeheres Dach, aber keine Reparatur. */
+    const st = vorpostenStufeVon(doc);
+    vorpostenSchreib(doc);
+    pushPendingReward(doc.besitzer, { type: 'vorposten-umruestung', system: doc.sys, stufe: doc.stufe || 1,
+      name: st.name, vonZweig: vorher, vonZweigName: (VORPOSTEN_ZWEIGE[vorher] || {}).name || vorher,
+      zweig: l.ziel, zweigName: (VORPOSTEN_ZWEIGE[l.ziel] || {}).name || l.ziel, zeit: jetzt });
+    fertig++;
+    console.log('[vorposten] umruestung fertig sys=' + doc.sys + ' von=' + vorher + ' nach=' + l.ziel);
   }
   if (fertig) await saveDb();
   return fertig;

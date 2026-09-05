@@ -13352,7 +13352,9 @@ const VP_LAGER_ANTEILE = { erz: 0.225, kristalle: 0.075, deuterium: 0.06 };
    Etappe a: Verbuendete duerfen GARNISON beisteuern und nur ihre eigenen Schiffe zurueckrufen.
    Etappe b: Verbuendete nutzen den Flugzeit-Bonus mit (`verbuendet` im Client-Dokument). */
 /* UMGELEGT AM 05.09.2026 (Etappe V5, Frontend-Haelfte). Das Frontend liest `verbuendet` und
-   `garnisonVon` jetzt: Der Allianzpartner sieht am fremden Vorposten zwei zusaetzliche
+   `meineGarnison` jetzt (hier stand zuerst `garnisonVon` - so heisst die Aufschluesselung nur
+   SERVERSEITIG in `doc`; an den Client geht der eigene Anteil, und genau dieser Namensdreher hat
+   die Frontend-Haelfte einen halben Tag gekostet): Der Allianzpartner sieht am fremden Vorposten zwei zusaetzliche
    Menueeintraege (Garnison beisteuern, seine eigenen Schiffe zurueckrufen), erfaehrt in der
    Stationstafel, wie viele der Schiffe dort seine sind, nutzt den Flugzeit-Bonus mit und bekommt
    beim Fall und beim Abbau seine EIGENE Meldung (`alsVerbuendeter`) statt einer ueber fremdes

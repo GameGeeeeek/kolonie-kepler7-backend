@@ -40,7 +40,8 @@
 // Listen heissen Schiffstypen, verluste als Datum, Regel gegen Stueckzahlen als Wort): am alten
 // Datenblock fallen genau 14e2 und 15d2. Abschnitt 17 (Codex-Befund an #237, zwei
 // Texte oder keiner auch am Rand des Gesamtdeckels): ohne die Vorpruefung beider Plaetze in
-// kampftextPvpBestellen fallen genau 17a, 17b und 17c. BEFUND aus 14m: Die Sperre fand
+// kampftextPvpBestellen fallen genau 17a, 17b und 17c. Abschnitt 15k-15m (vierte Sperre, zweite
+// Messung 05.09.2026): am alten Server fallen genau 15l und 15m. BEFUND aus 14m: Die Sperre fand
 // "Mondzerstoerer" (oe) nicht, weil sie nur die Umlaut-Schreibweise suchte - seit E2 wird auch der
 // Text normalisiert; der Messlauf von AI Core kannte beide Schreibweisen schon immer.
 //
@@ -75,6 +76,9 @@ const INES = crypto.randomUUID(), GERD = crypto.randomUUID(), HANNA = crypto.ran
 const JONAS = crypto.randomUUID(), KARLA = crypto.randomUUID();
 const LARS = crypto.randomUUID(), MIA = crypto.randomUUID();
 const NILS = crypto.randomUUID(), OLGA = crypto.randomUUID();
+// 15k-15m (vierte Sperre): paul greift rita an - ein eigenes Paar, weil ein Angriff dem Opfer einen
+// Schutzschild schenkt (grantAttackShield) und lars/mia in Abschnitt 16 noch frei sein muessen (gemessen: 16c fiel mit 403).
+const PAUL = crypto.randomUUID(), RITA = crypto.randomUUID();
 const angreiferSave = JSON.stringify({
   resources: { erz: 1e5, kristalle: 1e5, deuterium: 1e5, energie: 1e5 }, credits: 1000,
   buildings: { lager: 60, werft: 10 }, research: {}, fleet: { cruisers: 40, bomber: 12 }, colonies: {}
@@ -103,13 +107,16 @@ function grunddb() {
       lars:  { userId: LARS,  username: 'lars',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
       mia:   { userId: MIA,   username: 'mia',   passwordHash: hash, emailVerified: true, createdAt: Date.now() },
       nils:  { userId: NILS,  username: 'nils',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
-      olga:  { userId: OLGA,  username: 'olga',  passwordHash: hash, emailVerified: true, createdAt: Date.now() }
+      olga:  { userId: OLGA,  username: 'olga',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      paul:  { userId: PAUL,  username: 'paul',  passwordHash: hash, emailVerified: true, createdAt: Date.now() },
+      rita:  { userId: RITA,  username: 'rita',  passwordHash: hash, emailVerified: true, createdAt: Date.now() }
     },
     private: {
       [GERD]: { 'kepler7-save-v3': angreiferSave }, [HANNA]: { 'kepler7-save-v3': verteidigerSave },
       [JONAS]: { 'kepler7-save-v3': angreiferSave }, [KARLA]: { 'kepler7-save-v3': verteidigerSave },
       [LARS]: { 'kepler7-save-v3': angreiferSave }, [MIA]: { 'kepler7-save-v3': verteidigerSave },
-      [NILS]: { 'kepler7-save-v3': angreiferSave }, [OLGA]: { 'kepler7-save-v3': verteidigerSave }
+      [NILS]: { 'kepler7-save-v3': angreiferSave }, [OLGA]: { 'kepler7-save-v3': verteidigerSave },
+      [PAUL]: { 'kepler7-save-v3': angreiferSave }, [RITA]: { 'kepler7-save-v3': verteidigerSave }
     }, shared: {}, resetTokens: {},
     galaxy: { npcEmpireStrength: 1, marketTrend: 1, collapsedSystems: {}, controlledSystems: {},
       news: [], activeWar: null, activeWormhole: null, lastTick: Date.now(), factions: {} }
@@ -700,6 +707,35 @@ const KAMPF = {
     check('15j: /api/health nennt die Kampfarten (Erkennungsweg fuer einen Server ohne E2) und keinen Takt-Fehler',
       health.body && health.body.kampftext && JSON.stringify(health.body.kampftext.arten) === JSON.stringify(['npc', 'weltboss', 'festung', 'koenigin', 'pvp-angriff', 'pvp-verteidigung']) && health.body.kampftext.e2 === true && health.body.taktFehler === 0,
       health.body && { arten: health.body.kampftext && health.body.kampftext.arten, taktFehler: health.body.taktFehler });
+    // 15k-15m: die vierte Sperre (zweite Messung am M715q, 05.09.2026). Ein zweiter Spielerkampf,
+    // paul gegen rita: Der Angreifer-Text ist sauber, der Verteidiger-Text behauptet "unbeschadet" -
+    // bei "verluste: nicht bekannt" eine Erfindung. Er darf NICHT am Bericht haengen; der Eintrag
+    // in db.kampftexte nennt den Grund. Der Angreifer-Text bleibt davon unberuehrt (zwei Auftraege,
+    // zwei Urteile).
+    const paul = await api.anmelden('paul');
+    const rita = await api.anmelden('rita');
+    const vor2 = ai.prompts.length;
+    ai.antwort = (n) => n - vor2 === 1
+      ? 'Unsere Kreuzer stiessen auf die Waechter der Station.'
+      : 'Die Waechter hielten die Linie, und wir blieben unbeschadet.';
+    const angriff2 = await api.j('/attack', { method: 'POST', headers: auth(paul), body: JSON.stringify({ targetUserId: RITA }) });
+    check('15k: der zweite Spielerkampf kommt zustande (200)', angriff2.status === 200, { status: angriff2.status, body: angriff2.body && angriff2.body.error });
+    let gesendet2 = null, empfangen2 = null, verworfen = null;
+    for (let i = 0; i < 80; i++) {
+      gesendet2 = (await berichte(paul)).find(r => r.type === 'attack-sent');
+      empfangen2 = (await berichte(rita)).find(r => r.type === 'attack-received');
+      const kt = (JSON.parse(fs.readFileSync(dbPfad, 'utf8')).kampftexte) || {};
+      verworfen = Object.values(kt).find(e => e.userId === RITA && e.status === 'verworfen') || null;
+      if (gesendet2 && gesendet2.kiText && verworfen) break;
+      await warte(100);
+    }
+    check('15l: der Prompt bittet ausdruecklich, bei unbekannten Verlusten NICHTS darueber zu sagen',
+      ai.prompts.length - vor2 === 2 && [vor2, vor2 + 1].every(i => /sage NICHTS ueber Verluste/.test((ai.prompts[i] || {}).prompt || '')),
+      { aufrufe: ai.prompts.length - vor2 });
+    check('15m: "unbeschadet" bei "verluste: nicht bekannt" wird verworfen - der Grund nennt beides, der Angreifer-Text haengt trotzdem',
+      !!verworfen && /Aussage ueber Verluste trotz 'nicht bekannt': unbeschadet/.test(verworfen.grund || '') &&
+      !!empfangen2 && !empfangen2.kiText && !!gesendet2 && /Waechter der Station/.test(gesendet2.kiText || ''),
+      { verworfen: verworfen && verworfen.grund, verteidiger: empfangen2 && empfangen2.kiText, angreifer: gesendet2 && gesendet2.kiText });
     ai.antwort = () => 'Der Verband kehrte zurueck.';
   }
 

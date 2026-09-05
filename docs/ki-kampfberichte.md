@@ -66,7 +66,7 @@ Werte im Portainer-Stack.
 
 ### Die Sperren sind eine KOPIE-FAMILIE über drei Repos
 
-Prompt, Zuschnitt und die drei Sperren liegen hier **und** in
+Prompt, Zuschnitt und die vier Sperren liegen hier **und** in
 `gamegeeeeek-ai-core/tools/kampftext_messlauf.py`; die Schiffsnamen zusätzlich in `SHIP_DEFS` der
 Spieldatei. Dort sind sie am echten Modell **gemessen** worden (E0, 28.08.2026: acht von acht
 Texten trugen eine Falschaussage), hier **entscheiden** sie. Laufen sie auseinander, misst das
@@ -286,3 +286,19 @@ Hauptkopie misst beide Schalter in Stellung „an", eine dritte Kopie die Grunds
 Gegenprobe im Dateikopf. **Frontend folgt:** Bestellung mit `art` für Weltboss, Festungs-Fall und
 Königinnen-Fall, Logbuch-Sektion in den Berichten `festung-angriff`, `nest-angriff`, `attack-sent`
 und `attack-received` (der npc-Zweig zeigt sie seit E1b).
+
+### Die vierte Sperre: keine erfundene Unversehrtheit (05.09.2026)
+
+Zweite Messung am M715q (nach dem RAM-Ausbau, qwen3.5:4b gegen qwen3.5:9b, acht Fälle je Modell):
+4b kam acht von acht durch die drei Sperren, ohne Stückzahl als Wort – aber beide Verteidiger-Texte
+des Spielerkampfs behaupteten „unbeschadet" bzw. „ungeschoren", obwohl das Datum `verluste: nicht
+bekannt` lautet. Das Modell liest „nicht bekannt" als Einladung, das Fehlende zu ergänzen. Deshalb
+prüft `kampftextVerlustaussage` seither die Unversehrtheits-Familie (unbeschadet, ungeschoren,
+unversehrt, verlustfrei, ohne Verluste, heil), **nur** wenn der Datenblock `verluste: nicht bekannt`
+trägt – Weltboss, Festung, Königin und npc nennen ihre verlorenen Schiffstypen, dort wäre
+„unbeschadet" bei leerer Liste richtig. Die Gegenrichtung („ohne klare Verlustmeldungen") bleibt
+erlaubt, sie ist die richtige Wiedergabe des Datums. Dazu ein Regelsatz im Prompt (Kopie-Familie
+mit AI Core, Paritätstest 6-regeln). Wächter 15k–15m mit eigenem Konto-Paar paul/rita (ein Angriff
+schenkt dem Opfer einen Schutzschild, lars/mia müssen für Abschnitt 16 frei bleiben); am alten
+Server fallen genau 15l und 15m. 9b war doppelt so langsam und nicht wahrer („Ein Bomber fiel",
+„Verlust aller Bomber", „Nyx-Stock"); 4b bleibt.

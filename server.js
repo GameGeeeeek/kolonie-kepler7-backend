@@ -17725,7 +17725,9 @@ const KAMPFTEXT_E2_REGELN =
   'Zeitangaben - die genauen Werte stehen im Bericht daneben, dein Text erzaehlt nur. Erfinde ' +
   'keine Schiffsnamen, keine Orte, keine Mechaniken und keine Verluste, die nicht in den Daten ' +
   'stehen. Die Listen nennen SCHIFFSTYPEN, keine Stueckzahlen - nenne keine Anzahl, auch nicht ' +
-  'als Wort (kein \'ein Kreuzer\', kein \'drei Bomber\'). Du entscheidest nichts - du beschreibst nur, ' +
+  'als Wort (kein \'ein Kreuzer\', kein \'drei Bomber\'). Steht bei verluste \'nicht bekannt\', dann ' +
+  'sage NICHTS ueber Verluste - weder dass Schiffe verloren gingen, noch dass keine verloren ' +
+  'gingen oder alle heil blieben. Du entscheidest nichts - du beschreibst nur, ' +
   'was geschehen ist.\n\n' +
   'KAMPFDATEN:\n';
 function kampftextPromptFuer(art, daten) {
@@ -17733,7 +17735,7 @@ function kampftextPromptFuer(art, daten) {
   return KAMPFTEXT_EINLEITUNGEN[art] + KAMPFTEXT_E2_REGELN + kampftextDatenText(daten);
 }
 
-// --- Die drei Sperren -----------------------------------------------------------------------
+// --- Die vier Sperren ------------------------------------------------------------------------
 //
 // Sie sind die WAHRHEIT, der Prompt ist nur die Bitte (AI-Core-Lektion 10). Am 28.08.2026 am
 // echten Modell gemessen: Von acht Texten verwarf die Sperre zwei - nachgelesen trugen alle acht
@@ -17776,6 +17778,31 @@ function kampftextFremdeSchiffe(text, daten) {
   return raus.sort();
 }
 
+// Die vierte Sperre (zweite E2-Messung am M715q, 05.09.2026): keine Aussage ueber die eigene
+// Unversehrtheit, wenn die Verluste unbekannt sind. Das Datum "verluste: nicht bekannt" liess
+// qwen3.5:4b in beiden Verteidiger-Texten das GEGENTEIL erfinden - "durchdrang die Reihen ...
+// unbeschadet", "stehen wir ungeschoren zurueck"; die drei Sperren oben sahen nichts. Gefasst wird
+// die gemessene Richtung; die andere ("wir verloren Kreuzer") teilt ihre Woerter mit richtigen
+// Saetzen ("die Verteidigung fiel") und bleibt eine benannte Luecke (AI Core, Testabschnitt 11).
+// Das \b hinter verluste?: "ohne klare Verlustmeldungen" ist die RICHTIGE Wiedergabe des Datums.
+// Kopie-Familie mit UNVERSEHRT_MUSTER in AI Cores kampftext_messlauf.py.
+const KAMPFTEXT_UNVERSEHRT = [
+  /unbeschadet/, /ungeschoren/, /unversehrt/, /verlustfrei/, /ohne (?:[\wäöü]+ )?verluste?\b/,
+  /keine verluste/, /keinen verlust/, /kein (?:einziges )?schiff (?:ging )?verloren/, /\bheil\b/,
+];
+function kampftextVerlustaussage(text, daten) {
+  // Liest das DATUM, nicht die Kampfart: Weltboss, Festung, Koenigin und npc nennen ihre verlorenen
+  // Schiffstypen - dort ist "unbeschadet" bei leerer Liste sogar richtig.
+  if (!daten || daten.verluste !== 'nicht bekannt') return [];
+  const t = String(text || '').replace(/ae/g, 'ä').replace(/oe/g, 'ö').replace(/ue/g, 'ü').toLowerCase();
+  const raus = [];
+  for (const muster of KAMPFTEXT_UNVERSEHRT) {
+    const m = t.match(muster);
+    if (m && raus.indexOf(m[0]) < 0) raus.push(m[0]);
+  }
+  return raus.sort();
+}
+
 function kampftextMaengel(text, daten) {
   const t = String(text || '');
   if (!t.trim()) return ['leerer Text'];
@@ -17783,6 +17810,7 @@ function kampftextMaengel(text, daten) {
   if (t.length > KAMPFTEXT_MAX_ZEICHEN) raus.push('zu lang: ' + t.length + ' Zeichen (Deckel ' + KAMPFTEXT_MAX_ZEICHEN + ')');
   for (const z of kampftextErfundeneZahlen(t, daten)) raus.push('erfundene Zahl ' + z);
   for (const s of kampftextFremdeSchiffe(t, daten)) raus.push('fremdes Schiff ' + s);
+  for (const s of kampftextVerlustaussage(t, daten)) raus.push('Aussage ueber Verluste trotz \'nicht bekannt\': ' + s);
   return raus;
 }
 

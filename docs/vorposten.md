@@ -848,3 +848,76 @@ bekäme die falsche Tabelle sauber ausgeliefert.
 dort, wo beide Seiten lesbar sind. Er liest den gültigen Vorrat aus dem Frontend-Code, statt ihn
 zu tippen: eine neue Tier-2-Ressource erweitert ihn von selbst, ein Tippfehler nicht. Wer hier eine
 Kostentabelle anfasst, lässt ihn laufen.
+
+## Etappe V7: Modul-Sets und ein Steckplatz je Zweig (05.09.2026)
+
+Bis hierher war jedes Stationsmodul für sich allein wirksam, und die Steckplatzzahl hing **nur** an
+der Stufe. Wer bestückte, beantwortete sechsmal dieselbe Frage — „welcher Kanal ist mir am meisten
+wert?" — und nie eine Kombination. Zwei Ergänzungen, beide hinter `VP_MODUL_SETS_AKTIV`.
+
+### Sets belohnen Breite, Seltenheiten belohnen Tiefe
+
+| Set | Module | Bonus |
+|---|---|---|
+| **Bollwerk** | Kernpanzerung + Geschützbank | Kern +10 %, Verteidigung +10 % |
+| **Flottenbasis** | Hangarerweiterung + Sprungrechner | Garnison +10 %, Flugzeit +3 % |
+| **Umschlagplatz** | Umlaufraffinerie + Horchposten | Produktion +10 %, Aufklärung +1 |
+| **Sternwacht** | alle sechs | Kern, Verteidigung und Garnison je +10 % |
+
+Gezählt wird der **Modulschlüssel, nicht die Seltenheit**. Ein legendäres Modul bleibt für sich
+stärker als zwei gewöhnliche; ein Set gibt es trotzdem nur, wenn beide Plätze belegt sind. Damit
+stehen die zwei Achsen nebeneinander, statt sich zu ersetzen — und beide kosten Steckplätze.
+
+Set-Boni wirken auf **dieselben Kanäle** wie Module und Projekte und werden in `vorpostenWerte`
+dort addiert. Ein eigener Rechenweg wäre eine zweite Stelle, an der ein Kanal vergessen werden
+kann (dieselbe Begründung wie bei den Projekten).
+
+### Der sechste Steckplatz gehört dem Festungsring
+
+`VP_ZWEIG_SLOTS = { werft: 0, handel: 0, festung: 1 }`, gedeckelt auf `VP_MODUL_SLOTS_MAX = 6`.
+Der Festungsring ist der Zweig, dessen Identität die **Station** ist — die anderen beiden wirken
+nach außen (Flugzeit, Börse, Ertrag). Der sechste Platz ist zugleich der einzige Weg zur
+**Sternwacht**, und damit das erste Set, das eine Zweigwahl voraussetzt.
+
+**Die Zuschläge dürfen nur addieren, nie abziehen.** Das ist keine Schönheit, sondern die Hausregel
+„Deckel dürfen niemals Daten löschen" in ihrer Wirkung: `vpModulBoni` und `vorpostenFuerClient`
+schneiden die Modulliste auf die Steckplatzzahl (`slice(0, slots)`). Ein Zweig mit *weniger*
+Plätzen hätte ein bereits eingebautes Modul still wirkungslos gemacht und es dem Besitzer aus der
+Anzeige genommen — ohne Meldung, ohne Rückgabe in den Bestand. Zwei Wächter dagegen, auf zwei
+Ebenen: `0b` liest die Tabelle im Quelltext, `2b` misst alle 24 Zweig/Stufe-Kombinationen an der
+Antwort. Dazu klemmt `vpModulSlots` den Zuschlag selbst auf `>= 0`.
+
+### `vpModulSlotsVon(doc)` ist die Form, die man benutzt
+
+Dieselbe Lehre wie bei `vorpostenStufeVon` (GR-7): Sobald ein Wert vom **Zweig** abhängt, fällt
+jede Aufrufstelle, die nur die Stufe kennt, still auf den Basiswert zurück. Alle sechs Aufrufstellen
+nehmen jetzt das Dokument.
+
+### Wächter
+
+`tests/test_vorposten_sets_http.js` (19 Prüfungen), Port 3263. Vier Gegenproben mit **gemessener**
+Pflichtliste — die erste Liste war dreimal falsch, und jeder dieser Fehler ist im Test festgehalten:
+
+| Sabotage | fällt |
+|---|---|
+| `abzug` (negativer Zuschlag **und** die Klemme entfernt) | `2a`, `2b` |
+| `seltenheit` (ein Set verlangt mehr als „gewöhnlich") | `3b` |
+| `scheibe` (die ganze Modulliste statt der Steckplatz-Scheibe) | `4b`, `5a` |
+| `kanal` (Set-Boni nicht addiert) | `6a`, `6b` |
+
+Drei eigene Messfehler, alle im Test dokumentiert:
+
+- **`abzug` fiel zuerst ins Leere.** Die Sabotage setzte `handel: -1` — und `vpModulSlots` klemmt
+  den Zuschlag selbst auf `>= 0`. Es lief ein *unsabotierter* Server, und die Gegenprobe belegte
+  nur, dass die Klemme existiert. Sie muss die Klemme mit entfernen.
+- **`seltenheit` riss fünf Prüfungen mit**, weil *alle* Vorlagen gewöhnliche Module trugen. Die
+  Vorlagen sind jetzt gemischt; nur die eine für `3b` bleibt gewöhnlich — das ist ihre Aussage.
+- **`6b` verglich zwei verschiedene Stationen** und maß damit die Hangarerweiterung statt des Sets.
+  Der Aus-Lauf trägt jetzt dieselbe Bestückung.
+
+### Auslieferungsreihenfolge
+
+`VP_MODUL_SETS_AKTIV = false` — ausgeliefert rechnet der Server Zahl für Zahl wie vor V7 (`1a`
+misst genau das). Der Schalter wird in einem eigenen Backend-PR umgelegt, sobald die
+Frontend-Hälfte steht: Ein Set, das der Server rechnet und das Spiel nicht zeigt, wäre angezeigter
+Nutzen ohne Anzeige — genau die Sorte, die es hier nicht geben soll.

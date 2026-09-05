@@ -13286,7 +13286,11 @@ const VORPOSTEN_ABBAU_MS = 24 * 3600 * 1000;
    vom 05.09.2026 an anderer Stelle angerichtet hat. Deshalb wird hier VORHER geprueft und mit
    einer verstaendlichen Auskunft abgelehnt, statt still etwas schlafen zu legen. Automatisch
    ausbauen waere die andere Moeglichkeit, naehme dem Besitzer aber die Wahl, WELCHES Stueck geht. */
-const VP_UMRUESTEN_AKTIV = false;
+/* UMGELEGT AM 05.09.2026 (Frontend-Haelfte ist fertig gemessen). Das Spiel bietet die Wahl im
+   Kartenmenue an, sperrt sie mit dem Grund im Klartext, wenn dieser Server sie ohnehin ablehnen
+   wuerde, nennt die Folgen VOR dem Klick (Dauer, Unumkehrbarkeit, das schlafende Projekt) und
+   zeigt die laufende Frist jedem Betrachter. */
+const VP_UMRUESTEN_AKTIV = true;
 const VP_UMRUESTEN_MS = 24 * 3600 * 1000;
 const VP_UMRUESTEN_AB_STUFE = 8;
 const VP_UMRUESTEN_KOSTEN = { erz: 10500000, kristalle: 7500000, deuterium: 4900000, nanolegierungen: 6400,

@@ -237,3 +237,26 @@ nicht, sondern **prüft nur**.
 nächste Sitzung dazu gebracht, funktionierenden Code umzubauen. Aufgefallen ist es erst beim
 Nachmessen vor der Umsetzung. Dieselbe Fehlerklasse wie bei Aufgabe #52 am selben Tag, und derselbe
 Grund: **eine Vermutung, die in einen Text wandert, wird beim nächsten Lesen als Messung gelesen.**
+
+## Eine Sicherung je Fall deckt den Nachbarfall nicht – auch wenn beide durch denselben Code laufen (06.09.2026)
+
+Der Deploy-Webhook bedient zwei Repos. Sperre und Vormerkung sind **je Repo** gebaut und für ihren
+Fall korrekt: Überholen sich zwei Pushs desselben Repos, wird der zweite vorgemerkt und nachgeholt.
+Blind waren beide für den Fall daneben – der Backend-Deploy beendet den Prozess, und der
+Frontend-Deploy hing an genau diesem Prozess. Fünf Sekunden zwischen zwei Merges genügten; live blieb
+eine Spielversion zurück, während das Log für das Backend „erfolgreich" meldete.
+
+**Die Prüffrage, die das gefunden hätte: Wessen Ausfall würde diese Sicherung NICHT bemerken?**
+Nicht „deckt sie ihren Fall ab" – das tat sie – sondern welcher gleichartige Fall danebensteht und
+niemanden hat. Verwandt mit der schon notierten Regel „eine Sicherung, deren Ausfall wie
+Normalbetrieb aussieht, ist keine", aber eine Stufe früher: Hier war die Sicherung vorhanden und in
+Ordnung, sie war nur für den falschen der zwei Fälle zuständig.
+
+**Der zweite Teil derselben Lehre:** Der Kommentar im Code sagte, ein übersprungener Deploy sei
+ungefährlich, weil `git pull` kumulativ ist und „der nächste Lauf alles mitholt". Das stimmt für das
+Backend, wo ständig gepusht wird – für das Frontend ist *der nächste Lauf* der nächste
+Frontend-Push, und der kann Tage entfernt sein. **Eine Begründung, die an einer Annahme über die
+Häufigkeit hängt, gilt nur dort, wo die Häufigkeit stimmt** – und sie sollte das dann auch sagen.
+
+Details, Messungen und Wächter: `docs/deploy-historie.md`, Ausfall Nr. 14.
+

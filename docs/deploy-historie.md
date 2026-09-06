@@ -1367,3 +1367,76 @@ Verhalten misst und nicht die Änderung.
 **Übertragbar:** Nach einem Deploy nicht nur ins Log sehen, sondern **von außen die ausgelieferte
 Version messen**. Für das Backend tut das `/api/health`; für das Spiel ist es
 `https://gamegeeeeek.de/version.txt` gegen `git show origin/main:version.txt`.
+
+### AUSFALL NR. 14 (06.09.2026) – der Selbst-Neustart nahm den Frontend-Deploy mit
+
+**Dieselbe Form wie Nr. 13, andere Ursache** – und das ist der eigentliche Befund: Nur das Frontend
+betroffen, das Log meldete für das Backend „erfolgreich", aufgefallen an der Versionsnummer der
+Live-Seite. Wenn eine Ausfallform zum zweiten Mal auftritt, ist die Gegenmaßnahme von Nr. 13 („von
+außen die ausgelieferte Version messen") richtig, aber nicht ausreichend: Sie *findet* den Ausfall,
+sie *verhindert* ihn nicht.
+
+**Die Messung.** Backend-PR #259 wurde um 11:12:39Z gemergt, Frontend-PR #593 um 11:12:44Z – fünf
+Sekunden Abstand. `/api/health` meldete danach `uptimeSec 18` um 11:15:26Z, der Prozess war also um
+**11:12:44Z** neu gestartet: exakt in der Sekunde, in der der Frontend-Webhook anklopfte. Live blieb
+`8.693.0` stehen, während `8.694.0` gemergt war. `Last-Modified` von `version.txt` zeigte
+`10:59:56Z` – die Datei war seit dem vorigen Push nicht angefasst worden, es war also kein
+Cache-Effekt, sondern ein ausgebliebener Deploy.
+
+**Warum die vorhandene Vormerkung nicht griff.** Sie ist auf das *eigene* Repo zugeschnitten: Ist
+die Sperre belegt, wird `.pending` geschrieben und am Ende nachgeholt. Die Sperre des **Frontends**
+war frei – es gab nichts vorzumerken. Der Frontend-Deploy hing schlicht an einem Prozess, der sich
+gerade beendete. Der Kommentar im Code („ein übersprungener Deploy ist ungefährlich, `git pull` ist
+kumulativ, der nächste Lauf holt alles mit") stimmt für das Backend, wo ständig gepusht wird. Für
+das Frontend ist *der nächste Lauf* der nächste Frontend-Push – und der kann Tage entfernt sein.
+
+**Zwei Fälle, eine Gegenmaßnahme.** (a) Der Frontend-Deploy läuft bereits; sein `git` ist ein Kind
+dieses Prozesses und stirbt mit dem Container. (b) Der Frontend-Push kommt erst *während* der rund
+sieben Sekunden Auszeit an – er bekommt einen 502, und **GitHub wiederholt eine gescheiterte
+Zustellung nicht von selbst**. Beide löst derselbe Marker, weil er **vor** dem Beenden geschrieben
+und **nach** dem Start gelesen wird: Der Nachhol-Pull fällt damit zeitlich hinter die Auszeit.
+
+**Behebung:** `deployAndereVormerken()` merkt vor dem Beenden jedes *andere* Ziel vor und entfernt
+dessen liegengebliebene Sperre. Das Entfernen ist kein Aufräumen, sondern Teil der Reparatur: Die
+Sperre ist eine **Datei** und überlebt den Prozess, ihr `git` nicht. Bliebe sie liegen, liefe der
+Nachhol-Lauf beim Start in genau diese Sperre, merkte sich erneut vor – und niemand läse den Marker
+ein zweites Mal. Der Frontend-Deploy wäre dann bis `DEPLOY_LOCK_STALE_MS` (11 Minuten) tot. Dazu
+eine Marke `deployBeendetSich`: `handleTerminate` ist asynchron, und ein Rückruf zwischen
+Entscheidung und Exit hätte den frischen Marker sonst **verbraucht**.
+
+**Die BENANNTE Grenze:** Der Marker liegt in `DEPLOY_LOCK_DIR` (Vorgabe `/tmp`) und überlebt einen
+`docker restart` – ein *Neuerzeugen* des Containers nicht. Das ist keine neue Abhängigkeit: Der
+vorhandene `.pending`-Weg hängt seit dem 28.08.2026 an derselben Annahme, und `test_deploy_neustart`
+Prüfung 5 hält sie fest. Wer sie loswerden will, legt `DEPLOY_LOCK_DIR` auf ein gemountetes
+Verzeichnis.
+
+**Der Preis, bewusst bezahlt:** ein überflüssiger Frontend-Pull je Backend-Deploy (meist „Already up
+to date" plus ein Kopieren gleicher Bytes). Ein gesparter Pull ist nichts wert gegen eine
+Auslieferung, die still ausbleibt.
+
+**Wächter:** `tests/test_deploy_neustart.js` Abschnitte 6–8. Gegenprobe gegen `origin/master`: es
+fallen 5 (`6`, `7-bau`, `8`, `8b`, `8c`); die fünf Prüfungen 7a–7e können dort nicht laufen, weil es
+die Funktion nicht gibt – **`7-bau` ist genau dafür der Anker und fällt laut**. Zusätzlich drei
+gezielte Sabotagen, jede trifft nur ihre eigene Prüfung: Vormerken nach `handleTerminate` → nur 6
+fällt (die Prüfung misst die *Reihenfolge*, nicht das Vorkommen); alle Ziele statt nur der fremden
+vormerken → 7c/7d/7e; die Sperre nicht entfernen → 7b.
+
+**Nebenbefund, mitrepariert:** `tests/test_deploy_selbstheilung.js` war seit dem 05.09.2026 rot – 7
+von 22 Prüfungen, gemessen auch gegen `origin/master`, also nicht durch diese Änderung. Sein
+Konstanten-Sammler liest nur GROSSGESCHRIEBENE Namen und übersah `gitIn` (camelCase, mit Nr. 13
+dazugekommen); `deployAufraeumen` warf zur Laufzeit `gitIn is not defined`. **Der Test war dabei
+ehrlich rot, nicht still grün** – seine eigene Prüfung `6-bau` benannte den verschluckten
+Laufzeitfehler. Die Zeile wird jetzt aus `server.js` geschnitten, nicht im Test abgetippt. Der
+Sammler bleibt bewusst auf Großschreibung beschränkt: camelCase zöge `const fs`/`const path` aus
+`server.js` mit und käme den gebundenen Parametern in die Quere. Kommt eine weitere
+camelCase-Konstante dazu, fällt `6-bau` erneut und benennt sie. Gemessen: Der reparierte Test ist gegen `server.js`
+**beider** Stände grün – die Reparatur hängt an keiner Code-Änderung, sie war schlicht überfällig.
+Dass er trotzdem misst, belegt eine Sabotage: Meldet `deployAufraeumen` „verwaiste Sperre entfernt",
+ohne sie zu entfernen, fallen 6 von 22 Prüfungen – allen voran Prüfung 1, die die **Datei** ansieht
+und nicht die Meldung.
+
+**Übertragbar:** *Eine Sicherung, die für einen von zwei gleichartigen Fällen gebaut wurde, deckt den
+anderen nicht – auch wenn beide durch denselben Code laufen.* Sperre und Vormerkung waren je Repo
+korrekt und trotzdem blind für den Fall „der Prozess verschwindet unter dem Deploy des Nachbarn".
+Die Prüffrage: **Wessen Ausfall würde diese Sicherung NICHT bemerken?**
+

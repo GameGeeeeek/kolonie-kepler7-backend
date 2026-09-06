@@ -102,8 +102,20 @@ try {
   // Fehlt ein Modul hier, wirft der Zweig zur LAUFZEIT, der innere catch von deployAufraeumen
   // schluckt es in den Bericht - und ein gefilterter Beleg versteckt es vollends. Deshalb misst
   // 0-bau2 unten, dass der Arbeitsbaum ueberhaupt pruefbar war.
+  // `gitIn` ist camelCase - der Sammler oben findet ausschliesslich GROSSGESCHRIEBENE Namen
+  // (/\b[A-Z][A-Z0-9_]{3,}\b/) und uebersah sie, seit sie am 05.09.2026 dazukam. Der Fehler war
+  // nicht still: deployAufraeumen warf zur Laufzeit "gitIn is not defined", 6-bau meldete genau
+  // das, und der Test war ehrlich rot - gemessen am 06.09.2026 auch gegen origin/master, also
+  // schon vor der Aenderung, die ihn hier wieder gruen macht.
+  // Sie wird AUS server.js geschnitten, nicht hier abgetippt: Eine Kopie der Zeile im Test wuerde
+  // bei der naechsten Aenderung an gitIn still danebenliegen.
+  // Der Sammler wird bewusst NICHT auf camelCase erweitert - er wuerde dann `const path = ...`
+  // und `const fs = ...` aus server.js mitziehen und den gebundenen Parametern in die Quere
+  // kommen. Kommt eine weitere camelCase-Konstante dazu, faellt 6-bau erneut und benennt sie.
+  const gitInZeile = (OHNE_KOMMENTARE.match(/^const gitIn = [^;]+;/m) || [])[0];
+  if (!gitInZeile) throw new Error('const gitIn nicht gefunden');
   heilen = new Function('fs', 'path', 'os', 'execSync',
-    konstanten + '\n' + teile.join('\n') + '\nreturn { deployAufraeumen, lebenderGitProzess };')(fs, path, os, execSync);
+    gitInZeile + '\n' + konstanten + '\n' + teile.join('\n') + '\nreturn { deployAufraeumen, lebenderGitProzess };')(fs, path, os, execSync);
 } catch (e) { baufehler = e.message; }
 check('0-bau: die Selbstheilung laesst sich aus server.js schneiden und ausfuehren', !!heilen, { fehler: baufehler });
 if (!heilen) { console.log('\nFEHLGESCHLAGEN'); process.exit(1); }

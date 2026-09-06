@@ -88,7 +88,8 @@ bekommt die Zeitung, nicht die Zutaten.
 
 ### Schalter
 
-`CHRONIK_AKTIV` steht auf `false` und wird im **Frontend-PR** umgelegt (Auslieferungsreihenfolge).
+`CHRONIK_AKTIV` steht seit dem 06.09.2026 auf `true` — umgelegt mit dem Frontend-Release v8.697.0
+(Weltlage-Panel), wie die Auslieferungsreihenfolge es verlangt.
 Dazu der zehnte Notaus-Schalter `chronik`: Steht er aus, bleibt die abgelegte Ausgabe liegen und
 wird nur nicht mehr ausgeliefert – der Rückwärtsgang für einen Text, der sich als unpassend
 herausstellt, ohne Release und ohne dass der M715q davon wissen muss.
@@ -108,7 +109,18 @@ fährt dafür eine Kopie von `server.js` im Repo-Verzeichnis). Gegenproben gemes
 | Buch geht wieder an den Client | 8a, 8b, 9b |
 | Säuberung entfällt | 7g |
 | zu langer Text wird gekürzt statt abgelehnt | 7d (und 7e als Folge) |
-| Schalter wird beim Ausliefern ignoriert | 8b |
+| Schalter wird beim Ausliefern ignoriert | 8d, 9a |
+| Notaus wird ignoriert | 8d |
+
+**Die Prüfungen leiten den erwarteten Zustand aus dem Schalter ab, statt ihn einzutippen.** Beim
+Umlegen am 06.09.2026 fielen 7h und 8b — sie hielten „ausgeliefert = aus" fest. Eine getippte
+Erwartung wäre dabei zu einer Prüfung geworden, die man *repariert* statt liest; gemessen wird
+seither die **Aussage** (die Antwort muss sagen, was der Server wirklich tut). Abschnitt 9 fährt
+konsequenterweise die Stellung, die **nicht** ausgeliefert ist — so sind immer beide geprüft.
+
+Der AUS-Pfad hängt seither am **Notaus** statt am ausgelieferten Zustand: Er ist der
+Rückwärtsgang, der auch bei umgelegtem Schalter greifen muss, und die einzige Abschaltung ohne
+Release. `8f` hält fest, dass er die abgelegte Ausgabe **nicht löscht** — er verbirgt sie nur.
 
 ## Was folgt
 

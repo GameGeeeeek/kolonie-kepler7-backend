@@ -6331,7 +6331,7 @@ function chronikWeltbossGefallen(boss) {
    Zeichen, die in deutscher Prosa vorkommen, und wirft alles andere weg - insbesondere spitze
    Klammern. Das Frontend darf den Text damit auch dann anzeigen, wenn es ihn je ohne escapeHtml
    einsetzt; die Sicherheit haengt nicht an der Anzeigestelle. */
-const CHRONIK_AKTIV = false;      // wird im Frontend-PR umgelegt (Auslieferungsschutz, Hausregel)
+const CHRONIK_AKTIV = true;       // umgelegt am 06.09.2026 mit dem Frontend-PR (v8.697.0, Weltlage-Panel)
 const CHRONIK_TEXT_MAX = 1400;    // der M715q deckelt bei 1200 - hier bleibt Luft, aber eine Grenze
 const CHRONIK_WOCHE = /^\d{4}-KW\d{1,2}$/;
 function chronikAusgabeText(roh) {

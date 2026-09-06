@@ -221,6 +221,116 @@ const liesDb = () => JSON.parse(fs.readFileSync(dbPfad, 'utf8'));
     await stoppeServer();
   }
 
+  // ---- 7: Etappe C3 - die Wochenausgabe ablegen ---------------------------------------------
+  // Die EINZIGE schreibende Route des Chronik-Bereichs, und die einzige Stelle, an der ein
+  // Modelltext in den Bestand kommt. Geprueft wird jede Zurueckweisung einzeln, nicht nur "400":
+  // Drei Gruende mit einer Meldung waeren im Fehlerfall keine Diagnose (Lektion 7).
+  {
+    api = await starteServer(true);
+    const post = (body, tok) => api.j('/chronik/ausgabe', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, tok ? { Authorization: 'Bearer ' + tok } : {}),
+      body: JSON.stringify(body)
+    });
+
+    let r = await post({ woche: '2026-KW36', text: 'Ein ruhiger Zyklus.' }, null);
+    check('7a: ohne Token 401 - und die Meldung nennt die LAENGE, nicht den Wert',
+      r.status === 401 && /Kein Abhol-Token/.test(String(r.body && r.body.error)), { status: r.status, body: r.body });
+
+    r = await post({ woche: '2026-KW36', text: 'Ein ruhiger Zyklus.' }, TOKEN + 'x');
+    check('7b: falscher Token 401 mit Zeichenzahl',
+      r.status === 401 && /\d+ Zeichen empfangen/.test(String(r.body && r.body.error)), { status: r.status, body: r.body });
+
+    r = await post({ woche: 'letzte Woche', text: 'Ein ruhiger Zyklus.' }, TOKEN);
+    check('7c: falsche Wochenkennung 400 - und die Meldung nennt das erwartete Format',
+      r.status === 400 && /2026-KW36/.test(String(r.body && r.body.error)), { status: r.status, body: r.body });
+
+    // Zu lang wird ABGELEHNT, nicht gekuerzt: Der Absender ist eine Cron-Zeile, die von einem
+    // stillen Schnitt nie erfaehrt.
+    r = await post({ woche: '2026-KW36', text: 'A'.repeat(1401) }, TOKEN);
+    check('7d: zu langer Text 400 mit BEIDEN Zahlen, und nichts wird abgelegt',
+      r.status === 400 && /1401/.test(String(r.body && r.body.error)) && /1400/.test(String(r.body && r.body.error))
+        && !(liesDb().galaxy || {}).chronikAusgabe,
+      { status: r.status, body: r.body });
+
+    r = await post({ woche: '2026-KW36', text: '   \n  ' }, TOKEN);
+    check('7e: ein Text, von dem nach der Saeuberung nichts uebrig bleibt, wird abgelehnt',
+      r.status === 400 && !(liesDb().galaxy || {}).chronikAusgabe, { status: r.status, body: r.body });
+
+    r = await post({ woche: '2026-KW36', text: 'Die Woche blieb ruhig. <script>alert(1)</script> Kein Boss fiel.', modell: 'qwen3.5:4b' }, TOKEN);
+    const abgelegt = (liesDb().galaxy || {}).chronikAusgabe || {};
+    check('7f: gueltige Ausgabe wird abgelegt', r.status === 200 && r.body && r.body.ok === true && r.body.woche === '2026-KW36',
+      { status: r.status, body: r.body });
+    check('7g: spitze Klammern sind raus - die Sicherheit haengt nicht an der Anzeigestelle',
+      typeof abgelegt.text === 'string' && !abgelegt.text.includes('<') && !abgelegt.text.includes('>')
+        && abgelegt.text.includes('Die Woche blieb ruhig.'),
+      { text: abgelegt.text });
+    check('7h: die Antwort sagt, ob der Text ueberhaupt jemand sieht (aktiv)',
+      r.body && r.body.aktiv === false, { aktiv: r.body && r.body.aktiv });
+
+    // ---- 8: was aus db.galaxy an den Client geht ---------------------------------------------
+    // Befund beim Bau von C3: db.galaxy reicht alles ungefragt an jeden Client weiter, und C1 hat
+    // das Buch genau dort abgelegt - gemessen 81,7 KB je /api/galaxy bei vollem Deckel, alle zwei
+    // Minuten, fuer Daten, die kein Client benutzt.
+    const anna = await api.anmelden('anna');
+    let g = await api.j('/galaxy', { headers: api.auth(anna) });
+    check('8a: das Ereignisbuch geht NICHT an den Client', g.status === 200 && g.body && g.body.chronik === undefined,
+      { hatBuch: !!(g.body && g.body.chronik), eintraege: g.body && g.body.chronik && g.body.chronik.length });
+    check('8b: im ausgelieferten Stand (CHRONIK_AKTIV=false) sieht der Client auch keine Ausgabe',
+      g.body && g.body.chronikAusgabe === undefined, { ausgabe: g.body && g.body.chronikAusgabe });
+    check('8c: und der Rest der Galaxie kommt weiterhin an',
+      g.body && typeof g.body.npcEmpireStrength === 'number' && Array.isArray(g.body.news),
+      { keys: g.body && Object.keys(g.body).slice(0, 8) });
+    await stoppeServer();
+  }
+
+  // ---- 9: mit umgelegtem Schalter sieht der Client die Ausgabe -------------------------------
+  // Eine KOPIE von server.js im Repo-Verzeichnis - nur dort loest require('./mailer') auf.
+  {
+    const rohServer = fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8');
+    const schalter = /const CHRONIK_AKTIV = (true|false);/;
+    check('9-kopie: der Schalter ist auffindbar', schalter.test(rohServer), { ausgeliefert: (rohServer.match(schalter) || [])[1] });
+    const kopie = path.join(WURZEL, 'server.__chronik_c3_test.js');
+    fs.writeFileSync(kopie, rohServer.replace(schalter, 'const CHRONIK_AKTIV = true;'));
+    process.on('exit', () => { try { fs.unlinkSync(kopie); } catch (e) {} });
+    const vorher = process.env.KEPLER_BACKEND_SERVER;
+    try {
+      process.env.KEPLER_BACKEND_SERVER = kopie;
+      // starteServer liest QUELLE, das oben einmal ausgewertet wurde - deshalb hier direkt.
+      const srvAlt = srv;
+      srv = spawn(process.execPath, [kopie], { cwd: WURZEL, env: Object.assign({}, process.env, {
+        DB_FILE: dbPfad, PORT: String(PORT), JWT_SECRET: 'testsecret',
+        JWT_SECRET_FILE: path.join(tmpDir, 'jwt.txt'),
+        VAPID_PUBLIC_FILE: path.join(tmpDir, 'vapid-pub.txt'), VAPID_PRIVATE_FILE: path.join(tmpDir, 'vapid-priv.txt'),
+        AI_CORE_URL: 'http://127.0.0.1:9', BACKUP_PULL_TOKEN: TOKEN
+      }), stdio: ['ignore', 'pipe', 'pipe'] });
+      if (srvAlt && srvAlt !== srv) { try { srvAlt.kill(); } catch (e) {} }
+      const basis = 'http://127.0.0.1:' + PORT + '/api';
+      for (let i = 0; i < 80; i++) { try { const r = await fetch(basis + '/health'); if (r.ok) break; } catch (e) {} await warte(250); }
+      const jj = async (pfad, opt) => {
+        const r = await fetch(basis + pfad, opt); const tx = await r.text();
+        try { return { status: r.status, body: JSON.parse(tx) }; } catch (e) { return { status: r.status, body: tx.slice(0, 300) }; }
+      };
+      const tok = (await jj('/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'anna', password: 'test1234' }) })).body.token;
+      const g = await jj('/galaxy', { headers: { Authorization: 'Bearer ' + tok } });
+      check('9a: mit umgelegtem Schalter sieht der Client die AUSGABE',
+        g.body && g.body.chronikAusgabe && /Die Woche blieb ruhig/.test(g.body.chronikAusgabe.text)
+          && g.body.chronikAusgabe.woche === '2026-KW36' && typeof g.body.chronikAusgabe.erstellt === 'number',
+        { ausgabe: g.body && g.body.chronikAusgabe });
+      check('9b: das BUCH bleibt trotzdem draussen - der Schalter oeffnet nur die Ausgabe',
+        g.body && g.body.chronik === undefined, { hatBuch: !!(g.body && g.body.chronik) });
+      const h = await jj('/health');
+      check('9c: /api/health nennt die Ausgabe und ob sie wirksam ist',
+        h.body && h.body.chronik && h.body.chronik.ausgabe && h.body.chronik.ausgabe.woche === '2026-KW36' && h.body.chronik.aktiv === true,
+        { chronik: h.body && h.body.chronik });
+    } finally {
+      if (vorher === undefined) delete process.env.KEPLER_BACKEND_SERVER; else process.env.KEPLER_BACKEND_SERVER = vorher;
+      await stoppeServer();
+      try { fs.unlinkSync(kopie); } catch (e) {}
+    }
+  }
+
   console.log('');
   console.log(fail ? 'FEHLGESCHLAGEN' : 'Alles gruen.');
   process.exit(fail ? 1 : 0);

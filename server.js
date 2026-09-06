@@ -6316,9 +6316,52 @@ function chronikWeltbossGefallen(boss) {
   boss.chronikEintrag = eintrag.id;
   return eintrag;
 }
+/* ===== Etappe C3: die fertige Wochenausgabe ==================================================
+   Der M715q holt das Buch ab (C2), laesst das Modell EINEN Zeitungstext daraus schreiben und legt
+   ihn hier ab. Der Weg ist derselbe wie bei der Off-Site-Sicherung, nur andersherum - und deshalb
+   ist DIESE Route die einzige im Chronik-Bereich, die SCHREIBT: Sie traegt denselben Token und
+   dieselbe fail-closed-Pruefung.
+
+   NUR EINE AUSGABE, nicht eine Liste. Die Chronik ist eine Wochenzeitung; die Ausgabe der Vorwoche
+   ist Archiv, kein Spielinhalt. Eine Liste waere ein zweiter Deckel, den jemand pflegen muesste -
+   und sie ginge ueber galaxyFuerClient() an jeden Client.
+
+   DER TEXT KOMMT VON EINEM MODELL und wird jedem Spieler gezeigt. Der Token beweist, dass der
+   M715q ihn geschickt hat, nicht dass er harmlos ist: `chronikAusgabeText` nimmt deshalb nur
+   Zeichen, die in deutscher Prosa vorkommen, und wirft alles andere weg - insbesondere spitze
+   Klammern. Das Frontend darf den Text damit auch dann anzeigen, wenn es ihn je ohne escapeHtml
+   einsetzt; die Sicherheit haengt nicht an der Anzeigestelle. */
+const CHRONIK_AKTIV = false;      // wird im Frontend-PR umgelegt (Auslieferungsschutz, Hausregel)
+const CHRONIK_TEXT_MAX = 1400;    // der M715q deckelt bei 1200 - hier bleibt Luft, aber eine Grenze
+const CHRONIK_WOCHE = /^\d{4}-KW\d{1,2}$/;
+function chronikAusgabeText(roh) {
+  return String(roh == null ? '' : roh)
+    .replace(/[^A-Za-z0-9ÄÖÜäöüß .,;:!?%()\-–—'"„“\n]/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, CHRONIK_TEXT_MAX);
+}
+function chronikAusgabeSetzen(woche, text, modell) {
+  const g = loadOrInitGalaxy();
+  g.chronikAusgabe = { woche: String(woche), text, erstellt: Date.now(), modell: chronikText(modell) };
+  return g.chronikAusgabe;
+}
+// Was der Client sehen darf - und nur dann, wenn die Etappe ausgeliefert und nicht abgeschaltet ist.
+// `erstellt` reist mit: Ohne den Zeitpunkt kann das Frontend eine alte Ausgabe nicht als alt
+// erkennen und zeigt sie noch Wochen spaeter als "diese Woche".
+function chronikAusgabeFuerClient() {
+  if (!CHRONIK_AKTIV || notAusGesetzt('chronik')) return null;
+  const a = (db.galaxy && db.galaxy.chronikAusgabe) || null;
+  if (!a || !a.text) return null;
+  return { woche: a.woche, text: a.text, erstellt: a.erstellt };
+}
 function chronikHealth() {
   const liste = (db.galaxy && db.galaxy.chronik) || [];
-  return { eintraege: liste.length, letzterEintrag: liste.length ? liste[0].zeit : null, woche: chronikSeit(7).length };
+  const a = (db.galaxy && db.galaxy.chronikAusgabe) || null;
+  return { eintraege: liste.length, letzterEintrag: liste.length ? liste[0].zeit : null, woche: chronikSeit(7).length,
+           ausgabe: a ? { woche: a.woche, erstellt: a.erstellt, zeichen: (a.text || '').length } : null,
+           aktiv: CHRONIK_AKTIV && !notAusGesetzt('chronik') };
 }
 // Nie ein System zerstören/besetzen, in dem tatsächlich ein Spieler zuhause ist - gilt für ALLE
 // ortsgebundenen Ereignisse (nicht nur Supernova), damit kein Spieler den Eindruck bekommt, sein
@@ -7586,9 +7629,27 @@ setImmediate(takt('galaxyTick-start', galaxyTick));
 // jeden eingeloggten Client. Statt der Rohdaten bekommt jeder Aufrufer jetzt genau das, was seine
 // Anzeige braucht: den Stand, wie viele verschiedene Konten je Seite dahinterstehen, und was er
 // SELBST heute beigetragen hat.
+/* Was aus db.galaxy an den Client geht - und was NICHT.
+
+   BEFUND 06.09.2026, beim Bau von C3: `db.galaxy` reicht alles ungefragt an jeden Client weiter
+   (der Kommentar an db.notAus sagt das ausdruecklich) - und C1 hat das Ereignisbuch genau dort
+   abgelegt. Damit gingen bis zu 500 Roheintraege bei JEDEM /api/galaxy mit, das der Client alle
+   zwei Minuten holt. Gemessen an Eintraegen in der Form, die chronikVermerken schreibt: 81,7 KB je
+   Abruf, rund 2,4 MB je Spieler und Stunde - fuer Daten, die kein Client benutzt, auf einem
+   Raspberry Pi. Das Buch ist die Arbeitsgrundlage des M715q; der Spieler bekommt die fertige
+   Ausgabe, nicht die Zutaten.
+
+   Beides laeuft ueber dieselbe Stelle, damit es nicht auseinanderlaufen kann: `chronik` raus,
+   `chronikAusgabe` nur in der Client-Form (und nur bei ausgelieferter, nicht abgeschalteter
+   Etappe). Wer kuenftig etwas in db.galaxy legt, das nicht an alle darf, gehoert hierher. */
+function chronikAusClient(g) {
+  const { chronik, chronikAusgabe, ...rest } = g;
+  const ausgabe = chronikAusgabeFuerClient();
+  return ausgabe ? Object.assign(rest, { chronikAusgabe: ausgabe }) : rest;
+}
 function galaxyFuerClient(g, userId) {
   const rk = g.randkriege;
-  if (!rk || !Array.isArray(rk.fronten)) return g;
+  if (!rk || !Array.isArray(rk.fronten)) return chronikAusClient(g);
   const fronten = rk.fronten.map(f => ({
     a: f.a, b: f.b,
     systeme: (f.systeme || []).map(e => {
@@ -7621,7 +7682,7 @@ function galaxyFuerClient(g, userId) {
     wocheDeckel: RK_MARKEN_WOCHE,
     markeJePunkte: RK_MARKE_JE_PUNKTE
   };
-  return Object.assign({}, g, { randkriege: {
+  return Object.assign(chronikAusClient(g), { randkriege: {
     stand: rk.stand, fronten, meinTag, meineBasis, meinKonto,
     tagesBreite: RK_TAGESSTUFEN.reduce((a, st) => a + st[0], 0),
     nachschubZuletzt: (db.private[userId] && db.private[userId].__rkNachschubAt) || 0
@@ -16557,6 +16618,11 @@ const NOTAUS_NAMEN = {
   // bei den fuenf Spawns.
   angriffe: 'Angriffe werden angenommen (PvP, Festung, Nest, Konvoi, Vorposten)',
   hort: 'Der seltenste Expeditionsfund wird ausgewürfelt und in der Weltlage gemeldet',
+  // Zehnter Schalter (06.09.2026, C3): Die Wochenausgabe der Chronik ist ein MODELLTEXT, den jeder
+  // Spieler sieht. Steht der Schalter aus, bleibt die abgelegte Ausgabe liegen und wird nur nicht
+  // mehr ausgeliefert - der Rueckwaertsgang fuer einen Text, der sich als unpassend herausstellt,
+  // ohne Release und ohne dass der M715q etwas davon wissen muss.
+  chronik: 'Die Wochenausgabe der Galaxie-Chronik wird im Spiel gezeigt',
   // Neunter Schalter (04.09.2026, E1b): Jeder KI-Kampftext kostet den M715q rund 70 Sekunden, und
   // der bedient auch Social Hub. Faellt AI Core aus oder frisst die Warteschlange die Maschine,
   // kann der Betreiber hier abschalten, ohne einen Deploy - der Endpunkt antwortet dann 503, der
@@ -16584,6 +16650,42 @@ app.get('/api/chronik/abholen', offsiteRateLimit, (req, res) => {
   const fehler = offsiteTokenPruefen(req);
   if (fehler) return res.status(fehler.status).json({ error: fehler.error });
   res.json(chronikAntwort(req.query.tage));
+});
+/* Etappe C3: der M715q legt die fertige Wochenausgabe ab. Die einzige SCHREIBENDE Route des
+   Chronik-Bereichs, und die einzige Stelle, an der ein Modelltext in den Bestand kommt.
+
+   Drei Pruefungen, drei verschiedene Fragen - und jede meldet ihren eigenen Grund, statt sie zu
+   einem "ungueltige Anfrage" zusammenzufassen (Lektion 7): Der Token beantwortet "wer", die
+   Wochenkennung "wofuer", der gesaeuberte Text "was". Die Laenge des Empfangenen steht dabei, nie
+   der Wert. */
+app.post('/api/chronik/ausgabe', offsiteRateLimit, async (req, res) => {
+  const fehler = offsiteTokenPruefen(req);
+  if (fehler) return res.status(fehler.status).json({ error: fehler.error });
+  const woche = String((req.body && req.body.woche) || '').trim();
+  if (!CHRONIK_WOCHE.test(woche)) {
+    return res.status(400).json({ error: 'Wochenkennung fehlt oder passt nicht (erwartet "2026-KW36").' });
+  }
+  const roh = String((req.body && req.body.text) || '');
+  /* Zu lang wird ABGELEHNT, nicht abgeschnitten. Der erste Entwurf haengte hier ein zweites
+     express.json({limit:'32kb'}) davor - wirkungslos, weil der globale Parser (2 MB) den Body
+     langst geparst hat und express.json einen bereits geparsten ueberspringt. Ein Limit, das nur
+     wie eines aussieht, ist keines. Und stilles Kuerzen waere hier besonders schlecht: Der Absender
+     ist eine unbeaufsichtigte Cron-Zeile, die nie erfaehrt, dass ihre Ausgabe halbiert im Spiel
+     steht. Der Fehler nennt beide Zahlen, damit die Diagnose nicht geraten werden muss. */
+  if (roh.length > CHRONIK_TEXT_MAX) {
+    return res.status(400).json({ error: 'Text zu lang: ' + roh.length + ' Zeichen, erlaubt sind ' + CHRONIK_TEXT_MAX + '.' });
+  }
+  const text = chronikAusgabeText(roh);
+  if (!text) {
+    return res.status(400).json({ error: 'Kein Text (' + roh.length + ' Zeichen empfangen, nach der Saeuberung 0).' });
+  }
+  const ausgabe = chronikAusgabeSetzen(woche, text, (req.body && req.body.modell) || '');
+  await saveDb();
+  // `aktiv` ist die Antwort auf die Frage, die der M715q sonst nicht stellen kann: Der Text liegt,
+  // aber sieht ihn auch jemand? Ohne sie sieht eine noch nicht ausgelieferte Etappe fuer den
+  // Absender genauso aus wie eine laufende.
+  res.json({ ok: true, woche: ausgabe.woche, zeichen: text.length, gesaeubert: text.length < roh.trim().length,
+             aktiv: CHRONIK_AKTIV && !notAusGesetzt('chronik') });
 });
 
 app.get('/api/admin/schalter', authMiddleware, (req, res) => {
@@ -16622,6 +16724,7 @@ function spawnAktivImCode(name) {
      abgeschaltet oder nie ausgeliefert wurde; fuer 'hort' sagten sie dauerhaft 'nie ausgeliefert'. */
   if (name === 'hort') return HORT_BANNER_AKTIV;
   if (name === 'kampftext') return KAMPFTEXT_AKTIV;
+  if (name === 'chronik') return CHRONIK_AKTIV;
   return false;
 }
 

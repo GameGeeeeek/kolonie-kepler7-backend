@@ -62,16 +62,17 @@ function anfrage(methode, pfad, token, body) {
 }
 
 const NUTZER = 'standmelder';
+const VERKAEUFER = 'standmelderzwei';   // Testkonten nur mit Kleinbuchstaben (CLAUDE.md)
 const PASS = 'geheim-123';
 
-async function konto() {
-  await anfrage('POST', '/api/register', null, { username: NUTZER, password: PASS, email: 'sm@example.invalid' });
+async function konto(name) {
+  await anfrage('POST', '/api/register', null, { username: name, password: PASS, email: name + '@example.invalid' });
   await new Promise(r => setTimeout(r, 700));
   const db = JSON.parse(fs.readFileSync(process.env.DB_FILE, 'utf8'));
-  const u = db.users[NUTZER];
+  const u = db.users[name];
   const eintrag = Object.entries(db.verifyTokens || {}).find(([, v]) => u && v.userId === u.userId);
   if (eintrag) await anfrage('POST', '/api/verify-email', null, { token: eintrag[0] });
-  const login = await anfrage('POST', '/api/login', null, { username: NUTZER, password: PASS });
+  const login = await anfrage('POST', '/api/login', null, { username: name, password: PASS });
   return login.body && login.body.token;
 }
 
@@ -94,7 +95,7 @@ const stand = async (token) => {
 const nenntTakt = (t) => /10 Sekunden/.test(t || '');
 
 (async () => {
-  const token = await konto();
+  const token = await konto(NUTZER);
   check('0-vorab: Konto steht', !!token);
   await anfrage('PUT', '/api/storage/kepler7-save-v3', token, { value: JSON.stringify(save) });
   const vorher = await stand(token);
@@ -135,18 +136,34 @@ const nenntTakt = (t) => /10 Sekunden/.test(t || '');
   check('3b: die Ablehnung nennt den 10-Sekunden-Takt als moegliche Ursache', nenntTakt(mTxt), mTxt);
 
   // ---- 4) Modulboerse: kaufen ohne Kredite ------------------------------------------------
-  // Ohne fremdes Angebot antwortet die Route mit "Angebot nicht gefunden" - das ist eine
-  // ANDERE Ablehnung und wuerde nichts belegen. Der Kredit-Zweig wird deshalb nur geprueft,
-  // wenn ein Angebot existiert; sonst meldet der Test das ehrlich als uebersprungen.
+  /* HIER STAND EIN TEST, DER SICH IMMER SELBST UEBERSPRANG (Codex-Durchsicht 06.09.2026).
+     Er suchte ein fremdes Angebot ueber `l.sellerId !== undefined`. publicListing() liefert
+     sellerId aber BEWUSST nicht mit - nur `mine`. Das Praedikat war damit fuer JEDES Angebot
+     falsch, der Zweig lief IMMER in den "uebersprungen"-Ausgang, und der druckte eine gruene
+     Zeile. Die Begruendung daneben ("per Quelltext identisch zu 2") liess das begruendet
+     aussehen, war aber eine Ausrede fuer eine Pruefung, die nie stattfand.
+     Jetzt wird ein echtes fremdes Angebot ERZEUGT: zweites Konto, Modul im Inventar,
+     eingestellt - und ueber das ausgelieferte Feld `mine === false` ausgewaehlt. */
+  const tokenB = await konto(VERKAEUFER);
+  check('4-vorab: das zweite Konto steht', !!tokenB);
+  const saveB = { resources: {}, credits: 0, buildings: {}, research: {}, fleet: {}, colonies: {},
+    modules: { [MODUL]: 1 }, shipModules: {} };
+  await anfrage('PUT', '/api/storage/kepler7-save-v3', tokenB, { value: JSON.stringify(saveB) });
+  const eingestellt = await anfrage('POST', '/api/modulemarket/list', tokenB,
+    { isShip: false, instKey: MODUL, price: 2000 });
+  check('4-vorab2: das fremde Angebot steht wirklich in der Boerse',
+    eingestellt.status === 200 && eingestellt.body && eingestellt.body.ok,
+    { status: eingestellt.status, error: eingestellt.body && eingestellt.body.error });
+
   const boerse = await anfrage('GET', '/api/modulemarket', token, null);
-  const fremd = ((boerse.body && boerse.body.listings) || []).find(l => l.sellerId !== undefined);
-  if (fremd) {
-    const b = await anfrage('POST', '/api/modulemarket/buy', token, { id: fremd.id });
-    const bTxt = b.body && b.body.error;
-    check('4: der Modulkauf nennt den gesehenen Kreditstand', b.status === 400 && nenntTakt(bTxt), bTxt);
-  } else {
-    console.log('OK   - 4: uebersprungen - kein fremdes Angebot in der Boerse (der Zweig ist per Quelltext identisch zu 2)');
-  }
+  const fremd = ((boerse.body && boerse.body.listings) || []).find(l => l.mine === false);
+  check('4-vorab3: aus Sicht des ersten Kontos ist es ein FREMDES Angebot',
+    !!fremd, { listings: (boerse.body && boerse.body.listings) || [] });
+  const b = await anfrage('POST', '/api/modulemarket/buy', token, { id: fremd && fremd.id });
+  const bTxt = b.body && b.body.error;
+  check('4: der Modulkauf nennt den gesehenen Kreditstand UND den Preis',
+    b.status === 400 && !!bTxt && bTxt.includes(KREDITE.toLocaleString('de-DE'))
+      && bTxt.includes((2000).toLocaleString('de-DE')) && nenntTakt(bTxt), bTxt);
 
   // ---- 5) GEGENRICHTUNG: die Ablehnungen mutieren nichts ----------------------------------
   const nachher = await stand(token);
@@ -166,14 +183,24 @@ const nenntTakt = (t) => /10 Sekunden/.test(t || '');
   process.exit(fehl);
 })();
 
-/* GEGENPROBE, GEMESSEN am 05.09.2026 gegen origin/master (ea6e27e) vor dieser Aenderung:
+/* GEGENPROBE, GEMESSEN am 06.09.2026 gegen origin/master (ea6e27e):
    `git show origin/master:server.js > server.alt.js` im SELBEN Ordner (damit node_modules und
    require('./mailer') aufloesen), auf einem eigenen Port gestartet, danach wieder geloescht.
-   ES FALLEN GENAU VIER: 1b, 1c, 2b, 3b - die alten Meldungen lauten
+   ES FALLEN FUENF: 1b, 1c, 2b, 3b und 4 - die alten Meldungen lauten
      "Nicht genug energie zum Verkaufen."
      "Nicht genug Kredite."
      "Dieses Modul liegt nicht (mehr) in deinem Inventar. Ausgeruestete Module musst du erst abnehmen."
-   und nennen weder eine Zahl noch den Takt.
-   GRUEN bleiben dort 1a, 2a, 3-vorab, 3a, 5, 6a und 6b - Absicht: Die Ablehnungen selbst waren
-   nie falsch, nur ihre AUSKUNFT. 5 und 6 belegen zusaetzlich, dass diese Aenderung nichts
-   mutiert und den Hinweis nicht an gueltige Antworten haengt. */
+     "Nicht genug Kredite (2000 noetig)."
+   und nennen weder den gesehenen Stand noch den Takt.
+   GRUEN bleiben 1a, 2a, 3-vorab, 3a, die 4-vorab-Schritte, 5, 6a und 6b - Absicht: Die
+   Ablehnungen selbst waren nie falsch, nur ihre AUSKUNFT. 5 und 6 belegen zusaetzlich, dass
+   diese Aenderung nichts mutiert und den Hinweis nicht an gueltige Antworten haengt.
+
+   VORHER FIELEN NUR VIER. Pruefung 4 konnte gar nicht fallen: Sie suchte ein fremdes Angebot
+   ueber `l.sellerId !== undefined`, und publicListing() liefert sellerId bewusst nicht mit.
+   Das Praedikat war fuer JEDES Angebot falsch, der Zweig lief immer in den
+   "uebersprungen"-Ausgang - und der druckte eine gruene Zeile mit einer Begruendung, die das
+   begruendet aussehen liess. Gefunden hat es die Codex-Durchsicht, nicht der eigene Lauf.
+   Seit sie ein echtes fremdes Angebot ERZEUGT (zweites Konto, Modul im Inventar, eingestellt,
+   ueber `mine === false` ausgewaehlt), misst sie den Zweig wirklich - und faellt am alten
+   Stand mit. */

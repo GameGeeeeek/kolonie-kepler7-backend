@@ -265,8 +265,13 @@ const liesDb = () => JSON.parse(fs.readFileSync(dbPfad, 'utf8'));
       typeof abgelegt.text === 'string' && !abgelegt.text.includes('<') && !abgelegt.text.includes('>')
         && abgelegt.text.includes('Die Woche blieb ruhig.'),
       { text: abgelegt.text });
-    check('7h: die Antwort sagt, ob der Text ueberhaupt jemand sieht (aktiv)',
-      r.body && r.body.aktiv === false, { aktiv: r.body && r.body.aktiv });
+    // Der erwartete Wert wird aus dem ausgelieferten Schalter ABGELEITET, nicht eingetippt: Am
+    // 06.09.2026 kippte er von false auf true (Frontend-Release v8.697.0), und eine getippte
+    // Erwartung waere dabei zu einer Pruefung geworden, die man "repariert" statt liest. Gemessen
+    // wird die AUSSAGE - die Antwort muss sagen, was der Server wirklich tut.
+    const imCode = /const CHRONIK_AKTIV = true;/.test(fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8'));
+    check('7h: die Antwort sagt, ob der Text ueberhaupt jemand sieht (aktiv) - abgeleitet aus dem Schalter',
+      r.body && r.body.aktiv === imCode, { aktiv: r.body && r.body.aktiv, imCode });
 
     // ---- 8: was aus db.galaxy an den Client geht ---------------------------------------------
     // Befund beim Bau von C3: db.galaxy reicht alles ungefragt an jeden Client weiter, und C1 hat
@@ -276,22 +281,48 @@ const liesDb = () => JSON.parse(fs.readFileSync(dbPfad, 'utf8'));
     let g = await api.j('/galaxy', { headers: api.auth(anna) });
     check('8a: das Ereignisbuch geht NICHT an den Client', g.status === 200 && g.body && g.body.chronik === undefined,
       { hatBuch: !!(g.body && g.body.chronik), eintraege: g.body && g.body.chronik && g.body.chronik.length });
-    check('8b: im ausgelieferten Stand (CHRONIK_AKTIV=false) sieht der Client auch keine Ausgabe',
-      g.body && g.body.chronikAusgabe === undefined, { ausgabe: g.body && g.body.chronikAusgabe });
+    check('8b: im ausgelieferten Stand entscheidet der Schalter, ob die Ausgabe beim Client ankommt',
+      (g.body && g.body.chronikAusgabe !== undefined) === imCode,
+      { ausgabe: g.body && g.body.chronikAusgabe, imCode });
+    // Der AUS-Pfad wird jetzt BEWUSST erzeugt statt am ausgelieferten Zustand zu haengen: Der
+    // Notaus ist der Rueckwaertsgang, der auch bei umgelegtem Schalter greifen muss - und er ist
+    // die einzige Abschaltung, die ohne Release funktioniert. Genau dafuer gibt es ihn.
+    {
+      const admin8 = await api.anmelden('gamegeeeeek');
+      const s = await api.j('/admin/schalter', { method: 'POST', headers: api.auth(admin8),
+        body: JSON.stringify({ name: 'chronik', aus: true, grund: 'Test 8d' }) });
+      const g2 = await api.j('/galaxy', { headers: api.auth(anna) });
+      check('8d: mit gesetztem Notaus kommt die Ausgabe NICHT beim Client an - auch bei umgelegtem Schalter',
+        (s.status === 200 || !imCode) && g2.body && g2.body.chronikAusgabe === undefined,
+        { schalter: s.status, ausgabe: g2.body && g2.body.chronikAusgabe });
+      const h2 = await api.j('/health');
+      check('8e: ... und /api/health sagt das ebenfalls',
+        h2.body && h2.body.chronik && h2.body.chronik.aktiv === false, { chronik: h2.body && h2.body.chronik });
+      // Die abgelegte Ausgabe bleibt LIEGEN - der Notaus loescht nichts (Hausregel: Deckel und
+      // Schalter loeschen keine Daten).
+      check('8f: die abgelegte Ausgabe bleibt erhalten - der Notaus verbirgt sie nur',
+        !!(liesDb().galaxy || {}).chronikAusgabe, { ausgabe: (liesDb().galaxy || {}).chronikAusgabe });
+      await api.j('/admin/schalter', { method: 'POST', headers: api.auth(admin8),
+        body: JSON.stringify({ name: 'chronik', aus: false }) });
+    }
     check('8c: und der Rest der Galaxie kommt weiterhin an',
       g.body && typeof g.body.npcEmpireStrength === 'number' && Array.isArray(g.body.news),
       { keys: g.body && Object.keys(g.body).slice(0, 8) });
     await stoppeServer();
   }
 
-  // ---- 9: mit umgelegtem Schalter sieht der Client die Ausgabe -------------------------------
+  // ---- 9: die andere Stellung des Schalters ------------------------------------------------
+  // Gefahren wird die Stellung, die NICHT ausgeliefert ist - so ist immer BEIDE geprueft, egal
+  // welche gerade im Code steht. Am 06.09.2026 kippte die Auslieferung von false auf true; ohne
+  // diese Ableitung waere hier eine Pruefung entstanden, die dasselbe zweimal misst.
   // Eine KOPIE von server.js im Repo-Verzeichnis - nur dort loest require('./mailer') auf.
   {
     const rohServer = fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8');
     const schalter = /const CHRONIK_AKTIV = (true|false);/;
     check('9-kopie: der Schalter ist auffindbar', schalter.test(rohServer), { ausgeliefert: (rohServer.match(schalter) || [])[1] });
     const kopie = path.join(WURZEL, 'server.__chronik_c3_test.js');
-    fs.writeFileSync(kopie, rohServer.replace(schalter, 'const CHRONIK_AKTIV = true;'));
+    const ausgeliefert = (rohServer.match(schalter) || [])[1] === 'true';
+    fs.writeFileSync(kopie, rohServer.replace(schalter, 'const CHRONIK_AKTIV = ' + (!ausgeliefert) + ';'));
     process.on('exit', () => { try { fs.unlinkSync(kopie); } catch (e) {} });
     const vorher = process.env.KEPLER_BACKEND_SERVER;
     try {
@@ -314,16 +345,19 @@ const liesDb = () => JSON.parse(fs.readFileSync(dbPfad, 'utf8'));
       const tok = (await jj('/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: 'anna', password: 'test1234' }) })).body.token;
       const g = await jj('/galaxy', { headers: { Authorization: 'Bearer ' + tok } });
-      check('9a: mit umgelegtem Schalter sieht der Client die AUSGABE',
-        g.body && g.body.chronikAusgabe && /Die Woche blieb ruhig/.test(g.body.chronikAusgabe.text)
-          && g.body.chronikAusgabe.woche === '2026-KW36' && typeof g.body.chronikAusgabe.erstellt === 'number',
-        { ausgabe: g.body && g.body.chronikAusgabe });
-      check('9b: das BUCH bleibt trotzdem draussen - der Schalter oeffnet nur die Ausgabe',
+      const sichtbar = !!(g.body && g.body.chronikAusgabe);
+      check('9a: in der ANDEREN Schalterstellung kehrt sich die Sichtbarkeit um',
+        sichtbar === !ausgeliefert
+          && (!sichtbar || (/Die Woche blieb ruhig/.test(g.body.chronikAusgabe.text)
+              && g.body.chronikAusgabe.woche === '2026-KW36' && typeof g.body.chronikAusgabe.erstellt === 'number')),
+        { ausgeliefert, sichtbar, ausgabe: g.body && g.body.chronikAusgabe });
+      check('9b: das BUCH bleibt in BEIDEN Stellungen draussen - der Schalter oeffnet nur die Ausgabe',
         g.body && g.body.chronik === undefined, { hatBuch: !!(g.body && g.body.chronik) });
       const h = await jj('/health');
       check('9c: /api/health nennt die Ausgabe und ob sie wirksam ist',
-        h.body && h.body.chronik && h.body.chronik.ausgabe && h.body.chronik.ausgabe.woche === '2026-KW36' && h.body.chronik.aktiv === true,
-        { chronik: h.body && h.body.chronik });
+        h.body && h.body.chronik && h.body.chronik.ausgabe && h.body.chronik.ausgabe.woche === '2026-KW36'
+          && h.body.chronik.aktiv === !ausgeliefert,
+        { chronik: h.body && h.body.chronik, ausgeliefert });
     } finally {
       if (vorher === undefined) delete process.env.KEPLER_BACKEND_SERVER; else process.env.KEPLER_BACKEND_SERVER = vorher;
       await stoppeServer();

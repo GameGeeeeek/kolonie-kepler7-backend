@@ -1404,6 +1404,24 @@ ein zweites Mal. Der Frontend-Deploy wäre dann bis `DEPLOY_LOCK_STALE_MS` (11 M
 eine Marke `deployBeendetSich`: `handleTerminate` ist asynchron, und ein Rückruf zwischen
 Entscheidung und Exit hätte den frischen Marker sonst **verbraucht**.
 
+**Der Befund der Codex-Durchsicht – eine Regression im ersten Entwurf.** Die Marke wirkte zunächst
+nur im `exec`-Rückruf, also erst, wenn ein Lauf schon lief. `httpServer.close()` lässt aber bereits
+angenommene Anfragen zu Ende laufen, und eine davon erreicht `starteDeploy`, **nachdem** die Sperre
+des anderen Ziels entfernt wurde – sie ist frei, der Lauf startet ein **zweites `git` im selben
+Arbeitsbaum**. Genau die Kollision, gegen die die Sperre gebaut ist, und der Fingerabdruck der
+Ausfälle Nr. 1–12. Vor der Änderung hielt die liegengebliebene Sperre solche Anfragen auf: **Wer
+eine Sperre entfernt, muss die Abweisung selbst mitbringen.** Die Marke wird seither am **Eingang**
+von `starteDeploy` geprüft, vor `deploySperreNehmen`; vorgemerkt wird auf demselben Weg wie bei
+belegter Sperre, es geht also nichts verloren.
+
+**Und die Marke ist keine Einbahn-Sperre.** Sie hält jeden weiteren Deploy an – richtig, solange der
+Prozess auch geht. Scheitert `handleTerminate`, lebt er weiter (eine abgelehnte Zusage beendet
+diesen Server bewusst nicht, siehe `unhandledRejection`) und hätte **nie wieder** einen Deploy
+gemacht: ein lautloser Dauerausfall statt eines lauten Fehlschlags. Am Beenden hängt deshalb ein
+Fang, der die Marke zurücknimmt und den gescheiterten Neustart benennt. Benannte Grenze: Ein
+*hängendes* `handleTerminate` fängt das nicht – dann steht der Flush, und der Server hat größere
+Sorgen als einen Deploy; sichtbar bleibt es an `/api/health`.
+
 **Die BENANNTE Grenze:** Der Marker liegt in `DEPLOY_LOCK_DIR` (Vorgabe `/tmp`) und überlebt einen
 `docker restart` – ein *Neuerzeugen* des Containers nicht. Das ist keine neue Abhängigkeit: Der
 vorhandene `.pending`-Weg hängt seit dem 28.08.2026 an derselben Annahme, und `test_deploy_neustart`
@@ -1414,12 +1432,14 @@ Verzeichnis.
 to date" plus ein Kopieren gleicher Bytes). Ein gesparter Pull ist nichts wert gegen eine
 Auslieferung, die still ausbleibt.
 
-**Wächter:** `tests/test_deploy_neustart.js` Abschnitte 6–8. Gegenprobe gegen `origin/master`: es
-fallen 5 (`6`, `7-bau`, `8`, `8b`, `8c`); die fünf Prüfungen 7a–7e können dort nicht laufen, weil es
-die Funktion nicht gibt – **`7-bau` ist genau dafür der Anker und fällt laut**. Zusätzlich drei
-gezielte Sabotagen, jede trifft nur ihre eigene Prüfung: Vormerken nach `handleTerminate` → nur 6
-fällt (die Prüfung misst die *Reihenfolge*, nicht das Vorkommen); alle Ziele statt nur der fremden
-vormerken → 7c/7d/7e; die Sperre nicht entfernen → 7b.
+**Wächter:** `tests/test_deploy_neustart.js` Abschnitte 6–10, 45 statt 19 Prüfungen. Gegenprobe
+gegen `origin/master`: es fallen 11; die Prüfungen 7a–7g können dort nicht laufen, weil es die
+Funktion nicht gibt – **`7-bau` ist genau dafür der Anker und fällt laut**. Abschnitt 9 misst den
+Codex-Fall *ausgeführt*: `starteDeploy` wird geschnitten und mit gestellter Marke gefahren; die
+Sperre darf nicht genommen und kein `exec` gestartet werden, der Marker muss trotzdem liegen. Dazu
+vier gezielte Sabotagen, jede trifft nur ihre eigene Prüfung: Vormerken nach `handleTerminate` →
+nur 6 (sie misst die *Reihenfolge*, nicht das Vorkommen); alle Ziele statt nur der fremden
+vormerken → 7c/7d/7e; die Sperre nicht entfernen → 7b; die Eingangssperre entfernen → 9/9b/9c.
 
 **Nebenbefund, mitrepariert:** `tests/test_deploy_selbstheilung.js` war seit dem 05.09.2026 rot – 7
 von 22 Prüfungen, gemessen auch gegen `origin/master`, also nicht durch diese Änderung. Sein

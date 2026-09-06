@@ -10878,11 +10878,35 @@ function deploySelbstNeustart(repoName, dir) {
   console.log('Deploy-Webhook: geaenderter Code (' + geaendert.join(', ') + ') - dieser Prozess beendet sich, Docker startet ihn neu.');
   deployBeendetSich = true;
   deployAndereVormerken(repoName);
-  handleTerminate('DEPLOY-NEUSTART');
+  // Die Marke sperrt jeden weiteren Deploy - das ist richtig, solange der Prozess auch wirklich
+  // geht. Scheitert handleTerminate (eine abgelehnte Zusage beendet diesen Server bewusst NICHT,
+  // siehe den unhandledRejection-Handler), lebt er weiter UND haette nie wieder einen Deploy
+  // gemacht: ein lautloser Dauerausfall statt eines lauten Fehlschlags. Deshalb zurueck damit.
+  // Die benannte Grenze: Ein HAENGENDES handleTerminate faengt das nicht - dann steht der Flush,
+  // und der Server hat groessere Sorgen als einen Deploy. Sichtbar bleibt es an /api/health
+  // (uptimeSec laeuft weiter, checkout und commit stehen auseinander).
+  handleTerminate('DEPLOY-NEUSTART').catch((e) => {
+    deployBeendetSich = false;
+    console.error('Deploy-Webhook: der Selbst-Neustart ist gescheitert, der Prozess laeuft weiter - Deploys bleiben moeglich:', e && e.message);
+  });
   return true;
 }
 
 function starteDeploy(repoName, command, dir) {
+  // Waehrend des Selbst-Neustarts wird KEIN Lauf mehr gestartet, und diese Zeile muss VOR
+  // deploySperreNehmen stehen. Befund der Codex-Durchsicht zu #260, nachvollzogen: httpServer.close()
+  // laesst bereits angenommene Anfragen zu Ende laufen. Eine davon kaeme hier an, NACHDEM
+  // deployAndereVormerken die Sperre des anderen Ziels entfernt hat - sie waere frei, der Lauf
+  // startete ein ZWEITES `git` im selben Arbeitsbaum, und genau davor schuetzt die Sperre. Vor
+  // dieser Aenderung hielt die liegengebliebene Sperre solche Anfragen auf; wer sie entfernt, muss
+  // die Abweisung selbst mitbringen. Die Marke im Rueckruf weiter unten reicht dafuer NICHT: Sie
+  // wirkt erst, wenn ein Lauf schon laeuft.
+  // Verloren geht dabei nichts - vorgemerkt wird auf demselben Weg wie bei belegter Sperre.
+  if (deployBeendetSich) {
+    try { fs.writeFileSync(deployPfad(repoName, '.pending'), String(Date.now())); } catch (e) {}
+    console.log('Deploy-Webhook: der Prozess startet gerade neu - der Push fuer ' + repoName + ' wird beim Start nachgeholt.');
+    return;
+  }
   if (!deploySperreNehmen(repoName)) {
     // Nicht abweisen, sondern vormerken - sonst ginge ausgerechnet der Push verloren, der
     // waehrend eines laufenden Deploys ankommt (also der haeufigste Fall bei Push + Merge).

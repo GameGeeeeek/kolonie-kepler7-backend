@@ -89,7 +89,9 @@ verloren, und GitHub wiederholt eine gescheiterte Zustellung nicht von selbst. G
 11:12:39Z und 11:12:44Z, Neustart um 11:12:44Z, live blieb eine Version zurück.
 
 Seither merkt der Prozess vor dem Beenden jedes **andere** Ziel vor (`deployAndereVormerken`) und
-holt es beim Start nach. **Trotzdem gilt weiter:** Nach einem Doppel-Merge die ausgelieferte Version
+holt es beim Start nach. Ab derselben Sekunde startet er **keinen** Deploy mehr (`deployBeendetSich`
+am Eingang von `starteDeploy`) – sonst liefe ein zweites `git` im selben Arbeitsbaum, sobald die
+Sperre entfernt ist. Vorgemerkt wird stattdessen; verloren geht nichts. **Trotzdem gilt weiter:** Nach einem Doppel-Merge die ausgelieferte Version
 messen, nicht das Log lesen. Und wer es entspannt haben will, lässt zwischen beiden Merges eine
 Minute – der Nachhol-Weg ist die Sicherung, nicht der Normalfall.
 

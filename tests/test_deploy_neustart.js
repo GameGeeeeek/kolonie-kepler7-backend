@@ -31,6 +31,10 @@
 //      FREMDE Ziel, dessen liegengebliebene Sperre weg, das eigene unangetastet
 //   8  waehrend des Neustarts wird kein Marker mehr VERBRAUCHT (sonst stirbt der Nachhol-Lauf
 //      mit dem Prozess, und der Marker ist trotzdem weg)
+//   9  waehrend des Neustarts wird auch kein Lauf mehr GESTARTET - sonst liefe ein zweites `git`
+//      im selben Arbeitsbaum, sobald die Sperre entfernt ist (Codex-Befund zu #260)
+//  10  und die Marke ist keine Einbahn-Sperre: scheitert das Beenden, lebt der Prozess weiter
+//      und muss weiter deployen koennen
 //
 // ANLASS FUER 6-8, gemessen am 06.09.2026: Backend-Merge 11:12:39Z, Frontend-Merge 11:12:44Z,
 // Neustart 11:12:44Z. Der Frontend-Webhook fiel in die Auszeit, live blieb eine Version zurueck,
@@ -106,7 +110,11 @@ function lauf(schalter, eigenes, dir, geaendert) {
   gefaelscht.exit = (code) => { gerufen.push('process.exit(' + code + ')'); ablauf.push('exit'); };
   try {
     const fn = bau(schalter, eigenes, path, () => geaendert,
-      (grund) => { gerufen.push(grund); ablauf.push('beenden:' + grund); },
+      // handleTerminate ist in server.js `async` und liefert damit IMMER eine Zusage; der Aufrufer
+      // haengt seit #260 ein .catch daran. Ein Stellvertreter, der undefined liefert, stirbt dort
+      // an "Cannot read properties of undefined" - gemessen. Ein Stellvertreter muss den
+      // Pruefling spiegeln, sonst misst der Test sich selbst.
+      (grund) => { gerufen.push(grund); ablauf.push('beenden:' + grund); return Promise.resolve(); },
       STILL, gefaelscht,
       (name) => ablauf.push('vormerken:' + name),
       false);
@@ -331,6 +339,71 @@ const EIGEN = '/app', FREMD = '/deploy/kolonie-kepler7';
   const vormerk = rumpf.indexOf('deployAndereVormerken(');
   check('8c: der Neustart setzt die Marke, bevor er vormerkt',
     gesetzt > 0 && vormerk > gesetzt, { gesetzt, vormerk });
+}
+
+// ---- 9) Waehrend des Neustarts startet starteDeploy KEINEN Lauf mehr ---------------------------
+// Befund der Codex-Durchsicht zu #260, und er war berechtigt: httpServer.close() laesst bereits
+// angenommene Anfragen zu Ende laufen. Eine davon erreicht starteDeploy, NACHDEM
+// deployAndereVormerken die Sperre des anderen Ziels entfernt hat - sie ist frei, der Lauf startet
+// ein ZWEITES `git` im selben Arbeitsbaum. Genau die Kollision, gegen die die Sperre gebaut ist,
+// und vor dieser Aenderung hielt die liegengebliebene Sperre solche Anfragen auf.
+// GEMESSEN, nicht gegreppt: starteDeploy wird geschnitten und mit beobachteten Bindungen gefahren.
+{
+  const teil = schneide('starteDeploy');
+  check('9-bau: starteDeploy laesst sich schneiden', !!teil, { laenge: teil ? teil.length : 0 });
+  if (teil) {
+    const raum = fs.mkdtempSync(path.join(os.tmpdir(), 'kepler7-starte-'));
+    // Ein Lauf mit gestellter Marke. Alles, was starteDeploy anfassen koennte, wird beobachtet.
+    function starte(beendetSich) {
+      const gesehen = [];
+      const pfad = (r, e) => path.join(raum, beendetSich + '-' + r + e);
+      const fn = new Function('deployBeendetSich', 'fs', 'deployPfad', 'console', 'deploySperreNehmen',
+        'deploySperreFreigeben', 'deployAufraeumen', 'exec', 'DEPLOY_TIMEOUT_MS', 'deployAlarm', 'deploySelbstNeustart',
+        teil + '\nreturn starteDeploy;')(
+        beendetSich, fs, pfad, STILL,
+        (r) => { gesehen.push('sperreNehmen:' + r); return true; },
+        (r) => gesehen.push('sperreFrei:' + r),
+        () => [],
+        (cmd) => { gesehen.push('exec'); },     // kein Rueckruf: der Lauf haenge, wie ein echtes git
+        1000,
+        () => gesehen.push('alarm'),
+        () => gesehen.push('neustart'));
+      fn('kolonie-kepler7', 'git pull', '/deploy/kolonie-kepler7');
+      return { gesehen, marker: fs.existsSync(pfad('kolonie-kepler7', '.pending')) };
+    }
+
+    const imNeustart = starte(true);
+    check('9: waehrend des Neustarts wird die Sperre gar nicht erst genommen',
+      !imNeustart.gesehen.some(z => z.startsWith('sperreNehmen')), imNeustart.gesehen);
+    check('9b: und kein zweites `git` gestartet (das ist der eigentliche Schaden)',
+      !imNeustart.gesehen.includes('exec'), imNeustart.gesehen);
+    check('9c: der Push geht trotzdem nicht verloren - er ist vorgemerkt',
+      imNeustart.marker === true, imNeustart);
+
+    // Die Gegenrichtung, und ohne sie belegt 9/9b nichts: Ein starteDeploy, das NIE etwas tut,
+    // waere oben genauso gruen.
+    const normal = starte(false);
+    check('9d: ohne Neustart nimmt derselbe Aufruf die Sperre und startet den Lauf',
+      normal.gesehen.includes('sperreNehmen:kolonie-kepler7') && normal.gesehen.includes('exec'), normal.gesehen);
+    check('9e: und merkt dann nichts vor (der Marker ist die AUSNAHME, nicht der Normalfall)',
+      normal.marker === false, normal);
+    fs.rmSync(raum, { recursive: true, force: true });
+  }
+}
+
+// ---- 10) Die Marke ist keine Einbahn-Sperre ---------------------------------------------------
+// Sie sperrt jeden weiteren Deploy. Das ist richtig, solange der Prozess auch geht - scheitert
+// handleTerminate, lebt er weiter (eine abgelehnte Zusage beendet diesen Server bewusst nicht) und
+// haette nie wieder einen Deploy gemacht: ein lautloser Dauerausfall. Geprueft wird die
+// VERDRAHTUNG, nicht die Wirkung: Der Ruecknahme-Zweig laeuft nur in einem Prozess, der eigentlich
+// sterben sollte - den kann dieser Test nicht nachstellen, ohne mehr zu faelschen als er misst.
+{
+  const rumpf = schneide('deploySelbstNeustart') || '';
+  check('10: am Beenden haengt ein Fang', /handleTerminate\([^)]*\)\s*\.catch\s*\(/.test(rumpf));
+  const nachCatch = rumpf.slice(rumpf.indexOf('.catch'));
+  check('10b: und er nimmt die Marke zurueck', /deployBeendetSich\s*=\s*false/.test(nachCatch),
+    { ausschnitt: nachCatch.slice(0, 120).replace(/\s+/g, ' ') });
+  check('10c: und sagt, dass der Neustart gescheitert ist', /console\.error/.test(nachCatch));
 }
 
 console.log('\n' + (okZahl + failZahl) + ' Pruefungen, ' + failZahl + ' fehlgeschlagen');

@@ -10813,6 +10813,61 @@ function deployAufraeumen(repoName, dir) {
 // anfasst. Er gehoert deshalb gemeinsam mit dem Container-Umbau gesetzt, nie vorher.
 const DEPLOY_SELBST_NEUSTART = process.env.DEPLOY_SELBST_NEUSTART === '1';
 
+// ---- Der Selbst-Neustart nahm den Deploy des ANDEREN Repos mit (06.09.2026) -------------------
+// GEMESSEN, nicht vermutet: Backend-PR #259 wurde um 11:12:39Z gemergt, Frontend-PR #593 um
+// 11:12:44Z - fuenf Sekunden Abstand. Der Backend-Deploy lief durch und beendete diesen Prozess um
+// 11:12:44Z, und der Frontend-Webhook klopfte in genau dieser Sekunde an. Live blieb 8.694.0 aus,
+// waehrend es gemergt war; das Log meldete fuer das Backend "erfolgreich". Aufgefallen ist es nur,
+// weil jemand die Versionsnummer live nachgesehen hat - wieder die Form, vor der der Kommentar
+// oben schon einmal warnt: Der Ausfall betraf nur EINES der beiden Ziele und sah daneben wie
+// Normalbetrieb aus.
+//
+// Die vorhandene Vormerkung deckte das NICHT ab, und das ist kein Versehen, sondern ihr Zuschnitt:
+// Sie greift, wenn sich zwei Pushs DESSELBEN Repos ueberholen (Sperre belegt -> .pending). Die
+// Sperre des Frontends war frei, es gab also nichts vorzumerken - der Prozess verschwand einfach
+// unter dem fremden Deploy weg. Die Annahme im Kommentar oben ("der naechste Lauf holt alles mit")
+// stimmt fuer das Backend, wo staendig gepusht wird. Fuer das Frontend ist der naechste Lauf der
+// naechste Frontend-Push, und der kann Tage entfernt sein.
+//
+// Zwei Faelle, eine Gegenmassnahme:
+//   (a) Der Frontend-Deploy LAEUFT schon - sein `git` ist ein Kind dieses Prozesses und stirbt
+//       mit dem Container.
+//   (b) Der Frontend-Push kommt erst WAEHREND der rund sieben Sekunden Auszeit an - er bekommt
+//       einen 502, und GitHub wiederholt eine gescheiterte Zustellung nicht von selbst.
+// Beide loest derselbe Marker, weil er VOR dem Beenden geschrieben und NACH dem Start gelesen
+// wird: Der Nachhol-Pull faellt damit zeitlich HINTER die Auszeit und nimmt auch (b) mit.
+//
+// Der Preis ist ein ueberfluessiger Frontend-Pull je Backend-Deploy (meist "Already up to date"
+// plus ein Kopieren gleicher Bytes). Bewusst so: Ein gesparter Pull ist nichts wert gegen eine
+// Auslieferung, die still ausbleibt.
+//
+// Die Sperre wird ZUERST entfernt, und das ist kein Aufraeumen, sondern Teil der Reparatur: Sie
+// ist eine DATEI und ueberlebt den Prozess, ihr `git` nicht. Bliebe sie liegen, liefe der
+// Nachhol-Lauf beim Start in genau diese Sperre, merkte sich erneut vor - und niemand laese den
+// Marker ein zweites Mal. Der Frontend-Deploy waere dann bis DEPLOY_LOCK_STALE_MS (11 Minuten)
+// tot, und jeder Push in dieser Zeit ginge ebenfalls verloren.
+let deployBeendetSich = false;
+// BEIDE Dateizugriffe sind EINZELN gefasst, und das ist kein Stil: Diese Funktion steht unmittelbar
+// VOR handleTerminate. Wuerfe sie, bliebe der Neustart aus - der Fix haette dann einen selten
+// verlorenen Frontend-Deploy gegen ein Backend getauscht, das nach JEDEM Deploy auf altem Code
+// stehen bleibt. Eine Sicherung darf nicht schlimmer scheitern koennen als der Fehler, den sie
+// verhindert. Ein zusaetzlicher Fang um den ganzen Rumpf stand hier kurz und ist wieder weg: Er
+// haette nur einen werfenden console.error abgedeckt - den es nicht gibt -, und selbst den nicht,
+// weil sein eigener Handler denselben Kanal benutzt. Gemessen, nicht ueberlegt (Pruefung 7h fiel
+// mit Fang genauso wie ohne).
+function deployAndereVormerken(eigenerRepoName) {
+  for (const repoName of Object.keys(DEPLOY_TARGETS)) {
+    if (repoName === eigenerRepoName) continue;
+    try { fs.unlinkSync(deployPfad(repoName, '.lock')); } catch (e) {}
+    try {
+      fs.writeFileSync(deployPfad(repoName, '.pending'), String(Date.now()));
+      console.log('Deploy-Webhook: dieser Prozess startet neu - der Deploy fuer ' + repoName + ' wird beim Start nachgeholt.');
+    } catch (e) {
+      console.error('Deploy-Webhook: Vormerkung fuer ' + repoName + ' nicht schreibbar:', e.message);
+    }
+  }
+}
+
 function deploySelbstNeustart(repoName, dir) {
   if (!DEPLOY_SELBST_NEUSTART) return false;
   // Nur das EIGENE Verzeichnis: Der Frontend-Deploy zieht ein fremdes Repo, dessen Dateien mit
@@ -10821,11 +10876,37 @@ function deploySelbstNeustart(repoName, dir) {
   const geaendert = geaenderteModule();
   if (!geaendert.length) return false;   // z.B. ein reiner Doku-Commit: kein Neustart
   console.log('Deploy-Webhook: geaenderter Code (' + geaendert.join(', ') + ') - dieser Prozess beendet sich, Docker startet ihn neu.');
-  handleTerminate('DEPLOY-NEUSTART');
+  deployBeendetSich = true;
+  deployAndereVormerken(repoName);
+  // Die Marke sperrt jeden weiteren Deploy - das ist richtig, solange der Prozess auch wirklich
+  // geht. Scheitert handleTerminate (eine abgelehnte Zusage beendet diesen Server bewusst NICHT,
+  // siehe den unhandledRejection-Handler), lebt er weiter UND haette nie wieder einen Deploy
+  // gemacht: ein lautloser Dauerausfall statt eines lauten Fehlschlags. Deshalb zurueck damit.
+  // Die benannte Grenze: Ein HAENGENDES handleTerminate faengt das nicht - dann steht der Flush,
+  // und der Server hat groessere Sorgen als einen Deploy. Sichtbar bleibt es an /api/health
+  // (uptimeSec laeuft weiter, checkout und commit stehen auseinander).
+  handleTerminate('DEPLOY-NEUSTART').catch((e) => {
+    deployBeendetSich = false;
+    console.error('Deploy-Webhook: der Selbst-Neustart ist gescheitert, der Prozess laeuft weiter - Deploys bleiben moeglich:', e && e.message);
+  });
   return true;
 }
 
 function starteDeploy(repoName, command, dir) {
+  // Waehrend des Selbst-Neustarts wird KEIN Lauf mehr gestartet, und diese Zeile muss VOR
+  // deploySperreNehmen stehen. Befund der Codex-Durchsicht zu #260, nachvollzogen: httpServer.close()
+  // laesst bereits angenommene Anfragen zu Ende laufen. Eine davon kaeme hier an, NACHDEM
+  // deployAndereVormerken die Sperre des anderen Ziels entfernt hat - sie waere frei, der Lauf
+  // startete ein ZWEITES `git` im selben Arbeitsbaum, und genau davor schuetzt die Sperre. Vor
+  // dieser Aenderung hielt die liegengebliebene Sperre solche Anfragen auf; wer sie entfernt, muss
+  // die Abweisung selbst mitbringen. Die Marke im Rueckruf weiter unten reicht dafuer NICHT: Sie
+  // wirkt erst, wenn ein Lauf schon laeuft.
+  // Verloren geht dabei nichts - vorgemerkt wird auf demselben Weg wie bei belegter Sperre.
+  if (deployBeendetSich) {
+    try { fs.writeFileSync(deployPfad(repoName, '.pending'), String(Date.now())); } catch (e) {}
+    console.log('Deploy-Webhook: der Prozess startet gerade neu - der Push fuer ' + repoName + ' wird beim Start nachgeholt.');
+    return;
+  }
   if (!deploySperreNehmen(repoName)) {
     // Nicht abweisen, sondern vormerken - sonst ginge ausgerechnet der Push verloren, der
     // waehrend eines laufenden Deploys ankommt (also der haeufigste Fall bei Push + Merge).
@@ -10854,6 +10935,11 @@ function starteDeploy(repoName, command, dir) {
       deployAlarm(repoName, err.message, stderr);
     }
     else console.log('Deploy-Webhook erfolgreich für ' + repoName + ':', stdout.trim() || '(keine Änderungen)');
+    // WAEHREND des Selbst-Neustarts nichts mehr nachholen: handleTerminate ist async, dieser
+    // Rueckruf kann zwischen der Entscheidung und dem Exit noch feuern. Er wuerde den gerade
+    // geschriebenen Marker VERBRAUCHEN und einen Lauf starten, der mit dem Prozess stirbt -
+    // also genau die Luecke wieder aufreissen, die der Marker schliesst.
+    if (deployBeendetSich) return;
     const pending = deployPfad(repoName, '.pending');
     if (fs.existsSync(pending)) {
       try { fs.unlinkSync(pending); } catch (e) {}

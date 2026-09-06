@@ -11,8 +11,10 @@ alle Messungen stehen unten unter „nodemon fliegt aus dem Deploy-Pfad".
    dieselbe Ursache: `git pull` schrieb `server.js`, nodemon startete daraufhin neu und räumte den
    laufenden git-Prozess mit ab, bevor er den Ref gesetzt hatte. Der Container läuft seither **ohne
    nodemon**; der Server beendet sich nach einem erfolgreichen Pull selbst, Docker startet ihn neu.
-   Zwei gleichzeitige Webhooks fängt die Sperre aus #147 ab (der zweite wird vorgemerkt und
-   nachgeholt). **Die Parallelität war nie die Ursache** – sie hat die Häufigkeit erhöht.
+   Zwei gleichzeitige Webhooks **desselben Repos** fängt die Sperre aus #147 ab (der zweite wird
+   vorgemerkt und nachgeholt); dass der Selbst-Neustart den Deploy des **anderen** Repos mitnahm,
+   war eine eigene Lücke und ist seit dem 06.09.2026 geschlossen (Ausfall Nr. 14).
+   **Die Parallelität war nie die Ursache** – sie hat die Häufigkeit erhöht.
 2. **Ein Code-Deploy kostet rund 7 Sekunden 502**, gemessen im Sekundentakt. Ein Commit ohne
    `.js`/`.json`-Änderung startet gar nichts neu – dann laufen `commit` und `checkout` in
    `/api/health` auseinander, und das ist KORREKT, keine Störung.
@@ -78,6 +80,23 @@ curl -s https://gamegeeeeek.de/version.txt      # gegen: git show origin/main:ve
 
 Ausfall Nr. 13 in `docs/deploy-historie.md` – drei Spielversionen lagen dadurch gemergt, aber nicht
 ausgeliefert.
+
+### Die zweite Falle: Backend und Frontend im Abstand von Sekunden mergen (06.09.2026)
+
+Der Frontend-Deploy läuft **im Backend-Container**. Ein Backend-Merge beendet diesen Prozess (rund
+sieben Sekunden 502) – ein Frontend-Webhook, der in dieses Fenster fällt, ging bis zum 06.09.2026
+verloren, und GitHub wiederholt eine gescheiterte Zustellung nicht von selbst. Gemessen: Merges um
+11:12:39Z und 11:12:44Z, Neustart um 11:12:44Z, live blieb eine Version zurück.
+
+Seither merkt der Prozess vor dem Beenden jedes **andere** Ziel vor (`deployAndereVormerken`) und
+holt es beim Start nach. Ab derselben Sekunde startet er **keinen** Deploy mehr (`deployBeendetSich`
+am Eingang von `starteDeploy`) – sonst liefe ein zweites `git` im selben Arbeitsbaum, sobald die
+Sperre entfernt ist. Vorgemerkt wird stattdessen; verloren geht nichts. **Trotzdem gilt weiter:** Nach einem Doppel-Merge die ausgelieferte Version
+messen, nicht das Log lesen. Und wer es entspannt haben will, lässt zwischen beiden Merges eine
+Minute – der Nachhol-Weg ist die Sicherung, nicht der Normalfall.
+
+Kommt ein **drittes** Ziel in `DEPLOY_TARGETS` dazu, ist nichts zu tun: Die Vormerkung läuft über
+die Liste, nicht über eine gepflegte Kopie davon.
 
 ## Diagnose in drei Schritten (Kurzfassung, 01.09.2026)
 

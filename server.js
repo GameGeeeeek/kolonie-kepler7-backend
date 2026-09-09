@@ -5501,6 +5501,24 @@ app.post('/api/analytics/event', authMiddleware, (req, res) => {
 // 24h (Stunden-Auflösung, siehe oben), 7d/30d (Tages-Auflösung wie bisher) und all (alles, was noch
 // nicht bereinigt wurde, faktisch bis zu 60 Tage zurück). "granularity" im Response sagt dem Frontend,
 // ob "label" eine Stunde oder ein Datum ist, ohne dass es range erneut selbst auswerten müsste.
+/* --- Spielerzahl fuer die Kopfzeile des Betreibers (09.09.2026, Wunsch Sascha) ---------------
+   BEWUSST EINE EIGENE, WINZIGE ROUTE und nicht ein Feld in /api/admin/lage: Die Kopfzeile frischt
+   regelmaessig auf, und `lage` laeuft ueber JEDEN Spielstand (spielstandZusammenfassung je Konto).
+   Diese hier zaehlt nur und liest keinen einzigen Spielstand.
+   „ONLINE" IST DIE VORHANDENE NAEHERUNG, nicht eine zweite: `userIsOnline` misst den
+   lastSeen-Zeitstempel der Bestenliste gegen REMINDER_ONLINE_THRESHOLD_MS (zwei Minuten). Der
+   Client schreibt ihn bei jedem Speichern, im offenen Tab also alle zehn Sekunden. Eine zweite
+   Definition daneben waere genau die Kopie-Familie, die spaeter auseinanderlaeuft - und die
+   Kopfzeile zeigte dann eine andere Zahl als jede andere Stelle, die „online" sagt.
+   DIE SPERRE STEHT HIER, nicht im Frontend: Ein Abzeichen, das der Client nur versteckt, ist keine
+   Rechtepruefung. Wer die Route ohne Admin-Konto ruft, bekommt 403. */
+app.get('/api/admin/spielerzahl', authMiddleware, (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
+  const alle = Object.values(db.users).filter(Boolean);
+  let online = 0;
+  for (const u of alle) if (userIsOnline(u.userId)) online++;
+  res.json({ online, registriert: alle.length, schwelleMs: REMINDER_ONLINE_THRESHOLD_MS });
+});
 app.get('/api/admin/analytics', authMiddleware, (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: 'Kein Admin-Zugriff.' });
   const range = ['24h', '7d', '30d', 'all'].includes(req.query.range) ? req.query.range : '7d';

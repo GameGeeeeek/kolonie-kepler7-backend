@@ -6,7 +6,7 @@ unter `docs/` (Übersicht am Ende). Wer einen Bereich anfasst, liest vorher dess
 
 ## Projekt in 30 Sekunden
 
-- Node.js/Express-Backend für Kolonie Kepler-7. Eine Datei `server.js` (107 Routen), dazu `mailer.js`.
+- Node.js/Express-Backend für Kolonie Kepler-7. Eine Datei `server.js` (rund 180 Routen, Stand 11.09.2026), dazu `mailer.js`.
 - Läuft als Docker-Container `kepler7-backend` auf einem Raspberry Pi 4 (CasaOS, Portainer-Stack).
 - „Datenbank" ist eine JSON-Datei (`db.json`): `db.users`, `db.private[userId]` (Spielstand, klientenautoritativ),
   `db.shared` (Allianzen, Markt, Chat, Weltboss), `db.galaxy` (Nester, Konvois, NPC-Stärke), `db.notAus`, `db.bonusCodes`.

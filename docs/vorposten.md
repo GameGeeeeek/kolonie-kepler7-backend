@@ -690,6 +690,42 @@ Der Endpunkt prüft jetzt selbst (`if (!VP_ENDPROJEKTE_AKTIV && vpIstEndprojekt(
 
 Wächter: `tests/test_vorposten_endprojekte_http.js` (Port 3259).
 
+### Umgelegt am 11.09.2026
+
+`VP_ENDPROJEKTE_AKTIV = true` (Frontend-Paket vom selben Tag). Die Frontend-Hälfte war zum
+größeren Teil schon seit dem 07.09.2026 im Spiel — Projektfenster mit Grund je Endprojekt, das
+Sternendock am Griff des Lagers samt Buchung der Schiffe in die Flotte, die Dock-Zeile an der
+Station — und wurde am 11.09.2026 nachgemessen (Skill `anzeigestellen`). Es fehlten vier Stellen:
+die **Wirkung** der fertigen Endprojekte an der Stationstafel (für jeden Betrachter, wie Sets —
+und ob sie *ruht*, weil die Ausrichtung nicht passt; gelesen wird `projektBoni`, nicht die
+Definition), der **Sperrfeuer-Aufschlag in der Angriffsvorschau** (sie nannte für jede Station
+„6–45 % Verluste", auch mit Leitstand), die **Dominanz** (`dominiert` reiste zu jedem Client und
+wurde von keinem gelesen — jetzt Stationstafel, Kartenzeichen und rechte Leiste) und der
+Hilfetext. Wächter im Frontend-Repo: `tests/test_vorposten_endprojekte.js`.
+
+Der HTTP-Wächter hier erzwingt beide Schalterstellungen seit jeher selbst (Aus-Lauf 1a–1a4,
+An-Lauf ab 1b) und hat durch das Umlegen nichts verloren. Neu ist nur `0d`: Sie hält fest, dass
+der Schalter nicht zurückfällt — dieselbe Richtungsumkehr wie `0c` bei den Modul-Sets.
+
+**Ein Nachbar-Test fiel aber — und das war ein Test, der seine Voraussetzung vom Prüfling bezog.**
+`test_vorposten_lager_http.js` 5b pinnte in seinem Aus-Lauf nur `VP_LAGER_AKTIV = false` und
+erwartete vom Abhol-Endpunkt 404 `inaktiv`. Der Endpunkt lehnt seit Audit-Befund 4 aber nur ab,
+wenn **beide** Schalter liegen (mit Endprojekten an und Lager aus produzierte das Dock sonst
+Kreuzer, die niemand abholen kann) — und den zweiten Schalter nahm der Test stillschweigend aus
+dem ausgelieferten Quelltext mit. Nach dem Umlegen kam 400 „leer" statt 404. Der Aus-Lauf pinnt
+jetzt beide Schalter ausdrücklich, und `5c` misst die Kopplung selbst: Lager aus, Endprojekte an
+→ der Griff bleibt offen. Gegenprobe `griff` (Endpunkt wieder allein am Lager-Schalter) lässt genau
+`5c` fallen. Dieselbe Fehlerklasse wie bei den Modul-Sets (`ausQuelle`/`anQuelle`), nur einen Test
+weiter — ein Schalter, der umgelegt wird, muss in **jedem** Test gesucht werden, der ihn nicht
+selbst setzt, nicht nur im eigenen.
+
+**Reihenfolge: Backend zuerst.** Ein alter Client sieht bis zum Frontend-Merge nichts Falsches:
+`projektMoeglich` nennt jetzt die Endprojekte, und das Fenster zeigt sie seit dem 07.09.2026 mit
+Grund und Wirkung; den `vorposten-lager`-Reward mit `schiffe` bucht er seit demselben Tag;
+`dominiert` und `projektBoni` ignoriert er still. Einzige Lücke: Seine Angriffsvorschau nennt
+gegen einen Sperrfeuerleitstand weiter „6–45 %" — um acht Punkte zu niedrig, aber kein Bruch, und
+der Bericht danach zeigt die echten Verluste.
+
 ## Sieben Befunde aus dem Audit der Etappen V4–V6 (04.09.2026)
 
 Vor dem Merge haben sechs unabhängige Prüfer die noch nicht ausgelieferten Etappen durchgesehen.

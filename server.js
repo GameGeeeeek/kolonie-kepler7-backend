@@ -13676,8 +13676,15 @@ const VP_ALLIANZ_GARNISON_ANTEIL = 0.5;
    zusammen die Entscheidung sind, welchen Zweig man auf der Endstufe haelt.
    DAS STERNENDOCK TICKT NICHT (wie das Lager): Was bereitliegt, wird beim Abholen aus der
    verstrichenen Zeit gerechnet. Ein Kreuzer je 24 Stunden, hoechstens sieben gestapelt - dieselbe
-   Groessenordnung wie beim Lager, also eine Beigabe und kein Ersatz fuer die eigene Werft. */
-const VP_ENDPROJEKTE_AKTIV = false;
+   Groessenordnung wie beim Lager, also eine Beigabe und kein Ersatz fuer die eigene Werft.
+   UMGELEGT AM 11.09.2026 (Frontend-Paket vom selben Tag). Die Frontend-Haelfte war zum groesseren
+   Teil schon seit dem 07.09.2026 im Spiel (Projektfenster mit Grund je Endprojekt, das Sternendock
+   am Griff des Lagers samt Buchung der Schiffe, die Dock-Zeile an der Station); nachgemessen
+   fehlten die WIRKUNG der Endprojekte an der Stationstafel, der Sperrfeuer-Aufschlag in der
+   Angriffsvorschau, die Dominanz und der Hilfetext - alle vier stehen seit dem 11.09.2026
+   (Waechter dort: tests/test_vorposten_endprojekte.js). Reihenfolge: Backend zuerst; ein alter
+   Client sieht bis zum Frontend-Merge nichts Falsches (Details in docs/vorposten.md). */
+const VP_ENDPROJEKTE_AKTIV = true;   // umgelegt am 11.09.2026
 const VP_DOCK_STUNDEN = 24;
 const VP_DOCK_MAX = 7;
 const VP_DOCK_SCHIFF = 'cruisers';

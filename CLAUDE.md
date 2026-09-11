@@ -122,6 +122,7 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/ki-kampfberichte.md` | Etappe E1a: Prompt-Zuschnitt, Wahrheits-Sperren, Warteschlange, `KAMPFTEXT_AKTIV` |
 | `docs/galaxie-chronik.md` | C1: das Ereignisbuch `db.galaxy.chronik` (feste Felder je Art, Deckel mit Wochenschutz, Admin- und Abhol-Route) |
 | `docs/galaxie-ziel.md` | Feature A: das gemeinsame Wochenziel `db.galaxy.galaxieZiel` (Rotation, Zielhöhe, Hooks in den vier Angriffsrouten, Tagesdeckel, Abrechnung mit Reward `galaxie-ziel`, Notaus `galaxieziel`) |
+| `docs/auftragsbuch.md` | Feature B: Saison-Auftragsbuch – Taten am Nutzerobjekt, 20 Stufen, Tagesdeckel, lazy Saisonwechsel, Notaus `auftragsbuch` |
 
 Der vollständige frühere Text dieser Datei liegt in der Git-Historie vor dem 01.09.2026.
 

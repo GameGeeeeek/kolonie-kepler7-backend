@@ -102,3 +102,24 @@ dass sich etwas geändert hat; die zweite, dass es der Fänger ist.
 **Die Notbremse steckt in der Messvorrichtung**, nicht nur im Prüfling: Ist der Server tot — der
 Fall, den dieser Test misst —, wirft jedes `fetch`. Ohne den Fänger in `j()` brach der Lauf gegen
 den alten Stand nach drei von fünfzehn Prüfungen ab, statt rot zu werden.
+
+### Betriebsdashboard: Zustände aus tatsächlichen Messungen
+
+`/api/health` ergänzt `operationsHealthVersion: 1`. Der bestehende `ok`-Wert bleibt
+kompatibel; das Dashboard wertet zusätzlich `checks` aus. `database` prüft alle
+30 Sekunden die Lesbarkeit und JSON-Struktur von `DB_FILE`. Ein fehlgeschlagener
+Start-Ladevorgang bleibt als Fehler sichtbar. `simulation` verlangt einen
+fehlerfreien Galaxie-Takt innerhalb von 18 Minuten (Intervall: 15 Minuten).
+`persistence` verlangt einen tatsächlich erfolgreichen atomaren Schreibvorgang
+innerhalb von sechs Minuten; Schreibfehler werden sofort gemeldet. Vor einer
+ersten bestätigten Messung steht `null`, danach bei Fehler oder Überalterung `false`.
+
+`players` zählt verschiedene gültig authentifizierte Konten mit einer Anfrage in
+den letzten fünf Minuten. Die kurzlebige Zuordnung bleibt nur im Arbeitsspeicher;
+der Endpunkt liefert ausschließlich die Gesamtzahl. `maintenance.active` bedeutet
+ein aktuell laufendes angekündigtes Wartungsfenster oder eine aktive Angriffspause,
+keine pauschale Sperre aller Spielrouten. `maintenance.mode` benennt die Grundlage.
+
+Prüfungen: `node --test tests/test_operations_health*.js`, außerdem Serverstart und
+`tests/test_betriebsnetz_http.js`. Die HTTP-Gegenprobe gegen den vorherigen Server
+muss an der fehlenden versionierten Zustandsantwort scheitern.

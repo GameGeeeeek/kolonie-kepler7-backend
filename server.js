@@ -4993,6 +4993,7 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: false, looted: Object.keys(stolen).length > 0 }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     kampfVerlaufVermerken(findUserById(req.userId), { rolle: 'angriff', gegner: targetUser ? targetUser.username : null, ziel: standortFelder.targetPlanet || 'home', erfolg: true, angriff: attackPower, verteidigung: defensePower, beute: Object.keys(stolen).length });
     kampfVerlaufVermerken(targetUser, { rolle: 'verteidigung', gegner: req.username, ziel: standortFelder.targetPlanet || 'home', erfolg: false, angriff: attackPower, verteidigung: defensePower, beute: Object.keys(stolen).length });
+    auftragsbuchTat(req.userId, 'angriff');   // Saison-Auftragsbuch: der gefuehrte Angriff zaehlt, egal wie er ausging
     await saveDb();
     return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
   } else {
@@ -5054,6 +5055,8 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: true, looted: false }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     kampfVerlaufVermerken(findUserById(req.userId), { rolle: 'angriff', gegner: targetUser ? targetUser.username : null, ziel: standortFelder.targetPlanet || 'home', erfolg: false, angriff: attackPower, verteidigung: defensePower, beute: 0 });
     kampfVerlaufVermerken(targetUser, { rolle: 'verteidigung', gegner: req.username, ziel: standortFelder.targetPlanet || 'home', erfolg: true, angriff: attackPower, verteidigung: defensePower, beute: 0 });
+    auftragsbuchTat(req.userId, 'angriff');   // Saison-Auftragsbuch: beide Seiten haben gekaempft ...
+    auftragsbuchTat(targetUserId, 'abwehr');  // ... und der Verteidiger hat serverseitig gewonnen
     await saveDb();
     return res.json({ success: false, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
   }
@@ -7956,6 +7959,7 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
 
   market[resource] = priceAfter;
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+  auftragsbuchTat(req.userId, 'markt');   // Saison-Auftragsbuch: nur ein Handel, der zustande kam
   saveDb();
 
   // Das Restkontingent reist in JEDER Antwort mit (auch beim Kauf, dort nur informativ) - das
@@ -8330,6 +8334,7 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
       if (loseNow > 0) { fleetObj[k] = Math.max(0, (fleetObj[k] || 0) - loseNow); lostShips[k] = loseNow; }
     }
     save.battlePoints = (save.battlePoints || 0) + 3 + bLevel;
+    auftragsbuchTat(req.userId, 'weltboss');   // Saison-Auftragsbuch: nur ein Schlag, der den Boss trifft
   }
 
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
@@ -12928,6 +12933,7 @@ app.post('/api/konvoi/angriff', authMiddleware, async (req, res) => {
     if (weg > 0) eigeneVerluste[typ] = weg;
   }
   const meinAnteil = erg.anteile[req.userId] || 0;
+  auftragsbuchTat(req.userId, 'konvoi');   // Saison-Auftragsbuch: der Schlag ist ausgefuehrt
   console.log('[konvoi-angriff] userId=' + req.userId + ' ziel=' + zielId + ' sys=' + ziel.sys +
     ' schaden=' + erg.schaden + ' lp=' + (erg.gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax);
   await saveDb();
@@ -13016,6 +13022,7 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
   }
   db.shared[astFeldKey(sysId)] = feld;
 
+  auftragsbuchTat(req.userId, 'festung');   // Saison-Auftragsbuch: der Schlag ist ausgefuehrt
   console.log('[festung-angriff] userId=' + req.userId + ' sys=' + sysId + ' stufe=' + erg.stufeName +
     ' ziel=' + erg.ziel + ' rolle=' + erg.rollenFaktor.toFixed(2) +
     ' kernschaden=' + erg.schaden + ' teilschaden=' + erg.teilSchaden + (erg.zerstoert ? ' ZERSTOERT:' + erg.zerstoert : '') +
@@ -13356,6 +13363,7 @@ app.post('/api/alien/nest-angriff', authMiddleware, async (req, res) => {
   const { schaden, gefallen, trifftSchwaeche, schwarmGefallen, mitgerissen } = erg;
   const meinAnteil = erg.anteile[req.userId] || 0;
   const teilnehmer = erg.teilnehmer;
+  auftragsbuchTat(req.userId, 'nest');   // Saison-Auftragsbuch: der Schlag ist ausgefuehrt
   console.log('[nest-angriff] userId=' + req.userId + ' nest=' + nestId + ' volk=' + nest.volk +
     ' stufe=' + (erg.stufe === null ? 'gefallen' : erg.stufe) + ' schwaeche=' + trifftSchwaeche + ' schaden=' + schaden +
     ' lp=' + (gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax +
@@ -15572,6 +15580,7 @@ app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
     }
   } catch (e) { console.warn('[vorposten-angriff] Push fehlgeschlagen:', e.message); }
 
+  auftragsbuchTat(req.userId, 'vorposten');   // Saison-Auftragsbuch: der Schlag ist ausgefuehrt
   console.log('[vorposten-angriff] userId=' + req.userId + ' sys=' + sys + ' kraft=' + Math.round(kraft) + ' verteidigung=' + erg.verteidigung +
     ' schaden=' + erg.schaden + ' lp=' + (erg.gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax);
   await saveDb();
@@ -16386,6 +16395,165 @@ app.get('/api/admin/supporters', authMiddleware, (req, res) => {
   liste.sort((a, b) => Math.max(b.vergebenBis, b.gespendetBis) - Math.max(a.vergebenBis, a.gespendetBis));
   res.json({ supporters: liste.slice(0, 200), laufzeiten: SUPPORTER_GRANT_DAYS });
 });
+/* ===== Saison-Auftragsbuch (11.09.2026, Feature B aus der Sieben-Features-Analyse) ===============
+
+   WAS ES IST: Ein Monatsfortschritt aus TATEN, die der Server selbst beobachtet hat. Jede Tat gibt
+   Punkte, zwanzig Stufen zahlen Kredite, Modulfragmente und Sternenstaub, die letzte traegt einen
+   Titel. Nichts davon kommt aus dem Spielstand: Gezaehlt wird NUR im Erfolgspfad einer Route, die
+   den Kampf oder Handel serverseitig aufgeloest hat - derselbe Gedanke wie beim Sternenstaub
+   (Kommentarblock ueber STAUB_ANMELDUNG). Der Zustand liegt am NUTZEROBJEKT (`user.auftragsbuch`),
+   nicht in db.private: Ein Spielstand-PUT kann ihn nicht anfassen (dieselbe Entscheidung wie bei
+   user.staub, user.marktTag und user.bonusCodes).
+
+   WO GEZAEHLT WIRD - und wo bewusst nicht:
+     angriff    /api/attack, beide Ausgaenge (der Angreifer hat gekaempft, egal wie es ausging).
+                NICHT bei Schild (403) und keinem 400/404 - da hat kein Kampf stattgefunden.
+     abwehr     /api/attack, Abwehrzweig, dem VERTEIDIGER - er konnte den Kampf weder ausloesen
+                noch beeinflussen, genau deshalb taugt er als Quelle.
+     festung / nest / konvoi / vorposten  der jeweilige Einzelschlag, nachdem *SchlagAusfuehren
+                gelaufen ist. Die "verpasst"-Antworten (Ziel weg, weitergezogen) stehen davor.
+     weltboss   /api/worldboss/resolve, nur wenn der Schlag den Boss TRIFFT - nicht bei Abklingzeit
+                und nicht bei arrivedTooLate (beides zahlt die 50 Trostkredite, aber trifft nichts).
+     markt      /api/market/trade, nur der Erfolgspfad (jede Ablehnung kehrt vorher um).
+
+   TAGESDECKEL je Art (UTC-Tag, derselbe Schluessel wie beim Sternenstaub): Zwei abgesprochene Konten,
+   die sich abwechselnd angreifen, fuellen so hoechstens 5 Angriffe + 3 Abwehren am Tag - die 2310
+   Punkte der Endstufe verlangen Vielfalt ueber den ganzen Monat, nicht eine Schleife.
+
+   SAISONWECHSEL LAZY, ohne Tick: Beim ersten Kontakt in einem neuen Monat (Tat, GET oder POST) werden
+   die erreichten, nicht abgeholten Stufen der ALTEN Saison eingereiht und das Buch neu angelegt. Wer
+   im ganzen Monat nicht vorbeikommt, bekommt sie beim naechsten Besuch - nichts verfaellt.
+
+   SCHALTER: `auftragsbuch` in NOTAUS_NAMEN, im Code AUFTRAGSBUCH_AKTIV. Er gattert Zaehlung, Auszahlung
+   UND beide Routen (404 mit inaktiv:true, der Client blendet die Box dann ersatzlos aus). Das Backend
+   geht VOR dem Frontend live: Bis dahin sieht ein alter Client nichts - er kennt die Routen nicht,
+   und ein Reward vom Typ 'auftragsbuch' entsteht nur durch POST /abholen (den nur der neue Client
+   ruft) oder durch einen Saisonwechsel (naechster: Monatsanfang). */
+const AUFTRAGSBUCH_AKTIV = true;   // 11.09.2026, Feature B - zusammen mit dem Frontend-PR ausgeliefert
+// art -> Name, Punkte je Tat, hoechstens gezaehlte Taten je UTC-Tag. Reihenfolge = Anzeige im Client.
+const AUFTRAGSBUCH_TATEN = {
+  angriff:   { name: 'Spielerangriff geführt', punkte: 10, tagesDeckel: 5 },
+  abwehr:    { name: 'Angriff abgewehrt',      punkte: 8,  tagesDeckel: 3 },
+  festung:   { name: 'Festung angegriffen',    punkte: 8,  tagesDeckel: 6 },
+  nest:      { name: 'Nest angegriffen',       punkte: 8,  tagesDeckel: 6 },
+  konvoi:    { name: 'Konvoi überfallen',      punkte: 8,  tagesDeckel: 6 },
+  weltboss:  { name: 'Weltboss getroffen',     punkte: 6,  tagesDeckel: 8 },
+  vorposten: { name: 'Vorposten angegriffen',  punkte: 8,  tagesDeckel: 6 },
+  markt:     { name: 'Handel am Markt',        punkte: 2,  tagesDeckel: 10 }
+};
+// Die vier Meilensteine tragen Sternenstaub und Fragmente, die Endstufe den Titel. Der Titel steht
+// nur INFORMATIV im Reward - vergeben wird er vom Client (state.seasonTitles), wie der Saison-Liga-Titel.
+const AUFTRAGSBUCH_MEILENSTEINE = {
+  5:  { staub: 5,  fragmente: 2 },
+  10: { staub: 8,  fragmente: 4 },
+  15: { staub: 12, fragmente: 6 },
+  20: { staub: 20, fragmente: 10, titel: 'Chronist der Saison' }
+};
+// Zwanzig Stufen. Kredite steigen von 100 auf 600, in Zehnerschritten gerundet, damit die Zahl im
+// Client lesbar bleibt; die Schwellen sind die des Vertrags (Abstaende wachsen um 10 je Stufe).
+const AUFTRAGSBUCH_STUFEN = [25, 60, 100, 150, 210, 280, 360, 450, 550, 660, 780, 910, 1050, 1200, 1360, 1530, 1710, 1900, 2100, 2310]
+  .map((ab, i) => ({
+    stufe: i + 1, ab,
+    belohnung: Object.assign({ credits: 100 + Math.round(500 * i / 19 / 10) * 10 }, AUFTRAGSBUCH_MEILENSTEINE[i + 1] || {})
+  }));
+function auftragsbuchSaison(zeit) { return new Date(zeit || Date.now()).toISOString().slice(0, 7); }   // 'YYYY-MM', UTC
+function auftragsbuchSaisonEnde(saison) {
+  const [j, m] = String(saison).split('-').map(Number);
+  return Date.UTC(j, m, 1);   // Monat ist 1-basiert -> Index m ist der NAECHSTE Monat, Tag 1, 00:00 UTC
+}
+function auftragsbuchNeu(saison) { return { saison, punkte: 0, taten: {}, tag: { datum: null, zaehler: {} }, abgeholt: [] }; }
+function auftragsbuchErreicht(b) { return AUFTRAGSBUCH_STUFEN.filter(s => (b.punkte || 0) >= s.ab).map(s => s.stufe); }
+function auftragsbuchOffen(b) { return auftragsbuchErreicht(b).filter(n => b.abgeholt.indexOf(n) < 0); }
+// EINE Stelle fuer die Auszahlung einer Stufe - der Abhol-Knopf und der Saisonwechsel laufen beide
+// hierdurch. Staub bucht der Server selbst (staubGutschreiben), im Reward reist die Zahl nur zur
+// Anzeige mit; Kredite und Fragmente bucht der Client beim Abholen (claimPendingRewards).
+function auftragsbuchStufeAuszahlen(user, b, stufenNr) {
+  const st = AUFTRAGSBUCH_STUFEN[stufenNr - 1];
+  if (!st || b.abgeholt.indexOf(stufenNr) !== -1) return false;
+  b.abgeholt.push(stufenNr);
+  if (st.belohnung.staub) staubGutschreiben(staubKonto(user), st.belohnung.staub);
+  pushPendingReward(user.userId, Object.assign({ type: 'auftragsbuch', saison: b.saison, stufe: stufenNr }, st.belohnung));
+  return true;
+}
+function auftragsbuchSaisonAbschliessen(user, b) {
+  const stufen = auftragsbuchOffen(b);
+  for (const n of stufen) auftragsbuchStufeAuszahlen(user, b, n);
+  return stufen;
+}
+// Das Buch der LAUFENDEN Saison. Liegt ein aelteres, wird es zuerst abgeschlossen (siehe oben).
+// Rueckgabe [buch, gewechselt] - `gewechselt` sagt dem Aufrufer, dass etwas zu persistieren ist,
+// auch wenn er selbst nur gelesen hat (GET).
+function auftragsbuchVon(user) {
+  const saison = auftragsbuchSaison();
+  let b = user.auftragsbuch;
+  let gewechselt = false;
+  if (!b || typeof b !== 'object' || b.saison !== saison) {
+    if (b && typeof b === 'object' && b.saison && Array.isArray(b.abgeholt)) auftragsbuchSaisonAbschliessen(user, b);
+    b = user.auftragsbuch = auftragsbuchNeu(saison);
+    gewechselt = true;
+  }
+  if (!b.taten || typeof b.taten !== 'object') b.taten = {};
+  if (!b.tag || typeof b.tag !== 'object') b.tag = { datum: null, zaehler: {} };
+  if (!b.tag.zaehler || typeof b.tag.zaehler !== 'object') b.tag.zaehler = {};
+  if (!Array.isArray(b.abgeholt)) b.abgeholt = [];
+  if (!(b.punkte >= 0)) b.punkte = 0;
+  return [b, gewechselt];
+}
+// DER HOOK. Steht in jeder Route im Erfolgspfad, unmittelbar vor deren saveDb() - die Route
+// persistiert also mit. Rueckgabe true = gezaehlt, false = Deckel erreicht, Schalter aus oder
+// Konto unbekannt. Darf nie werfen: Ein Fehler hier darf keinen Kampf zum 500er machen.
+function auftragsbuchTat(userId, art) {
+  if (!spawnAktiv('auftragsbuch')) return false;
+  const def = AUFTRAGSBUCH_TATEN[art];
+  if (!def) return false;
+  const user = findUserById(userId);
+  if (!user) return false;
+  const [b] = auftragsbuchVon(user);
+  const heute = staubTagesschluessel();
+  if (b.tag.datum !== heute) b.tag = { datum: heute, zaehler: {} };
+  if ((b.tag.zaehler[art] || 0) >= def.tagesDeckel) return false;
+  b.tag.zaehler[art] = (b.tag.zaehler[art] || 0) + 1;
+  b.taten[art] = (b.taten[art] || 0) + 1;
+  b.punkte += def.punkte;
+  return true;
+}
+function auftragsbuchAntwort(b) {
+  const erreicht = auftragsbuchErreicht(b);
+  const heute = staubTagesschluessel();
+  const zaehler = (b.tag && b.tag.datum === heute && b.tag.zaehler) || {};
+  return {
+    aktiv: true, saison: b.saison, endetAm: auftragsbuchSaisonEnde(b.saison),
+    punkte: b.punkte, taten: b.taten,
+    stufen: AUFTRAGSBUCH_STUFEN.map(s => ({
+      stufe: s.stufe, ab: s.ab, belohnung: s.belohnung,
+      erreicht: erreicht.indexOf(s.stufe) !== -1, abgeholt: b.abgeholt.indexOf(s.stufe) !== -1
+    })),
+    katalog: Object.keys(AUFTRAGSBUCH_TATEN).map(art => ({
+      art, name: AUFTRAGSBUCH_TATEN[art].name, punkte: AUFTRAGSBUCH_TATEN[art].punkte,
+      tagesDeckel: AUFTRAGSBUCH_TATEN[art].tagesDeckel, heute: zaehler[art] || 0
+    }))
+  };
+}
+app.get('/api/auftragsbuch', authMiddleware, (req, res) => {
+  if (!spawnAktiv('auftragsbuch')) return res.status(404).json({ error: 'Das Auftragsbuch ist nicht aktiv.', inaktiv: true });
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+  const [b, gewechselt] = auftragsbuchVon(user);
+  // Eine GET-Route schreibt nur, wenn der Saisonwechsel wirklich etwas veraendert hat.
+  if (gewechselt) saveDb();
+  res.json(auftragsbuchAntwort(b));
+});
+app.post('/api/auftragsbuch/abholen', authMiddleware, async (req, res) => {
+  if (!spawnAktiv('auftragsbuch')) return res.status(404).json({ error: 'Das Auftragsbuch ist nicht aktiv.', inaktiv: true });
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+  const [b, gewechselt] = auftragsbuchVon(user);
+  const offen = auftragsbuchOffen(b);
+  for (const n of offen) auftragsbuchStufeAuszahlen(user, b, n);
+  if (offen.length || gewechselt) await saveDb();
+  res.json({ ok: true, abgeholt: offen });
+});
+
 /* ===== Bonuscodes (21.08.2026, Auftrag Sascha) ==================================================
    "ich will ab und zu mal bonuscodes posten wo die spieler kleine geschenke bekommen die codes
    sollen aber nur eine gewisse gueltigkeit haben also max 1 mal pro account einloesbar und nur
@@ -16645,7 +16813,10 @@ const NOTAUS_NAMEN = {
   // der bedient auch Social Hub. Faellt AI Core aus oder frisst die Warteschlange die Maschine,
   // kann der Betreiber hier abschalten, ohne einen Deploy - der Endpunkt antwortet dann 503, der
   // Client laesst die Sektion still weg (ein fehlender Text ist per Konzept kein Fehler).
-  kampftext: 'KI-Kampfberichte werden beim M715q bestellt'
+  kampftext: 'KI-Kampfberichte werden beim M715q bestellt',
+  // Elfter Schalter (11.09.2026, Feature B): Zaehlung UND Auszahlung UND beide Routen des
+  // Saison-Auftragsbuchs. Steht er aus, antworten die Routen 404 und der Client laesst die Box weg.
+  auftragsbuch: 'Das Saison-Auftragsbuch zählt Taten und zahlt Stufen aus'
 };
 const ANGRIFFE_PAUSE_TEXT = 'Angriffe sind gerade pausiert (Wartung) – bitte in ein paar Minuten noch einmal.';
 function notAusGesetzt(name) {
@@ -16743,6 +16914,7 @@ function spawnAktivImCode(name) {
   if (name === 'hort') return HORT_BANNER_AKTIV;
   if (name === 'kampftext') return KAMPFTEXT_AKTIV;
   if (name === 'chronik') return CHRONIK_AKTIV;
+  if (name === 'auftragsbuch') return AUFTRAGSBUCH_AKTIV;
   return false;
 }
 

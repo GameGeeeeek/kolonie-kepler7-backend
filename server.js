@@ -1527,6 +1527,9 @@ function checkAllianceKeyPermission(req, key, isWrite) {
     // Berechtigungsprüfung - jeder eingeloggte Client konnte per direktem API-Aufruf für eine
     // beliebige fremde Allianz einen Krieg erklären/beenden, unabhängig von der eigenen Rolle.
     if (!isWrite) return null; // Lesen bleibt offen (Kriegsliste ist für alle sichtbar)
+    // Feature C (11.09.2026): Steht der Schalter, schreibt NUR der Server (POST /api/allianzkrieg/erklaeren
+    // bzw. /frieden). Der Zweig darunter ist der alte Weg und bleibt fuer den Schalter-aus-Fall byte-gleich.
+    if (ALLIANZKRIEG_SERVER_AKTIV) return ALLIANZKRIEG_SPERRTEXT;
     if (isAdmin) return null; // Admin verwaltet die Kriegsliste der eigenen Allianz direkt
     // declareWar()/makePeace() im Frontend tragen einen Krieg GEGENSEITIG in beide Kriegslisten ein -
     // der Admin der bekriegenden/befriedenden Allianz schreibt dafür auch in die FREMDE Kriegsliste
@@ -1546,12 +1549,23 @@ function checkAllianceKeyPermission(req, key, isWrite) {
     // gebunden), aber aus Konsistenz zu den übrigen Allianz-Ressourcen gehärtet (13.07.2026) - nur
     // echte Mitglieder der Allianz dürfen schreiben, warcontrib zusätzlich nur den eigenen Beitrag.
     if (!isWrite) return null;
+    // Feature C (11.09.2026): An diesem Wert haengt seit #4 eine Kredit-Praemie - "rein kosmetisch" (Kommentar
+    // oben) stimmte schon lange nicht mehr. Bei Schalter an vergibt die Punkte ausschliesslich der Server
+    // (allianzkriegWerten in /api/attack und /api/vorposten/angriff); LESEN bleibt fuer das Kriegspanel offen.
+    if (ALLIANZKRIEG_SERVER_AKTIV) return ALLIANZKRIEG_SPERRTEXT;
     if (!myRole) return 'Nur Mitglieder dieser Allianz dürfen Kriegspunkte eintragen.';
     if (rest.startsWith('warcontrib:')) {
       const parts = rest.split(':'); // warcontrib:<enemyTag>:<playerId>
       const targetId = parts[2];
       if (targetId && targetId !== req.userId) return 'Du kannst nur deinen eigenen Kriegsbeitrag eintragen.';
     }
+    return null;
+  }
+  if (rest.startsWith('warmeta:')) {
+    // Das Zeitfenster eines Krieges. Bis Feature C (11.09.2026) OHNE Regel - jeder eingeloggte Client konnte
+    // jedes endsAt setzen und damit einen fremden Krieg vorzeitig abrechnen lassen. Bei Schalter an schreibt
+    // es nur der Server; bei Schalter aus bleibt es wie bisher offen (Rueckfall-Zeile am Ende der Funktion).
+    if (isWrite && ALLIANZKRIEG_SERVER_AKTIV) return ALLIANZKRIEG_SPERRTEXT;
     return null;
   }
   if (rest === 'raid' || rest.startsWith('raidjoin:')) {
@@ -5056,15 +5070,19 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
       }
     }
 
+    // Allianzkrieg (Feature C): Punkte vergibt der Server - hier, wo er den Kampf ausgewuerfelt hat. Im
+    // Sockel nichts: Ein Nadelstich soll keinen Krieg entscheiden (dieselbe Regel, die der Client bei
+    // addWarScore hatte). Das Ergebnis reist in Antwort und beide Berichte, damit beide Seiten es sehen.
+    const allianzkrieg = ertragStufe === 'sockel' ? null : allianzkriegWerten(req.userId, req.username, targetUserId, targetUser ? targetUser.username : '', 'sieg');
     const angreiferBerichtId = addReport(req.userId, {
       type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt', ...racheZielId, ...racheFelder,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
-      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder, ...(allianzkrieg ? { allianzkrieg } : {})
     });
     const verteidigerBerichtId = addReport(targetUserId, {
       type: 'attack-received', result: 'loss', attackerName: req.username, ...racheAngreiferId, ...racheFelder,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
-      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder, ...(allianzkrieg ? { allianzkrieg } : {})
     });
     // KI-Kampfberichte E2 (04.09.2026): zwei Texte aus diesem einen Datensatz, je einer an den
     // Bericht jeder Seite. Synchron (nur db-Mutation), das saveDb() unten persistiert die Auftraege.
@@ -5084,7 +5102,7 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Vergeltung: Der Verteidiger darf 24 h zurueckschlagen - synchron VOR saveDb() (db-Regel).
     racheVermerken(targetUser, req.userId, req.username, racheJetzt);
     await saveDb();
-    return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails(), ...racheFelder });
+    return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails(), ...racheFelder, ...(allianzkrieg ? { allianzkrieg } : {}) });
   } else {
     // Sockel: auch die drei Trostpunkte fallen weg - sonst bliebe der Nadelstich eine, wenn auch
     // duenne, Punktequelle, und genau die sollte er nicht mehr sein.
@@ -5121,18 +5139,21 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Ergebnis beeinflussen. Genau deshalb taugt er als Quelle, anders als alles, was aus dem
     // Spielstand gemeldet wird. Gegen Absprache zählt je Angreifer nur ein Angriff pro Tag.
     const staubAbwehr = staubAbwehrGutschreiben(targetUser, req.userId);
+    // Allianzkrieg (Feature C): +2 fuer die Allianz des geschlagenen Angreifers, +6 fuer die des Verteidigers
+    // (Beitrag dem Verteidiger) - im Sockel nichts, siehe Siegzweig.
+    const allianzkrieg = ertragStufe === 'sockel' ? null : allianzkriegWerten(req.userId, req.username, targetUserId, targetUser ? targetUser.username : '', 'niederlage');
 
     const angreiferBerichtId = addReport(req.userId, {
       type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt', ...racheZielId,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
-      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder, ...(allianzkrieg ? { allianzkrieg } : {})
     });
     const verteidigerBerichtId = addReport(targetUserId, {
       // staubReward steht im Bericht, damit die Gutschrift nicht unsichtbar bleibt: Der Verteidiger
       // war beim Kampf per Definition nicht dabei, der Bericht ist seine einzige Quelle.
       type: 'attack-received', result: 'win', attackerName: req.username, defendReward: abwehrCp, staubReward: staubAbwehr, ...racheAngreiferId,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
-      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder, ...(allianzkrieg ? { allianzkrieg } : {})
     });
     // KI-Kampfberichte E2: siehe Siegzweig - hier ohne Beute, aus Verteidigersicht "abgewehrt".
     try {
@@ -5149,7 +5170,7 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Vergeltung: auch ein abgewehrter Angriff war eine Provokation - das Recht entsteht in beiden Ausgaengen.
     racheVermerken(targetUser, req.userId, req.username, racheJetzt);
     await saveDb();
-    return res.json({ success: false, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
+    return res.json({ success: false, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails(), ...(allianzkrieg ? { allianzkrieg } : {}) });
   }
 });
 
@@ -6262,6 +6283,9 @@ function loadOrInitGalaxy() {
   // (kein offener Shared-Storage) und galaxyFuerClient() alles aus db.galaxy automatisch lesend
   // an den Client schickt.
   if (!Array.isArray(db.galaxy.wrackKonvois)) db.galaxy.wrackKonvois = [];
+  // Kriegsruhm je Allianz (Feature C, 11.09.2026): { siege, niederlagen, unentschieden } je Tag. Liegt in
+  // db.galaxy, weil daran ein Ehrentitel haengt - ueber PUT /api/storage ist das nicht erreichbar.
+  if (!db.galaxy.allianzRuhm || typeof db.galaxy.allianzRuhm !== 'object') db.galaxy.allianzRuhm = {};
   if (db.galaxy.activeWar === undefined) db.galaxy.activeWar = null;
   if (!db.galaxy.collapsedSystems) db.galaxy.collapsedSystems = {};
   if (db.galaxy.activeWormhole === undefined) db.galaxy.activeWormhole = null;
@@ -6375,6 +6399,7 @@ const CHRONIK_ARTEN = {
   'system-erobert':        'system, spieler, von (NPC-Volk)',
   'allianz-gegruendet':    'tag, name, gruender',
   'allianzkrieg-beendet':  'sieger, verlierer, punkteSieger, punkteVerlierer - oder a, b, punkteA, punkteB, unentschieden',
+  'allianzkrieg-erklaert': 'angreifer (Tag), verteidiger (Tag), erklaertVon (Spieler), endet (Zeitstempel)',
   'kopfgeld-kassiert':     'jaeger, ziel, kredite',
   'saison-beendet':        'saison, champion, teilnehmer',
   'front-durchbrochen':    'system, sieger, verlierer (NPC-Voelker der Randkriege)',
@@ -7217,6 +7242,109 @@ function cleanupWarKeys(a, b) {
   const cp1 = 'alliance:' + a + ':warcontrib:' + b + ':', cp2 = 'alliance:' + b + ':warcontrib:' + a + ':';
   for (const k of Object.keys(db.shared)) if (k.startsWith(cp1) || k.startsWith(cp2)) delete db.shared[k];
 }
+/* ===== Allianzkriege mit Einsatz (Feature C, 11.09.2026) ==========================================
+   Bis hierher schrieb der CLIENT die Kriegspunkte selbst (addWarScore im Frontend: +1 je gewonnenem
+   Spielerangriff, per PUT /api/storage auf alliance:<TAG>:warscore:<GEGNER>) und setzte auch das
+   Zeitfenster (warmeta). Die Rechtepruefung liess jedes Mitglied jeden Wert eintragen - und an genau
+   diesem Wert haengt seit #4 die Kredit-Praemie fuer alle Beitragenden. Das war die Sorte Zaehler, die
+   die Hausregel in Serverhand verlangt ("nie eine Belohnung aus einem vom Client gemeldeten Zaehler").
+
+   Seit dem Schalter vergibt der SERVER die Punkte - dort, wo er den Kampf ohnehin selbst auswuerfelt
+   (/api/attack, /api/vorposten/angriff) -, der generische Speicher lehnt Client-Schreibzugriffe auf
+   :wars, :warmeta:, :warscore:, :warcontrib: ab (LESEN bleibt erlaubt, das Kriegspanel liest die
+   Schluessel weiter), Erklaerung und Frieden laufen ueber eigene Routen. Die Daten liegen WEITER in
+   db.shared unter denselben Schluesseln: Alte warmeta, die ein Client vor der Umstellung gesetzt hat,
+   bleiben gueltig, und resolveAllianceWarsServer liest unveraendert dieselbe Quelle.
+
+   Schalter aus = alter Zustand byte-gleich (Client schreibt, Routen 404, keine Serverpunkte, keine der
+   neuen Auszahlungen). Auszahlungen mit NEUEM Reward-Typ (war-defeat) stehen hinter dem Schalter, weil
+   ein alter Client dafuer keinen Zweig hat und "Dankeschoen vom Team: +NaN Kredite" meldete - deshalb
+   geht das Backend VOR dem Frontend live. Wer den Schalter je ausschaltet: die Sperre im geteilten
+   Speicher faellt mit, der Client schreibt dann wieder selbst (der alte addWarScore-Weg ist im neuen
+   Frontend entfernt - die Punkte staenden dann still, bis der Schalter wieder steht). */
+const ALLIANZKRIEG_SERVER_AKTIV = true;
+const ALLIANZKRIEG_DAUER_MS = 7 * 24 * 3600 * 1000;   // wie WAR_DURATION_MS im Frontend
+const ALLIANZKRIEG_MAX_LAUFEND = 2;                   // laufende Kriege je Allianz (beide Seiten)
+const ALLIANZKRIEG_TAGESDECKEL = 3;                   // gewertete Angriffe je Angreifer, Ziel und UTC-Tag
+const ALLIANZKRIEG_PUNKTE = { sieg: 10, niederlage: 2, abwehr: 6, vorposten: 8 };
+const WAR_VICTORY_STAUB = 15;                         // Sternenstaub je Sieger-Beitragendem - bucht der Server
+const WAR_DEFEAT_CREDITS = 200;                       // Trostpreis je Verlierer-Beitragendem
+const ALLIANZKRIEG_SPERRTEXT = 'Kriegspunkte vergibt der Server.';
+function warMetaOf(tag, enemy) {
+  try { const raw = db.shared['alliance:' + tag + ':warmeta:' + enemy]; return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+}
+// Gibt es diese Allianz? Massstab sind aktive Mitglieder, nicht der info-Datensatz: Der wird beim
+// Gruenden geschrieben, aber eine Allianz ohne ein einziges Mitglied ist kein Kriegsgegner - und eine
+// aufgeloeste (disbanded) auch dann nicht, wenn ihr Datensatz noch liegt.
+function allianzExistiert(tag) {
+  const info = allianceInfoOf(tag);
+  if (info && info.disbanded === true) return false;
+  return allianceMemberIds(tag).length > 0;
+}
+/* Stehen zwei Allianzen gerade gegeneinander im Krieg? BEIDE Listen UND ein laufendes Zeitfenster.
+   Eine Liste allein reicht nicht: Nach dem Frieden raeumt erst der naechste Takt auf, und ein Krieg,
+   dessen endsAt vorbei ist, wartet nur noch auf die Abrechnung - Punkte dorthin waeren verloren. Das
+   Zeitfenster wird auf beiden Seiten gelesen (max), weil der alte Client es beidseitig schrieb. */
+function allianzkriegLaeuft(tagA, tagB, now) {
+  if (!tagA || !tagB || tagA === tagB) return false;
+  if (!warEnemiesOf(tagA).includes(tagB) || !warEnemiesOf(tagB).includes(tagA)) return false;
+  const mA = warMetaOf(tagA, tagB), mB = warMetaOf(tagB, tagA);
+  return Math.max((mA && mA.endsAt) || 0, (mB && mB.endsAt) || 0) > (now || Date.now());
+}
+function allianzkriegLaufende(tag, now) {
+  return warEnemiesOf(tag).filter(e => allianzkriegLaeuft(tag, e, now));
+}
+// Punktestand UND persoenlicher Beitrag - dieselben zwei Schluessel, die der Client bis Feature C schrieb,
+// damit resolveAllianceWarsServer und das Kriegspanel nichts Neues lesen muessen.
+function allianzkriegPunkteEintragen(tag, enemy, userId, name, punkte) {
+  if (!(punkte > 0)) return;
+  db.shared['alliance:' + tag + ':warscore:' + enemy] = JSON.stringify({ score: warScoreOf(tag, enemy) + punkte });
+  const ck = 'alliance:' + tag + ':warcontrib:' + enemy + ':' + userId;
+  let bisher = 0; try { const raw = db.shared[ck]; if (raw) bisher = JSON.parse(raw).score || 0; } catch (e) {}
+  db.shared[ck] = JSON.stringify({ score: bisher + punkte, name: name || 'Kommandant' });
+}
+/* Der Absprache-Riegel: je Angreifer und Ziel hoechstens ALLIANZKRIEG_TAGESDECKEL gewertete Angriffe am
+   Tag - am NUTZEROBJEKT des Angreifers (user.allianzkriegTag), nie im Spielstand (klientenautoritativ).
+   Dasselbe Muster wie user.staub.abwehrVon und user.marktTag: UTC-Tagesstempel, bei Tageswechsel leer.
+   Zaehlt JEDEN Ausgang, nicht nur Siege - sonst liesse sich die Abwehrpraemie (+6 fuer die Verteidiger)
+   ueber einen befreundeten Gegner farmen, der absichtlich verliert. */
+function allianzkriegRiegel(user, zielId) {
+  if (!user) return false;
+  const heute = staubTagesschluessel();
+  if (!user.allianzkriegTag || user.allianzkriegTag.datum !== heute) user.allianzkriegTag = { datum: heute, ziele: {} };
+  const n = user.allianzkriegTag.ziele[zielId] || 0;
+  if (n >= ALLIANZKRIEG_TAGESDECKEL) return false;
+  user.allianzkriegTag.ziele[zielId] = n + 1;
+  return true;
+}
+/* DER HAKEN aus /api/attack und /api/vorposten/angriff. `ausgang`: 'sieg' (Angreifer gewinnt),
+   'niederlage' (Verteidiger haelt stand - er bekommt die Abwehrpunkte), 'vorposten' (ein Vorposten der
+   Gegner faellt). Rueckgabe null, wenn die beiden nicht gegeneinander im Krieg stehen; sonst ein
+   Objekt fuer Antwort und Bericht - auch bei erreichtem Tagesdeckel (gedeckelt:true, 0 Punkte), damit
+   der Spieler den Grund sieht und nicht einen Fehler vermutet. Wirft nie: Ein Fehler hier ist ein Log,
+   kein 500 - der Kampf ist zu diesem Zeitpunkt schon entschieden (wie beim Kampftext). */
+function allianzkriegWerten(angreiferId, angreiferName, verteidigerId, verteidigerName, ausgang) {
+  if (!ALLIANZKRIEG_SERVER_AKTIV) return null;
+  try {
+    const tagA = allianceTagOf(angreiferId), tagV = allianceTagOf(verteidigerId);
+    if (!allianzkriegLaeuft(tagA, tagV)) return null;
+    if (!allianzkriegRiegel(findUserById(angreiferId), verteidigerId)) {
+      return { eigeneTag: tagA, gegnerTag: tagV, angreifer: 0, verteidiger: 0, gedeckelt: true, deckel: ALLIANZKRIEG_TAGESDECKEL };
+    }
+    let pA = 0, pV = 0;
+    if (ausgang === 'sieg') pA = ALLIANZKRIEG_PUNKTE.sieg;
+    else if (ausgang === 'vorposten') pA = ALLIANZKRIEG_PUNKTE.vorposten;
+    else if (ausgang === 'niederlage') { pA = ALLIANZKRIEG_PUNKTE.niederlage; pV = ALLIANZKRIEG_PUNKTE.abwehr; }
+    if (pA) allianzkriegPunkteEintragen(tagA, tagV, angreiferId, angreiferName, pA);
+    if (pV) allianzkriegPunkteEintragen(tagV, tagA, verteidigerId, verteidigerName, pV);
+    return { eigeneTag: tagA, gegnerTag: tagV, angreifer: pA, verteidiger: pV, gedeckelt: false };
+  } catch (e) { console.error('[allianzkrieg] werten: ' + (e && e.message)); return null; }
+}
+function allianzRuhmOf(tag) {
+  const g = loadOrInitGalaxy();
+  if (!g.allianzRuhm[tag]) g.allianzRuhm[tag] = { siege: 0, niederlagen: 0, unentschieden: 0 };
+  return g.allianzRuhm[tag];
+}
 function resolveAllianceWarsServer() {
   const now = Date.now();
   const metaKeys = Object.keys(db.shared).filter(k => /^alliance:[^:]+:warmeta:[^:]+$/.test(k));
@@ -7238,10 +7366,26 @@ function resolveAllianceWarsServer() {
         const loser = winner === A ? B : A;
         const wS = winner === A ? scoreA : scoreB, lS = winner === A ? scoreB : scoreA;
         const members = warContributorIds(winner, loser);
-        for (const uid of members) pushPendingReward(uid, { type: 'war-victory', enemyTag: loser, credits: WAR_VICTORY_CREDITS, myScore: wS, theirScore: lS });
+        for (const uid of members) {
+          const lohn = { type: 'war-victory', enemyTag: loser, credits: WAR_VICTORY_CREDITS, myScore: wS, theirScore: lS };
+          if (ALLIANZKRIEG_SERVER_AKTIV) {
+            // Sternenstaub bucht der SERVER (Hausregel) - der Reward traegt die Zahl nur zur Anzeige.
+            const u = findUserById(uid);
+            if (u) { staubGutschreiben(staubKonto(u), WAR_VICTORY_STAUB); lohn.staub = WAR_VICTORY_STAUB; }
+          }
+          pushPendingReward(uid, lohn);
+        }
+        if (ALLIANZKRIEG_SERVER_AKTIV) {
+          // Trostpreis fuer die Beitragenden der Verliererseite - damit die Niederlage nicht stumm ist. Eigener
+          // Typ, deshalb hinter dem Schalter (ein alter Client haette dafuer keinen Zweig).
+          for (const uid of warContributorIds(loser, winner)) pushPendingReward(uid, { type: 'war-defeat', enemyTag: winner, credits: WAR_DEFEAT_CREDITS, myScore: lS, theirScore: wS });
+          allianzRuhmOf(winner).siege++;
+          allianzRuhmOf(loser).niederlagen++;
+        }
         pushGalaxyNews('ti-trophy', 'Allianz-Krieg beendet: [' + winner + '] besiegt [' + loser + '] mit ' + wS + ':' + lS + ' Kriegspunkten.');
         chronikVermerken('allianzkrieg-beendet', { sieger: winner, verlierer: loser, punkteSieger: wS, punkteVerlierer: lS });
       } else {
+        if (ALLIANZKRIEG_SERVER_AKTIV) { allianzRuhmOf(A).unentschieden++; allianzRuhmOf(B).unentschieden++; }
         pushGalaxyNews('ti-flag', 'Allianz-Krieg zwischen [' + A + '] und [' + B + '] endet unentschieden (' + scoreA + ':' + scoreB + ').');
         chronikVermerken('allianzkrieg-beendet', { a: A, b: B, punkteA: scoreA, punkteB: scoreB, unentschieden: true });
       }
@@ -7250,6 +7394,104 @@ function resolveAllianceWarsServer() {
     cleanupWarKeys(A, B);
   }
 }
+
+/* Die drei Routen des Allianzkriegs (Feature C). Wer erklaeren und Frieden schliessen darf, ist aus dem
+   Frontend-Kriegspanel abgelesen (declareWar/makePeace: `state.player.allianceRole !== 'admin'` bricht
+   ab - Offiziere duerfen dort NICHT): nur der Anfuehrer. Frieden darf der Anfuehrer JEDER der beiden
+   Seiten (beide sehen den Krieg im Panel und beide hatten den Knopf). Alle Fehler nennen den Grund. */
+function allianzkriegRoutenGrundlage(req) {
+  const tag = allianceTagOf(req.userId);
+  if (!tag) return { fehler: [403, 'Du gehörst keiner Allianz an.'] };
+  if (allianceRoleOf(tag, req.userId) !== 'admin') return { fehler: [403, 'Nur der Anführer der Allianz darf das.'] };
+  const gegnerTag = String((req.body && req.body.gegnerTag) || '').trim().toUpperCase();
+  // Der Tag wird zum Schluesselbestandteil (alliance:<TAG>:...) - deshalb nur Buchstaben und Ziffern, kein
+  // Doppelpunkt, kein Unterstrich (schliesst auch __proto__ & Co. aus). Das Frontend erlaubt 4 Zeichen,
+  // aeltere Tags sind bis 6 lang.
+  if (!/^[A-Z0-9]{1,8}$/.test(gegnerTag)) return { fehler: [400, 'Ungültiger Allianz-Tag.'] };
+  if (gegnerTag === tag) return { fehler: [400, 'Man kann sich selbst keinen Krieg erklären.'] };
+  return { tag, gegnerTag };
+}
+app.post('/api/allianzkrieg/erklaeren', authMiddleware, async (req, res) => {
+  if (!ALLIANZKRIEG_SERVER_AKTIV) return res.status(404).json({ error: 'Kriegserklärungen laufen derzeit nicht über den Server.', inaktiv: true });
+  const g = allianzkriegRoutenGrundlage(req);
+  if (g.fehler) return res.status(g.fehler[0]).json({ error: g.fehler[1] });
+  const { tag, gegnerTag } = g;
+  // 400, nicht 404: Der Client deutet 404 als "alter Server ohne diese Route" und faellt auf den alten Weg
+  // zurueck - ein unbekannter Gegner ist aber eine Ablehnung, die der Spieler lesen soll.
+  if (!allianzExistiert(gegnerTag)) return res.status(400).json({ error: 'Die Allianz [' + gegnerTag + '] gibt es nicht.', unbekannt: true });
+  const now = Date.now();
+  if (allianzkriegLaeuft(tag, gegnerTag, now)) return res.status(409).json({ error: 'Mit [' + gegnerTag + '] seid ihr bereits im Krieg.' });
+  if (allianzkriegLaufende(tag, now).length >= ALLIANZKRIEG_MAX_LAUFEND) {
+    return res.status(409).json({ error: 'Deine Allianz führt bereits ' + ALLIANZKRIEG_MAX_LAUFEND + ' Kriege - erst einen beenden.' });
+  }
+  if (allianzkriegLaufende(gegnerTag, now).length >= ALLIANZKRIEG_MAX_LAUFEND) {
+    return res.status(409).json({ error: '[' + gegnerTag + '] führt bereits ' + ALLIANZKRIEG_MAX_LAUFEND + ' Kriege - mehr Fronten gibt es nicht.' });
+  }
+  const meine = warEnemiesOf(tag); if (!meine.includes(gegnerTag)) meine.push(gegnerTag);
+  db.shared['alliance:' + tag + ':wars'] = JSON.stringify({ enemies: meine });
+  const ihre = warEnemiesOf(gegnerTag); if (!ihre.includes(tag)) ihre.push(tag);
+  db.shared['alliance:' + gegnerTag + ':wars'] = JSON.stringify({ enemies: ihre });
+  // Reste eines frueheren Krieges gegen dieselbe Allianz (z.B. Frieden per altem Client, noch nicht
+  // aufgeraeumt) duerfen nicht in den neuen ragen - nur Punkte und Beitraege, das Zeitfenster kommt neu.
+  for (const k of ['alliance:' + tag + ':warscore:' + gegnerTag, 'alliance:' + gegnerTag + ':warscore:' + tag]) delete db.shared[k];
+  const cp1 = 'alliance:' + tag + ':warcontrib:' + gegnerTag + ':', cp2 = 'alliance:' + gegnerTag + ':warcontrib:' + tag + ':';
+  for (const k of Object.keys(db.shared)) if (k.startsWith(cp1) || k.startsWith(cp2)) delete db.shared[k];
+  // startedAt/declaredBy sind die Felder des alten Client-Formats - ein alter Client liest sie weiter.
+  const endsAt = now + ALLIANZKRIEG_DAUER_MS;
+  const meta = JSON.stringify({ startedAt: now, endsAt, declaredBy: tag, erklaertVon: req.username || 'Kommandant', erklaertAm: now });
+  db.shared['alliance:' + tag + ':warmeta:' + gegnerTag] = meta;
+  db.shared['alliance:' + gegnerTag + ':warmeta:' + tag] = meta;
+  pushGalaxyNews('ti-skull', 'Allianz-Krieg: [' + tag + '] hat [' + gegnerTag + '] den Krieg erklärt - sieben Tage lang zählt jeder Schlag.');
+  chronikVermerken('allianzkrieg-erklaert', { angreifer: tag, verteidiger: gegnerTag, erklaertVon: req.username || '', endet: endsAt });
+  await saveDb();
+  res.json({ ok: true, gegnerTag, endsAt });
+});
+app.post('/api/allianzkrieg/frieden', authMiddleware, async (req, res) => {
+  if (!ALLIANZKRIEG_SERVER_AKTIV) return res.status(404).json({ error: 'Friedensschlüsse laufen derzeit nicht über den Server.', inaktiv: true });
+  const g = allianzkriegRoutenGrundlage(req);
+  if (g.fehler) return res.status(g.fehler[0]).json({ error: g.fehler[1] });
+  const { tag, gegnerTag } = g;
+  if (!warEnemiesOf(tag).includes(gegnerTag) && !warEnemiesOf(gegnerTag).includes(tag)) {
+    return res.status(400).json({ error: 'Mit [' + gegnerTag + '] seid ihr nicht im Krieg.', keinKrieg: true });   // 400 wie oben: 404 hiesse "alter Server"
+  }
+  removeWarEnemy(tag, gegnerTag); removeWarEnemy(gegnerTag, tag);
+  cleanupWarKeys(tag, gegnerTag);   // Zeitfenster, Punkte, Beitraege - ohne Belohnung, wie beim alten Client-Frieden
+  pushGalaxyNews('ti-flag', 'Frieden: [' + tag + '] und [' + gegnerTag + '] haben ihren Krieg beendet.');
+  await saveDb();
+  res.json({ ok: true, gegnerTag });
+});
+app.get('/api/allianzkrieg', authMiddleware, (req, res) => {
+  if (!ALLIANZKRIEG_SERVER_AKTIV) return res.status(404).json({ error: 'Kriegspunkte vergibt derzeit nicht der Server.', inaktiv: true });
+  const tag = allianceTagOf(req.userId);
+  const now = Date.now();
+  const kriege = [];
+  if (tag) {
+    for (const gegnerTag of warEnemiesOf(tag)) {
+      const meta = warMetaOf(tag, gegnerTag) || warMetaOf(gegnerTag, tag) || {};
+      const prefix = 'alliance:' + tag + ':warcontrib:' + gegnerTag + ':';
+      const beitraege = [];
+      for (const k of Object.keys(db.shared)) {
+        if (!k.startsWith(prefix)) continue;
+        try { const d = JSON.parse(db.shared[k]); beitraege.push({ userId: k.slice(prefix.length), name: d.name || 'Kommandant', score: d.score || 0 }); } catch (e) {}
+      }
+      const meiner = beitraege.find(b => b.userId === req.userId);
+      kriege.push({
+        gegnerTag, endsAt: meta.endsAt || 0, laeuft: allianzkriegLaeuft(tag, gegnerTag, now),
+        erklaertVon: meta.erklaertVon || null, erklaertDurch: meta.declaredBy || null, erklaertAm: meta.erklaertAm || meta.startedAt || 0,
+        punkte: { eigene: warScoreOf(tag, gegnerTag), gegner: warScoreOf(gegnerTag, tag) },
+        topBeitraege: beitraege.filter(b => b.score > 0).sort((a, b) => b.score - a.score).slice(0, 3),
+        meinBeitrag: meiner ? meiner.score : 0
+      });
+    }
+  }
+  const ruhm = Object.assign({ siege: 0, niederlagen: 0, unentschieden: 0 }, (tag && loadOrInitGalaxy().allianzRuhm[tag]) || {});
+  res.json({
+    aktiv: true, tag: tag || null, kriege, ruhm,
+    // Die Regeln reisen mit, damit das Kriegspanel keine zweite Kopie der Zahlen fuehrt.
+    regeln: { dauerMs: ALLIANZKRIEG_DAUER_MS, maxLaufend: ALLIANZKRIEG_MAX_LAUFEND, tagesdeckel: ALLIANZKRIEG_TAGESDECKEL,
+      punkte: ALLIANZKRIEG_PUNKTE, siegKredite: WAR_VICTORY_CREDITS, siegStaub: WAR_VICTORY_STAUB, trostKredite: WAR_DEFEAT_CREDITS }
+  });
+});
 
 // --- Kopfgeld-System (#2) ---
 // Jede Woche liegt ein Kopfgeld auf dem aktuellen Bestenlisten-Ersten (der stärkste, sichtbarste
@@ -15850,6 +16092,9 @@ app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
     if (weg > 0) eigeneVerluste[typ] = weg;
   }
   const meinAnteil = erg.anteile[req.userId] || 0;
+  // Allianzkrieg (Feature C): Faellt ein Vorposten der Kriegsgegner, +8 fuer die eigene Allianz. Gewertet
+  // wird nur der FALL (erg.gefallen), nicht der Treffer - der Erfolgspfad ist damit eindeutig.
+  const allianzkrieg = (erg.gefallen && doc.besitzer) ? allianzkriegWerten(req.userId, req.username, doc.besitzer, doc.besitzerName || '', 'vorposten') : null;
 
   /* DEN BESITZER BENACHRICHTIGEN - bei JEDEM Schlag, nicht erst beim Fall. Genau derselbe Weg wie
      bei der Anfechtung (asteroid-contested): Prefs pruefen, Handy-Push ueber allowAttackPush
@@ -15884,7 +16129,8 @@ app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
     eigeneVerluste, garnisonVerluste: erg.garnisonVerluste,
     anteil: erg.gefallen ? Math.round(meinAnteil * 1000) / 1000 : 0,
     teilnehmer: erg.gefallen ? erg.teilnehmer : Object.keys(doc.beitraege || {}).length,
-    naechsterSchlagAb: jetzt + VORPOSTEN_ABKLING_MS
+    naechsterSchlagAb: jetzt + VORPOSTEN_ABKLING_MS,
+    ...(allianzkrieg ? { allianzkrieg } : {})
   });
 });
 

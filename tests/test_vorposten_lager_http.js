@@ -25,7 +25,11 @@ const SAB = process.env.KEPLER_VPLAGER_SABOTAGE || '';
    deshalb nur 5a mit: 5b prueft den EIGENEN Riegel des Abhol-Endpunkts, und der ist mit Absicht
    eine zweite Stelle - er gibt eine verstaendliche Auskunft („Vorposten fuehren derzeit kein
    Lager") statt der irrefuehrenden „Im Lager liegt noch nichts". */
-const MUSS_FALLEN = { deckel: ['2b'], zurueckdrehen: ['3a'], beute: ['4a'], schalter: ['5a'], vollab: ['6b'] };
+const MUSS_FALLEN = { deckel: ['2b'], zurueckdrehen: ['3a'], beute: ['4a'], schalter: ['5a'], vollab: ['6b'],
+  /* GEMESSEN am 11.09.2026: `griff` haengt den Abhol-Endpunkt wieder allein an den Lager-Schalter
+     (der Stand vor Audit-Befund 4) und reisst genau 5c mit - 5b bleibt gruen, weil dort BEIDE
+     Schalter liegen. */
+  griff: ['5c'] };
 
 let fail = false;
 const ergebnis = {};
@@ -162,6 +166,12 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
   if (SAB === 'vollab') basis = basis.replace(
     'return vorpostenLagerSeit(doc) + VP_LAGER_STUNDEN * 3600000;',
     'return ((doc && doc.lagerSeit) || (doc && doc.seit) || Date.now()) + VP_LAGER_STUNDEN * 3600000;');
+  /* `griff` stellt den Stand vor Audit-Befund 4 wieder her: der Abhol-Endpunkt haengt allein am
+     Lager-Schalter. Belegt sich selbst ueber 0c - eine Ersetzung, die ins Leere greift, meldet
+     keinen Fehler und saehe aus wie eine bestandene Gegenprobe (Lehre aus test_vorposten_endprojekte_http). */
+  if (SAB === 'griff') basis = basis.replace('  if (!VP_LAGER_AKTIV && !VP_ENDPROJEKTE_AKTIV) {\n', '  if (!VP_LAGER_AKTIV) {\n');
+  check('0c: die Sabotage `griff` hat gegriffen (oder wurde gar nicht verlangt)',
+    SAB !== 'griff' || (!/if \(!VP_LAGER_AKTIV && !VP_ENDPROJEKTE_AKTIV\) \{/.test(basis) && /  if \(!VP_LAGER_AKTIV\) \{\n/.test(basis)));
   const an = basis.replace(/const VP_LAGER_AKTIV = (true|false);/, 'const VP_LAGER_AKTIV = true;');
   check('0b: der Lager-Schalter liess sich in der Kopie umlegen', /const VP_LAGER_AKTIV = true;/.test(an),
     { gefunden: /const VP_LAGER_AKTIV = (true|false);/.test(roh) });
@@ -269,7 +279,19 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
 
   // ---- 5) Mit ausgeschaltetem Schalter ----------------------------------------------------------
   await stoppeServer();
-  fs.writeFileSync(QUELLE, basis.replace(/const VP_LAGER_AKTIV = (true|false);/, 'const VP_LAGER_AKTIV = false;'));
+  /* BEIDE Schalter aus, nicht nur der des Lagers (11.09.2026, beim Umlegen von VP_ENDPROJEKTE_AKTIV
+     gemessen): Der Abhol-Endpunkt bedient Lager UND Sternendock und lehnt nur ab, wenn BEIDE
+     Schalter liegen (Audit-Befund 4 - mit Endprojekten an und Lager aus haette das Dock sonst
+     Kreuzer produziert, die niemand abholen kann). Bis zum Umlegen stand der Endprojekt-Schalter
+     ausgeliefert auf false, und diese Zeile pinnte ihn STILLSCHWEIGEND mit - danach fiel 5b mit
+     400 „leer" statt 404 „inaktiv". Ein Test, der seine Voraussetzung vom Prüfling bezieht (dieselbe
+     Lehre wie bei den Modul-Sets, docs/vorposten.md). Der Aus-Lauf misst den LAGER-Schalter; die
+     Kopplung an den anderen misst 5c darunter ausdruecklich. */
+  const beideAus = basis.replace(/const VP_LAGER_AKTIV = (true|false);/, 'const VP_LAGER_AKTIV = false;')
+    .replace(/const VP_ENDPROJEKTE_AKTIV = (true|false);/, 'const VP_ENDPROJEKTE_AKTIV = false;');
+  check('5-vorab: beide Schalter liessen sich in der Kopie auf false stellen',
+    /const VP_LAGER_AKTIV = false;/.test(beideAus) && /const VP_ENDPROJEKTE_AKTIV = false;/.test(beideAus));
+  fs.writeFileSync(QUELLE, beideAus);
   const db2 = grunddb();
   db2.shared['vorposten:h-acht'] = JSON.stringify(vpDoc('h-acht', 8, 'handel', { lagerSeit: Date.now() - stunden * 3600 * 1000 }));
   fs.writeFileSync(dbPfad, JSON.stringify(db2, null, 1));
@@ -285,6 +307,28 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
   const holenAus = await s.sende('/vorposten/lager/holen', tokA2, { system: 'h-acht' });
   check('5b: und der Abhol-Endpunkt sagt, dass es ihn noch nicht gibt',
     holenAus.status === 404 && holenAus.body.inaktiv === true, { status: holenAus.status, body: holenAus.body });
+  await stoppeServer();
+  /* 5c: Lager AUS, Endprojekte AN - der Griff bleibt offen. Ohne Dock am Vorposten antwortet er
+     400 „leer", nicht 404 „inaktiv": Genau das belegt, dass er nicht am Lager-Schalter allein
+     haengt (Audit-Befund 4). Der Grund wird MITGEPRUEFT, nicht nur der Statuscode - ein 400 aus
+     einem anderen Grund („Ungueltige Anfrage") waere sonst dieselbe Farbe.
+     EIGENE Station, `lagerSeit` eine Minute in der ZUKUNFT, nicht die zurueckdatierte aus 5a
+     (zweimal gemessen): Mit der Sabotage `schalter` (Rate nicht mehr gegattert) hatte die alte
+     Station trotz liegendem Schalter einen Stand, der Griff gab ihn heraus (200), und 5c fiel
+     MIT - und mit `lagerSeit = jetzt` genauso, weil schon die Sekunden bis zum Aufruf bei 28k
+     Erz/h zu einer ganzen Zahl aufliefen. Die Stunden klemmen bei 0 (Math.max), der Stand ist
+     damit leer UNABHAENGIG davon, ob die Rate gegattert ist - 5c misst nur das Gatter des Griffs,
+     und `schalter` behaelt seine gemessene Liste ['5a']. */
+  fs.writeFileSync(QUELLE, basis.replace(/const VP_LAGER_AKTIV = (true|false);/, 'const VP_LAGER_AKTIV = false;')
+    .replace(/const VP_ENDPROJEKTE_AKTIV = (true|false);/, 'const VP_ENDPROJEKTE_AKTIV = true;'));
+  const db5c = grunddb();
+  db5c.shared['vorposten:h-acht'] = JSON.stringify(vpDoc('h-acht', 8, 'handel', { lagerSeit: Date.now() + 60000 }));
+  fs.writeFileSync(dbPfad, JSON.stringify(db5c, null, 1));
+  s = await starteServer();
+  const tokA5c = await s.anmelden('anna');
+  const holenDock = await s.sende('/vorposten/lager/holen', tokA5c, { system: 'h-acht' });
+  check('5c: Lager aus, Endprojekte an - der Griff bleibt offen (400 „leer" statt 404 „inaktiv"), weil das Sternendock an ihm haengt',
+    holenDock.status === 400 && holenDock.body.leer === true && !holenDock.body.inaktiv, { status: holenDock.status, body: holenDock.body });
   await stoppeServer();
 
   /* ---- 6) Die Aktivierungs-Untergrenze VP_LAGER_AB (05.09.2026) -------------------------------

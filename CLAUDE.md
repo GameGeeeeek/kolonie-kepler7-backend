@@ -6,7 +6,7 @@ unter `docs/` (Übersicht am Ende). Wer einen Bereich anfasst, liest vorher dess
 
 ## Projekt in 30 Sekunden
 
-- Node.js/Express-Backend für Kolonie Kepler-7. Eine Datei `server.js` (107 Routen), dazu `mailer.js`.
+- Node.js/Express-Backend für Kolonie Kepler-7. Eine Datei `server.js` (rund 180 Routen, Stand 11.09.2026), dazu `mailer.js`.
 - Läuft als Docker-Container `kepler7-backend` auf einem Raspberry Pi 4 (CasaOS, Portainer-Stack).
 - „Datenbank" ist eine JSON-Datei (`db.json`): `db.users`, `db.private[userId]` (Spielstand, klientenautoritativ),
   `db.shared` (Allianzen, Markt, Chat, Weltboss), `db.galaxy` (Nester, Konvois, NPC-Stärke), `db.notAus`, `db.bonusCodes`.
@@ -121,6 +121,11 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/hort-meldung.md` | Der seltenste Expeditionsfund: Server würfelt, Meldung in der Weltlage, Schalter `HORT_BANNER_AKTIV` |
 | `docs/ki-kampfberichte.md` | Etappe E1a: Prompt-Zuschnitt, Wahrheits-Sperren, Warteschlange, `KAMPFTEXT_AKTIV` |
 | `docs/galaxie-chronik.md` | C1: das Ereignisbuch `db.galaxy.chronik` (feste Felder je Art, Deckel mit Wochenschutz, Admin- und Abhol-Route) |
+| `docs/galaxie-ziel.md` | Feature A: das gemeinsame Wochenziel `db.galaxy.galaxieZiel` (Rotation, Zielhöhe, Hooks in den vier Angriffsrouten, Tagesdeckel, Abrechnung mit Reward `galaxie-ziel`, Notaus `galaxieziel`) |
+| `docs/auftragsbuch.md` | Feature B: Saison-Auftragsbuch – Taten am Nutzerobjekt, 20 Stufen, Tagesdeckel, lazy Saisonwechsel, Notaus `auftragsbuch` |
+| `docs/rache.md` | Feature D: Vergeltung – Rachrecht am Nutzerobjekt (`user.rache`), +25 % Beute-Anteil und +10 Kampfpunkte beim gewonnenen Vergeltungsschlag, `attackerId`/`targetUserId` in den Berichten, `/api/me.rache`, Schalter `RACHE_AKTIV` |
+| `docs/allianzkriege.md` | Feature C: Kriegspunkte vergibt der Server (`/api/attack`, `/api/vorposten/angriff`), Routen `/api/allianzkrieg/*`, Schreibsperre im geteilten Speicher, Tagesriegel am Nutzerobjekt, Staub/Trostpreis/Kriegsruhm, Schalter `ALLIANZKRIEG_SERVER_AKTIV` |
+| `docs/patenschaft.md` | Feature G: Pate und Schützling 30 Tage am Nutzerobjekt, fünf Meilenstein-Hooks, Reward-Typ `patenschaft`, `GET /api/patenschaft`, Schalter `PATENSCHAFT_AKTIV` |
 
 Der vollständige frühere Text dieser Datei liegt in der Git-Historie vor dem 01.09.2026.
 

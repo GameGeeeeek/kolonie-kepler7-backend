@@ -141,6 +141,14 @@ const liesDoc = (sys) => JSON.parse(liesDb().shared['vorposten:' + sys]);
   const an = basis.replace(/const VP_ENDPROJEKTE_AKTIV = (true|false);/, 'const VP_ENDPROJEKTE_AKTIV = true;');
   check('0b: der Endprojekt-Schalter liess sich in der Kopie umlegen', /const VP_ENDPROJEKTE_AKTIV = true;/.test(an),
     { gefunden: /const VP_ENDPROJEKTE_AKTIV = (true|false);/.test(roh) });
+  /* 0d (11.09.2026): Der Schalter ist umgelegt. Beide Laeufe unten erzwingen ihren Zustand SELBST
+     (aus: 1a-1a4, an: ab 1b) und sagen deshalb nichts ueber den ausgelieferten Stand - nur diese
+     Zeile tut das, und sie wacht darueber, dass er nicht zurueckfaellt. Dieselbe Richtungsumkehr
+     wie 0c in test_vorposten_sets_http.js beim Umlegen von VP_MODUL_SETS_AKTIV.
+     Gegenprobe (von Hand, nicht per Sabotage-Env - die trifft nur die Kopie): `false` in server.js
+     eintragen -> genau 0d faellt, alle Laeufe bleiben gruen. */
+  check('0d: VP_ENDPROJEKTE_AKTIV steht im ausgelieferten Quelltext auf true (umgelegt 11.09.2026)',
+    /const VP_ENDPROJEKTE_AKTIV = true;/.test(roh));
 
   // ---- 1) Ausgeschaltet steht kein Endprojekt zur Wahl -----------------------------------------
   fs.writeFileSync(QUELLE, basis.replace(/const VP_ENDPROJEKTE_AKTIV = (true|false);/, 'const VP_ENDPROJEKTE_AKTIV = false;'));

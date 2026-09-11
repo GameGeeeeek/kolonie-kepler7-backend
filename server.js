@@ -2884,7 +2884,11 @@ app.get('/api/me', authMiddleware, (req, res) => {
     // Vergeltung (Feature D, 11.09.2026): die gueltigen Rachrechte - fuer die Hinweiszeile in der
     // Angriffsvorschau. Bei ausgeschaltetem Schalter FEHLT das Feld (nicht: leere Liste), damit der
     // Client "alter Server / inaktiv" von "kein Recht" unterscheiden kann.
-    ...(RACHE_AKTIV ? { rache: racheListeFuerClient(user, Date.now()) } : {})
+    ...(RACHE_AKTIV ? { rache: racheListeFuerClient(user, Date.now()) } : {}),
+    // Stimmen-Belohnung (11.09.2026): WANN die naechste belohnte Stimme moeglich ist und WAS es
+    // dafuer gibt. Das Spiel zeigt seine Erinnerung nur, wenn naechsteAb erreicht ist - die sechs
+    // Stunden rechnet der Server am Konto, nicht der Spielstand.
+    stimme: stimmeInfoFuer(user)
   });
 });
 
@@ -5501,7 +5505,9 @@ app.get('/api/health', (req, res) => res.json({
   // Schluessel, nur Befunde und Laengen (Definition am Dateiende).
   kampftext: kampftextHealth(),
   chronik: chronikHealth(),
-  galaxieZiel: galaxieZielHealth()   // Feature A (11.09.2026): steht das Ziel dieser Woche? Deploy-Beleg ohne Anmeldung
+  galaxieZiel: galaxieZielHealth(),   // Feature A (11.09.2026): steht das Ziel dieser Woche? Deploy-Beleg ohne Anmeldung
+  // Stimmen-Rueckruf (11.09.2026): Schluessel gesetzt UND nicht per Notaus abgeschaltet.
+  stimmenRueckruf: stimmeAktiv()
 }));
 
 // --- Andere Spieler in einem Sternensystem (für die Sektorkarte) ---
@@ -16276,6 +16282,91 @@ app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
   });
 });
 
+// ===== Stimmen-Belohnung: browsermmorpg.com ruft nach einer Stimme zurueck (11.09.2026) =====
+// Auftrag Sascha, woertlich: "Spieler sollen nach 6 Stunden ein Popup bekommen bitte voten fuer mehr
+// Spieler und vergib nach dem Voten dem Spieler eine kleine Belohnung." Das Verzeichnis bietet
+// dafuer selbst den Weg ("Postback & callback reward systems - pay players for voting"): Nach einer
+// Stimme ruft es die Adresse auf, die in seinem Konto hinterlegt ist. Das ist diese Route:
+//     GET /api/stimme/rueckruf?key=<STIMME_RUECKRUF_KEY>&spieler=<Registrierungsname>
+// (`username` und `user` sind als Zweitnamen des Spieler-Parameters zugelassen, weil der Name des
+// Parameters vom Verzeichnis vorgegeben wird und dort erst abzulesen ist.)
+//
+// DREI ENTSCHEIDUNGEN:
+//   1. Fail-closed wie beim Ko-fi-Webhook unten: Ohne STIMME_RUECKRUF_KEY gibt es die Route nicht
+//      (503). Fehlender und falscher Schluessel bekommen 401 mit der LAENGE des Empfangenen, nie dem
+//      Wert - 0 heisst fehlend, sonst falsch (dieselbe Trennung wie beim Maschinenzugang des Social
+//      Hub und aus demselben Grund: Eine Meldung, die beides zusammenfasst, ist keine Diagnose).
+//   2. Die Sperre liegt am KONTO (user.stimmeBelohntZuletzt), nie im Spielstand - der ist
+//      klientenautoritativ, und eine Belohnung, die der Spieler selbst freischalten koennte, waere
+//      keine. Sechs Stunden ist der Abstimm-Takt des Verzeichnisses; ein Rueckruf davor bekommt 200
+//      OHNE Belohnung mit Grund, damit die fremde Maschine nicht wiederholt (ein 4xx koennte sie dazu
+//      bringen). Fuer "unbekannt" und "kein Spielstand" gilt dasselbe.
+//   3. Die Belohnung geht ueber pushPendingReward mit EIGENEM Typ 'verzeichnis-stimme'; das Spiel
+//      hat den Zweig dazu (claimPendingRewards). Ihre Hoehe kommt aus STIMME_BELOHNUNG_KREDITE
+//      (Vorgabe 25) und laeuft durch bonuscodeGabenPruefen - dieselben Deckel wie bei Bonuscodes.
+//
+// Der Betreiber kann das Ganze per Notaus `stimme` abschalten (db.notAus, ohne Deploy).
+// Waechter: tests/test_stimme_rueckruf_http.js. Doku: docs/verzeichnis-stimme.md.
+const STIMME_RUECKRUF_KEY = process.env.STIMME_RUECKRUF_KEY || '';
+const STIMME_SPERRE_MS = 6 * 3600 * 1000;
+// Der Rueckruf kommt Sekunden NACH der Stimme; wer punktgenau alle sechs Stunden abstimmt, soll nicht
+// an diesen Sekunden scheitern. Die Sperre gilt deshalb "sechs Stunden minus eine Viertelstunde".
+const STIMME_SPERRE_TOLERANZ_MS = 15 * 60 * 1000;
+function stimmeBelohnung() {
+  const n = Math.floor(Number(process.env.STIMME_BELOHNUNG_KREDITE || 25));
+  const geprueft = bonuscodeGabenPruefen({ credits: n });
+  return geprueft.gaben || { credits: 25 };
+}
+function stimmeAktiv() { return !!STIMME_RUECKRUF_KEY && !notAusGesetzt('stimme'); }
+// Wann die naechste belohnte Stimme moeglich ist - fuer /api/me, damit das Spiel seine Erinnerung
+// zum richtigen Zeitpunkt zeigt. Ein frisches Konto sieht sie erst sechs Stunden nach der
+// Registrierung ("nach 6 Stunden ein Popup"); der Rueckruf selbst prueft nur die Sperre, damit
+// jemand, der frueher abstimmt, nicht leer ausgeht.
+function stimmeNaechsteAb(user) {
+  const letzte = (user && user.stimmeBelohntZuletzt) || 0;
+  const erstellt = (user && user.createdAt) || 0;
+  return Math.max(letzte, erstellt) + STIMME_SPERRE_MS;
+}
+function stimmeInfoFuer(user) {
+  return { belohnung: stimmeAktiv() ? stimmeBelohnung() : null, naechsteAb: stimmeNaechsteAb(user) };
+}
+// Erst zaehlen, dann pruefen: Die Bremse begrenzt auch das Durchprobieren des Schluessels.
+const stimmeRateLimit = rateLimit(15 * 60 * 1000, 60, 'Zu viele Rueckrufe - bitte kurz warten.');
+app.get('/api/stimme/rueckruf', stimmeRateLimit, async (req, res) => {
+  if (!STIMME_RUECKRUF_KEY) return res.status(503).json({ error: 'Der Stimmen-Rueckruf ist nicht eingerichtet (STIMME_RUECKRUF_KEY fehlt).' });
+  const q = req.query || {};
+  const gegeben = Buffer.from(String(q.key || req.get('X-Stimme-Key') || ''));
+  const erwartet = Buffer.from(STIMME_RUECKRUF_KEY);
+  let passt = false;
+  try { passt = gegeben.length === erwartet.length && crypto.timingSafeEqual(gegeben, erwartet); } catch (e) { passt = false; }
+  if (!passt) {
+    console.warn('[stimme] Rueckruf abgewiesen: Schluessel ' + (gegeben.length ? 'falsch' : 'fehlt') + ' (' + gegeben.length + ' Zeichen) von ' + req.ip);
+    return res.status(401).json({ error: gegeben.length ? 'Schluessel falsch (' + gegeben.length + ' Zeichen).' : 'Schluessel fehlt (0 Zeichen).' });
+  }
+  const name = String(q.spieler || q.username || q.user || '').trim();
+  const user = name ? db.users[name.toLowerCase()] : null;
+  if (!user) {
+    console.log('[stimme] Rueckruf fuer unbekannten Spieler: ' + JSON.stringify(name.slice(0, 40)));
+    return res.json({ ok: true, belohnt: false, grund: 'unbekannt' });
+  }
+  if (notAusGesetzt('stimme')) return res.json({ ok: true, belohnt: false, grund: 'notaus' });
+  const priv = db.private[user.userId];
+  // Ohne Spielstand gibt es nichts, worin die Gabe landen koennte (dieselbe Regel wie beim Geschenk).
+  if (!priv || priv[SAVE_KEY] === undefined) return res.json({ ok: true, belohnt: false, grund: 'kein-spielstand' });
+  const jetzt = Date.now();
+  if (jetzt - (user.stimmeBelohntZuletzt || 0) < STIMME_SPERRE_MS - STIMME_SPERRE_TOLERANZ_MS) {
+    return res.json({ ok: true, belohnt: false, grund: 'sperre', naechsteAb: stimmeNaechsteAb(user) });
+  }
+  // Sperre und Zaehler VOR der Belohnung, im selben synchronen Block vor saveDb() (Reihenfolge wie
+  // beim Bonuscode): Zwei gleichzeitige Rueckrufe koennen die Sperre so nicht gemeinsam durchbrechen.
+  user.stimmeBelohntZuletzt = jetzt;
+  user.stimmenGezaehlt = (user.stimmenGezaehlt || 0) + 1;
+  pushPendingReward(user.userId, Object.assign({ type: 'verzeichnis-stimme', zeit: jetzt }, stimmeBelohnung()));
+  console.log('[stimme] belohnt: ' + user.username + ' (Stimme #' + user.stimmenGezaehlt + ')');
+  await saveDb();
+  res.json({ ok: true, belohnt: true, spieler: user.username, naechsteAb: stimmeNaechsteAb(user) });
+});
+
 // ===== Ko-fi-Spenden: Top-Unterstützer im Spiel anzeigen =====
 // Ko-fi schickt bei jeder Zahlung einen Webhook als application/x-www-form-urlencoded mit einem
 // Feld "data", das JSON als String enthält - braucht deshalb eine eigene, auf diese Route
@@ -17494,6 +17585,11 @@ const NOTAUS_NAMEN = {
   // mehr ausgeliefert - der Rueckwaertsgang fuer einen Text, der sich als unpassend herausstellt,
   // ohne Release und ohne dass der M715q etwas davon wissen muss.
   chronik: 'Die Wochenausgabe der Galaxie-Chronik wird im Spiel gezeigt',
+  // Elfter Schalter (11.09.2026): die Belohnung fuer Stimmen auf browsermmorpg.com. Steht er aus,
+  // antwortet der Rueckruf 200 ohne Belohnung, und /api/me verspricht im Spiel keine mehr - die
+  // Erinnerung dort nennt dann keine Kredite. Der Rueckwaertsgang, falls die Belohnung je missbraucht
+  // wird, ohne Release und ohne dass das Verzeichnis etwas davon wissen muss.
+  stimme: 'Stimmen auf browsermmorpg.com werden im Spiel belohnt',
   // Neunter Schalter (04.09.2026, E1b): Jeder KI-Kampftext kostet den M715q rund 70 Sekunden, und
   // der bedient auch Social Hub. Faellt AI Core aus oder frisst die Warteschlange die Maschine,
   // kann der Betreiber hier abschalten, ohne einen Deploy - der Endpunkt antwortet dann 503, der
@@ -17600,6 +17696,9 @@ function spawnAktivImCode(name) {
      ein Fehlschlag. Die drei Felder sollen laut eigenem Kommentar unterscheiden, ob etwas
      abgeschaltet oder nie ausgeliefert wurde; fuer 'hort' sagten sie dauerhaft 'nie ausgeliefert'. */
   if (name === 'hort') return HORT_BANNER_AKTIV;
+  // 'stimme' (11.09.2026): im Code immer an - ob es etwas zu belohnen gibt, entscheidet der
+  // Schluessel (ohne ihn 503); der Schalter ist der Rueckwaertsgang fuer den Betreiber.
+  if (name === 'stimme') return true;
   if (name === 'kampftext') return KAMPFTEXT_AKTIV;
   if (name === 'chronik') return CHRONIK_AKTIV;
   if (name === 'galaxieziel') return GALAXIE_ZIEL_AKTIV;

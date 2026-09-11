@@ -126,6 +126,7 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/rache.md` | Feature D: Vergeltung – Rachrecht am Nutzerobjekt (`user.rache`), +25 % Beute-Anteil und +10 Kampfpunkte beim gewonnenen Vergeltungsschlag, `attackerId`/`targetUserId` in den Berichten, `/api/me.rache`, Schalter `RACHE_AKTIV` |
 | `docs/allianzkriege.md` | Feature C: Kriegspunkte vergibt der Server (`/api/attack`, `/api/vorposten/angriff`), Routen `/api/allianzkrieg/*`, Schreibsperre im geteilten Speicher, Tagesriegel am Nutzerobjekt, Staub/Trostpreis/Kriegsruhm, Schalter `ALLIANZKRIEG_SERVER_AKTIV` |
 | `docs/patenschaft.md` | Feature G: Pate und Schützling 30 Tage am Nutzerobjekt, fünf Meilenstein-Hooks, Reward-Typ `patenschaft`, `GET /api/patenschaft`, Schalter `PATENSCHAFT_AKTIV` |
+| `docs/verzeichnis-stimme.md` | Stimmen-Belohnung von browsermmorpg.com: Rückruf-Route `GET /api/stimme/rueckruf`, Schlüssel `STIMME_RUECKRUF_KEY`, Sperre am Konto, Notaus `stimme`, Einrichtung im Verzeichnis |
 
 Der vollständige frühere Text dieser Datei liegt in der Git-Historie vor dem 01.09.2026.
 

@@ -5,7 +5,8 @@
 //
 // Das Verzeichnis bietet dafuer selbst den Weg ("Postback & callback reward systems - pay players for
 // voting"): Nach einer Stimme ruft browsermmorpg.com eine Adresse auf, die WIR ihm nennen. Diese
-// Route ist GET /api/stimme/rueckruf. Was sie kann und vor allem, was sie NICHT kann, misst dieser
+// Route ist /api/stimme/rueckruf - GET und POST, denn das Verzeichnis POSTet (Abschnitt 9). Was sie
+// kann und vor allem, was sie NICHT kann, misst dieser
 // Test - ein Test nur ueber den Erfolgsweg waere auch bei einer Route gruen, die jedem, der die
 // Adresse kennt, Kredite schenkt.
 //
@@ -20,6 +21,7 @@
 // Fehlercodes womoeglich mit Wiederholungen reagiert. Der Grund steht im Body und im Protokoll.
 //
 // Gegenprobe beidseitig: am alten server.js (ohne Route) antwortet 1a mit 404 statt 503 - rot.
+// Abschnitt 9: am Stand, der nur GET kannte, antworten 9a/9c/9d/9e mit 404 - rot.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -129,6 +131,9 @@ async function aendereDb(fn, extraEnv) {
 }
 const kopf = t => ({ 'Content-Type': 'application/json', Authorization: 'Bearer ' + t });
 const rueckruf = (query) => s.j('/stimme/rueckruf?' + new URLSearchParams(query).toString());
+// POST wie das Verzeichnis: Parameter in der Adresse und/oder im Body (Formular oder JSON).
+const rueckrufPost = (query, body, typ) => s.j('/stimme/rueckruf' + (query ? '?' + new URLSearchParams(query).toString() : ''),
+  { method: 'POST', headers: typ ? { 'Content-Type': typ } : {}, body });
 const fach = async (tok) => (await s.j('/pending-rewards', { headers: kopf(tok) })).body.rewards || [];
 
 (async () => {
@@ -236,6 +241,27 @@ const fach = async (tok) => (await s.j('/pending-rewards', { headers: kopf(tok) 
   r = await rueckruf({ key: SCHLUESSEL, spieler: 'Anna' });
   check('8c: waehrend der Deckel fuer diese Adresse steht, wird auch der richtige Schluessel nicht mehr verraten (429)',
     r.status === 429, r.status);
+
+  // ---------------------------------------------------------------- 9. POST - so ruft das Verzeichnis wirklich
+  // browsermmorpg.com/info_updates, woertlich: "the exact request we POST", "the next vote posts to
+  // it"; die Stimm-Parameter haengt es an die hinterlegte Adresse an (Query, mit "&"). Eine Route nur
+  // fuer GET haette jeden echten Rueckruf mit 404 abgewiesen - still, denn im Spiel kaeme einfach nie
+  // eine Belohnung an. Der Neustart in aendereDb leert nebenbei den Fehlversuchs-Zaehler aus 8.
+  await aendereDb(db => { db.users.anna.stimmeBelohntZuletzt = 0; }, { STIMME_RUECKRUF_KEY: SCHLUESSEL, STIMME_BELOHNUNG_KREDITE: '25' });
+  const vorher = (await fach(tokA)).length;
+  r = await rueckrufPost({ key: SCHLUESSEL, spieler: 'Anna' }, '', 'application/x-www-form-urlencoded');
+  check('9a: POST mit den Parametern in der Adresse (so haengt das Verzeichnis sie an), leerer Formular-Body -> belohnt',
+    r.status === 200 && r.body && r.body.belohnt === true, { status: r.status, body: r.body });
+  check('9b: ... und die Belohnung liegt im Fach', (await fach(tokA)).length === vorher + 1);
+  r = await rueckrufPost(null, new URLSearchParams({ key: SCHLUESSEL, spieler: 'Anna' }).toString(), 'application/x-www-form-urlencoded');
+  check('9c: POST mit Formular-Body (application/x-www-form-urlencoded) wird gelesen - die Sperre greift, kein 404/401',
+    r.status === 200 && r.body && r.body.belohnt === false && r.body.grund === 'sperre', { status: r.status, body: r.body });
+  r = await rueckrufPost(null, JSON.stringify({ key: SCHLUESSEL, spieler: 'Anna' }), 'application/json');
+  check('9d: POST mit JSON-Body wird ebenfalls gelesen (Sperre greift)',
+    r.status === 200 && r.body && r.body.belohnt === false && r.body.grund === 'sperre', { status: r.status, body: r.body });
+  r = await rueckrufPost(null, new URLSearchParams({ key: 'z'.repeat(SCHLUESSEL.length), spieler: 'Anna' }).toString(), 'application/x-www-form-urlencoded');
+  check('9e: falscher Schluessel per POST -> 401 mit Laenge, wie bei GET',
+    r.status === 401 && new RegExp(SCHLUESSEL.length + ' Zeichen').test(String(r.body && r.body.error)), r.body);
 
   await stoppeServer();
   console.log(fail ? '\nFEHLGESCHLAGEN' : '\nAlles gruen.');

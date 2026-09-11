@@ -11241,7 +11241,7 @@ const DEPLOY_WEBHOOK_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
 // fehlendes sitemap.xml soll die Auslieferung nicht reissen). Ein gescheitertes gzip bei
 // VORHANDENER Datei bricht dagegen ab (`exit 1` verlaesst die Subshell), denn dann laege
 // womoeglich eine alte .gz daneben, und die wuerde nginx weiter ausliefern.
-// *.xml (11.09.2026): sitemap.xml und der RSS-Feed der Patchnotes (patchnotes.xml, seit v8.719.0 ein
+// *.xml (11.09.2026): sitemap.xml und der RSS-Feed der Patchnotes (patchnotes.xml, seit v8.720.0 ein
 // Erzeugnis von build-patchnotes.js) - als Muster aus demselben Grund wie *.css darunter.
 // *.css (11.09.2026): Das gemeinsame Stylesheet der Themenseiten (seiten.css) war nie live - die
 // Kopierliste kannte *.html und *.png, aber keine .css. Gemessen an der Produktion lieferte
@@ -16289,9 +16289,19 @@ app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
 // Spieler und vergib nach dem Voten dem Spieler eine kleine Belohnung." Das Verzeichnis bietet
 // dafuer selbst den Weg ("Postback & callback reward systems - pay players for voting"): Nach einer
 // Stimme ruft es die Adresse auf, die in seinem Konto hinterlegt ist. Das ist diese Route:
-//     GET /api/stimme/rueckruf?key=<STIMME_RUECKRUF_KEY>&spieler=<Registrierungsname>
+//     GET oder POST /api/stimme/rueckruf?key=<STIMME_RUECKRUF_KEY>&spieler=<Registrierungsname>
 // (`username` und `user` sind als Zweitnamen des Spieler-Parameters zugelassen, weil der Name des
 // Parameters vom Verzeichnis vorgegeben wird und dort erst abzulesen ist.)
+//
+// POST (Nachtrag, 11.09.2026): Der erste Stand kannte nur GET. Das oeffentliche Aenderungsprotokoll
+// des Verzeichnisses (browsermmorpg.com/info_updates) sagt aber woertlich "the exact request we
+// POST" und "the next vote posts to it" - und dass es seine Stimm-Parameter an die hinterlegte
+// Adresse ANHAENGT, auch wenn die schon eigene traegt (ihr eigener, inzwischen behobener Fehler:
+// zweites "?" statt "&"). Eine Route nur fuer GET haette jeden echten Rueckruf mit 404 abgewiesen,
+// und zwar STILL: Fuer das Verzeichnis saehe das wie "Adresse falsch" aus, im Spiel kaeme nie eine
+// Belohnung an, und /api/health meldete weiter stimmenRueckruf:true. Deshalb derselbe Handler fuer
+// GET und POST; die Parameter kommen erst aus der Query (dort haengt das Verzeichnis sie an), dann
+// aus dem Body (Formular oder JSON), damit auch ein Formular-POST ohne Query-Parameter ankommt.
 //
 // DREI ENTSCHEIDUNGEN:
 //   1. Fail-closed wie beim Ko-fi-Webhook unten: Ohne STIMME_RUECKRUF_KEY gibt es die Route nicht
@@ -16352,7 +16362,7 @@ function stimmeFehlversuchEintrag(ip, jetzt) {
   }
   return e;
 }
-app.get('/api/stimme/rueckruf', async (req, res) => {
+async function stimmeRueckruf(req, res) {
   if (!STIMME_RUECKRUF_KEY) return res.status(503).json({ error: 'Der Stimmen-Rueckruf ist nicht eingerichtet (STIMME_RUECKRUF_KEY fehlt).' });
   const jetztPruefung = Date.now();
   const fehl = stimmeFehlversuchEintrag(req.ip, jetztPruefung);
@@ -16362,7 +16372,11 @@ app.get('/api/stimme/rueckruf', async (req, res) => {
     res.set('Retry-After', String(Math.ceil((fehl.resetAt - jetztPruefung) / 1000)));
     return res.status(429).json({ error: 'Zu viele falsche Schluessel von dieser Adresse - bitte spaeter erneut.' });
   }
-  const q = req.query || {};
+  // Erst die Query, dann der Body: Das Verzeichnis haengt seine Parameter an die Adresse an; ein
+  // Body (Formular per express.urlencoded unten, JSON per globalem Parser) ergaenzt nur, was in
+  // der Adresse fehlt. Ein GET hat keinen Body, req.body ist dann leer.
+  const body = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
+  const q = Object.assign({}, body, req.query || {});
   const gegeben = Buffer.from(String(q.key || req.get('X-Stimme-Key') || ''));
   const erwartet = Buffer.from(STIMME_RUECKRUF_KEY);
   let passt = false;
@@ -16394,7 +16408,11 @@ app.get('/api/stimme/rueckruf', async (req, res) => {
   console.log('[stimme] belohnt: ' + user.username + ' (Stimme #' + user.stimmenGezaehlt + ')');
   await saveDb();
   res.json({ ok: true, belohnt: true, spieler: user.username, naechsteAb: stimmeNaechsteAb(user) });
-});
+}
+app.get('/api/stimme/rueckruf', stimmeRueckruf);
+// Formular-Bodies (application/x-www-form-urlencoded) nur an dieser Route, wie beim Ko-fi-Webhook
+// darunter: Die App parst global nur JSON. 16 kB reichen fuer Schluessel, Name und ein paar Felder.
+app.post('/api/stimme/rueckruf', express.urlencoded({ extended: false, limit: '16kb' }), stimmeRueckruf);
 
 // ===== Ko-fi-Spenden: Top-Unterstützer im Spiel anzeigen =====
 // Ko-fi schickt bei jeder Zahlung einen Webhook als application/x-www-form-urlencoded mit einem

@@ -123,6 +123,7 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/galaxie-chronik.md` | C1: das Ereignisbuch `db.galaxy.chronik` (feste Felder je Art, Deckel mit Wochenschutz, Admin- und Abhol-Route) |
 | `docs/galaxie-ziel.md` | Feature A: das gemeinsame Wochenziel `db.galaxy.galaxieZiel` (Rotation, Zielhöhe, Hooks in den vier Angriffsrouten, Tagesdeckel, Abrechnung mit Reward `galaxie-ziel`, Notaus `galaxieziel`) |
 | `docs/auftragsbuch.md` | Feature B: Saison-Auftragsbuch – Taten am Nutzerobjekt, 20 Stufen, Tagesdeckel, lazy Saisonwechsel, Notaus `auftragsbuch` |
+| `docs/rache.md` | Feature D: Vergeltung – Rachrecht am Nutzerobjekt (`user.rache`), +25 % Beute-Anteil und +10 Kampfpunkte beim gewonnenen Vergeltungsschlag, `attackerId`/`targetUserId` in den Berichten, `/api/me.rache`, Schalter `RACHE_AKTIV` |
 
 Der vollständige frühere Text dieser Datei liegt in der Git-Historie vor dem 01.09.2026.
 

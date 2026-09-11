@@ -1730,8 +1730,8 @@ function pushNotificationText(type, payload) {
   if (type === 'weltboss-kill') return { title: 'Weltboss besiegt!', body: 'Leviathan Stufe ' + (payload.level || 1) + ' erlegt - dein Beitrag: ' + (payload.share || 0) + '%.' };
   if (type === 'raid-incoming') return { title: 'Überfall!', body: 'Eine feindliche Flotte greift deine Kolonie an.' };
   if (type === 'attack-received') return payload.defended
-    ? { title: 'Angriff abgewehrt!', body: (payload.attackerName || 'Ein Spieler') + ' hat dich angegriffen - deine Verteidigung hat gehalten. Sieh dir den Bericht an.' }
-    : { title: 'Du wurdest angegriffen!', body: (payload.attackerName || 'Ein Spieler') + ' hat deine Kolonie überfallen' + (payload.looted ? ' und Ressourcen erbeutet' : '') + '. Rüste auf oder schlage zurück!' };
+    ? { title: 'Angriff abgewehrt!', body: (payload.attackerName || 'Ein Spieler') + ' hat dich angegriffen - deine Verteidigung hat gehalten. Sieh dir den Bericht an.' + racheHinweisText() }
+    : { title: 'Du wurdest angegriffen!', body: (payload.attackerName || 'Ein Spieler') + ' hat deine Kolonie überfallen' + (payload.looted ? ' und Ressourcen erbeutet' : '') + '. Rüste auf oder schlage zurück!' + racheHinweisText() };
   if (type === 'asteroid-contested') return payload.verloren
     ? { title: 'Schürfrecht verloren!', body: (payload.angreiferName || 'Ein Kommandant') + ' hat dir das Schürfrecht abgenommen. Deine überlebende Eskorte kehrt zurück - das Vorkommen gehört jetzt ihm.' }
     : { title: 'Angriff auf dein Schürfrecht abgewehrt', body: 'Deine Eskorte hat ' + (payload.angreiferName || 'einen Angreifer') + ' zurückgeschlagen. Das Vorkommen bleibt deins - sieh nach, was von der Wache übrig ist.' };
@@ -2770,7 +2770,11 @@ app.get('/api/me', authMiddleware, (req, res) => {
     supporter: supporterFeaturesFor(req.userId),
     // `neu` sagt dem Spiel, ob es die Gutschrift ansagen soll - ohne das müsste es den Stand mit
     // dem letzten Start vergleichen, den es nach einem Neuladen gar nicht mehr kennt.
-    staub: Object.assign({ neu: staubNeu }, staubStand(user || {}))
+    staub: Object.assign({ neu: staubNeu }, staubStand(user || {})),
+    // Vergeltung (Feature D, 11.09.2026): die gueltigen Rachrechte - fuer die Hinweiszeile in der
+    // Angriffsvorschau. Bei ausgeschaltetem Schalter FEHLT das Feld (nicht: leere Liste), damit der
+    // Client "alter Server / inaktiv" von "kein Recht" unterscheiden kann.
+    ...(RACHE_AKTIV ? { rache: racheListeFuerClient(user, Date.now()) } : {})
   });
 });
 
@@ -4678,6 +4682,65 @@ function pvpFindeAngriffsmission(save, missionId, targetUserId) {
   return null;
 }
 
+// ===== Vergeltung / Rache-Knopf (Feature D, 11.09.2026) =====
+// Wer angegriffen wurde, darf 24 Stunden lang zurueckschlagen - mit mehr Beute und mehr Kampfpunkten.
+// Das Recht liegt am NUTZEROBJEKT des Verteidigers (user.rache), nie im Spielstand: Daran haengt eine
+// Belohnung, und der Spielstand ist klientenautoritativ (CLAUDE.md, Sicherheitsgrenze). Es entsteht
+// bei JEDEM aufgeloesten Spielerangriff (Sieg wie Niederlage des Angreifers), wird nur durch einen
+// GEWONNENEN Vergeltungsschlag verbraucht und laeuft sonst mit `bis` aus.
+// Der Schalter gattert die Wirkung UND die Zusatzfelder in Berichten/Antworten/Push: Ein Client, der
+// `attackerId` sieht, zeigt den Knopf und verspricht "Vergeltung moeglich" - das darf er nur, wenn
+// der Server das Versprechen auch einloest.
+const RACHE_AKTIV = true;
+const RACHE_FENSTER_MS = 24 * 3600 * 1000;
+const RACHE_BEUTE_BONUS = 0.25;      // +25 % auf den Beute-ANTEIL (vor der Kappung am Bestand des Ziels)
+const RACHE_KAMPFPUNKTE = 10;        // zusaetzlich zu den 25 Punkten des gewoehnlichen Sieges
+const RACHE_MAX_EINTRAEGE = 5;       // je Verteidiger; beim Schreiben fliegen abgelaufene und die aeltesten raus
+function racheHinweisText() {
+  return RACHE_AKTIV ? ' Vergeltung ' + Math.round(RACHE_FENSTER_MS / 3600000) + ' h möglich.' : '';
+}
+// Abgelaufene Eintraege entfernen - in-place, damit ein user.rache nie ueber die Zeit waechst.
+function racheBereinigen(user, now) {
+  if (!user || !user.rache || typeof user.rache !== 'object') return;
+  for (const id of Object.keys(user.rache)) {
+    const e = user.rache[id];
+    if (!e || typeof e !== 'object' || !(e.bis > now)) delete user.rache[id];
+  }
+}
+// Rachrecht des OPFERS gegen den Angreifer anlegen bzw. erneuern (das Fenster beginnt beim juengsten Angriff).
+function racheVermerken(opferUser, angreiferId, angreiferName, now) {
+  if (!RACHE_AKTIV || !opferUser || !angreiferId) return;
+  if (!opferUser.rache || typeof opferUser.rache !== 'object') opferUser.rache = {};
+  racheBereinigen(opferUser, now);
+  opferUser.rache[angreiferId] = { name: angreiferName || 'Unbekannt', seit: now, bis: now + RACHE_FENSTER_MS };
+  const ids = Object.keys(opferUser.rache);
+  if (ids.length > RACHE_MAX_EINTRAEGE) {
+    ids.sort((a, b) => opferUser.rache[a].bis - opferUser.rache[b].bis);
+    for (const id of ids.slice(0, ids.length - RACHE_MAX_EINTRAEGE)) delete opferUser.rache[id];
+  }
+}
+// Gueltiges Rachrecht des Angreifers gegen genau dieses Ziel - oder null. hasOwnProperty statt
+// Wahrheitswert: `gegnerId` kommt aus dem Request, und `{}['constructor']` waere sonst wahr
+// (dieselbe Falle wie bei der Standortwahl in /api/attack).
+function racheRecht(user, gegnerId, now) {
+  if (!RACHE_AKTIV || !user || !user.rache || typeof user.rache !== 'object') return null;
+  if (!Object.prototype.hasOwnProperty.call(user.rache, gegnerId)) return null;
+  const e = user.rache[gegnerId];
+  return e && typeof e === 'object' && e.bis > now ? e : null;
+}
+function racheVerbrauchen(user, gegnerId) {
+  if (user && user.rache && Object.prototype.hasOwnProperty.call(user.rache, gegnerId)) delete user.rache[gegnerId];
+}
+// Fuer /api/me: nur die gueltigen, juengste zuerst. Liest nur - eine GET-Route soll nichts schreiben.
+function racheListeFuerClient(user, now) {
+  if (!user || !user.rache || typeof user.rache !== 'object') return [];
+  return Object.keys(user.rache)
+    .map(id => ({ id, e: user.rache[id] }))
+    .filter(x => x.e && typeof x.e === 'object' && x.e.bis > now)
+    .sort((a, b) => b.e.bis - a.e.bis)
+    .map(x => ({ gegnerId: x.id, gegnerName: x.e.name || 'Unbekannt', bis: x.e.bis }));
+}
+
 app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });   // Notaus 'angriffe' (02.09.2026)
   const { targetUserId, targetPlanet } = req.body || {};
@@ -4750,6 +4813,19 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     : {};
 
   const targetUser = findUserById(targetUserId);
+  /* Vergeltung (Feature D): Hat der Angreifer ein gueltiges Rachrecht gegen genau dieses Ziel, ist
+     dieser Angriff ein Vergeltungsschlag. Die Entscheidung faellt HIER - hinter Schild und Ratenbremse
+     (die bleiben unveraendert vor allem), vor dem Wurf. Ein Sockel-Angriff (unter dem Mindesteinsatz)
+     loest KEINE Vergeltung aus und verbraucht sie auch nicht: Der Nadelstich soll nichts einbringen,
+     und +10 Kampfpunkte fuer einen Jaeger waeren genau das Leck, das der Mindesteinsatz schliesst.
+     `attackerId`/`targetUserId` in den Berichten haengen am Schalter: Sie sind das Signal, an dem
+     der Client den Knopf zeigt - ohne Wirkung dahinter waere der Knopf ein leeres Versprechen. */
+  const attackerUser = findUserById(req.userId);
+  const racheJetzt = Date.now();
+  const istRache = RACHE_AKTIV && ertragStufe !== 'sockel' && !!racheRecht(attackerUser, targetUserId, racheJetzt);
+  const racheFelder = istRache ? { rache: true, racheBonus: RACHE_BEUTE_BONUS } : {};
+  const racheZielId = RACHE_AKTIV ? { targetUserId } : {};
+  const racheAngreiferId = RACHE_AKTIV ? { attackerId: req.userId } : {};
   const attackerFleetSummary = fleetSummary(attacker);
   // Im Standort-Fall ist die GEGNERFLOTTE die des Standorts: Sie bestimmt Konter, Formation und
   // den defenderFleet-Bericht - genau die Flotte, die dort wirklich steht. Eine leere
@@ -4892,10 +4968,15 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
        Ressourcenkontos - und der groesste Teil davon wurde schlicht VERNICHTET, weil ihn niemand
        tragen konnte. Fuer den Angreifer sah es nach "keine Beute" aus, fuer das Opfer nicht.
        Damit haengt der Ressourcenverlust jetzt an derselben Schwelle wie alles andere. */
+    /* Vergeltung: +25 % auf den ANTEIL, nicht auf die Beute nach der Kappung. Die Kappung ist der
+       Bestand des Ziels (Math.min unten) - der Bonus kann also nie mehr nehmen, als da ist. Bisher war
+       die Kappung implizit (der Anteil lag stets unter 1); jetzt steht sie ausdruecklich da, weil ein
+       Faktor dazugekommen ist. Im Normalfall ist racheBeuteMult 1 und der Term byte-neutral. */
+    const racheBeuteMult = istRache ? 1 + RACHE_BEUTE_BONUS : 1;
     const stolen = {};
     if (ertragStufe !== 'sockel') {
       for (const [r, amt] of Object.entries(target.resources || {})) {
-        const take = Math.floor((amt || 0) * lootPct * farmPenalty * lootProtection * beuteFaktor);
+        const take = Math.min(amt || 0, Math.floor((amt || 0) * lootPct * farmPenalty * lootProtection * beuteFaktor * racheBeuteMult));
         if (take > 0) {
           stolen[r] = take;
           target.resources[r] = Math.max(0, (target.resources[r] || 0) - take);
@@ -4926,6 +5007,12 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Sockel: keine Kampfpunkte. Das ist die Groesse, wegen der der Ein-Jaeger-Angriff ueberhaupt
     // gefahren wurde.
     if (ertragStufe !== 'sockel') attacker.battlePoints = (attacker.battlePoints || 0) + 25;
+    // Vergeltung: Zusatzpunkte, und das Recht ist mit dem SIEG verbraucht (eine Niederlage laesst es
+    // stehen - wer verliert, hat seine Rache noch nicht gehabt). istRache ist im Sockel-Fall false.
+    if (istRache) {
+      attacker.battlePoints = (attacker.battlePoints || 0) + RACHE_KAMPFPUNKTE;
+      racheVerbrauchen(attackerUser, targetUserId);
+    }
 
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     setSaveValue(targetUserId, JSON.stringify(target));
@@ -4970,12 +5057,12 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     }
 
     const angreiferBerichtId = addReport(req.userId, {
-      type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt',
+      type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt', ...racheZielId, ...racheFelder,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
       phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder
     });
     const verteidigerBerichtId = addReport(targetUserId, {
-      type: 'attack-received', result: 'loss', attackerName: req.username,
+      type: 'attack-received', result: 'loss', attackerName: req.username, ...racheAngreiferId, ...racheFelder,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
       phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder
     });
@@ -4994,8 +5081,10 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     kampfVerlaufVermerken(findUserById(req.userId), { rolle: 'angriff', gegner: targetUser ? targetUser.username : null, ziel: standortFelder.targetPlanet || 'home', erfolg: true, angriff: attackPower, verteidigung: defensePower, beute: Object.keys(stolen).length });
     kampfVerlaufVermerken(targetUser, { rolle: 'verteidigung', gegner: req.username, ziel: standortFelder.targetPlanet || 'home', erfolg: false, angriff: attackPower, verteidigung: defensePower, beute: Object.keys(stolen).length });
     auftragsbuchTat(req.userId, 'angriff');   // Saison-Auftragsbuch: der gefuehrte Angriff zaehlt, egal wie er ausging
+    // Vergeltung: Der Verteidiger darf 24 h zurueckschlagen - synchron VOR saveDb() (db-Regel).
+    racheVermerken(targetUser, req.userId, req.username, racheJetzt);
     await saveDb();
-    return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
+    return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails(), ...racheFelder });
   } else {
     // Sockel: auch die drei Trostpunkte fallen weg - sonst bliebe der Nadelstich eine, wenn auch
     // duenne, Punktequelle, und genau die sollte er nicht mehr sein.
@@ -5034,14 +5123,14 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     const staubAbwehr = staubAbwehrGutschreiben(targetUser, req.userId);
 
     const angreiferBerichtId = addReport(req.userId, {
-      type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt',
+      type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt', ...racheZielId,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
       phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder
     });
     const verteidigerBerichtId = addReport(targetUserId, {
       // staubReward steht im Bericht, damit die Gutschrift nicht unsichtbar bleibt: Der Verteidiger
       // war beim Kampf per Definition nicht dabei, der Bericht ist seine einzige Quelle.
-      type: 'attack-received', result: 'win', attackerName: req.username, defendReward: abwehrCp, staubReward: staubAbwehr,
+      type: 'attack-received', result: 'win', attackerName: req.username, defendReward: abwehrCp, staubReward: staubAbwehr, ...racheAngreiferId,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
       phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder
     });
@@ -5057,6 +5146,8 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     kampfVerlaufVermerken(targetUser, { rolle: 'verteidigung', gegner: req.username, ziel: standortFelder.targetPlanet || 'home', erfolg: true, angriff: attackPower, verteidigung: defensePower, beute: 0 });
     auftragsbuchTat(req.userId, 'angriff');   // Saison-Auftragsbuch: beide Seiten haben gekaempft ...
     auftragsbuchTat(targetUserId, 'abwehr');  // ... und der Verteidiger hat serverseitig gewonnen
+    // Vergeltung: auch ein abgewehrter Angriff war eine Provokation - das Recht entsteht in beiden Ausgaengen.
+    racheVermerken(targetUser, req.userId, req.username, racheJetzt);
     await saveDb();
     return res.json({ success: false, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
   }

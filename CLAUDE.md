@@ -121,6 +121,7 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/hort-meldung.md` | Der seltenste Expeditionsfund: Server würfelt, Meldung in der Weltlage, Schalter `HORT_BANNER_AKTIV` |
 | `docs/ki-kampfberichte.md` | Etappe E1a: Prompt-Zuschnitt, Wahrheits-Sperren, Warteschlange, `KAMPFTEXT_AKTIV` |
 | `docs/galaxie-chronik.md` | C1: das Ereignisbuch `db.galaxy.chronik` (feste Felder je Art, Deckel mit Wochenschutz, Admin- und Abhol-Route) |
+| `docs/rache.md` | Feature D: Vergeltung – Rachrecht am Nutzerobjekt (`user.rache`), +25 % Beute-Anteil und +10 Kampfpunkte beim gewonnenen Vergeltungsschlag, `attackerId`/`targetUserId` in den Berichten, `/api/me.rache`, Schalter `RACHE_AKTIV` |
 
 Der vollständige frühere Text dieser Datei liegt in der Git-Historie vor dem 01.09.2026.
 

@@ -14,6 +14,15 @@ const os = require('os');
 const PORT = process.env.PORT || 3001;
 const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'db.json');
 const SECRET_FILE = process.env.SECRET_FILE || path.join(__dirname, 'jwt-secret.txt');
+const opsHealth = require('./operations-health').createOperationalHealth({ dbFile: DB_FILE });
+let opsProbePending = false;
+async function opsProbe() {
+  if (opsProbePending) return;
+  opsProbePending = true;
+  try { await opsHealth.probe(); } finally { opsProbePending = false; }
+}
+setImmediate(opsProbe);
+setInterval(opsProbe, 30000).unref();
 
 // Für Passwort-Reset-E-Mails (siehe ANLEITUNG.md, Abschnitt "Passwort-Reset einrichten")
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
@@ -57,12 +66,13 @@ const VAPID_KEYS = loadOrCreateVapidKeys();
 webpush.setVapidDetails(PUBLIC_URL, VAPID_KEYS.publicKey, VAPID_KEYS.privateKey);
 
 function loadDb() {
-  if (!fs.existsSync(DB_FILE)) return { users: {}, private: {}, shared: {}, resetTokens: {} };
+  if (!fs.existsSync(DB_FILE)) { opsHealth.load(true); return { users: {}, private: {}, shared: {}, resetTokens: {} }; }
   try {
     const d = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
     if (!d.resetTokens) d.resetTokens = {};
+    opsHealth.load(true);
     return d;
-  } catch (e) { console.error('DB konnte nicht gelesen werden, starte mit leerer DB:', e); return { users: {}, private: {}, shared: {}, resetTokens: {} }; }
+  } catch (e) { opsHealth.load(false); console.error('DB konnte nicht gelesen werden, starte mit leerer DB:', e); return { users: {}, private: {}, shared: {}, resetTokens: {} }; }
 }
 let db = loadDb();
 
@@ -89,6 +99,7 @@ const TAKT_FEHLER_MERKEN = 20;
 const taktFehlerListe = [];            // neueste zuerst
 const taktFehlerAnzahl = {};           // Name -> Anzahl seit Prozessstart
 function taktFehlerVermerken(name, fehler) {
+  opsHealth.tickError(name);
   // Die ersten drei Zeilen des Stacks: Die Meldung allein sagt oft nicht, WO es passiert ist,
   // der ganze Stack sprengt jede Uebersicht.
   const meldung = String((fehler && fehler.stack) || fehler || 'unbekannt')
@@ -106,12 +117,14 @@ function taktFehlerVermerken(name, fehler) {
 function takt(name, fn) {
   return function (...args) {
     try {
+      const opsTickBefore = opsHealth.tickStart();
       const ergebnis = fn.apply(this, args);
       // Ein async-Takt wirft nicht, er lehnt ab - ohne dieses .catch waere die Ablehnung eine
       // unbehandelte Zusage und beendete den Prozess (Node seit v15).
       if (ergebnis && typeof ergebnis.then === 'function') {
-        return ergebnis.catch(f => taktFehlerVermerken(name, f));
+        return ergebnis.then(value => { opsHealth.tickDone(name, opsTickBefore); return value; }, f => taktFehlerVermerken(name, f));
       }
+      opsHealth.tickDone(name, opsTickBefore);
       return ergebnis;
     } catch (f) { taktFehlerVermerken(name, f); }
   };
@@ -151,6 +164,7 @@ function performDbWrite() {
   const data = JSON.stringify(db); // Snapshot des aktuellen Standes (synchron, enthält alle bisherigen Mutationen)
   const tmp = DB_FILE + '.tmp';
   const finish = (err) => {
+    opsHealth.write(err);
     if (err) console.error('DB-Speichern fehlgeschlagen:', err);
     saveInFlight = false;
     claimed.forEach(r => r());
@@ -892,6 +906,7 @@ function authMiddleware(req, res, next) {
     }
     req.userId = payload.userId;
     req.username = payload.username;
+    if (user) opsHealth.touch(user.userId);
     // Aktivitaets-Uhr (siehe den Block ueber dieser Funktion). Steht HINTER der
     // vollstaendigen Pruefung: Ein abgewiesener Aufruf ist keine Handlung dieses Kontos.
     if (user && aktivGezaehlt(req.method, req.path)) aktivVermerken(user);
@@ -5476,6 +5491,8 @@ function gitKopfJetzt() {
 
 app.get('/api/health', (req, res) => res.json({
   ok: true,
+  ...opsHealth.snapshot({ announcement: db.ankuendigung, attacksPaused: notAusGesetzt('angriffe') }),
+  contentVersion: LAUFENDER_COMMIT,
   users: Object.keys(db.users).length,
   commit: LAUFENDER_COMMIT,
   checkout: gitKopfJetzt(),

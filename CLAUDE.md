@@ -121,6 +121,7 @@ Alles Weitere, insbesondere der Wiederherstellungsweg und die Ausfall-Historie: 
 | `docs/hort-meldung.md` | Der seltenste Expeditionsfund: Server würfelt, Meldung in der Weltlage, Schalter `HORT_BANNER_AKTIV` |
 | `docs/ki-kampfberichte.md` | Etappe E1a: Prompt-Zuschnitt, Wahrheits-Sperren, Warteschlange, `KAMPFTEXT_AKTIV` |
 | `docs/galaxie-chronik.md` | C1: das Ereignisbuch `db.galaxy.chronik` (feste Felder je Art, Deckel mit Wochenschutz, Admin- und Abhol-Route) |
+| `docs/allianzkriege.md` | Feature C: Kriegspunkte vergibt der Server (`/api/attack`, `/api/vorposten/angriff`), Routen `/api/allianzkrieg/*`, Schreibsperre im geteilten Speicher, Tagesriegel am Nutzerobjekt, Staub/Trostpreis/Kriegsruhm, Schalter `ALLIANZKRIEG_SERVER_AKTIV` |
 
 Der vollständige frühere Text dieser Datei liegt in der Git-Historie vor dem 01.09.2026.
 

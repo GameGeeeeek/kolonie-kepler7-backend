@@ -5282,7 +5282,8 @@ app.get('/api/health', (req, res) => res.json({
   // der Etappe E1b von aussen - vorher waren das drei SSH-Befehle. Nennt weder Adresse noch
   // Schluessel, nur Befunde und Laengen (Definition am Dateiende).
   kampftext: kampftextHealth(),
-  chronik: chronikHealth()
+  chronik: chronikHealth(),
+  galaxieZiel: galaxieZielHealth()   // Feature A (11.09.2026): steht das Ziel dieser Woche? Deploy-Beleg ohne Anmeldung
 }));
 
 // --- Andere Spieler in einem Sternensystem (für die Sektorkarte) ---
@@ -6282,7 +6283,8 @@ const CHRONIK_ARTEN = {
   'allianzkrieg-beendet':  'sieger, verlierer, punkteSieger, punkteVerlierer - oder a, b, punkteA, punkteB, unentschieden',
   'kopfgeld-kassiert':     'jaeger, ziel, kredite',
   'saison-beendet':        'saison, champion, teilnehmer',
-  'front-durchbrochen':    'system, sieger, verlierer (NPC-Voelker der Randkriege)'
+  'front-durchbrochen':    'system, sieger, verlierer (NPC-Voelker der Randkriege)',
+  'galaxie-ziel-erreicht': 'zielArt (Schluessel aus GALAXIE_ZIEL_ARTEN), ziel, stand, beitragende'
 };
 function chronikText(roh) {
   return String(roh == null ? '' : roh).replace(/[^A-Za-z0-9ÄÖÜäöüß \-']/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
@@ -6967,6 +6969,9 @@ function pushPendingReward(userId, reward) {
   // Idempotenz: dieselbe Wochenliga-/Saison-Belohnung nie doppelt einreihen.
   if (reward.type === 'weekly-league' && list.some(r => r.type === 'weekly-league' && r.weekKey === reward.weekKey)) return;
   if (reward.type === 'season-league' && list.some(r => r.type === 'season-league' && r.seasonKey === reward.seasonKey)) return;
+  // Galaxie-Ziel (11.09.2026): dieselbe Woche nie zweimal - die erste Sperre ist `ausgezahlt` am
+  // Ziel selbst, diese hier faengt den Fall, dass der Server zwischen Abrechnung und Flush stirbt.
+  if (reward.type === 'galaxie-ziel' && list.some(r => r.type === 'galaxie-ziel' && r.woche === reward.woche)) return;
   reward.id = crypto.randomUUID();
   list.push(reward);
   db.private[userId].__pendingRewards = list.slice(-20);
@@ -7171,6 +7176,186 @@ function resolveBountyServer() {
   if (top && topId) g.bounty = { targetUserId: topId, targetName: top.name || 'Unbekannt', reward: BOUNTY_REWARD, weekKey: nowKey, claimed: false, claimedBy: null };
 }
 
+/* ===== Galaxie-Ziel der Woche (Feature A, 11.09.2026) ==========================================
+
+   Ein GEMEINSAMES Wochenziel fuer alle Spieler: "Schlagt diese Woche zusammen N-mal gegen Alien-
+   Nester" - eine Art je Woche, rotierend ueber GALAXIE_ZIEL_ARTEN. Jeder gewertete Schlag zaehlt
+   eins, wer beigetragen hat, bekommt beim Wochenwechsel Kredite (nach eigenem Beitrag gestaffelt)
+   und Sternenstaub - aber NUR, wenn die Gemeinschaft das Ziel erreicht hat.
+
+   ALLES LIEGT IN db.galaxy (fuer Clients unerreichbar) und wird ausschliesslich aus den Erfolgs-
+   pfaden der vier Angriffsrouten geschrieben, also dort, wo der SERVER gewuerfelt hat. Ein Client
+   kann weder seinen Beitrag noch den Stand melden - PUT /api/storage/galaxieZiel landet im
+   generischen Speicher und beruehrt das Ziel nicht (Waechter: tests/test_galaxie_ziel_http.js).
+
+   DREI ENTSCHEIDUNGEN, die man kennen muss:
+   - Die Zielhoehe wird EINMAL beim Anlegen aus den aktiven Spielern (rkAktiveSpieler, 24 h) und
+     dem Faktor der Art gerechnet und dann festgeschrieben - sonst wanderte das Ziel mit jedem
+     Login, und ein fast erreichtes Ziel koennte am Sonntag wieder wegrutschen. Geklemmt auf
+     GALAXIE_ZIEL_MIN..MAX: Unter zehn waere es keine Gemeinschaftsleistung, ueber 400 unerreichbar.
+   - Hoechstens GALAXIE_ZIEL_TAGESDECKEL Beitraege je Spieler und Tag: Wer zwoelf Nester am Stueck
+     beschiesst, erfuellt das Ziel sonst allein, und das Wort "gemeinsam" waere eine Falschaussage.
+     Der Deckel begrenzt nur die ZAEHLUNG - der Angriff selbst laeuft unveraendert.
+   - Zwei Tore, eine Kette: GALAXIE_ZIEL_AKTIV ist die Grundstellung im Code, der Notaus
+     'galaxieziel' (NOTAUS_NAMEN) der Rueckwaertsgang ohne Deploy. spawnAktiv('galaxieziel')
+     gattert Zaehlung, Auszahlung UND Transport - eine Karte, die zaehlt, waehrend nichts gezaehlt
+     wird, waere die Anzeige-Falschaussage, vor der das Frontend seine Flaechen schuetzt.
+
+   DER REWARD-TYP 'galaxie-ziel' IST NEU. Ein Client ohne den Zweig in claimPendingRewards meldet
+   dafuer "Dankeschoen vom Team: +… Kredite fuer deinen Bug-Report". Deshalb: Backend zuerst live,
+   Frontend unmittelbar danach - die erste Auszahlung faellt fruehestens am naechsten Montag, bis
+   dahin muss der Frontend-Zweig ausgeliefert sein. Sternenstaub bucht der SERVER hier selbst
+   (staubGutschreiben); `staub` im Reward ist nur die Zahl fuer die Meldung. */
+const GALAXIE_ZIEL_AKTIV = true;   // 11.09.2026, Paket der sieben Gameplay-Features (Backend vor Frontend)
+// Reihenfolge = Rotation nach Wochennummer. `icon` MUSS eine ti-Klasse sein, die im Frontend
+// vorkommt (das Icon-Font dort ist ein Teilsatz) - tests/test_galaxie_ziel.js im Frontend misst das.
+const GALAXIE_ZIEL_ARTEN = [
+  { key: 'nestschlaege',      name: 'Schläge gegen Alien-Nester',          icon: 'ti-alien',             proSpieler: 3,
+    beschreibung: 'Jeder gewertete Angriff auf ein Alien-Nest zählt – egal, ob das Nest dabei fällt.' },
+  { key: 'festungsschlaege',  name: 'Schläge gegen Asteroidenfestungen',   icon: 'ti-building-fortress', proSpieler: 3,
+    beschreibung: 'Jeder gewertete Angriff auf eine Asteroidenfestung zählt – egal, ob sie dabei fällt.' },
+  { key: 'konvoiueberfaelle', name: 'Überfälle auf Wrackkonvois',          icon: 'ti-truck',             proSpieler: 3,
+    beschreibung: 'Jeder gewertete Überfall auf einen Wrackkonvoi zählt – egal, ob er dabei aufgebracht wird.' },
+  { key: 'weltbossschlaege',  name: 'Schläge gegen den Weltboss',          icon: 'ti-skull',             proSpieler: 2,
+    beschreibung: 'Jeder gewertete Schlag gegen den Weltboss zählt – ein Schlag je Tag und Kommandant.' }
+];
+const GALAXIE_ZIEL_MIN = 10, GALAXIE_ZIEL_MAX = 400;
+const GALAXIE_ZIEL_TAGESDECKEL = 10;            // Beitraege je Spieler und UTC-Tag
+const GALAXIE_ZIEL_CREDITS_BASIS = 200;         // fuer jeden Beitragenden
+const GALAXIE_ZIEL_CREDITS_JE_BEITRAG = 50;     // ... plus je Beitrag, gedeckelt:
+const GALAXIE_ZIEL_CREDITS_DECKEL = 400;        // hoechstens 200 + 400 = 600 Kredite
+const GALAXIE_ZIEL_STAUB = 5;                   // Sternenstaub je Beitragendem, bucht der Server
+function galaxieZielArtDef(key) {
+  return GALAXIE_ZIEL_ARTEN.find(a => a.key === key) || null;
+}
+// Die Art der Woche aus dem Wochenschluessel (Montag, 'YYYY-MM-DD'): Wochen seit Epoche modulo
+// Katalog. Deterministisch, ohne DB - zwei Server rechneten dieselbe Art.
+function galaxieZielArtIndex(woche) {
+  const [y, m, d] = String(woche || '').split('-').map(Number);
+  if (!(y > 0) || !(m > 0) || !(d > 0)) return 0;
+  const wochen = Math.floor(Math.floor(Date.UTC(y, m - 1, d) / 86400000) / 7);
+  const n = GALAXIE_ZIEL_ARTEN.length;
+  return ((wochen % n) + n) % n;
+}
+function galaxieZielAnlegen(g, now) {
+  const woche = serverWeekKey(now);
+  const def = GALAXIE_ZIEL_ARTEN[galaxieZielArtIndex(woche)];
+  const aktive = rkAktiveSpieler();
+  const ziel = Math.max(GALAXIE_ZIEL_MIN, Math.min(GALAXIE_ZIEL_MAX, Math.round(aktive * def.proSpieler)));
+  const [y, m, d] = woche.split('-').map(Number);
+  g.galaxieZiel = {
+    woche, art: def.key, ziel, stand: 0,
+    beitraege: {},                       // userId -> Beitraege dieser Woche (Grundlage der Auszahlung)
+    beitraegeTag: { stempel: null, konten: {} },   // Tagesdeckel je Spieler (UTC-Tag wie rkTagesSchluessel)
+    erreichtAm: null, ausgezahlt: false,
+    beginn: new Date(y, m - 1, d).getTime(), ende: new Date(y, m - 1, d + 7).getTime()
+  };
+  console.log('[galaxie-ziel] neue Woche ' + woche + ': ' + def.key + ' x' + ziel + ' (aktive Spieler: ' + aktive + ')');
+  return g.galaxieZiel;
+}
+/* Abrechnung der ALTEN Woche. Idempotent ueber `ausgezahlt`; das abgerechnete Ziel bleibt als
+   `galaxieZielVorwoche` liegen (Beleg fuer den Admin und den Test, geht nie an Clients). Zahlt nur,
+   wenn erreicht - ein Ziel, das nicht erreicht wurde, zahlt NICHTS, sonst waere "Ziel" das falsche
+   Wort. Und nur, wenn der Notaus nicht gesetzt ist: Wer abschaltet, will keine Auszahlung; die
+   Woche wird dann mit einem Protokollvermerk geschlossen statt still liegen zu bleiben. */
+function galaxieZielAbrechnen(g, z) {
+  if (!z || z.ausgezahlt) return 0;
+  z.ausgezahlt = true;
+  z.abgerechnetAm = Date.now();
+  g.galaxieZielVorwoche = z;
+  const def = galaxieZielArtDef(z.art);
+  if (!def) return 0;
+  const beitragende = Object.keys(z.beitraege || {}).filter(uid => (z.beitraege[uid] || 0) > 0);
+  if (!z.erreichtAm) {
+    console.log('[galaxie-ziel] Woche ' + z.woche + ' nicht erreicht (' + z.stand + '/' + z.ziel + ', ' + beitragende.length + ' Beitragende) - keine Auszahlung');
+    if (beitragende.length) pushGalaxyNews(def.icon, 'Galaxie-Ziel der Woche verfehlt: „' + def.name + '" kam auf ' + z.stand + ' von ' + z.ziel + '. Nächste Woche wartet ein neues Ziel.', 'galaxie-ziel');
+    return 0;
+  }
+  if (!spawnAktiv('galaxieziel')) {
+    console.warn('[galaxie-ziel] Woche ' + z.woche + ' erreicht, aber Notaus gesetzt - keine Auszahlung an ' + beitragende.length + ' Beitragende');
+    return 0;
+  }
+  let n = 0;
+  for (const uid of beitragende) {
+    const user = findUserById(uid);
+    if (!user) continue;
+    const beitrag = z.beitraege[uid];
+    const credits = GALAXIE_ZIEL_CREDITS_BASIS + Math.min(GALAXIE_ZIEL_CREDITS_DECKEL, beitrag * GALAXIE_ZIEL_CREDITS_JE_BEITRAG);
+    staubGutschreiben(staubKonto(user), GALAXIE_ZIEL_STAUB);   // der Server bucht den Staub, nicht der Client
+    pushPendingReward(uid, { type: 'galaxie-ziel', woche: z.woche, art: z.art, name: def.name,
+      ziel: z.ziel, stand: z.stand, beitrag, credits, staub: GALAXIE_ZIEL_STAUB });
+    n++;
+  }
+  console.log('[galaxie-ziel] Woche ' + z.woche + ' abgerechnet: ' + n + ' Beitragende belohnt (' + z.stand + '/' + z.ziel + ')');
+  pushGalaxyNews(def.icon, 'Galaxie-Ziel der Woche abgerechnet: „' + def.name + '" wurde erreicht – ' + n + ' Kommandanten finden ihre Belohnung beim nächsten Login.', 'galaxie-ziel');
+  return n;
+}
+// Wochenwechsel: laeuft im galaxyTick (alle 15 Minuten und beim Start) UND vor jedem Beitrag, damit
+// ein Schlag um 00:05 Uhr am Montag schon in die neue Woche faellt statt in die abgelaufene.
+function galaxieZielTick(g, now) {
+  if (!GALAXIE_ZIEL_AKTIV) return;
+  now = now || Date.now();
+  const woche = serverWeekKey(now);
+  const z = g.galaxieZiel;
+  if (z && z.woche === woche) return;
+  if (z) galaxieZielAbrechnen(g, z);
+  galaxieZielAnlegen(g, now);
+}
+/* Der Hook. Aufgerufen NUR aus dem Erfolgspfad der vier Routen (der Server hat gewuerfelt, der
+   Schlag ist gewertet) und VOR deren saveDb(): synchron mutieren, dann schreiben. Ein Schlag, den
+   die Route ablehnt (Abklingzeit, Flotte unterwegs, Ziel weg, Weltboss-Tagessperre), kommt hier
+   nie an. `art` bindet den Schlag an die Art der Woche - in einer Festungswoche zaehlt kein Nest. */
+function galaxieZielBeitrag(userId, art) {
+  if (!spawnAktiv('galaxieziel')) return null;
+  const g = loadOrInitGalaxy();
+  const now = Date.now();
+  galaxieZielTick(g, now);
+  const z = g.galaxieZiel;
+  if (!z || z.art !== art) return null;
+  const heute = rkTagesSchluessel();
+  if (!z.beitraegeTag || z.beitraegeTag.stempel !== heute) z.beitraegeTag = { stempel: heute, konten: {} };
+  const heuteN = z.beitraegeTag.konten[userId] || 0;
+  if (heuteN >= GALAXIE_ZIEL_TAGESDECKEL) return { gezaehlt: false, gedeckelt: true, stand: z.stand, ziel: z.ziel };
+  z.beitraegeTag.konten[userId] = heuteN + 1;
+  z.beitraege[userId] = (z.beitraege[userId] || 0) + 1;
+  z.stand += 1;
+  if (!z.erreichtAm && z.stand >= z.ziel) {
+    z.erreichtAm = now;
+    const def = galaxieZielArtDef(z.art);
+    const beitragende = Object.keys(z.beitraege).length;
+    console.log('[galaxie-ziel] Woche ' + z.woche + ' ERREICHT: ' + z.stand + '/' + z.ziel + ' durch ' + beitragende + ' Beitragende');
+    pushGalaxyNews(def.icon, 'Galaxie-Ziel erreicht: „' + def.name + '" – ' + z.ziel + ' geschafft, ' + beitragende + ' Kommandanten haben beigetragen. Die Belohnung kommt zum Wochenwechsel.', 'galaxie-ziel');
+    // `zielArt`, nicht `art`: chronikVermerken traegt die Felder ueber den Eintrag, und `art` ist dort
+    // die Sorte des Eintrags selbst - ein Feld `art` hatte sie in der ersten Fassung ueberschrieben.
+    chronikVermerken('galaxie-ziel-erreicht', { zielArt: z.art, ziel: z.ziel, stand: z.stand, beitragende });
+  }
+  return { gezaehlt: true, stand: z.stand, ziel: z.ziel, erreicht: !!z.erreichtAm };
+}
+// Die Client-Form: kein Beitrags-Verzeichnis anderer Konten, nur der EIGENE Beitrag. Null, wenn
+// abgeschaltet oder das Ziel noch zur alten Woche gehoert (bis zum naechsten Takt) - dann faellt
+// die Karte im Frontend ersatzlos weg, statt "endet in 0s" zu zeigen.
+function galaxieZielFuerClient(g, userId) {
+  if (!spawnAktiv('galaxieziel')) return null;
+  const z = g.galaxieZiel;
+  if (!z || !z.art || z.woche !== serverWeekKey(Date.now())) return null;
+  const def = galaxieZielArtDef(z.art);
+  if (!def) return null;
+  return {
+    woche: z.woche, art: z.art, name: def.name, beschreibung: def.beschreibung, icon: def.icon,
+    ziel: z.ziel, stand: z.stand, erreicht: !!z.erreichtAm, ende: z.ende,
+    meinBeitrag: (z.beitraege && z.beitraege[userId]) || 0,
+    beitragende: Object.keys(z.beitraege || {}).length,
+    tagesDeckel: GALAXIE_ZIEL_TAGESDECKEL   // fuer die Karte - keine Kopie der Zahl im Frontend
+  };
+}
+// Fuer /api/health: ohne Anmeldung sehen, ob das Ziel dieser Woche steht (Deploy-Beleg).
+function galaxieZielHealth() {
+  const z = db.galaxy && db.galaxy.galaxieZiel;
+  if (!GALAXIE_ZIEL_AKTIV || !z) return null;
+  return { woche: z.woche, art: z.art, stand: z.stand, ziel: z.ziel, erreicht: !!z.erreichtAm,
+           beitragende: Object.keys(z.beitraege || {}).length, notAus: notAusGesetzt('galaxieziel') };
+}
+
 function galaxyTick() {
   const g = loadOrInitGalaxy();
   g.lastTick = Date.now();
@@ -7190,6 +7375,7 @@ function galaxyTick() {
   resolveSeasonLeagueServer();
   resolveAllianceWarsServer();
   resolveBountyServer();
+  galaxieZielTick(g);   // Galaxie-Ziel der Woche (Feature A): alte Woche abrechnen, neue anlegen
 
   // Die Alien-Nester reifen, breiten sich aus und bringen Koeniginnen hervor (Phase 3). Steht der
   // Schalter aus, kehrt nestTick sofort zurueck. Bewusst VOR npcEmpireStrength: Ab Phase 4 leitet
@@ -7661,13 +7847,18 @@ setImmediate(takt('galaxyTick-start', galaxyTick));
    `chronikAusgabe` nur in der Client-Form (und nur bei ausgelieferter, nicht abgeschalteter
    Etappe). Wer kuenftig etwas in db.galaxy legt, das nicht an alle darf, gehoert hierher. */
 function chronikAusClient(g) {
-  const { chronik, chronikAusgabe, ...rest } = g;
+  // galaxieZiel/-Vorwoche (11.09.2026): das Beitrags-Verzeichnis ALLER Konten - raus, die
+  // Client-Form haengt galaxyFuerClient ueber galaxieZielFuerClient an.
+  const { chronik, chronikAusgabe, galaxieZiel, galaxieZielVorwoche, ...rest } = g;
   const ausgabe = chronikAusgabeFuerClient();
   return ausgabe ? Object.assign(rest, { chronikAusgabe: ausgabe }) : rest;
 }
 function galaxyFuerClient(g, userId) {
+  const antwort = chronikAusClient(g);
+  const gz = galaxieZielFuerClient(g, userId);   // Feature A: nur wenn Schalter an und Ziel vorhanden
+  if (gz) antwort.galaxieZiel = gz;
   const rk = g.randkriege;
-  if (!rk || !Array.isArray(rk.fronten)) return chronikAusClient(g);
+  if (!rk || !Array.isArray(rk.fronten)) return antwort;
   const fronten = rk.fronten.map(f => ({
     a: f.a, b: f.b,
     systeme: (f.systeme || []).map(e => {
@@ -7700,7 +7891,7 @@ function galaxyFuerClient(g, userId) {
     wocheDeckel: RK_MARKEN_WOCHE,
     markeJePunkte: RK_MARKE_JE_PUNKTE
   };
-  return Object.assign(chronikAusClient(g), { randkriege: {
+  return Object.assign(antwort, { randkriege: {
     stand: rk.stand, fronten, meinTag, meineBasis, meinKonto,
     tagesBreite: RK_TAGESSTUFEN.reduce((a, st) => a + st[0], 0),
     nachschubZuletzt: (db.private[userId] && db.private[userId].__rkNachschubAt) || 0
@@ -8330,6 +8521,7 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
       if (loseNow > 0) { fleetObj[k] = Math.max(0, (fleetObj[k] || 0) - loseNow); lostShips[k] = loseNow; }
     }
     save.battlePoints = (save.battlePoints || 0) + 3 + bLevel;
+    galaxieZielBeitrag(req.userId, 'weltbossschlaege');   // Galaxie-Ziel der Woche (Feature A): nur der GEWERTETE Schlag
   }
 
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
@@ -12918,6 +13110,7 @@ app.post('/api/konvoi/angriff', authMiddleware, async (req, res) => {
   if (!(kraft > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
   const erg = A2SchlagAusfuehren(g, ziel, kraft, mission.composition,
     [{ userId: req.userId, name: req.username || 'Kommandant', gewicht: 1 }], jetzt);
+  galaxieZielBeitrag(req.userId, 'konvoiueberfaelle');   // Galaxie-Ziel der Woche (Feature A): gewerteter Ueberfall
 
   // Aus der Quote werden hier - und NUR hier - konkrete Verluste (der Einzelangreifer hat genau eine
   // Zusammensetzung; ein spaeterer Verband bekaeme die Quote selbst).
@@ -13005,6 +13198,7 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
   // 0). Danach misst die Differenz nur noch die Abklingzeit, nicht die Aufmerksamkeit.
   if (!letzter && fest.seit) reaktionVermerken(findUserById(req.userId), 'festung', (jetzt - fest.seit) / 1000);
   fest.abgerechnet[missionId] = jetzt;
+  galaxieZielBeitrag(req.userId, 'festungsschlaege');   // Galaxie-Ziel der Woche (Feature A): gewerteter Schlag
 
   // Aus der Quote werden hier - und NUR hier - konkrete Verluste (der Einzelangreifer hat genau
   // eine Zusammensetzung; der Verband bekommt die Quote selbst, siehe /api/musterattack/resolve).
@@ -13344,6 +13538,7 @@ app.post('/api/alien/nest-angriff', authMiddleware, async (req, res) => {
   // Der Kern bedient auch den VERBAND, und dort sagt der Ausloesezeitpunkt ueber den
   // Ausloeser nichts - die Flotte steht seit dem Beitritt fest.
   if (!letzter && nest.seit) reaktionVermerken(findUserById(req.userId), 'nest', (jetzt - nest.seit) / 1000);
+  galaxieZielBeitrag(req.userId, 'nestschlaege');   // Galaxie-Ziel der Woche (Feature A): gewerteter Schlag
 
   /* Aus der Quote werden hier - und NUR hier - konkrete Verluste: Der Einzelangreifer hat genau
      eine Zusammensetzung, der Verband hat viele und bekommt deshalb die Quote selbst. */
@@ -16645,7 +16840,10 @@ const NOTAUS_NAMEN = {
   // der bedient auch Social Hub. Faellt AI Core aus oder frisst die Warteschlange die Maschine,
   // kann der Betreiber hier abschalten, ohne einen Deploy - der Endpunkt antwortet dann 503, der
   // Client laesst die Sektion still weg (ein fehlender Text ist per Konzept kein Fehler).
-  kampftext: 'KI-Kampfberichte werden beim M715q bestellt'
+  kampftext: 'KI-Kampfberichte werden beim M715q bestellt',
+  // Elfter Schalter (11.09.2026, Feature A): gattert Zaehlung, Auszahlung UND Transport des
+  // Galaxie-Ziels. Ein gesetzter Notaus am Wochenwechsel schliesst die Woche OHNE Auszahlung.
+  galaxieziel: 'Galaxie-Ziel der Woche läuft (Zählung, Auszahlung, Anzeige)'
 };
 const ANGRIFFE_PAUSE_TEXT = 'Angriffe sind gerade pausiert (Wartung) – bitte in ein paar Minuten noch einmal.';
 function notAusGesetzt(name) {
@@ -16743,6 +16941,7 @@ function spawnAktivImCode(name) {
   if (name === 'hort') return HORT_BANNER_AKTIV;
   if (name === 'kampftext') return KAMPFTEXT_AKTIV;
   if (name === 'chronik') return CHRONIK_AKTIV;
+  if (name === 'galaxieziel') return GALAXIE_ZIEL_AKTIV;
   return false;
 }
 

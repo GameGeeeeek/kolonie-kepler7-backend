@@ -6284,7 +6284,7 @@ const CHRONIK_ARTEN = {
   'kopfgeld-kassiert':     'jaeger, ziel, kredite',
   'saison-beendet':        'saison, champion, teilnehmer',
   'front-durchbrochen':    'system, sieger, verlierer (NPC-Voelker der Randkriege)',
-  'galaxie-ziel-erreicht': 'zielArt (Schluessel aus GALAXIE_ZIEL_ARTEN), ziel, stand, beitragende'
+  'galaxie-ziel-erreicht': 'zielArt (Schluessel aus GALAXIE_ZIEL_ARTEN), ziel, stand, kommandanten'
 };
 function chronikText(roh) {
   return String(roh == null ? '' : roh).replace(/[^A-Za-z0-9ÄÖÜäöüß \-']/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
@@ -7327,7 +7327,7 @@ function galaxieZielBeitrag(userId, art) {
     pushGalaxyNews(def.icon, 'Galaxie-Ziel erreicht: „' + def.name + '" – ' + z.ziel + ' geschafft, ' + beitragende + ' Kommandanten haben beigetragen. Die Belohnung kommt zum Wochenwechsel.', 'galaxie-ziel');
     // `zielArt`, nicht `art`: chronikVermerken traegt die Felder ueber den Eintrag, und `art` ist dort
     // die Sorte des Eintrags selbst - ein Feld `art` hatte sie in der ersten Fassung ueberschrieben.
-    chronikVermerken('galaxie-ziel-erreicht', { zielArt: z.art, ziel: z.ziel, stand: z.stand, beitragende });
+    chronikVermerken('galaxie-ziel-erreicht', { zielArt: z.art, ziel: z.ziel, stand: z.stand, kommandanten: beitragende });
   }
   return { gezaehlt: true, stand: z.stand, ziel: z.ziel, erreicht: !!z.erreichtAm };
 }
@@ -7344,7 +7344,7 @@ function galaxieZielFuerClient(g, userId) {
     woche: z.woche, art: z.art, name: def.name, beschreibung: def.beschreibung, icon: def.icon,
     ziel: z.ziel, stand: z.stand, erreicht: !!z.erreichtAm, ende: z.ende,
     meinBeitrag: (z.beitraege && z.beitraege[userId]) || 0,
-    beitragende: Object.keys(z.beitraege || {}).length,
+    kommandanten: Object.keys(z.beitraege || {}).length,   // NICHT 'beitragende': test_randkriege_handlungen_http 8 verbietet den Schluessel in /api/galaxy (Front-Beitragendenliste)
     tagesDeckel: GALAXIE_ZIEL_TAGESDECKEL   // fuer die Karte - keine Kopie der Zahl im Frontend
   };
 }
@@ -7353,7 +7353,7 @@ function galaxieZielHealth() {
   const z = db.galaxy && db.galaxy.galaxieZiel;
   if (!GALAXIE_ZIEL_AKTIV || !z) return null;
   return { woche: z.woche, art: z.art, stand: z.stand, ziel: z.ziel, erreicht: !!z.erreichtAm,
-           beitragende: Object.keys(z.beitraege || {}).length, notAus: notAusGesetzt('galaxieziel') };
+           kommandanten: Object.keys(z.beitraege || {}).length, notAus: notAusGesetzt('galaxieziel') };
 }
 
 function galaxyTick() {

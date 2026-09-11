@@ -26,7 +26,7 @@ Kredite und Sternenstaub – **nur, wenn die Gemeinschaft das Ziel erreicht hat.
   (`GALAXIE_ZIEL_TAGESDECKEL`, UTC-Tag wie `rkTagesSchluessel`) – sonst erfüllt ein Konto das Ziel
   allein; der Deckel begrenzt nur die Zählung, nicht den Angriff. Beim Erreichen: `erreichtAm`,
   `pushGalaxyNews(…, 'galaxie-ziel')`, `chronikVermerken('galaxie-ziel-erreicht', { zielArt, ziel,
-  stand, beitragende })`. Zählung läuft nach dem Erreichen weiter (spätere Beitragende werden mit
+  stand, kommandanten })`. Zählung läuft nach dem Erreichen weiter (spätere Beitragende werden mit
   bezahlt).
 - **Wochenwechsel** `galaxieZielTick(g)` im `galaxyTick` (alle 15 min, beim Start) **und** vor jedem
   Beitrag (ein Schlag Montag 00:05 fällt in die neue Woche). Abrechnung `galaxieZielAbrechnen`:
@@ -37,10 +37,10 @@ Kredite und Sternenstaub – **nur, wenn die Gemeinschaft das Ziel erreicht hat.
   `pushPendingReward` dedupliziert zusätzlich je `woche`. Verfehlt → keine Auszahlung, Meldung in
   der Weltlage.
 - **Transport** `galaxyFuerClient` → `galaxieZiel: { woche, art, name, beschreibung, icon, ziel,
-  stand, erreicht, ende, meinBeitrag, beitragende, tagesDeckel }` – nur wenn Schalter an, Notaus
+  stand, erreicht, ende, meinBeitrag, kommandanten, tagesDeckel }` – nur wenn Schalter an, Notaus
   nicht gesetzt und das Ziel zur laufenden Woche gehört. `chronikAusClient` blendet das rohe Ziel
   und die Vorwoche aus (Beitrags-Verzeichnis aller Konten).
-- `/api/health` → `galaxieZiel: { woche, art, stand, ziel, erreicht, beitragende, notAus }` –
+- `/api/health` → `galaxieZiel: { woche, art, stand, ziel, erreicht, kommandanten, notAus }` –
   der Deploy-Beleg ohne Anmeldung.
 
 ## Schalter
@@ -76,3 +76,5 @@ Bericht, Hilfe, Paritäts-Prüfung der Symbole und Zahlen gegen diese `server.js
 - `chronikVermerken` trägt die Felder über den Eintrag; ein Feld `art` überschriebe die Sorte des
   Eintrags selbst (gemessen: der erste Entwurf schrieb `art:'nestschlaege'` statt
   `'galaxie-ziel-erreicht'`). Deshalb heißt das Feld `zielArt`.
+
+**Nachtrag 11.09.2026:** Das Client-Feld heißt `kommandanten`, nicht `beitragende` – `test_randkriege_handlungen_http.js` Prüfung 8 verbietet den Schlüssel `"beitragende"` im gesamten `/api/galaxy`-JSON (Wache gegen die Beitragendenliste der Fronten), und die Wache soll pauschal bleiben.

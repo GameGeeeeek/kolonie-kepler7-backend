@@ -263,15 +263,15 @@ function zielObj(woche, art, ziel, extra) {
     { stand: z2e.stand, meinBeitrag: z2e.meinBeitrag, deckel });
   const sB = await schlag(tok.ben, 'n1', 'mb1');
   const z2f = await galaxie(tok.ben);
-  check('2e: der Deckel gilt je SPIELER - Bens Schlag zaehlt weiter', sB.status === 200 && z2f.stand === deckel + 1 && z2f.meinBeitrag === 1 && z2f.beitragende === 2,
-    { status: sB.status, stand: z2f.stand, ben: z2f.meinBeitrag, beitragende: z2f.beitragende });
+  check('2e: der Deckel gilt je SPIELER - Bens Schlag zaehlt weiter', sB.status === 200 && z2f.stand === deckel + 1 && z2f.meinBeitrag === 1 && z2f.kommandanten === 2,
+    { status: sB.status, stand: z2f.stand, ben: z2f.meinBeitrag, kommandanten: z2f.kommandanten });
   await stoppeServer();
   const db2 = liesDb();
   const gz2 = db2.galaxy.galaxieZiel;
   const chr2 = (db2.galaxy.chronik || []).filter(e => e.art === 'galaxie-ziel-erreicht');
   check('2f: im Server-Zustand: erreichtAm gesetzt, Beitraege je Konto, Tageskonto, und genau ein Chronik-Eintrag mit festen Feldern',
     !!gz2 && gz2.erreichtAm > 0 && gz2.beitraege[ID.anna] === deckel && gz2.beitraege[ID.ben] === 1 && gz2.beitraegeTag.konten[ID.anna] === deckel
-      && chr2.length === 1 && chr2[0].art === 'galaxie-ziel-erreicht' && chr2[0].zielArt === 'nestschlaege' && chr2[0].ziel === 3 && chr2[0].stand === 3 && chr2[0].beitragende === 1,
+      && chr2.length === 1 && chr2[0].art === 'galaxie-ziel-erreicht' && chr2[0].zielArt === 'nestschlaege' && chr2[0].ziel === 3 && chr2[0].stand === 3 && chr2[0].kommandanten === 1,
     { erreichtAm: gz2 && gz2.erreichtAm, beitraege: gz2 && gz2.beitraege, chronik: chr2 });
   s = await starteServer(); await alleAnmelden();
 

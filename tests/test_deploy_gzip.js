@@ -86,6 +86,7 @@ function grundbestand(u, text){
   schreibe(u, 'patchnotes.html', text);
   schreibe(u, 'robots.txt', text);
   schreibe(u, 'sitemap.xml', text);
+  schreibe(u, 'seiten.css', text);
   schreibe(u, 'manifest.json', text);
   schreibe(u, 'service-worker.js', text);
   schreibe(u, 'version.txt', '8.638.0\n');
@@ -100,7 +101,9 @@ function grundbestand(u, text){
   grundbestand(u, TEXT);
   const r = fuehreAus(u);
   check('1a: der Deploy-Befehl laeuft durch', r.status === 0, (r.stderr || '').slice(0, 160));
-  const erwartet = ['weltraum_kolonie.html', 'patchnotes.html', 'robots.txt', 'sitemap.xml',
+  // seiten.css seit dem 11.09.2026: das Stylesheet der Themenseiten fehlte in der Kopierliste (live gemessen);
+  // ausgeliefert wird es ueber das Muster *.css.
+  const erwartet = ['weltraum_kolonie.html', 'patchnotes.html', 'robots.txt', 'sitemap.xml', 'seiten.css',
     'manifest.json', 'service-worker.js', 'version.txt', 'patchnotes-archiv.json'];
   const fehlend = erwartet.filter(f => !fs.existsSync(path.join(u.ziel, f + '.gz')));
   check('1b: jede ausgelieferte Textdatei hat eine .gz', fehlend.length === 0, fehlend);

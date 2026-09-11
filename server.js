@@ -921,6 +921,99 @@ const REFERRAL_MILESTONES = [
 ];
 function referralMilestoneFor(count) { return REFERRAL_MILESTONES.find(m => m.n === count) || null; }
 
+// --- Patenschaft: Mentor und Schuetzling (Feature G, 11.09.2026) ---
+// Wer sich ueber einen Einladungs-Link registriert, ist 30 Tage lang der Schuetzling seines
+// Einladenden. Jeder Meilenstein, den der Schuetzling in dieser Zeit ZUM ERSTEN MAL schafft, zahlt
+// BEIDEN Seiten Kredite und Sternenstaub - der Pate hat damit einen Grund, dem Neuling zu helfen,
+// statt ihn nach der Einladung zu vergessen (der bestehende Einladungs-Bonus zahlt genau einmal).
+//
+// ALLES LIEGT AM NUTZEROBJEKT (user.pate / user.schuetzlinge), nichts im Spielstand: Der Spielstand
+// ist klientenautoritativ, und an dieser Verknuepfung haengen Belohnungen fuer ein FREMDES Konto.
+// Ein Spielstand mit einem selbst eingetragenen `pate` ist deshalb wirkungslos - der Server liest
+// ihn nie (tests/test_patenschaft_http.js, Abschnitt 7).
+//
+// SCHALTER: PATENSCHAFT_AKTIV gattert Verknuepfung, Zaehlung UND Auszahlung. Er steht auf true,
+// weil Backend und Frontend zusammen ausgeliefert werden - Backend zuerst. Bis das Frontend live
+// ist, sieht ein alter Client bei einem Meilenstein den Rueckfall in claimPendingRewards
+// ("Dankeschoen vom Team: +200 Kredite fuer deinen Bug-Report") - die Kredite stimmen, der Satz
+// nicht. Deshalb: erst mergen, wenn der Frontend-PR bereitliegt (docs/patenschaft.md).
+const PATENSCHAFT_AKTIV = true;
+const PATENSCHAFT_DAUER_MS = 30 * 24 * 3600 * 1000;
+const PATENSCHAFT_MAX_SCHUETZLINGE = 10;
+// Reihenfolge = Anzeige im Frontend. Der Schluessel ist der Vertrag mit den Hooks unten
+// (patenschaftMeilenstein(userId, key)) und mit der Karte im Frontend.
+const PATENSCHAFT_MEILENSTEINE = [
+  { key: 'erster-sieg',   name: 'Erster gewonnener Spielerangriff' },   // /api/attack, Siegzweig (Angreifer)
+  { key: 'erste-abwehr',  name: 'Erster abgewehrter Angriff' },         // /api/attack, Abwehrzweig (Verteidiger)
+  { key: 'erster-schlag', name: 'Erster Schlag gegen Nest oder Festung' }, // /api/alien/nest-angriff, /api/festung/angriff
+  { key: 'erster-handel', name: 'Erster Handel am Markt' },             // /api/market/trade
+  { key: 'serie-5',       name: 'Fünf Tage in Folge angemeldet' }       // staubAnmeldungGutschreiben, serie >= 5
+];
+const PATENSCHAFT_CREDITS = { schuetzling: 200, pate: 150 };
+const PATENSCHAFT_STAUB = 3;
+// Verknuepft beide Seiten. Gerufen aus /api/referral/redeem an GENAU der Stelle, an der
+// save.referredBy zum ersten Mal gesetzt wird - der Schuetzling ruft die Route vor Level 5
+// mehrfach, die Verknuepfung passiert nur einmal. Rueckgabe: der neue Paten-Eintrag oder null.
+// Eine Patenschaft ist fest: Wer schon einen Paten hat (auch einen abgelaufenen), bekommt keinen
+// zweiten - dieselbe Regel wie beim Einladungs-Bonus selbst (einmal je Konto).
+function patenschaftVerknuepfen(schuetzling, pate) {
+  if (!PATENSCHAFT_AKTIV || !schuetzling || !pate || schuetzling.userId === pate.userId) return null;
+  if (schuetzling.pate) return null;
+  const jetzt = Date.now();
+  if (!pate.schuetzlinge || typeof pate.schuetzlinge !== 'object') pate.schuetzlinge = {};
+  // Deckel: hoechstens PATENSCHAFT_MAX_SCHUETZLINGE Eintraege je Pate. Ist die Liste voll, fliegen
+  // ABGELAUFENE raus (aelteste zuerst) - laufende nie (Deckel loeschen keine Daten, CLAUDE.md).
+  // Sind alle zehn noch am Laufen, gibt es keinen Platz: kein Paten-Eintrag auf BEIDEN Seiten,
+  // der gewoehnliche Einladungs-Bonus bleibt davon unberuehrt.
+  if (Object.keys(pate.schuetzlinge).length >= PATENSCHAFT_MAX_SCHUETZLINGE) {
+    const abgelaufen = Object.keys(pate.schuetzlinge)
+      .filter(id => !((pate.schuetzlinge[id] || {}).bis > jetzt))
+      .sort((a, b) => ((pate.schuetzlinge[a] || {}).seit || 0) - ((pate.schuetzlinge[b] || {}).seit || 0));
+    while (Object.keys(pate.schuetzlinge).length >= PATENSCHAFT_MAX_SCHUETZLINGE && abgelaufen.length) delete pate.schuetzlinge[abgelaufen.shift()];
+    if (Object.keys(pate.schuetzlinge).length >= PATENSCHAFT_MAX_SCHUETZLINGE) return null;
+  }
+  const bis = jetzt + PATENSCHAFT_DAUER_MS;
+  schuetzling.pate = { userId: pate.userId, name: pate.username, seit: jetzt, bis, meilensteine: {} };
+  pate.schuetzlinge[schuetzling.userId] = { name: schuetzling.username, seit: jetzt, bis, meilensteine: {} };
+  return schuetzling.pate;
+}
+// Der EINE Hook fuer alle Meilensteine. Nur wenn der Schuetzling einen gueltigen Paten hat
+// (bis > jetzt) und der Meilenstein noch offen ist: Zeitstempel auf BEIDEN Seiten, Sternenstaub
+// bucht der Server selbst (staubGutschreiben - der Reward traegt die Zahl nur zur Anzeige),
+// Kredite gehen ueber die Warteschlange (der Client bucht sie in claimPendingRewards).
+// Synchron und ohne eigenes saveDb(): Jeder Aufrufer sitzt in einer Route, die danach ohnehin
+// speichert. Im try, weil ein Fehler hier nie den Kampf oder den Handel kaputtmachen darf.
+function patenschaftMeilenstein(userId, key) {
+  try {
+    if (!PATENSCHAFT_AKTIV) return false;
+    const def = PATENSCHAFT_MEILENSTEINE.find(m => m.key === key);
+    const user = findUserById(userId);
+    if (!def || !user || !user.pate) return false;
+    const jetzt = Date.now();
+    if (!(user.pate.bis > jetzt)) return false;
+    if (!user.pate.meilensteine || typeof user.pate.meilensteine !== 'object') user.pate.meilensteine = {};
+    if (user.pate.meilensteine[key]) return false;
+    user.pate.meilensteine[key] = jetzt;
+    const pate = findUserById(user.pate.userId);
+    const eintrag = pate && pate.schuetzlinge && pate.schuetzlinge[userId];
+    if (eintrag) {
+      if (!eintrag.meilensteine || typeof eintrag.meilensteine !== 'object') eintrag.meilensteine = {};
+      eintrag.meilensteine[key] = jetzt;
+    }
+    staubGutschreiben(staubKonto(user), PATENSCHAFT_STAUB);
+    pushPendingReward(userId, { type: 'patenschaft', rolle: 'schuetzling', meilenstein: key, name: def.name,
+      partnerName: user.pate.name, credits: PATENSCHAFT_CREDITS.schuetzling, staub: PATENSCHAFT_STAUB });
+    if (pate) {
+      staubGutschreiben(staubKonto(pate), PATENSCHAFT_STAUB);
+      pushPendingReward(pate.userId, { type: 'patenschaft', rolle: 'pate', meilenstein: key, name: def.name,
+        partnerName: user.username, credits: PATENSCHAFT_CREDITS.pate, staub: PATENSCHAFT_STAUB });
+      pushNotificationEvent(pate.userId, 'patenschaft', { schuetzling: user.username, meilenstein: key, name: def.name,
+        credits: PATENSCHAFT_CREDITS.pate, staub: PATENSCHAFT_STAUB });
+    }
+    return true;
+  } catch (e) { console.error('[patenschaft] Meilenstein ' + key + ': ' + e.message); return false; }
+}
+
 // --- Wortfilter (13.07.2026, Feature-Wunsch: Moderation vorbereiten) ---
 // Moderate Liste eindeutig unangemessener Begriffe (gängige Beleidigungen, bekannte Hassbegriffe,
 // NS-Bezug) für Spieler-/Allianznamen. Bewusst kein Anspruch auf Vollständigkeit oder Perfektion -
@@ -1527,6 +1620,9 @@ function checkAllianceKeyPermission(req, key, isWrite) {
     // Berechtigungsprüfung - jeder eingeloggte Client konnte per direktem API-Aufruf für eine
     // beliebige fremde Allianz einen Krieg erklären/beenden, unabhängig von der eigenen Rolle.
     if (!isWrite) return null; // Lesen bleibt offen (Kriegsliste ist für alle sichtbar)
+    // Feature C (11.09.2026): Steht der Schalter, schreibt NUR der Server (POST /api/allianzkrieg/erklaeren
+    // bzw. /frieden). Der Zweig darunter ist der alte Weg und bleibt fuer den Schalter-aus-Fall byte-gleich.
+    if (ALLIANZKRIEG_SERVER_AKTIV) return ALLIANZKRIEG_SPERRTEXT;
     if (isAdmin) return null; // Admin verwaltet die Kriegsliste der eigenen Allianz direkt
     // declareWar()/makePeace() im Frontend tragen einen Krieg GEGENSEITIG in beide Kriegslisten ein -
     // der Admin der bekriegenden/befriedenden Allianz schreibt dafür auch in die FREMDE Kriegsliste
@@ -1546,12 +1642,23 @@ function checkAllianceKeyPermission(req, key, isWrite) {
     // gebunden), aber aus Konsistenz zu den übrigen Allianz-Ressourcen gehärtet (13.07.2026) - nur
     // echte Mitglieder der Allianz dürfen schreiben, warcontrib zusätzlich nur den eigenen Beitrag.
     if (!isWrite) return null;
+    // Feature C (11.09.2026): An diesem Wert haengt seit #4 eine Kredit-Praemie - "rein kosmetisch" (Kommentar
+    // oben) stimmte schon lange nicht mehr. Bei Schalter an vergibt die Punkte ausschliesslich der Server
+    // (allianzkriegWerten in /api/attack und /api/vorposten/angriff); LESEN bleibt fuer das Kriegspanel offen.
+    if (ALLIANZKRIEG_SERVER_AKTIV) return ALLIANZKRIEG_SPERRTEXT;
     if (!myRole) return 'Nur Mitglieder dieser Allianz dürfen Kriegspunkte eintragen.';
     if (rest.startsWith('warcontrib:')) {
       const parts = rest.split(':'); // warcontrib:<enemyTag>:<playerId>
       const targetId = parts[2];
       if (targetId && targetId !== req.userId) return 'Du kannst nur deinen eigenen Kriegsbeitrag eintragen.';
     }
+    return null;
+  }
+  if (rest.startsWith('warmeta:')) {
+    // Das Zeitfenster eines Krieges. Bis Feature C (11.09.2026) OHNE Regel - jeder eingeloggte Client konnte
+    // jedes endsAt setzen und damit einen fremden Krieg vorzeitig abrechnen lassen. Bei Schalter an schreibt
+    // es nur der Server; bei Schalter aus bleibt es wie bisher offen (Rueckfall-Zeile am Ende der Funktion).
+    if (isWrite && ALLIANZKRIEG_SERVER_AKTIV) return ALLIANZKRIEG_SPERRTEXT;
     return null;
   }
   if (rest === 'raid' || rest.startsWith('raidjoin:')) {
@@ -1730,8 +1837,8 @@ function pushNotificationText(type, payload) {
   if (type === 'weltboss-kill') return { title: 'Weltboss besiegt!', body: 'Leviathan Stufe ' + (payload.level || 1) + ' erlegt - dein Beitrag: ' + (payload.share || 0) + '%.' };
   if (type === 'raid-incoming') return { title: 'Überfall!', body: 'Eine feindliche Flotte greift deine Kolonie an.' };
   if (type === 'attack-received') return payload.defended
-    ? { title: 'Angriff abgewehrt!', body: (payload.attackerName || 'Ein Spieler') + ' hat dich angegriffen - deine Verteidigung hat gehalten. Sieh dir den Bericht an.' }
-    : { title: 'Du wurdest angegriffen!', body: (payload.attackerName || 'Ein Spieler') + ' hat deine Kolonie überfallen' + (payload.looted ? ' und Ressourcen erbeutet' : '') + '. Rüste auf oder schlage zurück!' };
+    ? { title: 'Angriff abgewehrt!', body: (payload.attackerName || 'Ein Spieler') + ' hat dich angegriffen - deine Verteidigung hat gehalten. Sieh dir den Bericht an.' + racheHinweisText() }
+    : { title: 'Du wurdest angegriffen!', body: (payload.attackerName || 'Ein Spieler') + ' hat deine Kolonie überfallen' + (payload.looted ? ' und Ressourcen erbeutet' : '') + '. Rüste auf oder schlage zurück!' + racheHinweisText() };
   if (type === 'asteroid-contested') return payload.verloren
     ? { title: 'Schürfrecht verloren!', body: (payload.angreiferName || 'Ein Kommandant') + ' hat dir das Schürfrecht abgenommen. Deine überlebende Eskorte kehrt zurück - das Vorkommen gehört jetzt ihm.' }
     : { title: 'Angriff auf dein Schürfrecht abgewehrt', body: 'Deine Eskorte hat ' + (payload.angreiferName || 'einen Angreifer') + ' zurückgeschlagen. Das Vorkommen bleibt deins - sieh nach, was von der Wache übrig ist.' };
@@ -1813,6 +1920,7 @@ function pushNotificationText(type, payload) {
     const label = payload.type === 'idee' ? 'Verbesserungsvorschlag' : 'Bug-Report';
     return { title: 'Neuer ' + label, body: (payload.username || 'Ein Spieler') + ': ' + (payload.text || '') };
   }
+  if (type === 'patenschaft') return { title: 'Dein Schützling hat einen Meilenstein geschafft', body: (payload.schuetzling || 'Dein Schützling') + ': „' + (payload.name || 'Meilenstein') + '" - +' + (payload.credits || 0) + ' Kredite und +' + (payload.staub || 0) + ' Sternenstaub für dich.' };
   if (type === 'referral-redeemed') return { title: 'Einladungs-Bonus erhalten', body: (payload.username || 'Ein Spieler') + ' hat deinen Einladungscode eingelöst - +50 Kredite für dich!' };
   if (type === 'referral-milestone') return { title: 'Werbe-Meilenstein erreicht!', body: 'Schon ' + (payload.count || '?') + ' Spieler geworben! Bonus: +' + (payload.credits || 0) + ' Kredite und +' + (payload.fragments || 0) + ' Modulfragmente.' };
   if (type === 'player-reported') return { title: 'Spieler gemeldet', body: (payload.reporterName||'Jemand') + ' hat ' + (payload.targetName||'einen Spieler') + ' gemeldet: ' + (payload.reason||'') };
@@ -1890,6 +1998,8 @@ function notificationTarget(type, payload) {
     case 'alliance-muster': return 'allianz:uebersicht';
     case 'alliance-base-attacked': return 'allianz:uebersicht';
     case 'alliance-base-ready': return 'allianz:uebersicht';
+    // Die Patenschafts-Karte steht in den Einstellungen bei "Freunde einladen".
+    case 'patenschaft': return 'einstellungen';
     case 'referral-redeemed': return 'fortschritt';
     case 'referral-milestone': return 'fortschritt';
     case 'job-complete': return {
@@ -2770,7 +2880,11 @@ app.get('/api/me', authMiddleware, (req, res) => {
     supporter: supporterFeaturesFor(req.userId),
     // `neu` sagt dem Spiel, ob es die Gutschrift ansagen soll - ohne das müsste es den Stand mit
     // dem letzten Start vergleichen, den es nach einem Neuladen gar nicht mehr kennt.
-    staub: Object.assign({ neu: staubNeu }, staubStand(user || {}))
+    staub: Object.assign({ neu: staubNeu }, staubStand(user || {})),
+    // Vergeltung (Feature D, 11.09.2026): die gueltigen Rachrechte - fuer die Hinweiszeile in der
+    // Angriffsvorschau. Bei ausgeschaltetem Schalter FEHLT das Feld (nicht: leere Liste), damit der
+    // Client "alter Server / inaktiv" von "kein Recht" unterscheiden kann.
+    ...(RACHE_AKTIV ? { rache: racheListeFuerClient(user, Date.now()) } : {})
   });
 });
 
@@ -4678,6 +4792,65 @@ function pvpFindeAngriffsmission(save, missionId, targetUserId) {
   return null;
 }
 
+// ===== Vergeltung / Rache-Knopf (Feature D, 11.09.2026) =====
+// Wer angegriffen wurde, darf 24 Stunden lang zurueckschlagen - mit mehr Beute und mehr Kampfpunkten.
+// Das Recht liegt am NUTZEROBJEKT des Verteidigers (user.rache), nie im Spielstand: Daran haengt eine
+// Belohnung, und der Spielstand ist klientenautoritativ (CLAUDE.md, Sicherheitsgrenze). Es entsteht
+// bei JEDEM aufgeloesten Spielerangriff (Sieg wie Niederlage des Angreifers), wird nur durch einen
+// GEWONNENEN Vergeltungsschlag verbraucht und laeuft sonst mit `bis` aus.
+// Der Schalter gattert die Wirkung UND die Zusatzfelder in Berichten/Antworten/Push: Ein Client, der
+// `attackerId` sieht, zeigt den Knopf und verspricht "Vergeltung moeglich" - das darf er nur, wenn
+// der Server das Versprechen auch einloest.
+const RACHE_AKTIV = true;
+const RACHE_FENSTER_MS = 24 * 3600 * 1000;
+const RACHE_BEUTE_BONUS = 0.25;      // +25 % auf den Beute-ANTEIL (vor der Kappung am Bestand des Ziels)
+const RACHE_KAMPFPUNKTE = 10;        // zusaetzlich zu den 25 Punkten des gewoehnlichen Sieges
+const RACHE_MAX_EINTRAEGE = 5;       // je Verteidiger; beim Schreiben fliegen abgelaufene und die aeltesten raus
+function racheHinweisText() {
+  return RACHE_AKTIV ? ' Vergeltung ' + Math.round(RACHE_FENSTER_MS / 3600000) + ' h möglich.' : '';
+}
+// Abgelaufene Eintraege entfernen - in-place, damit ein user.rache nie ueber die Zeit waechst.
+function racheBereinigen(user, now) {
+  if (!user || !user.rache || typeof user.rache !== 'object') return;
+  for (const id of Object.keys(user.rache)) {
+    const e = user.rache[id];
+    if (!e || typeof e !== 'object' || !(e.bis > now)) delete user.rache[id];
+  }
+}
+// Rachrecht des OPFERS gegen den Angreifer anlegen bzw. erneuern (das Fenster beginnt beim juengsten Angriff).
+function racheVermerken(opferUser, angreiferId, angreiferName, now) {
+  if (!RACHE_AKTIV || !opferUser || !angreiferId) return;
+  if (!opferUser.rache || typeof opferUser.rache !== 'object') opferUser.rache = {};
+  racheBereinigen(opferUser, now);
+  opferUser.rache[angreiferId] = { name: angreiferName || 'Unbekannt', seit: now, bis: now + RACHE_FENSTER_MS };
+  const ids = Object.keys(opferUser.rache);
+  if (ids.length > RACHE_MAX_EINTRAEGE) {
+    ids.sort((a, b) => opferUser.rache[a].bis - opferUser.rache[b].bis);
+    for (const id of ids.slice(0, ids.length - RACHE_MAX_EINTRAEGE)) delete opferUser.rache[id];
+  }
+}
+// Gueltiges Rachrecht des Angreifers gegen genau dieses Ziel - oder null. hasOwnProperty statt
+// Wahrheitswert: `gegnerId` kommt aus dem Request, und `{}['constructor']` waere sonst wahr
+// (dieselbe Falle wie bei der Standortwahl in /api/attack).
+function racheRecht(user, gegnerId, now) {
+  if (!RACHE_AKTIV || !user || !user.rache || typeof user.rache !== 'object') return null;
+  if (!Object.prototype.hasOwnProperty.call(user.rache, gegnerId)) return null;
+  const e = user.rache[gegnerId];
+  return e && typeof e === 'object' && e.bis > now ? e : null;
+}
+function racheVerbrauchen(user, gegnerId) {
+  if (user && user.rache && Object.prototype.hasOwnProperty.call(user.rache, gegnerId)) delete user.rache[gegnerId];
+}
+// Fuer /api/me: nur die gueltigen, juengste zuerst. Liest nur - eine GET-Route soll nichts schreiben.
+function racheListeFuerClient(user, now) {
+  if (!user || !user.rache || typeof user.rache !== 'object') return [];
+  return Object.keys(user.rache)
+    .map(id => ({ id, e: user.rache[id] }))
+    .filter(x => x.e && typeof x.e === 'object' && x.e.bis > now)
+    .sort((a, b) => b.e.bis - a.e.bis)
+    .map(x => ({ gegnerId: x.id, gegnerName: x.e.name || 'Unbekannt', bis: x.e.bis }));
+}
+
 app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
   if (!spawnAktiv('angriffe')) return res.status(503).json({ error: ANGRIFFE_PAUSE_TEXT, pausiert: true });   // Notaus 'angriffe' (02.09.2026)
   const { targetUserId, targetPlanet } = req.body || {};
@@ -4750,6 +4923,19 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     : {};
 
   const targetUser = findUserById(targetUserId);
+  /* Vergeltung (Feature D): Hat der Angreifer ein gueltiges Rachrecht gegen genau dieses Ziel, ist
+     dieser Angriff ein Vergeltungsschlag. Die Entscheidung faellt HIER - hinter Schild und Ratenbremse
+     (die bleiben unveraendert vor allem), vor dem Wurf. Ein Sockel-Angriff (unter dem Mindesteinsatz)
+     loest KEINE Vergeltung aus und verbraucht sie auch nicht: Der Nadelstich soll nichts einbringen,
+     und +10 Kampfpunkte fuer einen Jaeger waeren genau das Leck, das der Mindesteinsatz schliesst.
+     `attackerId`/`targetUserId` in den Berichten haengen am Schalter: Sie sind das Signal, an dem
+     der Client den Knopf zeigt - ohne Wirkung dahinter waere der Knopf ein leeres Versprechen. */
+  const attackerUser = findUserById(req.userId);
+  const racheJetzt = Date.now();
+  const istRache = RACHE_AKTIV && ertragStufe !== 'sockel' && !!racheRecht(attackerUser, targetUserId, racheJetzt);
+  const racheFelder = istRache ? { rache: true, racheBonus: RACHE_BEUTE_BONUS } : {};
+  const racheZielId = RACHE_AKTIV ? { targetUserId } : {};
+  const racheAngreiferId = RACHE_AKTIV ? { attackerId: req.userId } : {};
   const attackerFleetSummary = fleetSummary(attacker);
   // Im Standort-Fall ist die GEGNERFLOTTE die des Standorts: Sie bestimmt Konter, Formation und
   // den defenderFleet-Bericht - genau die Flotte, die dort wirklich steht. Eine leere
@@ -4892,10 +5078,15 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
        Ressourcenkontos - und der groesste Teil davon wurde schlicht VERNICHTET, weil ihn niemand
        tragen konnte. Fuer den Angreifer sah es nach "keine Beute" aus, fuer das Opfer nicht.
        Damit haengt der Ressourcenverlust jetzt an derselben Schwelle wie alles andere. */
+    /* Vergeltung: +25 % auf den ANTEIL, nicht auf die Beute nach der Kappung. Die Kappung ist der
+       Bestand des Ziels (Math.min unten) - der Bonus kann also nie mehr nehmen, als da ist. Bisher war
+       die Kappung implizit (der Anteil lag stets unter 1); jetzt steht sie ausdruecklich da, weil ein
+       Faktor dazugekommen ist. Im Normalfall ist racheBeuteMult 1 und der Term byte-neutral. */
+    const racheBeuteMult = istRache ? 1 + RACHE_BEUTE_BONUS : 1;
     const stolen = {};
     if (ertragStufe !== 'sockel') {
       for (const [r, amt] of Object.entries(target.resources || {})) {
-        const take = Math.floor((amt || 0) * lootPct * farmPenalty * lootProtection * beuteFaktor);
+        const take = Math.min(amt || 0, Math.floor((amt || 0) * lootPct * farmPenalty * lootProtection * beuteFaktor * racheBeuteMult));
         if (take > 0) {
           stolen[r] = take;
           target.resources[r] = Math.max(0, (target.resources[r] || 0) - take);
@@ -4926,6 +5117,15 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Sockel: keine Kampfpunkte. Das ist die Groesse, wegen der der Ein-Jaeger-Angriff ueberhaupt
     // gefahren wurde.
     if (ertragStufe !== 'sockel') attacker.battlePoints = (attacker.battlePoints || 0) + 25;
+    // Vergeltung: Zusatzpunkte, und das Recht ist mit dem SIEG verbraucht (eine Niederlage laesst es
+    // stehen - wer verliert, hat seine Rache noch nicht gehabt). istRache ist im Sockel-Fall false.
+    if (istRache) {
+      attacker.battlePoints = (attacker.battlePoints || 0) + RACHE_KAMPFPUNKTE;
+      racheVerbrauchen(attackerUser, targetUserId);
+    }
+    // Patenschaft: der erste GEWONNENE Spielerangriff des Schuetzlings. Ein Sockel-Nadelstich
+    // zaehlt nicht - er zaehlt ja auch keine Kampfpunkte.
+    if (ertragStufe !== 'sockel') patenschaftMeilenstein(req.userId, 'erster-sieg');
 
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     setSaveValue(targetUserId, JSON.stringify(target));
@@ -4969,15 +5169,19 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
       }
     }
 
+    // Allianzkrieg (Feature C): Punkte vergibt der Server - hier, wo er den Kampf ausgewuerfelt hat. Im
+    // Sockel nichts: Ein Nadelstich soll keinen Krieg entscheiden (dieselbe Regel, die der Client bei
+    // addWarScore hatte). Das Ergebnis reist in Antwort und beide Berichte, damit beide Seiten es sehen.
+    const allianzkrieg = ertragStufe === 'sockel' ? null : allianzkriegWerten(req.userId, req.username, targetUserId, targetUser ? targetUser.username : '', 'sieg');
     const angreiferBerichtId = addReport(req.userId, {
-      type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt',
+      type: 'attack-sent', result: 'win', targetName: targetUser ? targetUser.username : 'Unbekannt', ...racheZielId, ...racheFelder,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
-      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder, ...(allianzkrieg ? { allianzkrieg } : {})
     });
     const verteidigerBerichtId = addReport(targetUserId, {
-      type: 'attack-received', result: 'loss', attackerName: req.username,
+      type: 'attack-received', result: 'loss', attackerName: req.username, ...racheAngreiferId, ...racheFelder,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
-      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, stolen, destroyedBuilding, destroyedBuildingCount, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, defenderLossPct, ...standortFelder, ...(allianzkrieg ? { allianzkrieg } : {})
     });
     // KI-Kampfberichte E2 (04.09.2026): zwei Texte aus diesem einen Datensatz, je einer an den
     // Bericht jeder Seite. Synchron (nur db-Mutation), das saveDb() unten persistiert die Auftraege.
@@ -4993,8 +5197,11 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: false, looted: Object.keys(stolen).length > 0 }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     kampfVerlaufVermerken(findUserById(req.userId), { rolle: 'angriff', gegner: targetUser ? targetUser.username : null, ziel: standortFelder.targetPlanet || 'home', erfolg: true, angriff: attackPower, verteidigung: defensePower, beute: Object.keys(stolen).length });
     kampfVerlaufVermerken(targetUser, { rolle: 'verteidigung', gegner: req.username, ziel: standortFelder.targetPlanet || 'home', erfolg: false, angriff: attackPower, verteidigung: defensePower, beute: Object.keys(stolen).length });
+    auftragsbuchTat(req.userId, 'angriff');   // Saison-Auftragsbuch: der gefuehrte Angriff zaehlt, egal wie er ausging
+    // Vergeltung: Der Verteidiger darf 24 h zurueckschlagen - synchron VOR saveDb() (db-Regel).
+    racheVermerken(targetUser, req.userId, req.username, racheJetzt);
     await saveDb();
-    return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
+    return res.json({ success: true, stolen, destroyedBuilding, destroyedBuildingCount, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails(), ...racheFelder, ...(allianzkrieg ? { allianzkrieg } : {}) });
   } else {
     // Sockel: auch die drei Trostpunkte fallen weg - sonst bliebe der Nadelstich eine, wenn auch
     // duenne, Punktequelle, und genau die sollte er nicht mehr sein.
@@ -5031,18 +5238,25 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Ergebnis beeinflussen. Genau deshalb taugt er als Quelle, anders als alles, was aus dem
     // Spielstand gemeldet wird. Gegen Absprache zählt je Angreifer nur ein Angriff pro Tag.
     const staubAbwehr = staubAbwehrGutschreiben(targetUser, req.userId);
+    // Allianzkrieg (Feature C): +2 fuer die Allianz des geschlagenen Angreifers, +6 fuer die des Verteidigers
+    // (Beitrag dem Verteidiger) - im Sockel nichts, siehe Siegzweig.
+    const allianzkrieg = ertragStufe === 'sockel' ? null : allianzkriegWerten(req.userId, req.username, targetUserId, targetUser ? targetUser.username : '', 'niederlage');
+    // Patenschaft: die erste erfolgreiche Abwehr des Schuetzlings. Derselbe Grund wie beim
+    // Sternenstaub eine Zeile darueber: Der Kampf ist serverseitig ausgewuerfelt, der Verteidiger
+    // konnte ihn weder ausloesen noch beeinflussen - eine Quelle, die kein Client faelschen kann.
+    patenschaftMeilenstein(targetUserId, 'erste-abwehr');
 
     const angreiferBerichtId = addReport(req.userId, {
-      type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt',
+      type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt', ...racheZielId,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
-      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder, ...(allianzkrieg ? { allianzkrieg } : {})
     });
     const verteidigerBerichtId = addReport(targetUserId, {
       // staubReward steht im Bericht, damit die Gutschrift nicht unsichtbar bleibt: Der Verteidiger
       // war beim Kampf per Definition nicht dabei, der Bericht ist seine einzige Quelle.
-      type: 'attack-received', result: 'win', attackerName: req.username, defendReward: abwehrCp, staubReward: staubAbwehr,
+      type: 'attack-received', result: 'win', attackerName: req.username, defendReward: abwehrCp, staubReward: staubAbwehr, ...racheAngreiferId,
       attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt,
-      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder
+      phasen: phasenErgebnis.phasen, counterMult: effektiverKonter, formation: formationKey, formationMult, defenseBefore, fleet: attackerFleetSummary, defenderFleet: targetFleetSummary, ...standortFelder, ...(allianzkrieg ? { allianzkrieg } : {})
     });
     // KI-Kampfberichte E2: siehe Siegzweig - hier ohne Beute, aus Verteidigersicht "abgewehrt".
     try {
@@ -5054,8 +5268,12 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     if (targetUser) { const dPrefs = getNotifPrefs(targetUser); if (dPrefs.enabled && dPrefs.attack) pushNotificationEvent(targetUserId, 'attack-received', { attackerName: req.username, defended: true, looted: false }, { skipWebPush: !allowAttackPush(targetUserId) }); }
     kampfVerlaufVermerken(findUserById(req.userId), { rolle: 'angriff', gegner: targetUser ? targetUser.username : null, ziel: standortFelder.targetPlanet || 'home', erfolg: false, angriff: attackPower, verteidigung: defensePower, beute: 0 });
     kampfVerlaufVermerken(targetUser, { rolle: 'verteidigung', gegner: req.username, ziel: standortFelder.targetPlanet || 'home', erfolg: true, angriff: attackPower, verteidigung: defensePower, beute: 0 });
+    auftragsbuchTat(req.userId, 'angriff');   // Saison-Auftragsbuch: beide Seiten haben gekaempft ...
+    auftragsbuchTat(targetUserId, 'abwehr');  // ... und der Verteidiger hat serverseitig gewonnen
+    // Vergeltung: auch ein abgewehrter Angriff war eine Provokation - das Recht entsteht in beiden Ausgaengen.
+    racheVermerken(targetUser, req.userId, req.username, racheJetzt);
     await saveDb();
-    return res.json({ success: false, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails() });
+    return res.json({ success: false, attackPower, defensePower, vorratAngriff: vorratAngriff.eingesetzt, vorratVerteidigung: vorratVerteidigung.eingesetzt, saveVersion: mySaveVersion, ...kampfDetails(), ...(allianzkrieg ? { allianzkrieg } : {}) });
   }
 });
 
@@ -5282,7 +5500,8 @@ app.get('/api/health', (req, res) => res.json({
   // der Etappe E1b von aussen - vorher waren das drei SSH-Befehle. Nennt weder Adresse noch
   // Schluessel, nur Befunde und Laengen (Definition am Dateiende).
   kampftext: kampftextHealth(),
-  chronik: chronikHealth()
+  chronik: chronikHealth(),
+  galaxieZiel: galaxieZielHealth()   // Feature A (11.09.2026): steht das Ziel dieser Woche? Deploy-Beleg ohne Anmeldung
 }));
 
 // --- Andere Spieler in einem Sternensystem (für die Sektorkarte) ---
@@ -5739,6 +5958,7 @@ app.post('/api/referral/redeem', authMiddleware, async (req, res) => {
   if (save.referralRedeemed) return res.status(400).json({ error: 'Du hast bereits einen Einladungs-Bonus eingelöst.' });
 
   let referrer;
+  let patenschaftNeu = null;   // nur beim ERSTEN Verknuepfen belegt - die Antwort nennt sie dann
   if (save.referredBy) {
     // Bereits verknüpft (aus einem früheren Aufruf) - Verknüpfung ist fest, referrerUsername aus
     // dieser Anfrage wird ignoriert. Das hier ist ein erneuter Versuch nach einem Level-Aufstieg.
@@ -5752,12 +5972,18 @@ app.post('/api/referral/redeem', authMiddleware, async (req, res) => {
     // Verknüpfung fest speichern - unabhängig davon, ob die Levelschwelle schon erreicht ist.
     save.referredBy = referrer.username;
     setSaveValue(req.userId, JSON.stringify(save));
+    // Patenschaft (Feature G): genau hier, beim ERSTEN Verknuepfen. Der Zweig oben (save.referredBy
+    // schon da) laeuft bei jedem weiteren Aufruf vor Level 5 - dort wird nicht neu verknuepft.
+    patenschaftNeu = patenschaftVerknuepfen(findUserById(req.userId), referrer);
   }
+  const patenschaftAntwort = patenschaftNeu
+    ? { patenschaft: { name: referrer.username, bis: patenschaftNeu.bis, tage: Math.round(PATENSCHAFT_DAUER_MS / 86400000) } }
+    : {};
 
   const myLevel = commanderLevelFromXp(save.xp || 0);
   if (myLevel < REFERRAL_LEVEL_THRESHOLD) {
     await saveDb();
-    return res.json({ ok: true, status: 'pending', referrerName: referrer.username, levelNeeded: REFERRAL_LEVEL_THRESHOLD, currentLevel: myLevel });
+    return res.json({ ok: true, status: 'pending', referrerName: referrer.username, levelNeeded: REFERRAL_LEVEL_THRESHOLD, currentLevel: myLevel, ...patenschaftAntwort });
   }
 
   // Levelschwelle erreicht - jetzt tatsächlich auszahlen.
@@ -5791,7 +6017,30 @@ app.post('/api/referral/redeem', authMiddleware, async (req, res) => {
   }
 
   await saveDb();
-  res.json({ ok: true, status: 'paid', referrerName: referrer.username, newResources: save.resources, saveVersion: mySaveVersion });
+  res.json({ ok: true, status: 'paid', referrerName: referrer.username, newResources: save.resources, saveVersion: mySaveVersion, ...patenschaftAntwort });
+});
+
+// Stand der eigenen Patenschaften fuer die Karte in den Einstellungen (Feature G). Namen, keine
+// Kennungen: Die Karte zeigt, wer der Pate ist und welche Meilensteine stehen - mehr braucht sie
+// nicht, und eine fremde userId hat auf dem Client nichts zu suchen. 404 bei ausgeschaltetem
+// Schalter, damit ein Client die Karte ersatzlos weglaesst (dieselbe Verabredung wie beim
+// Auftragsbuch: "Endpunkt fehlt" und "abgeschaltet" sehen fuer den Client gleich aus).
+app.get('/api/patenschaft', authMiddleware, (req, res) => {
+  if (!PATENSCHAFT_AKTIV) return res.status(404).json({ error: 'Patenschaften sind nicht aktiv.', inaktiv: true });
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+  const jetzt = Date.now();
+  const sicht = e => ({ name: e.name, seit: e.seit, bis: e.bis, aktiv: e.bis > jetzt, meilensteine: Object.assign({}, e.meilensteine || {}) });
+  const schuetzlinge = Object.values(user.schuetzlinge || {}).map(sicht).sort((a, b) => (b.seit || 0) - (a.seit || 0));
+  res.json({
+    aktiv: true,
+    dauerTage: Math.round(PATENSCHAFT_DAUER_MS / 86400000),
+    maxSchuetzlinge: PATENSCHAFT_MAX_SCHUETZLINGE,
+    pate: user.pate ? sicht(user.pate) : null,
+    schuetzlinge,
+    katalog: PATENSCHAFT_MEILENSTEINE.map(m => ({ key: m.key, name: m.name,
+      credits: { pate: PATENSCHAFT_CREDITS.pate, schuetzling: PATENSCHAFT_CREDITS.schuetzling }, staub: PATENSCHAFT_STAUB }))
+  });
 });
 
 // --- Server-Ereignis-Benachrichtigungen: Einstellungen, Postfach, Überfall-Terminierung ---
@@ -6167,6 +6416,9 @@ function loadOrInitGalaxy() {
   // (kein offener Shared-Storage) und galaxyFuerClient() alles aus db.galaxy automatisch lesend
   // an den Client schickt.
   if (!Array.isArray(db.galaxy.wrackKonvois)) db.galaxy.wrackKonvois = [];
+  // Kriegsruhm je Allianz (Feature C, 11.09.2026): { siege, niederlagen, unentschieden } je Tag. Liegt in
+  // db.galaxy, weil daran ein Ehrentitel haengt - ueber PUT /api/storage ist das nicht erreichbar.
+  if (!db.galaxy.allianzRuhm || typeof db.galaxy.allianzRuhm !== 'object') db.galaxy.allianzRuhm = {};
   if (db.galaxy.activeWar === undefined) db.galaxy.activeWar = null;
   if (!db.galaxy.collapsedSystems) db.galaxy.collapsedSystems = {};
   if (db.galaxy.activeWormhole === undefined) db.galaxy.activeWormhole = null;
@@ -6280,9 +6532,11 @@ const CHRONIK_ARTEN = {
   'system-erobert':        'system, spieler, von (NPC-Volk)',
   'allianz-gegruendet':    'tag, name, gruender',
   'allianzkrieg-beendet':  'sieger, verlierer, punkteSieger, punkteVerlierer - oder a, b, punkteA, punkteB, unentschieden',
+  'allianzkrieg-erklaert': 'angreifer (Tag), verteidiger (Tag), erklaertVon (Spieler), endet (Zeitstempel)',
   'kopfgeld-kassiert':     'jaeger, ziel, kredite',
   'saison-beendet':        'saison, champion, teilnehmer',
-  'front-durchbrochen':    'system, sieger, verlierer (NPC-Voelker der Randkriege)'
+  'front-durchbrochen':    'system, sieger, verlierer (NPC-Voelker der Randkriege)',
+  'galaxie-ziel-erreicht': 'zielArt (Schluessel aus GALAXIE_ZIEL_ARTEN), ziel, stand, kommandanten'
 };
 function chronikText(roh) {
   return String(roh == null ? '' : roh).replace(/[^A-Za-z0-9ÄÖÜäöüß \-']/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
@@ -6967,6 +7221,9 @@ function pushPendingReward(userId, reward) {
   // Idempotenz: dieselbe Wochenliga-/Saison-Belohnung nie doppelt einreihen.
   if (reward.type === 'weekly-league' && list.some(r => r.type === 'weekly-league' && r.weekKey === reward.weekKey)) return;
   if (reward.type === 'season-league' && list.some(r => r.type === 'season-league' && r.seasonKey === reward.seasonKey)) return;
+  // Galaxie-Ziel (11.09.2026): dieselbe Woche nie zweimal - die erste Sperre ist `ausgezahlt` am
+  // Ziel selbst, diese hier faengt den Fall, dass der Server zwischen Abrechnung und Flush stirbt.
+  if (reward.type === 'galaxie-ziel' && list.some(r => r.type === 'galaxie-ziel' && r.woche === reward.woche)) return;
   reward.id = crypto.randomUUID();
   list.push(reward);
   db.private[userId].__pendingRewards = list.slice(-20);
@@ -7118,6 +7375,109 @@ function cleanupWarKeys(a, b) {
   const cp1 = 'alliance:' + a + ':warcontrib:' + b + ':', cp2 = 'alliance:' + b + ':warcontrib:' + a + ':';
   for (const k of Object.keys(db.shared)) if (k.startsWith(cp1) || k.startsWith(cp2)) delete db.shared[k];
 }
+/* ===== Allianzkriege mit Einsatz (Feature C, 11.09.2026) ==========================================
+   Bis hierher schrieb der CLIENT die Kriegspunkte selbst (addWarScore im Frontend: +1 je gewonnenem
+   Spielerangriff, per PUT /api/storage auf alliance:<TAG>:warscore:<GEGNER>) und setzte auch das
+   Zeitfenster (warmeta). Die Rechtepruefung liess jedes Mitglied jeden Wert eintragen - und an genau
+   diesem Wert haengt seit #4 die Kredit-Praemie fuer alle Beitragenden. Das war die Sorte Zaehler, die
+   die Hausregel in Serverhand verlangt ("nie eine Belohnung aus einem vom Client gemeldeten Zaehler").
+
+   Seit dem Schalter vergibt der SERVER die Punkte - dort, wo er den Kampf ohnehin selbst auswuerfelt
+   (/api/attack, /api/vorposten/angriff) -, der generische Speicher lehnt Client-Schreibzugriffe auf
+   :wars, :warmeta:, :warscore:, :warcontrib: ab (LESEN bleibt erlaubt, das Kriegspanel liest die
+   Schluessel weiter), Erklaerung und Frieden laufen ueber eigene Routen. Die Daten liegen WEITER in
+   db.shared unter denselben Schluesseln: Alte warmeta, die ein Client vor der Umstellung gesetzt hat,
+   bleiben gueltig, und resolveAllianceWarsServer liest unveraendert dieselbe Quelle.
+
+   Schalter aus = alter Zustand byte-gleich (Client schreibt, Routen 404, keine Serverpunkte, keine der
+   neuen Auszahlungen). Auszahlungen mit NEUEM Reward-Typ (war-defeat) stehen hinter dem Schalter, weil
+   ein alter Client dafuer keinen Zweig hat und "Dankeschoen vom Team: +NaN Kredite" meldete - deshalb
+   geht das Backend VOR dem Frontend live. Wer den Schalter je ausschaltet: die Sperre im geteilten
+   Speicher faellt mit, der Client schreibt dann wieder selbst (der alte addWarScore-Weg ist im neuen
+   Frontend entfernt - die Punkte staenden dann still, bis der Schalter wieder steht). */
+const ALLIANZKRIEG_SERVER_AKTIV = true;
+const ALLIANZKRIEG_DAUER_MS = 7 * 24 * 3600 * 1000;   // wie WAR_DURATION_MS im Frontend
+const ALLIANZKRIEG_MAX_LAUFEND = 2;                   // laufende Kriege je Allianz (beide Seiten)
+const ALLIANZKRIEG_TAGESDECKEL = 3;                   // gewertete Angriffe je Angreifer, Ziel und UTC-Tag
+const ALLIANZKRIEG_PUNKTE = { sieg: 10, niederlage: 2, abwehr: 6, vorposten: 8 };
+const WAR_VICTORY_STAUB = 15;                         // Sternenstaub je Sieger-Beitragendem - bucht der Server
+const WAR_DEFEAT_CREDITS = 200;                       // Trostpreis je Verlierer-Beitragendem
+const ALLIANZKRIEG_SPERRTEXT = 'Kriegspunkte vergibt der Server.';
+function warMetaOf(tag, enemy) {
+  try { const raw = db.shared['alliance:' + tag + ':warmeta:' + enemy]; return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+}
+// Gibt es diese Allianz? Massstab sind aktive Mitglieder, nicht der info-Datensatz: Der wird beim
+// Gruenden geschrieben, aber eine Allianz ohne ein einziges Mitglied ist kein Kriegsgegner - und eine
+// aufgeloeste (disbanded) auch dann nicht, wenn ihr Datensatz noch liegt.
+function allianzExistiert(tag) {
+  const info = allianceInfoOf(tag);
+  if (info && info.disbanded === true) return false;
+  return allianceMemberIds(tag).length > 0;
+}
+/* Stehen zwei Allianzen gerade gegeneinander im Krieg? BEIDE Listen UND ein laufendes Zeitfenster.
+   Eine Liste allein reicht nicht: Nach dem Frieden raeumt erst der naechste Takt auf, und ein Krieg,
+   dessen endsAt vorbei ist, wartet nur noch auf die Abrechnung - Punkte dorthin waeren verloren. Das
+   Zeitfenster wird auf beiden Seiten gelesen (max), weil der alte Client es beidseitig schrieb. */
+function allianzkriegLaeuft(tagA, tagB, now) {
+  if (!tagA || !tagB || tagA === tagB) return false;
+  if (!warEnemiesOf(tagA).includes(tagB) || !warEnemiesOf(tagB).includes(tagA)) return false;
+  const mA = warMetaOf(tagA, tagB), mB = warMetaOf(tagB, tagA);
+  return Math.max((mA && mA.endsAt) || 0, (mB && mB.endsAt) || 0) > (now || Date.now());
+}
+function allianzkriegLaufende(tag, now) {
+  return warEnemiesOf(tag).filter(e => allianzkriegLaeuft(tag, e, now));
+}
+// Punktestand UND persoenlicher Beitrag - dieselben zwei Schluessel, die der Client bis Feature C schrieb,
+// damit resolveAllianceWarsServer und das Kriegspanel nichts Neues lesen muessen.
+function allianzkriegPunkteEintragen(tag, enemy, userId, name, punkte) {
+  if (!(punkte > 0)) return;
+  db.shared['alliance:' + tag + ':warscore:' + enemy] = JSON.stringify({ score: warScoreOf(tag, enemy) + punkte });
+  const ck = 'alliance:' + tag + ':warcontrib:' + enemy + ':' + userId;
+  let bisher = 0; try { const raw = db.shared[ck]; if (raw) bisher = JSON.parse(raw).score || 0; } catch (e) {}
+  db.shared[ck] = JSON.stringify({ score: bisher + punkte, name: name || 'Kommandant' });
+}
+/* Der Absprache-Riegel: je Angreifer und Ziel hoechstens ALLIANZKRIEG_TAGESDECKEL gewertete Angriffe am
+   Tag - am NUTZEROBJEKT des Angreifers (user.allianzkriegTag), nie im Spielstand (klientenautoritativ).
+   Dasselbe Muster wie user.staub.abwehrVon und user.marktTag: UTC-Tagesstempel, bei Tageswechsel leer.
+   Zaehlt JEDEN Ausgang, nicht nur Siege - sonst liesse sich die Abwehrpraemie (+6 fuer die Verteidiger)
+   ueber einen befreundeten Gegner farmen, der absichtlich verliert. */
+function allianzkriegRiegel(user, zielId) {
+  if (!user) return false;
+  const heute = staubTagesschluessel();
+  if (!user.allianzkriegTag || user.allianzkriegTag.datum !== heute) user.allianzkriegTag = { datum: heute, ziele: {} };
+  const n = user.allianzkriegTag.ziele[zielId] || 0;
+  if (n >= ALLIANZKRIEG_TAGESDECKEL) return false;
+  user.allianzkriegTag.ziele[zielId] = n + 1;
+  return true;
+}
+/* DER HAKEN aus /api/attack und /api/vorposten/angriff. `ausgang`: 'sieg' (Angreifer gewinnt),
+   'niederlage' (Verteidiger haelt stand - er bekommt die Abwehrpunkte), 'vorposten' (ein Vorposten der
+   Gegner faellt). Rueckgabe null, wenn die beiden nicht gegeneinander im Krieg stehen; sonst ein
+   Objekt fuer Antwort und Bericht - auch bei erreichtem Tagesdeckel (gedeckelt:true, 0 Punkte), damit
+   der Spieler den Grund sieht und nicht einen Fehler vermutet. Wirft nie: Ein Fehler hier ist ein Log,
+   kein 500 - der Kampf ist zu diesem Zeitpunkt schon entschieden (wie beim Kampftext). */
+function allianzkriegWerten(angreiferId, angreiferName, verteidigerId, verteidigerName, ausgang) {
+  if (!ALLIANZKRIEG_SERVER_AKTIV) return null;
+  try {
+    const tagA = allianceTagOf(angreiferId), tagV = allianceTagOf(verteidigerId);
+    if (!allianzkriegLaeuft(tagA, tagV)) return null;
+    if (!allianzkriegRiegel(findUserById(angreiferId), verteidigerId)) {
+      return { eigeneTag: tagA, gegnerTag: tagV, angreifer: 0, verteidiger: 0, gedeckelt: true, deckel: ALLIANZKRIEG_TAGESDECKEL };
+    }
+    let pA = 0, pV = 0;
+    if (ausgang === 'sieg') pA = ALLIANZKRIEG_PUNKTE.sieg;
+    else if (ausgang === 'vorposten') pA = ALLIANZKRIEG_PUNKTE.vorposten;
+    else if (ausgang === 'niederlage') { pA = ALLIANZKRIEG_PUNKTE.niederlage; pV = ALLIANZKRIEG_PUNKTE.abwehr; }
+    if (pA) allianzkriegPunkteEintragen(tagA, tagV, angreiferId, angreiferName, pA);
+    if (pV) allianzkriegPunkteEintragen(tagV, tagA, verteidigerId, verteidigerName, pV);
+    return { eigeneTag: tagA, gegnerTag: tagV, angreifer: pA, verteidiger: pV, gedeckelt: false };
+  } catch (e) { console.error('[allianzkrieg] werten: ' + (e && e.message)); return null; }
+}
+function allianzRuhmOf(tag) {
+  const g = loadOrInitGalaxy();
+  if (!g.allianzRuhm[tag]) g.allianzRuhm[tag] = { siege: 0, niederlagen: 0, unentschieden: 0 };
+  return g.allianzRuhm[tag];
+}
 function resolveAllianceWarsServer() {
   const now = Date.now();
   const metaKeys = Object.keys(db.shared).filter(k => /^alliance:[^:]+:warmeta:[^:]+$/.test(k));
@@ -7139,10 +7499,26 @@ function resolveAllianceWarsServer() {
         const loser = winner === A ? B : A;
         const wS = winner === A ? scoreA : scoreB, lS = winner === A ? scoreB : scoreA;
         const members = warContributorIds(winner, loser);
-        for (const uid of members) pushPendingReward(uid, { type: 'war-victory', enemyTag: loser, credits: WAR_VICTORY_CREDITS, myScore: wS, theirScore: lS });
+        for (const uid of members) {
+          const lohn = { type: 'war-victory', enemyTag: loser, credits: WAR_VICTORY_CREDITS, myScore: wS, theirScore: lS };
+          if (ALLIANZKRIEG_SERVER_AKTIV) {
+            // Sternenstaub bucht der SERVER (Hausregel) - der Reward traegt die Zahl nur zur Anzeige.
+            const u = findUserById(uid);
+            if (u) { staubGutschreiben(staubKonto(u), WAR_VICTORY_STAUB); lohn.staub = WAR_VICTORY_STAUB; }
+          }
+          pushPendingReward(uid, lohn);
+        }
+        if (ALLIANZKRIEG_SERVER_AKTIV) {
+          // Trostpreis fuer die Beitragenden der Verliererseite - damit die Niederlage nicht stumm ist. Eigener
+          // Typ, deshalb hinter dem Schalter (ein alter Client haette dafuer keinen Zweig).
+          for (const uid of warContributorIds(loser, winner)) pushPendingReward(uid, { type: 'war-defeat', enemyTag: winner, credits: WAR_DEFEAT_CREDITS, myScore: lS, theirScore: wS });
+          allianzRuhmOf(winner).siege++;
+          allianzRuhmOf(loser).niederlagen++;
+        }
         pushGalaxyNews('ti-trophy', 'Allianz-Krieg beendet: [' + winner + '] besiegt [' + loser + '] mit ' + wS + ':' + lS + ' Kriegspunkten.');
         chronikVermerken('allianzkrieg-beendet', { sieger: winner, verlierer: loser, punkteSieger: wS, punkteVerlierer: lS });
       } else {
+        if (ALLIANZKRIEG_SERVER_AKTIV) { allianzRuhmOf(A).unentschieden++; allianzRuhmOf(B).unentschieden++; }
         pushGalaxyNews('ti-flag', 'Allianz-Krieg zwischen [' + A + '] und [' + B + '] endet unentschieden (' + scoreA + ':' + scoreB + ').');
         chronikVermerken('allianzkrieg-beendet', { a: A, b: B, punkteA: scoreA, punkteB: scoreB, unentschieden: true });
       }
@@ -7151,6 +7527,104 @@ function resolveAllianceWarsServer() {
     cleanupWarKeys(A, B);
   }
 }
+
+/* Die drei Routen des Allianzkriegs (Feature C). Wer erklaeren und Frieden schliessen darf, ist aus dem
+   Frontend-Kriegspanel abgelesen (declareWar/makePeace: `state.player.allianceRole !== 'admin'` bricht
+   ab - Offiziere duerfen dort NICHT): nur der Anfuehrer. Frieden darf der Anfuehrer JEDER der beiden
+   Seiten (beide sehen den Krieg im Panel und beide hatten den Knopf). Alle Fehler nennen den Grund. */
+function allianzkriegRoutenGrundlage(req) {
+  const tag = allianceTagOf(req.userId);
+  if (!tag) return { fehler: [403, 'Du gehörst keiner Allianz an.'] };
+  if (allianceRoleOf(tag, req.userId) !== 'admin') return { fehler: [403, 'Nur der Anführer der Allianz darf das.'] };
+  const gegnerTag = String((req.body && req.body.gegnerTag) || '').trim().toUpperCase();
+  // Der Tag wird zum Schluesselbestandteil (alliance:<TAG>:...) - deshalb nur Buchstaben und Ziffern, kein
+  // Doppelpunkt, kein Unterstrich (schliesst auch __proto__ & Co. aus). Das Frontend erlaubt 4 Zeichen,
+  // aeltere Tags sind bis 6 lang.
+  if (!/^[A-Z0-9]{1,8}$/.test(gegnerTag)) return { fehler: [400, 'Ungültiger Allianz-Tag.'] };
+  if (gegnerTag === tag) return { fehler: [400, 'Man kann sich selbst keinen Krieg erklären.'] };
+  return { tag, gegnerTag };
+}
+app.post('/api/allianzkrieg/erklaeren', authMiddleware, async (req, res) => {
+  if (!ALLIANZKRIEG_SERVER_AKTIV) return res.status(404).json({ error: 'Kriegserklärungen laufen derzeit nicht über den Server.', inaktiv: true });
+  const g = allianzkriegRoutenGrundlage(req);
+  if (g.fehler) return res.status(g.fehler[0]).json({ error: g.fehler[1] });
+  const { tag, gegnerTag } = g;
+  // 400, nicht 404: Der Client deutet 404 als "alter Server ohne diese Route" und faellt auf den alten Weg
+  // zurueck - ein unbekannter Gegner ist aber eine Ablehnung, die der Spieler lesen soll.
+  if (!allianzExistiert(gegnerTag)) return res.status(400).json({ error: 'Die Allianz [' + gegnerTag + '] gibt es nicht.', unbekannt: true });
+  const now = Date.now();
+  if (allianzkriegLaeuft(tag, gegnerTag, now)) return res.status(409).json({ error: 'Mit [' + gegnerTag + '] seid ihr bereits im Krieg.' });
+  if (allianzkriegLaufende(tag, now).length >= ALLIANZKRIEG_MAX_LAUFEND) {
+    return res.status(409).json({ error: 'Deine Allianz führt bereits ' + ALLIANZKRIEG_MAX_LAUFEND + ' Kriege - erst einen beenden.' });
+  }
+  if (allianzkriegLaufende(gegnerTag, now).length >= ALLIANZKRIEG_MAX_LAUFEND) {
+    return res.status(409).json({ error: '[' + gegnerTag + '] führt bereits ' + ALLIANZKRIEG_MAX_LAUFEND + ' Kriege - mehr Fronten gibt es nicht.' });
+  }
+  const meine = warEnemiesOf(tag); if (!meine.includes(gegnerTag)) meine.push(gegnerTag);
+  db.shared['alliance:' + tag + ':wars'] = JSON.stringify({ enemies: meine });
+  const ihre = warEnemiesOf(gegnerTag); if (!ihre.includes(tag)) ihre.push(tag);
+  db.shared['alliance:' + gegnerTag + ':wars'] = JSON.stringify({ enemies: ihre });
+  // Reste eines frueheren Krieges gegen dieselbe Allianz (z.B. Frieden per altem Client, noch nicht
+  // aufgeraeumt) duerfen nicht in den neuen ragen - nur Punkte und Beitraege, das Zeitfenster kommt neu.
+  for (const k of ['alliance:' + tag + ':warscore:' + gegnerTag, 'alliance:' + gegnerTag + ':warscore:' + tag]) delete db.shared[k];
+  const cp1 = 'alliance:' + tag + ':warcontrib:' + gegnerTag + ':', cp2 = 'alliance:' + gegnerTag + ':warcontrib:' + tag + ':';
+  for (const k of Object.keys(db.shared)) if (k.startsWith(cp1) || k.startsWith(cp2)) delete db.shared[k];
+  // startedAt/declaredBy sind die Felder des alten Client-Formats - ein alter Client liest sie weiter.
+  const endsAt = now + ALLIANZKRIEG_DAUER_MS;
+  const meta = JSON.stringify({ startedAt: now, endsAt, declaredBy: tag, erklaertVon: req.username || 'Kommandant', erklaertAm: now });
+  db.shared['alliance:' + tag + ':warmeta:' + gegnerTag] = meta;
+  db.shared['alliance:' + gegnerTag + ':warmeta:' + tag] = meta;
+  pushGalaxyNews('ti-skull', 'Allianz-Krieg: [' + tag + '] hat [' + gegnerTag + '] den Krieg erklärt - sieben Tage lang zählt jeder Schlag.');
+  chronikVermerken('allianzkrieg-erklaert', { angreifer: tag, verteidiger: gegnerTag, erklaertVon: req.username || '', endet: endsAt });
+  await saveDb();
+  res.json({ ok: true, gegnerTag, endsAt });
+});
+app.post('/api/allianzkrieg/frieden', authMiddleware, async (req, res) => {
+  if (!ALLIANZKRIEG_SERVER_AKTIV) return res.status(404).json({ error: 'Friedensschlüsse laufen derzeit nicht über den Server.', inaktiv: true });
+  const g = allianzkriegRoutenGrundlage(req);
+  if (g.fehler) return res.status(g.fehler[0]).json({ error: g.fehler[1] });
+  const { tag, gegnerTag } = g;
+  if (!warEnemiesOf(tag).includes(gegnerTag) && !warEnemiesOf(gegnerTag).includes(tag)) {
+    return res.status(400).json({ error: 'Mit [' + gegnerTag + '] seid ihr nicht im Krieg.', keinKrieg: true });   // 400 wie oben: 404 hiesse "alter Server"
+  }
+  removeWarEnemy(tag, gegnerTag); removeWarEnemy(gegnerTag, tag);
+  cleanupWarKeys(tag, gegnerTag);   // Zeitfenster, Punkte, Beitraege - ohne Belohnung, wie beim alten Client-Frieden
+  pushGalaxyNews('ti-flag', 'Frieden: [' + tag + '] und [' + gegnerTag + '] haben ihren Krieg beendet.');
+  await saveDb();
+  res.json({ ok: true, gegnerTag });
+});
+app.get('/api/allianzkrieg', authMiddleware, (req, res) => {
+  if (!ALLIANZKRIEG_SERVER_AKTIV) return res.status(404).json({ error: 'Kriegspunkte vergibt derzeit nicht der Server.', inaktiv: true });
+  const tag = allianceTagOf(req.userId);
+  const now = Date.now();
+  const kriege = [];
+  if (tag) {
+    for (const gegnerTag of warEnemiesOf(tag)) {
+      const meta = warMetaOf(tag, gegnerTag) || warMetaOf(gegnerTag, tag) || {};
+      const prefix = 'alliance:' + tag + ':warcontrib:' + gegnerTag + ':';
+      const beitraege = [];
+      for (const k of Object.keys(db.shared)) {
+        if (!k.startsWith(prefix)) continue;
+        try { const d = JSON.parse(db.shared[k]); beitraege.push({ userId: k.slice(prefix.length), name: d.name || 'Kommandant', score: d.score || 0 }); } catch (e) {}
+      }
+      const meiner = beitraege.find(b => b.userId === req.userId);
+      kriege.push({
+        gegnerTag, endsAt: meta.endsAt || 0, laeuft: allianzkriegLaeuft(tag, gegnerTag, now),
+        erklaertVon: meta.erklaertVon || null, erklaertDurch: meta.declaredBy || null, erklaertAm: meta.erklaertAm || meta.startedAt || 0,
+        punkte: { eigene: warScoreOf(tag, gegnerTag), gegner: warScoreOf(gegnerTag, tag) },
+        topBeitraege: beitraege.filter(b => b.score > 0).sort((a, b) => b.score - a.score).slice(0, 3),
+        meinBeitrag: meiner ? meiner.score : 0
+      });
+    }
+  }
+  const ruhm = Object.assign({ siege: 0, niederlagen: 0, unentschieden: 0 }, (tag && loadOrInitGalaxy().allianzRuhm[tag]) || {});
+  res.json({
+    aktiv: true, tag: tag || null, kriege, ruhm,
+    // Die Regeln reisen mit, damit das Kriegspanel keine zweite Kopie der Zahlen fuehrt.
+    regeln: { dauerMs: ALLIANZKRIEG_DAUER_MS, maxLaufend: ALLIANZKRIEG_MAX_LAUFEND, tagesdeckel: ALLIANZKRIEG_TAGESDECKEL,
+      punkte: ALLIANZKRIEG_PUNKTE, siegKredite: WAR_VICTORY_CREDITS, siegStaub: WAR_VICTORY_STAUB, trostKredite: WAR_DEFEAT_CREDITS }
+  });
+});
 
 // --- Kopfgeld-System (#2) ---
 // Jede Woche liegt ein Kopfgeld auf dem aktuellen Bestenlisten-Ersten (der stärkste, sichtbarste
@@ -7169,6 +7643,186 @@ function resolveBountyServer() {
     try { const v = JSON.parse(db.shared[k]); if (!top || (v.score || 0) > (top.score || 0)) { top = v; topId = k.slice('leaderboard:'.length); } } catch (e) {}
   }
   if (top && topId) g.bounty = { targetUserId: topId, targetName: top.name || 'Unbekannt', reward: BOUNTY_REWARD, weekKey: nowKey, claimed: false, claimedBy: null };
+}
+
+/* ===== Galaxie-Ziel der Woche (Feature A, 11.09.2026) ==========================================
+
+   Ein GEMEINSAMES Wochenziel fuer alle Spieler: "Schlagt diese Woche zusammen N-mal gegen Alien-
+   Nester" - eine Art je Woche, rotierend ueber GALAXIE_ZIEL_ARTEN. Jeder gewertete Schlag zaehlt
+   eins, wer beigetragen hat, bekommt beim Wochenwechsel Kredite (nach eigenem Beitrag gestaffelt)
+   und Sternenstaub - aber NUR, wenn die Gemeinschaft das Ziel erreicht hat.
+
+   ALLES LIEGT IN db.galaxy (fuer Clients unerreichbar) und wird ausschliesslich aus den Erfolgs-
+   pfaden der vier Angriffsrouten geschrieben, also dort, wo der SERVER gewuerfelt hat. Ein Client
+   kann weder seinen Beitrag noch den Stand melden - PUT /api/storage/galaxieZiel landet im
+   generischen Speicher und beruehrt das Ziel nicht (Waechter: tests/test_galaxie_ziel_http.js).
+
+   DREI ENTSCHEIDUNGEN, die man kennen muss:
+   - Die Zielhoehe wird EINMAL beim Anlegen aus den aktiven Spielern (rkAktiveSpieler, 24 h) und
+     dem Faktor der Art gerechnet und dann festgeschrieben - sonst wanderte das Ziel mit jedem
+     Login, und ein fast erreichtes Ziel koennte am Sonntag wieder wegrutschen. Geklemmt auf
+     GALAXIE_ZIEL_MIN..MAX: Unter zehn waere es keine Gemeinschaftsleistung, ueber 400 unerreichbar.
+   - Hoechstens GALAXIE_ZIEL_TAGESDECKEL Beitraege je Spieler und Tag: Wer zwoelf Nester am Stueck
+     beschiesst, erfuellt das Ziel sonst allein, und das Wort "gemeinsam" waere eine Falschaussage.
+     Der Deckel begrenzt nur die ZAEHLUNG - der Angriff selbst laeuft unveraendert.
+   - Zwei Tore, eine Kette: GALAXIE_ZIEL_AKTIV ist die Grundstellung im Code, der Notaus
+     'galaxieziel' (NOTAUS_NAMEN) der Rueckwaertsgang ohne Deploy. spawnAktiv('galaxieziel')
+     gattert Zaehlung, Auszahlung UND Transport - eine Karte, die zaehlt, waehrend nichts gezaehlt
+     wird, waere die Anzeige-Falschaussage, vor der das Frontend seine Flaechen schuetzt.
+
+   DER REWARD-TYP 'galaxie-ziel' IST NEU. Ein Client ohne den Zweig in claimPendingRewards meldet
+   dafuer "Dankeschoen vom Team: +… Kredite fuer deinen Bug-Report". Deshalb: Backend zuerst live,
+   Frontend unmittelbar danach - die erste Auszahlung faellt fruehestens am naechsten Montag, bis
+   dahin muss der Frontend-Zweig ausgeliefert sein. Sternenstaub bucht der SERVER hier selbst
+   (staubGutschreiben); `staub` im Reward ist nur die Zahl fuer die Meldung. */
+const GALAXIE_ZIEL_AKTIV = true;   // 11.09.2026, Paket der sieben Gameplay-Features (Backend vor Frontend)
+// Reihenfolge = Rotation nach Wochennummer. `icon` MUSS eine ti-Klasse sein, die im Frontend
+// vorkommt (das Icon-Font dort ist ein Teilsatz) - tests/test_galaxie_ziel.js im Frontend misst das.
+const GALAXIE_ZIEL_ARTEN = [
+  { key: 'nestschlaege',      name: 'Schläge gegen Alien-Nester',          icon: 'ti-alien',             proSpieler: 3,
+    beschreibung: 'Jeder gewertete Angriff auf ein Alien-Nest zählt – egal, ob das Nest dabei fällt.' },
+  { key: 'festungsschlaege',  name: 'Schläge gegen Asteroidenfestungen',   icon: 'ti-building-fortress', proSpieler: 3,
+    beschreibung: 'Jeder gewertete Angriff auf eine Asteroidenfestung zählt – egal, ob sie dabei fällt.' },
+  { key: 'konvoiueberfaelle', name: 'Überfälle auf Wrackkonvois',          icon: 'ti-truck',             proSpieler: 3,
+    beschreibung: 'Jeder gewertete Überfall auf einen Wrackkonvoi zählt – egal, ob er dabei aufgebracht wird.' },
+  { key: 'weltbossschlaege',  name: 'Schläge gegen den Weltboss',          icon: 'ti-skull',             proSpieler: 2,
+    beschreibung: 'Jeder gewertete Schlag gegen den Weltboss zählt – ein Schlag je Tag und Kommandant.' }
+];
+const GALAXIE_ZIEL_MIN = 10, GALAXIE_ZIEL_MAX = 400;
+const GALAXIE_ZIEL_TAGESDECKEL = 10;            // Beitraege je Spieler und UTC-Tag
+const GALAXIE_ZIEL_CREDITS_BASIS = 200;         // fuer jeden Beitragenden
+const GALAXIE_ZIEL_CREDITS_JE_BEITRAG = 50;     // ... plus je Beitrag, gedeckelt:
+const GALAXIE_ZIEL_CREDITS_DECKEL = 400;        // hoechstens 200 + 400 = 600 Kredite
+const GALAXIE_ZIEL_STAUB = 5;                   // Sternenstaub je Beitragendem, bucht der Server
+function galaxieZielArtDef(key) {
+  return GALAXIE_ZIEL_ARTEN.find(a => a.key === key) || null;
+}
+// Die Art der Woche aus dem Wochenschluessel (Montag, 'YYYY-MM-DD'): Wochen seit Epoche modulo
+// Katalog. Deterministisch, ohne DB - zwei Server rechneten dieselbe Art.
+function galaxieZielArtIndex(woche) {
+  const [y, m, d] = String(woche || '').split('-').map(Number);
+  if (!(y > 0) || !(m > 0) || !(d > 0)) return 0;
+  const wochen = Math.floor(Math.floor(Date.UTC(y, m - 1, d) / 86400000) / 7);
+  const n = GALAXIE_ZIEL_ARTEN.length;
+  return ((wochen % n) + n) % n;
+}
+function galaxieZielAnlegen(g, now) {
+  const woche = serverWeekKey(now);
+  const def = GALAXIE_ZIEL_ARTEN[galaxieZielArtIndex(woche)];
+  const aktive = rkAktiveSpieler();
+  const ziel = Math.max(GALAXIE_ZIEL_MIN, Math.min(GALAXIE_ZIEL_MAX, Math.round(aktive * def.proSpieler)));
+  const [y, m, d] = woche.split('-').map(Number);
+  g.galaxieZiel = {
+    woche, art: def.key, ziel, stand: 0,
+    beitraege: {},                       // userId -> Beitraege dieser Woche (Grundlage der Auszahlung)
+    beitraegeTag: { stempel: null, konten: {} },   // Tagesdeckel je Spieler (UTC-Tag wie rkTagesSchluessel)
+    erreichtAm: null, ausgezahlt: false,
+    beginn: new Date(y, m - 1, d).getTime(), ende: new Date(y, m - 1, d + 7).getTime()
+  };
+  console.log('[galaxie-ziel] neue Woche ' + woche + ': ' + def.key + ' x' + ziel + ' (aktive Spieler: ' + aktive + ')');
+  return g.galaxieZiel;
+}
+/* Abrechnung der ALTEN Woche. Idempotent ueber `ausgezahlt`; das abgerechnete Ziel bleibt als
+   `galaxieZielVorwoche` liegen (Beleg fuer den Admin und den Test, geht nie an Clients). Zahlt nur,
+   wenn erreicht - ein Ziel, das nicht erreicht wurde, zahlt NICHTS, sonst waere "Ziel" das falsche
+   Wort. Und nur, wenn der Notaus nicht gesetzt ist: Wer abschaltet, will keine Auszahlung; die
+   Woche wird dann mit einem Protokollvermerk geschlossen statt still liegen zu bleiben. */
+function galaxieZielAbrechnen(g, z) {
+  if (!z || z.ausgezahlt) return 0;
+  z.ausgezahlt = true;
+  z.abgerechnetAm = Date.now();
+  g.galaxieZielVorwoche = z;
+  const def = galaxieZielArtDef(z.art);
+  if (!def) return 0;
+  const beitragende = Object.keys(z.beitraege || {}).filter(uid => (z.beitraege[uid] || 0) > 0);
+  if (!z.erreichtAm) {
+    console.log('[galaxie-ziel] Woche ' + z.woche + ' nicht erreicht (' + z.stand + '/' + z.ziel + ', ' + beitragende.length + ' Beitragende) - keine Auszahlung');
+    if (beitragende.length) pushGalaxyNews(def.icon, 'Galaxie-Ziel der Woche verfehlt: „' + def.name + '" kam auf ' + z.stand + ' von ' + z.ziel + '. Nächste Woche wartet ein neues Ziel.', 'galaxie-ziel');
+    return 0;
+  }
+  if (!spawnAktiv('galaxieziel')) {
+    console.warn('[galaxie-ziel] Woche ' + z.woche + ' erreicht, aber Notaus gesetzt - keine Auszahlung an ' + beitragende.length + ' Beitragende');
+    return 0;
+  }
+  let n = 0;
+  for (const uid of beitragende) {
+    const user = findUserById(uid);
+    if (!user) continue;
+    const beitrag = z.beitraege[uid];
+    const credits = GALAXIE_ZIEL_CREDITS_BASIS + Math.min(GALAXIE_ZIEL_CREDITS_DECKEL, beitrag * GALAXIE_ZIEL_CREDITS_JE_BEITRAG);
+    staubGutschreiben(staubKonto(user), GALAXIE_ZIEL_STAUB);   // der Server bucht den Staub, nicht der Client
+    pushPendingReward(uid, { type: 'galaxie-ziel', woche: z.woche, art: z.art, name: def.name,
+      ziel: z.ziel, stand: z.stand, beitrag, credits, staub: GALAXIE_ZIEL_STAUB });
+    n++;
+  }
+  console.log('[galaxie-ziel] Woche ' + z.woche + ' abgerechnet: ' + n + ' Beitragende belohnt (' + z.stand + '/' + z.ziel + ')');
+  pushGalaxyNews(def.icon, 'Galaxie-Ziel der Woche abgerechnet: „' + def.name + '" wurde erreicht – ' + n + ' Kommandanten finden ihre Belohnung beim nächsten Login.', 'galaxie-ziel');
+  return n;
+}
+// Wochenwechsel: laeuft im galaxyTick (alle 15 Minuten und beim Start) UND vor jedem Beitrag, damit
+// ein Schlag um 00:05 Uhr am Montag schon in die neue Woche faellt statt in die abgelaufene.
+function galaxieZielTick(g, now) {
+  if (!GALAXIE_ZIEL_AKTIV) return;
+  now = now || Date.now();
+  const woche = serverWeekKey(now);
+  const z = g.galaxieZiel;
+  if (z && z.woche === woche) return;
+  if (z) galaxieZielAbrechnen(g, z);
+  galaxieZielAnlegen(g, now);
+}
+/* Der Hook. Aufgerufen NUR aus dem Erfolgspfad der vier Routen (der Server hat gewuerfelt, der
+   Schlag ist gewertet) und VOR deren saveDb(): synchron mutieren, dann schreiben. Ein Schlag, den
+   die Route ablehnt (Abklingzeit, Flotte unterwegs, Ziel weg, Weltboss-Tagessperre), kommt hier
+   nie an. `art` bindet den Schlag an die Art der Woche - in einer Festungswoche zaehlt kein Nest. */
+function galaxieZielBeitrag(userId, art) {
+  if (!spawnAktiv('galaxieziel')) return null;
+  const g = loadOrInitGalaxy();
+  const now = Date.now();
+  galaxieZielTick(g, now);
+  const z = g.galaxieZiel;
+  if (!z || z.art !== art) return null;
+  const heute = rkTagesSchluessel();
+  if (!z.beitraegeTag || z.beitraegeTag.stempel !== heute) z.beitraegeTag = { stempel: heute, konten: {} };
+  const heuteN = z.beitraegeTag.konten[userId] || 0;
+  if (heuteN >= GALAXIE_ZIEL_TAGESDECKEL) return { gezaehlt: false, gedeckelt: true, stand: z.stand, ziel: z.ziel };
+  z.beitraegeTag.konten[userId] = heuteN + 1;
+  z.beitraege[userId] = (z.beitraege[userId] || 0) + 1;
+  z.stand += 1;
+  if (!z.erreichtAm && z.stand >= z.ziel) {
+    z.erreichtAm = now;
+    const def = galaxieZielArtDef(z.art);
+    const beitragende = Object.keys(z.beitraege).length;
+    console.log('[galaxie-ziel] Woche ' + z.woche + ' ERREICHT: ' + z.stand + '/' + z.ziel + ' durch ' + beitragende + ' Beitragende');
+    pushGalaxyNews(def.icon, 'Galaxie-Ziel erreicht: „' + def.name + '" – ' + z.ziel + ' geschafft, ' + beitragende + ' Kommandanten haben beigetragen. Die Belohnung kommt zum Wochenwechsel.', 'galaxie-ziel');
+    // `zielArt`, nicht `art`: chronikVermerken traegt die Felder ueber den Eintrag, und `art` ist dort
+    // die Sorte des Eintrags selbst - ein Feld `art` hatte sie in der ersten Fassung ueberschrieben.
+    chronikVermerken('galaxie-ziel-erreicht', { zielArt: z.art, ziel: z.ziel, stand: z.stand, kommandanten: beitragende });
+  }
+  return { gezaehlt: true, stand: z.stand, ziel: z.ziel, erreicht: !!z.erreichtAm };
+}
+// Die Client-Form: kein Beitrags-Verzeichnis anderer Konten, nur der EIGENE Beitrag. Null, wenn
+// abgeschaltet oder das Ziel noch zur alten Woche gehoert (bis zum naechsten Takt) - dann faellt
+// die Karte im Frontend ersatzlos weg, statt "endet in 0s" zu zeigen.
+function galaxieZielFuerClient(g, userId) {
+  if (!spawnAktiv('galaxieziel')) return null;
+  const z = g.galaxieZiel;
+  if (!z || !z.art || z.woche !== serverWeekKey(Date.now())) return null;
+  const def = galaxieZielArtDef(z.art);
+  if (!def) return null;
+  return {
+    woche: z.woche, art: z.art, name: def.name, beschreibung: def.beschreibung, icon: def.icon,
+    ziel: z.ziel, stand: z.stand, erreicht: !!z.erreichtAm, ende: z.ende,
+    meinBeitrag: (z.beitraege && z.beitraege[userId]) || 0,
+    kommandanten: Object.keys(z.beitraege || {}).length,   // NICHT 'beitragende': test_randkriege_handlungen_http 8 verbietet den Schluessel in /api/galaxy (Front-Beitragendenliste)
+    tagesDeckel: GALAXIE_ZIEL_TAGESDECKEL   // fuer die Karte - keine Kopie der Zahl im Frontend
+  };
+}
+// Fuer /api/health: ohne Anmeldung sehen, ob das Ziel dieser Woche steht (Deploy-Beleg).
+function galaxieZielHealth() {
+  const z = db.galaxy && db.galaxy.galaxieZiel;
+  if (!GALAXIE_ZIEL_AKTIV || !z) return null;
+  return { woche: z.woche, art: z.art, stand: z.stand, ziel: z.ziel, erreicht: !!z.erreichtAm,
+           kommandanten: Object.keys(z.beitraege || {}).length, notAus: notAusGesetzt('galaxieziel') };
 }
 
 function galaxyTick() {
@@ -7190,6 +7844,7 @@ function galaxyTick() {
   resolveSeasonLeagueServer();
   resolveAllianceWarsServer();
   resolveBountyServer();
+  galaxieZielTick(g);   // Galaxie-Ziel der Woche (Feature A): alte Woche abrechnen, neue anlegen
 
   // Die Alien-Nester reifen, breiten sich aus und bringen Koeniginnen hervor (Phase 3). Steht der
   // Schalter aus, kehrt nestTick sofort zurueck. Bewusst VOR npcEmpireStrength: Ab Phase 4 leitet
@@ -7661,13 +8316,18 @@ setImmediate(takt('galaxyTick-start', galaxyTick));
    `chronikAusgabe` nur in der Client-Form (und nur bei ausgelieferter, nicht abgeschalteter
    Etappe). Wer kuenftig etwas in db.galaxy legt, das nicht an alle darf, gehoert hierher. */
 function chronikAusClient(g) {
-  const { chronik, chronikAusgabe, ...rest } = g;
+  // galaxieZiel/-Vorwoche (11.09.2026): das Beitrags-Verzeichnis ALLER Konten - raus, die
+  // Client-Form haengt galaxyFuerClient ueber galaxieZielFuerClient an.
+  const { chronik, chronikAusgabe, galaxieZiel, galaxieZielVorwoche, ...rest } = g;
   const ausgabe = chronikAusgabeFuerClient();
   return ausgabe ? Object.assign(rest, { chronikAusgabe: ausgabe }) : rest;
 }
 function galaxyFuerClient(g, userId) {
+  const antwort = chronikAusClient(g);
+  const gz = galaxieZielFuerClient(g, userId);   // Feature A: nur wenn Schalter an und Ziel vorhanden
+  if (gz) antwort.galaxieZiel = gz;
   const rk = g.randkriege;
-  if (!rk || !Array.isArray(rk.fronten)) return chronikAusClient(g);
+  if (!rk || !Array.isArray(rk.fronten)) return antwort;
   const fronten = rk.fronten.map(f => ({
     a: f.a, b: f.b,
     systeme: (f.systeme || []).map(e => {
@@ -7700,7 +8360,7 @@ function galaxyFuerClient(g, userId) {
     wocheDeckel: RK_MARKEN_WOCHE,
     markeJePunkte: RK_MARKE_JE_PUNKTE
   };
-  return Object.assign(chronikAusClient(g), { randkriege: {
+  return Object.assign(antwort, { randkriege: {
     stand: rk.stand, fronten, meinTag, meineBasis, meinKonto,
     tagesBreite: RK_TAGESSTUFEN.reduce((a, st) => a + st[0], 0),
     nachschubZuletzt: (db.private[userId] && db.private[userId].__rkNachschubAt) || 0
@@ -7956,6 +8616,8 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
 
   market[resource] = priceAfter;
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
+  auftragsbuchTat(req.userId, 'markt');   // Saison-Auftragsbuch: nur ein Handel, der zustande kam
+  patenschaftMeilenstein(req.userId, 'erster-handel');   // Patenschaft: der Handel ist durch
   saveDb();
 
   // Das Restkontingent reist in JEDER Antwort mit (auch beim Kauf, dort nur informativ) - das
@@ -8330,6 +8992,8 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
       if (loseNow > 0) { fleetObj[k] = Math.max(0, (fleetObj[k] || 0) - loseNow); lostShips[k] = loseNow; }
     }
     save.battlePoints = (save.battlePoints || 0) + 3 + bLevel;
+    galaxieZielBeitrag(req.userId, 'weltbossschlaege');   // Galaxie-Ziel der Woche (Feature A): nur der GEWERTETE Schlag
+    auftragsbuchTat(req.userId, 'weltboss');   // Saison-Auftragsbuch: nur ein Schlag, der den Boss trifft
   }
 
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
@@ -12924,6 +13588,7 @@ app.post('/api/konvoi/angriff', authMiddleware, async (req, res) => {
   if (!(kraft > 0)) return res.status(400).json({ error: 'Diese Flotte trägt keine Kampfkraft.' });
   const erg = A2SchlagAusfuehren(g, ziel, kraft, mission.composition,
     [{ userId: req.userId, name: req.username || 'Kommandant', gewicht: 1 }], jetzt);
+  galaxieZielBeitrag(req.userId, 'konvoiueberfaelle');   // Galaxie-Ziel der Woche (Feature A): gewerteter Ueberfall
 
   // Aus der Quote werden hier - und NUR hier - konkrete Verluste (der Einzelangreifer hat genau eine
   // Zusammensetzung; ein spaeterer Verband bekaeme die Quote selbst).
@@ -12934,6 +13599,7 @@ app.post('/api/konvoi/angriff', authMiddleware, async (req, res) => {
     if (weg > 0) eigeneVerluste[typ] = weg;
   }
   const meinAnteil = erg.anteile[req.userId] || 0;
+  auftragsbuchTat(req.userId, 'konvoi');   // Saison-Auftragsbuch: der Schlag ist ausgefuehrt
   console.log('[konvoi-angriff] userId=' + req.userId + ' ziel=' + zielId + ' sys=' + ziel.sys +
     ' schaden=' + erg.schaden + ' lp=' + (erg.gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax);
   await saveDb();
@@ -13011,6 +13677,7 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
   // 0). Danach misst die Differenz nur noch die Abklingzeit, nicht die Aufmerksamkeit.
   if (!letzter && fest.seit) reaktionVermerken(findUserById(req.userId), 'festung', (jetzt - fest.seit) / 1000);
   fest.abgerechnet[missionId] = jetzt;
+  galaxieZielBeitrag(req.userId, 'festungsschlaege');   // Galaxie-Ziel der Woche (Feature A): gewerteter Schlag
 
   // Aus der Quote werden hier - und NUR hier - konkrete Verluste (der Einzelangreifer hat genau
   // eine Zusammensetzung; der Verband bekommt die Quote selbst, siehe /api/musterattack/resolve).
@@ -13022,10 +13689,12 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
   }
   db.shared[astFeldKey(sysId)] = feld;
 
+  auftragsbuchTat(req.userId, 'festung');   // Saison-Auftragsbuch: der Schlag ist ausgefuehrt
   console.log('[festung-angriff] userId=' + req.userId + ' sys=' + sysId + ' stufe=' + erg.stufeName +
     ' ziel=' + erg.ziel + ' rolle=' + erg.rollenFaktor.toFixed(2) +
     ' kernschaden=' + erg.schaden + ' teilschaden=' + erg.teilSchaden + (erg.zerstoert ? ' ZERSTOERT:' + erg.zerstoert : '') +
     ' kern=' + (erg.gefallen ? 'gefallen' : erg.kern) + '/' + erg.kernMax);
+  patenschaftMeilenstein(req.userId, 'erster-schlag');   // Patenschaft: der Schlag ist aufgeloest
   await saveDb();
   res.json({
     ok: true, schaden: erg.schaden, teilSchaden: erg.teilSchaden, ziel: erg.ziel, zerstoert: erg.zerstoert,
@@ -13350,6 +14019,7 @@ app.post('/api/alien/nest-angriff', authMiddleware, async (req, res) => {
   // Der Kern bedient auch den VERBAND, und dort sagt der Ausloesezeitpunkt ueber den
   // Ausloeser nichts - die Flotte steht seit dem Beitritt fest.
   if (!letzter && nest.seit) reaktionVermerken(findUserById(req.userId), 'nest', (jetzt - nest.seit) / 1000);
+  galaxieZielBeitrag(req.userId, 'nestschlaege');   // Galaxie-Ziel der Woche (Feature A): gewerteter Schlag
 
   /* Aus der Quote werden hier - und NUR hier - konkrete Verluste: Der Einzelangreifer hat genau
      eine Zusammensetzung, der Verband hat viele und bekommt deshalb die Quote selbst. */
@@ -13362,10 +14032,12 @@ app.post('/api/alien/nest-angriff', authMiddleware, async (req, res) => {
   const { schaden, gefallen, trifftSchwaeche, schwarmGefallen, mitgerissen } = erg;
   const meinAnteil = erg.anteile[req.userId] || 0;
   const teilnehmer = erg.teilnehmer;
+  auftragsbuchTat(req.userId, 'nest');   // Saison-Auftragsbuch: der Schlag ist ausgefuehrt
   console.log('[nest-angriff] userId=' + req.userId + ' nest=' + nestId + ' volk=' + nest.volk +
     ' stufe=' + (erg.stufe === null ? 'gefallen' : erg.stufe) + ' schwaeche=' + trifftSchwaeche + ' schaden=' + schaden +
     ' lp=' + (gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax +
     (schwarmGefallen ? ' SCHWARM ZERFALLEN (+' + mitgerissen + ')' : ''));
+  patenschaftMeilenstein(req.userId, 'erster-schlag');   // Patenschaft: der Schlag ist aufgeloest
   await saveDb();
   res.json({
     ok: true, schaden, gefallen,
@@ -13682,8 +14354,15 @@ const VP_ALLIANZ_GARNISON_ANTEIL = 0.5;
    zusammen die Entscheidung sind, welchen Zweig man auf der Endstufe haelt.
    DAS STERNENDOCK TICKT NICHT (wie das Lager): Was bereitliegt, wird beim Abholen aus der
    verstrichenen Zeit gerechnet. Ein Kreuzer je 24 Stunden, hoechstens sieben gestapelt - dieselbe
-   Groessenordnung wie beim Lager, also eine Beigabe und kein Ersatz fuer die eigene Werft. */
-const VP_ENDPROJEKTE_AKTIV = false;
+   Groessenordnung wie beim Lager, also eine Beigabe und kein Ersatz fuer die eigene Werft.
+   UMGELEGT AM 11.09.2026 (Frontend-Paket vom selben Tag). Die Frontend-Haelfte war zum groesseren
+   Teil schon seit dem 07.09.2026 im Spiel (Projektfenster mit Grund je Endprojekt, das Sternendock
+   am Griff des Lagers samt Buchung der Schiffe, die Dock-Zeile an der Station); nachgemessen
+   fehlten die WIRKUNG der Endprojekte an der Stationstafel, der Sperrfeuer-Aufschlag in der
+   Angriffsvorschau, die Dominanz und der Hilfetext - alle vier stehen seit dem 11.09.2026
+   (Waechter dort: tests/test_vorposten_endprojekte.js). Reihenfolge: Backend zuerst; ein alter
+   Client sieht bis zum Frontend-Merge nichts Falsches (Details in docs/vorposten.md). */
+const VP_ENDPROJEKTE_AKTIV = true;   // umgelegt am 11.09.2026
 const VP_DOCK_STUNDEN = 24;
 const VP_DOCK_MAX = 7;
 const VP_DOCK_SCHIFF = 'cruisers';
@@ -15555,6 +16234,9 @@ app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
     if (weg > 0) eigeneVerluste[typ] = weg;
   }
   const meinAnteil = erg.anteile[req.userId] || 0;
+  // Allianzkrieg (Feature C): Faellt ein Vorposten der Kriegsgegner, +8 fuer die eigene Allianz. Gewertet
+  // wird nur der FALL (erg.gefallen), nicht der Treffer - der Erfolgspfad ist damit eindeutig.
+  const allianzkrieg = (erg.gefallen && doc.besitzer) ? allianzkriegWerten(req.userId, req.username, doc.besitzer, doc.besitzerName || '', 'vorposten') : null;
 
   /* DEN BESITZER BENACHRICHTIGEN - bei JEDEM Schlag, nicht erst beim Fall. Genau derselbe Weg wie
      bei der Anfechtung (asteroid-contested): Prefs pruefen, Handy-Push ueber allowAttackPush
@@ -15578,6 +16260,7 @@ app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
     }
   } catch (e) { console.warn('[vorposten-angriff] Push fehlgeschlagen:', e.message); }
 
+  auftragsbuchTat(req.userId, 'vorposten');   // Saison-Auftragsbuch: der Schlag ist ausgefuehrt
   console.log('[vorposten-angriff] userId=' + req.userId + ' sys=' + sys + ' kraft=' + Math.round(kraft) + ' verteidigung=' + erg.verteidigung +
     ' schaden=' + erg.schaden + ' lp=' + (erg.gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax);
   await saveDb();
@@ -15588,7 +16271,8 @@ app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
     eigeneVerluste, garnisonVerluste: erg.garnisonVerluste,
     anteil: erg.gefallen ? Math.round(meinAnteil * 1000) / 1000 : 0,
     teilnehmer: erg.gefallen ? erg.teilnehmer : Object.keys(doc.beitraege || {}).length,
-    naechsterSchlagAb: jetzt + VORPOSTEN_ABKLING_MS
+    naechsterSchlagAb: jetzt + VORPOSTEN_ABKLING_MS,
+    ...(allianzkrieg ? { allianzkrieg } : {})
   });
 });
 
@@ -15987,6 +16671,10 @@ function staubAnmeldungGutschreiben(user) {
   const menge = STAUB_ANMELDUNG + (k.serie - 1) * STAUB_SERIE_BONUS;
   staubGutschreiben(k, menge);
   k.letzterTag = heute;
+  // Patenschaft: fuenf Tage in Folge. Die Serie ist bei STAUB_SERIE_MAX (5) gedeckelt und bleibt
+  // dort stehen - der Meilenstein selbst ist ueber seinen Zeitstempel einmalig. Der Aufrufer
+  // (/api/me) speichert, weil menge > 0 ist.
+  if (k.serie >= 5) patenschaftMeilenstein(user.userId, 'serie-5');
   return menge;
 }
 // Gutschrift für einen abgewehrten Angriff. `angreiferId` wird mitgeführt, damit derselbe Gegner
@@ -16392,6 +17080,165 @@ app.get('/api/admin/supporters', authMiddleware, (req, res) => {
   liste.sort((a, b) => Math.max(b.vergebenBis, b.gespendetBis) - Math.max(a.vergebenBis, a.gespendetBis));
   res.json({ supporters: liste.slice(0, 200), laufzeiten: SUPPORTER_GRANT_DAYS });
 });
+/* ===== Saison-Auftragsbuch (11.09.2026, Feature B aus der Sieben-Features-Analyse) ===============
+
+   WAS ES IST: Ein Monatsfortschritt aus TATEN, die der Server selbst beobachtet hat. Jede Tat gibt
+   Punkte, zwanzig Stufen zahlen Kredite, Modulfragmente und Sternenstaub, die letzte traegt einen
+   Titel. Nichts davon kommt aus dem Spielstand: Gezaehlt wird NUR im Erfolgspfad einer Route, die
+   den Kampf oder Handel serverseitig aufgeloest hat - derselbe Gedanke wie beim Sternenstaub
+   (Kommentarblock ueber STAUB_ANMELDUNG). Der Zustand liegt am NUTZEROBJEKT (`user.auftragsbuch`),
+   nicht in db.private: Ein Spielstand-PUT kann ihn nicht anfassen (dieselbe Entscheidung wie bei
+   user.staub, user.marktTag und user.bonusCodes).
+
+   WO GEZAEHLT WIRD - und wo bewusst nicht:
+     angriff    /api/attack, beide Ausgaenge (der Angreifer hat gekaempft, egal wie es ausging).
+                NICHT bei Schild (403) und keinem 400/404 - da hat kein Kampf stattgefunden.
+     abwehr     /api/attack, Abwehrzweig, dem VERTEIDIGER - er konnte den Kampf weder ausloesen
+                noch beeinflussen, genau deshalb taugt er als Quelle.
+     festung / nest / konvoi / vorposten  der jeweilige Einzelschlag, nachdem *SchlagAusfuehren
+                gelaufen ist. Die "verpasst"-Antworten (Ziel weg, weitergezogen) stehen davor.
+     weltboss   /api/worldboss/resolve, nur wenn der Schlag den Boss TRIFFT - nicht bei Abklingzeit
+                und nicht bei arrivedTooLate (beides zahlt die 50 Trostkredite, aber trifft nichts).
+     markt      /api/market/trade, nur der Erfolgspfad (jede Ablehnung kehrt vorher um).
+
+   TAGESDECKEL je Art (UTC-Tag, derselbe Schluessel wie beim Sternenstaub): Zwei abgesprochene Konten,
+   die sich abwechselnd angreifen, fuellen so hoechstens 5 Angriffe + 3 Abwehren am Tag - die 2310
+   Punkte der Endstufe verlangen Vielfalt ueber den ganzen Monat, nicht eine Schleife.
+
+   SAISONWECHSEL LAZY, ohne Tick: Beim ersten Kontakt in einem neuen Monat (Tat, GET oder POST) werden
+   die erreichten, nicht abgeholten Stufen der ALTEN Saison eingereiht und das Buch neu angelegt. Wer
+   im ganzen Monat nicht vorbeikommt, bekommt sie beim naechsten Besuch - nichts verfaellt.
+
+   SCHALTER: `auftragsbuch` in NOTAUS_NAMEN, im Code AUFTRAGSBUCH_AKTIV. Er gattert Zaehlung, Auszahlung
+   UND beide Routen (404 mit inaktiv:true, der Client blendet die Box dann ersatzlos aus). Das Backend
+   geht VOR dem Frontend live: Bis dahin sieht ein alter Client nichts - er kennt die Routen nicht,
+   und ein Reward vom Typ 'auftragsbuch' entsteht nur durch POST /abholen (den nur der neue Client
+   ruft) oder durch einen Saisonwechsel (naechster: Monatsanfang). */
+const AUFTRAGSBUCH_AKTIV = true;   // 11.09.2026, Feature B - zusammen mit dem Frontend-PR ausgeliefert
+// art -> Name, Punkte je Tat, hoechstens gezaehlte Taten je UTC-Tag. Reihenfolge = Anzeige im Client.
+const AUFTRAGSBUCH_TATEN = {
+  angriff:   { name: 'Spielerangriff geführt', punkte: 10, tagesDeckel: 5 },
+  abwehr:    { name: 'Angriff abgewehrt',      punkte: 8,  tagesDeckel: 3 },
+  festung:   { name: 'Festung angegriffen',    punkte: 8,  tagesDeckel: 6 },
+  nest:      { name: 'Nest angegriffen',       punkte: 8,  tagesDeckel: 6 },
+  konvoi:    { name: 'Konvoi überfallen',      punkte: 8,  tagesDeckel: 6 },
+  weltboss:  { name: 'Weltboss getroffen',     punkte: 6,  tagesDeckel: 8 },
+  vorposten: { name: 'Vorposten angegriffen',  punkte: 8,  tagesDeckel: 6 },
+  markt:     { name: 'Handel am Markt',        punkte: 2,  tagesDeckel: 10 }
+};
+// Die vier Meilensteine tragen Sternenstaub und Fragmente, die Endstufe den Titel. Der Titel steht
+// nur INFORMATIV im Reward - vergeben wird er vom Client (state.seasonTitles), wie der Saison-Liga-Titel.
+const AUFTRAGSBUCH_MEILENSTEINE = {
+  5:  { staub: 5,  fragmente: 2 },
+  10: { staub: 8,  fragmente: 4 },
+  15: { staub: 12, fragmente: 6 },
+  20: { staub: 20, fragmente: 10, titel: 'Chronist der Saison' }
+};
+// Zwanzig Stufen. Kredite steigen von 100 auf 600, in Zehnerschritten gerundet, damit die Zahl im
+// Client lesbar bleibt; die Schwellen sind die des Vertrags (Abstaende wachsen um 10 je Stufe).
+const AUFTRAGSBUCH_STUFEN = [25, 60, 100, 150, 210, 280, 360, 450, 550, 660, 780, 910, 1050, 1200, 1360, 1530, 1710, 1900, 2100, 2310]
+  .map((ab, i) => ({
+    stufe: i + 1, ab,
+    belohnung: Object.assign({ credits: 100 + Math.round(500 * i / 19 / 10) * 10 }, AUFTRAGSBUCH_MEILENSTEINE[i + 1] || {})
+  }));
+function auftragsbuchSaison(zeit) { return new Date(zeit || Date.now()).toISOString().slice(0, 7); }   // 'YYYY-MM', UTC
+function auftragsbuchSaisonEnde(saison) {
+  const [j, m] = String(saison).split('-').map(Number);
+  return Date.UTC(j, m, 1);   // Monat ist 1-basiert -> Index m ist der NAECHSTE Monat, Tag 1, 00:00 UTC
+}
+function auftragsbuchNeu(saison) { return { saison, punkte: 0, taten: {}, tag: { datum: null, zaehler: {} }, abgeholt: [] }; }
+function auftragsbuchErreicht(b) { return AUFTRAGSBUCH_STUFEN.filter(s => (b.punkte || 0) >= s.ab).map(s => s.stufe); }
+function auftragsbuchOffen(b) { return auftragsbuchErreicht(b).filter(n => b.abgeholt.indexOf(n) < 0); }
+// EINE Stelle fuer die Auszahlung einer Stufe - der Abhol-Knopf und der Saisonwechsel laufen beide
+// hierdurch. Staub bucht der Server selbst (staubGutschreiben), im Reward reist die Zahl nur zur
+// Anzeige mit; Kredite und Fragmente bucht der Client beim Abholen (claimPendingRewards).
+function auftragsbuchStufeAuszahlen(user, b, stufenNr) {
+  const st = AUFTRAGSBUCH_STUFEN[stufenNr - 1];
+  if (!st || b.abgeholt.indexOf(stufenNr) !== -1) return false;
+  b.abgeholt.push(stufenNr);
+  if (st.belohnung.staub) staubGutschreiben(staubKonto(user), st.belohnung.staub);
+  pushPendingReward(user.userId, Object.assign({ type: 'auftragsbuch', saison: b.saison, stufe: stufenNr }, st.belohnung));
+  return true;
+}
+function auftragsbuchSaisonAbschliessen(user, b) {
+  const stufen = auftragsbuchOffen(b);
+  for (const n of stufen) auftragsbuchStufeAuszahlen(user, b, n);
+  return stufen;
+}
+// Das Buch der LAUFENDEN Saison. Liegt ein aelteres, wird es zuerst abgeschlossen (siehe oben).
+// Rueckgabe [buch, gewechselt] - `gewechselt` sagt dem Aufrufer, dass etwas zu persistieren ist,
+// auch wenn er selbst nur gelesen hat (GET).
+function auftragsbuchVon(user) {
+  const saison = auftragsbuchSaison();
+  let b = user.auftragsbuch;
+  let gewechselt = false;
+  if (!b || typeof b !== 'object' || b.saison !== saison) {
+    if (b && typeof b === 'object' && b.saison && Array.isArray(b.abgeholt)) auftragsbuchSaisonAbschliessen(user, b);
+    b = user.auftragsbuch = auftragsbuchNeu(saison);
+    gewechselt = true;
+  }
+  if (!b.taten || typeof b.taten !== 'object') b.taten = {};
+  if (!b.tag || typeof b.tag !== 'object') b.tag = { datum: null, zaehler: {} };
+  if (!b.tag.zaehler || typeof b.tag.zaehler !== 'object') b.tag.zaehler = {};
+  if (!Array.isArray(b.abgeholt)) b.abgeholt = [];
+  if (!(b.punkte >= 0)) b.punkte = 0;
+  return [b, gewechselt];
+}
+// DER HOOK. Steht in jeder Route im Erfolgspfad, unmittelbar vor deren saveDb() - die Route
+// persistiert also mit. Rueckgabe true = gezaehlt, false = Deckel erreicht, Schalter aus oder
+// Konto unbekannt. Darf nie werfen: Ein Fehler hier darf keinen Kampf zum 500er machen.
+function auftragsbuchTat(userId, art) {
+  if (!spawnAktiv('auftragsbuch')) return false;
+  const def = AUFTRAGSBUCH_TATEN[art];
+  if (!def) return false;
+  const user = findUserById(userId);
+  if (!user) return false;
+  const [b] = auftragsbuchVon(user);
+  const heute = staubTagesschluessel();
+  if (b.tag.datum !== heute) b.tag = { datum: heute, zaehler: {} };
+  if ((b.tag.zaehler[art] || 0) >= def.tagesDeckel) return false;
+  b.tag.zaehler[art] = (b.tag.zaehler[art] || 0) + 1;
+  b.taten[art] = (b.taten[art] || 0) + 1;
+  b.punkte += def.punkte;
+  return true;
+}
+function auftragsbuchAntwort(b) {
+  const erreicht = auftragsbuchErreicht(b);
+  const heute = staubTagesschluessel();
+  const zaehler = (b.tag && b.tag.datum === heute && b.tag.zaehler) || {};
+  return {
+    aktiv: true, saison: b.saison, endetAm: auftragsbuchSaisonEnde(b.saison),
+    punkte: b.punkte, taten: b.taten,
+    stufen: AUFTRAGSBUCH_STUFEN.map(s => ({
+      stufe: s.stufe, ab: s.ab, belohnung: s.belohnung,
+      erreicht: erreicht.indexOf(s.stufe) !== -1, abgeholt: b.abgeholt.indexOf(s.stufe) !== -1
+    })),
+    katalog: Object.keys(AUFTRAGSBUCH_TATEN).map(art => ({
+      art, name: AUFTRAGSBUCH_TATEN[art].name, punkte: AUFTRAGSBUCH_TATEN[art].punkte,
+      tagesDeckel: AUFTRAGSBUCH_TATEN[art].tagesDeckel, heute: zaehler[art] || 0
+    }))
+  };
+}
+app.get('/api/auftragsbuch', authMiddleware, (req, res) => {
+  if (!spawnAktiv('auftragsbuch')) return res.status(404).json({ error: 'Das Auftragsbuch ist nicht aktiv.', inaktiv: true });
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+  const [b, gewechselt] = auftragsbuchVon(user);
+  // Eine GET-Route schreibt nur, wenn der Saisonwechsel wirklich etwas veraendert hat.
+  if (gewechselt) saveDb();
+  res.json(auftragsbuchAntwort(b));
+});
+app.post('/api/auftragsbuch/abholen', authMiddleware, async (req, res) => {
+  if (!spawnAktiv('auftragsbuch')) return res.status(404).json({ error: 'Das Auftragsbuch ist nicht aktiv.', inaktiv: true });
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+  const [b, gewechselt] = auftragsbuchVon(user);
+  const offen = auftragsbuchOffen(b);
+  for (const n of offen) auftragsbuchStufeAuszahlen(user, b, n);
+  if (offen.length || gewechselt) await saveDb();
+  res.json({ ok: true, abgeholt: offen });
+});
+
 /* ===== Bonuscodes (21.08.2026, Auftrag Sascha) ==================================================
    "ich will ab und zu mal bonuscodes posten wo die spieler kleine geschenke bekommen die codes
    sollen aber nur eine gewisse gueltigkeit haben also max 1 mal pro account einloesbar und nur
@@ -16651,7 +17498,13 @@ const NOTAUS_NAMEN = {
   // der bedient auch Social Hub. Faellt AI Core aus oder frisst die Warteschlange die Maschine,
   // kann der Betreiber hier abschalten, ohne einen Deploy - der Endpunkt antwortet dann 503, der
   // Client laesst die Sektion still weg (ein fehlender Text ist per Konzept kein Fehler).
-  kampftext: 'KI-Kampfberichte werden beim M715q bestellt'
+  kampftext: 'KI-Kampfberichte werden beim M715q bestellt',
+  // Elfter Schalter (11.09.2026, Feature A): gattert Zaehlung, Auszahlung UND Transport des
+  // Galaxie-Ziels. Ein gesetzter Notaus am Wochenwechsel schliesst die Woche OHNE Auszahlung.
+  galaxieziel: 'Galaxie-Ziel der Woche läuft (Zählung, Auszahlung, Anzeige)',
+  // Zwoelfter Schalter (11.09.2026, Feature B): Zaehlung UND Auszahlung UND beide Routen des
+  // Saison-Auftragsbuchs. Steht er aus, antworten die Routen 404 und der Client laesst die Box weg.
+  auftragsbuch: 'Das Saison-Auftragsbuch zählt Taten und zahlt Stufen aus'
 };
 const ANGRIFFE_PAUSE_TEXT = 'Angriffe sind gerade pausiert (Wartung) – bitte in ein paar Minuten noch einmal.';
 function notAusGesetzt(name) {
@@ -16749,6 +17602,8 @@ function spawnAktivImCode(name) {
   if (name === 'hort') return HORT_BANNER_AKTIV;
   if (name === 'kampftext') return KAMPFTEXT_AKTIV;
   if (name === 'chronik') return CHRONIK_AKTIV;
+  if (name === 'galaxieziel') return GALAXIE_ZIEL_AKTIV;
+  if (name === 'auftragsbuch') return AUFTRAGSBUCH_AKTIV;
   return false;
 }
 

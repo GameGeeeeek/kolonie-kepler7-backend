@@ -218,6 +218,25 @@ const fach = async (tok) => (await s.j('/pending-rewards', { headers: kopf(tok) 
   const healthAus = await s.j('/health');
   check('7d: /api/health zeigt den Rueckruf bei Notaus als nicht aktiv', healthAus.body && healthAus.body.stimmenRueckruf === false, healthAus.body && healthAus.body.stimmenRueckruf);
 
+  // ---------------------------------------------------------------- 8. Die Bremse trifft nur falsche Schluessel
+  // Alle echten Rueckrufe kommen von EINER Adresse (der des Verzeichnisses). Ein Zaehler ueber alle
+  // Aufrufe haette den 61. Voter in einer Viertelstunde leer ausgehen lassen (Codex-Review am PR).
+  await aendereDb(db => { db.notAus = {}; db.users.anna.stimmeBelohntZuletzt = 0; }, { STIMME_RUECKRUF_KEY: SCHLUESSEL, STIMME_BELOHNUNG_KREDITE: '25' });
+  let richtige = 0;
+  for (let i = 0; i < 70; i++) { const rr = await rueckruf({ key: SCHLUESSEL, spieler: 'Anna' }); if (rr.status === 200) richtige++; }
+  check('8a: 70 Rueckrufe mit richtigem Schluessel von derselben Adresse - keiner wird gebremst (alle 200)', richtige === 70, richtige);
+  let falscheBis401 = 0, erste429 = null;
+  for (let i = 0; i < 65; i++) {
+    const rr = await rueckruf({ key: 'y'.repeat(SCHLUESSEL.length), spieler: 'Anna' });
+    if (rr.status === 401) falscheBis401++;
+    else if (rr.status === 429 && erste429 === null) erste429 = { nach: i, retryAfter: rr.body && rr.body.error };
+  }
+  check('8b: falsche Schluessel bekommen 60-mal 401, danach 429 (der Deckel gilt fuer das Durchprobieren)',
+    falscheBis401 === 60 && erste429 && erste429.nach === 60, { falscheBis401, erste429 });
+  r = await rueckruf({ key: SCHLUESSEL, spieler: 'Anna' });
+  check('8c: waehrend der Deckel fuer diese Adresse steht, wird auch der richtige Schluessel nicht mehr verraten (429)',
+    r.status === 429, r.status);
+
   await stoppeServer();
   console.log(fail ? '\nFEHLGESCHLAGEN' : '\nAlles gruen.');
   process.exit(fail ? 1 : 0);

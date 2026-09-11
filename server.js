@@ -16332,16 +16332,43 @@ function stimmeNaechsteAb(user) {
 function stimmeInfoFuer(user) {
   return { belohnung: stimmeAktiv() ? stimmeBelohnung() : null, naechsteAb: stimmeNaechsteAb(user) };
 }
-// Erst zaehlen, dann pruefen: Die Bremse begrenzt auch das Durchprobieren des Schluessels.
-const stimmeRateLimit = rateLimit(15 * 60 * 1000, 60, 'Zu viele Rueckrufe - bitte kurz warten.');
-app.get('/api/stimme/rueckruf', stimmeRateLimit, async (req, res) => {
+// Die Bremse zaehlt nur FEHLVERSUCHE je Herkunft (Codex-Review #265, 11.09.2026): Alle echten
+// Rueckrufe kommen von der EINEN Adresse des Verzeichnisses. Ein Zaehler ueber alle Aufrufe
+// (rateLimit, req.ip) haette ab dem 61. Voter in einer Viertelstunde die Belohnung verweigert -
+// ausgerechnet dann, wenn die Aktion einschlaegt. Das Durchprobieren des Schluessels bleibt
+// begrenzt (60 falsche Schluessel je 15 Minuten je Adresse); ein richtiger Schluessel wird nie
+// gebremst - die Sperre je Konto (sechs Stunden) begrenzt dort ohnehin, was ein Aufruf bewirkt.
+const STIMME_FEHLVERSUCHE_MAX = 60;
+const STIMME_FEHLVERSUCHE_FENSTER_MS = 15 * 60 * 1000;
+const stimmeFehlversuche = new Map();   // req.ip -> { count, resetAt }
+function stimmeFehlversuchEintrag(ip, jetzt) {
+  let e = stimmeFehlversuche.get(ip);
+  if (!e || jetzt > e.resetAt) {
+    // Abgelaufene Eintraege beim Anlegen eines neuen mit wegraeumen - die Map waechst so nie ueber
+    // die Adressen eines Fensters hinaus (dieselbe Sorge wie beim rateLimit-Aufraeumtakt).
+    for (const [k, v] of stimmeFehlversuche) if (jetzt > v.resetAt) stimmeFehlversuche.delete(k);
+    e = { count: 0, resetAt: jetzt + STIMME_FEHLVERSUCHE_FENSTER_MS };
+    stimmeFehlversuche.set(ip, e);
+  }
+  return e;
+}
+app.get('/api/stimme/rueckruf', async (req, res) => {
   if (!STIMME_RUECKRUF_KEY) return res.status(503).json({ error: 'Der Stimmen-Rueckruf ist nicht eingerichtet (STIMME_RUECKRUF_KEY fehlt).' });
+  const jetztPruefung = Date.now();
+  const fehl = stimmeFehlversuchEintrag(req.ip, jetztPruefung);
+  if (fehl.count >= STIMME_FEHLVERSUCHE_MAX) {
+    // Erst die Sperre, dann der Vergleich: Wer den Deckel erreicht hat, bekommt keine weitere
+    // Auskunft "richtig/falsch" mehr - sonst waere der Deckel nur eine Verzoegerung.
+    res.set('Retry-After', String(Math.ceil((fehl.resetAt - jetztPruefung) / 1000)));
+    return res.status(429).json({ error: 'Zu viele falsche Schluessel von dieser Adresse - bitte spaeter erneut.' });
+  }
   const q = req.query || {};
   const gegeben = Buffer.from(String(q.key || req.get('X-Stimme-Key') || ''));
   const erwartet = Buffer.from(STIMME_RUECKRUF_KEY);
   let passt = false;
   try { passt = gegeben.length === erwartet.length && crypto.timingSafeEqual(gegeben, erwartet); } catch (e) { passt = false; }
   if (!passt) {
+    fehl.count++;
     console.warn('[stimme] Rueckruf abgewiesen: Schluessel ' + (gegeben.length ? 'falsch' : 'fehlt') + ' (' + gegeben.length + ' Zeichen) von ' + req.ip);
     return res.status(401).json({ error: gegeben.length ? 'Schluessel falsch (' + gegeben.length + ' Zeichen).' : 'Schluessel fehlt (0 Zeichen).' });
   }

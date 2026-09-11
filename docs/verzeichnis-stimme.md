@@ -34,8 +34,11 @@ pay players for voting".
 
 - **Die Sperre liegt am Konto** (`user.stimmeBelohntZuletzt`, dazu `user.stimmenGezaehlt`), nie im
   klientenautoritativen Spielstand – eine Belohnung, die der Spieler selbst freischalten könnte, wäre keine.
-- **Bremse vor der Schlüsselprüfung:** 60 Aufrufe je 15 Minuten je Herkunft (`rateLimit`), damit auch
-  das Durchprobieren des Schlüssels begrenzt ist.
+- **Bremse nur für Fehlversuche:** 60 falsche Schlüssel je 15 Minuten je Herkunft, dann 429 mit
+  `Retry-After`. Ein richtiger Schlüssel wird **nie** gebremst – alle echten Rückrufe kommen von der
+  einen Adresse des Verzeichnisses, und ein Zähler über alle Aufrufe hätte ab dem 61. Voter in einer
+  Viertelstunde die Belohnung verweigert (Codex-Review am PR, 11.09.2026). Was ein einzelner
+  Aufruf bewirken kann, begrenzt die Sperre je Konto.
 - **Höhe:** `STIMME_BELOHNUNG_KREDITE` (Vorgabe 25), geprüft durch `bonuscodeGabenPruefen` – dieselben
   Deckel wie bei Bonuscodes. Wer eine andere Gabe will, erweitert `stimmeBelohnung()`.
 - **Notaus `stimme`** (`POST /api/admin/schalter`): Rückruf antwortet 200 ohne Belohnung, `/api/me`

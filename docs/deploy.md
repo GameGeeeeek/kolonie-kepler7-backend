@@ -98,6 +98,24 @@ Minute – der Nachhol-Weg ist die Sicherung, nicht der Normalfall.
 Kommt ein **drittes** Ziel in `DEPLOY_TARGETS` dazu, ist nichts zu tun: Die Vormerkung läuft über
 die Liste, nicht über eine gepflegte Kopie davon.
 
+### Die dritte Falle: Was die Kopierliste nicht kennt, ist nie live (11.09.2026)
+
+`DEPLOY_WEB_COPY` kopiert nach Muster (`*.html`, `*.png`) plus einzeln genannte Dateien. `seiten.css`,
+das gemeinsame Stylesheet der vier Themenseiten und von `patchnotes.html`, fiel unter keines von beiden –
+und nginx antwortet auf jede unbekannte Adresse mit der Spieldatei (Catch-all). Gemessen am 11.09.2026:
+`https://www.gamegeeeeek.de/seiten.css` → `200 text/html`, 6,9 MB. Die Seiten liefen also seit ihrer
+Einführung ohne Stylesheet, und nichts hat es gemeldet, weil ein 200 wie Erfolg aussieht. Seither steht
+`*.css` in der Kopier- und in der gzip-Liste; `tests/test_deploy_gzip.js` erwartet `seiten.css` (am
+alten Stand fallen 1b und 1c).
+
+Aus demselben Grund steht seit dem 11.09.2026 auch `*.xml` in beiden Listen: `sitemap.xml` war bisher
+einzeln genannt, und der RSS-Feed der Patchnotes (`patchnotes.xml`, ein Erzeugnis von
+`build-patchnotes.js` im Frontend) wäre sonst die nächste Datei gewesen, die nie ankommt.
+
+**Prüffrage für jede neue Datei, die eine Seite per `href` oder `src` lädt:** Fällt sie unter ein Muster
+in `DEPLOY_WEB_COPY`? Wenn nicht, ist sie nach dem Merge nicht da – und der Beleg ist nie das Log,
+sondern `curl -sI https://www.gamegeeeeek.de/<datei>` mit dem richtigen `Content-Type`.
+
 ## Diagnose in drei Schritten (Kurzfassung, 01.09.2026)
 
 Ausführlich mit allen Messungen: `docs/deploy-historie.md`.

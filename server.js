@@ -921,6 +921,99 @@ const REFERRAL_MILESTONES = [
 ];
 function referralMilestoneFor(count) { return REFERRAL_MILESTONES.find(m => m.n === count) || null; }
 
+// --- Patenschaft: Mentor und Schuetzling (Feature G, 11.09.2026) ---
+// Wer sich ueber einen Einladungs-Link registriert, ist 30 Tage lang der Schuetzling seines
+// Einladenden. Jeder Meilenstein, den der Schuetzling in dieser Zeit ZUM ERSTEN MAL schafft, zahlt
+// BEIDEN Seiten Kredite und Sternenstaub - der Pate hat damit einen Grund, dem Neuling zu helfen,
+// statt ihn nach der Einladung zu vergessen (der bestehende Einladungs-Bonus zahlt genau einmal).
+//
+// ALLES LIEGT AM NUTZEROBJEKT (user.pate / user.schuetzlinge), nichts im Spielstand: Der Spielstand
+// ist klientenautoritativ, und an dieser Verknuepfung haengen Belohnungen fuer ein FREMDES Konto.
+// Ein Spielstand mit einem selbst eingetragenen `pate` ist deshalb wirkungslos - der Server liest
+// ihn nie (tests/test_patenschaft_http.js, Abschnitt 7).
+//
+// SCHALTER: PATENSCHAFT_AKTIV gattert Verknuepfung, Zaehlung UND Auszahlung. Er steht auf true,
+// weil Backend und Frontend zusammen ausgeliefert werden - Backend zuerst. Bis das Frontend live
+// ist, sieht ein alter Client bei einem Meilenstein den Rueckfall in claimPendingRewards
+// ("Dankeschoen vom Team: +200 Kredite fuer deinen Bug-Report") - die Kredite stimmen, der Satz
+// nicht. Deshalb: erst mergen, wenn der Frontend-PR bereitliegt (docs/patenschaft.md).
+const PATENSCHAFT_AKTIV = true;
+const PATENSCHAFT_DAUER_MS = 30 * 24 * 3600 * 1000;
+const PATENSCHAFT_MAX_SCHUETZLINGE = 10;
+// Reihenfolge = Anzeige im Frontend. Der Schluessel ist der Vertrag mit den Hooks unten
+// (patenschaftMeilenstein(userId, key)) und mit der Karte im Frontend.
+const PATENSCHAFT_MEILENSTEINE = [
+  { key: 'erster-sieg',   name: 'Erster gewonnener Spielerangriff' },   // /api/attack, Siegzweig (Angreifer)
+  { key: 'erste-abwehr',  name: 'Erster abgewehrter Angriff' },         // /api/attack, Abwehrzweig (Verteidiger)
+  { key: 'erster-schlag', name: 'Erster Schlag gegen Nest oder Festung' }, // /api/alien/nest-angriff, /api/festung/angriff
+  { key: 'erster-handel', name: 'Erster Handel am Markt' },             // /api/market/trade
+  { key: 'serie-5',       name: 'Fünf Tage in Folge angemeldet' }       // staubAnmeldungGutschreiben, serie >= 5
+];
+const PATENSCHAFT_CREDITS = { schuetzling: 200, pate: 150 };
+const PATENSCHAFT_STAUB = 3;
+// Verknuepft beide Seiten. Gerufen aus /api/referral/redeem an GENAU der Stelle, an der
+// save.referredBy zum ersten Mal gesetzt wird - der Schuetzling ruft die Route vor Level 5
+// mehrfach, die Verknuepfung passiert nur einmal. Rueckgabe: der neue Paten-Eintrag oder null.
+// Eine Patenschaft ist fest: Wer schon einen Paten hat (auch einen abgelaufenen), bekommt keinen
+// zweiten - dieselbe Regel wie beim Einladungs-Bonus selbst (einmal je Konto).
+function patenschaftVerknuepfen(schuetzling, pate) {
+  if (!PATENSCHAFT_AKTIV || !schuetzling || !pate || schuetzling.userId === pate.userId) return null;
+  if (schuetzling.pate) return null;
+  const jetzt = Date.now();
+  if (!pate.schuetzlinge || typeof pate.schuetzlinge !== 'object') pate.schuetzlinge = {};
+  // Deckel: hoechstens PATENSCHAFT_MAX_SCHUETZLINGE Eintraege je Pate. Ist die Liste voll, fliegen
+  // ABGELAUFENE raus (aelteste zuerst) - laufende nie (Deckel loeschen keine Daten, CLAUDE.md).
+  // Sind alle zehn noch am Laufen, gibt es keinen Platz: kein Paten-Eintrag auf BEIDEN Seiten,
+  // der gewoehnliche Einladungs-Bonus bleibt davon unberuehrt.
+  if (Object.keys(pate.schuetzlinge).length >= PATENSCHAFT_MAX_SCHUETZLINGE) {
+    const abgelaufen = Object.keys(pate.schuetzlinge)
+      .filter(id => !((pate.schuetzlinge[id] || {}).bis > jetzt))
+      .sort((a, b) => ((pate.schuetzlinge[a] || {}).seit || 0) - ((pate.schuetzlinge[b] || {}).seit || 0));
+    while (Object.keys(pate.schuetzlinge).length >= PATENSCHAFT_MAX_SCHUETZLINGE && abgelaufen.length) delete pate.schuetzlinge[abgelaufen.shift()];
+    if (Object.keys(pate.schuetzlinge).length >= PATENSCHAFT_MAX_SCHUETZLINGE) return null;
+  }
+  const bis = jetzt + PATENSCHAFT_DAUER_MS;
+  schuetzling.pate = { userId: pate.userId, name: pate.username, seit: jetzt, bis, meilensteine: {} };
+  pate.schuetzlinge[schuetzling.userId] = { name: schuetzling.username, seit: jetzt, bis, meilensteine: {} };
+  return schuetzling.pate;
+}
+// Der EINE Hook fuer alle Meilensteine. Nur wenn der Schuetzling einen gueltigen Paten hat
+// (bis > jetzt) und der Meilenstein noch offen ist: Zeitstempel auf BEIDEN Seiten, Sternenstaub
+// bucht der Server selbst (staubGutschreiben - der Reward traegt die Zahl nur zur Anzeige),
+// Kredite gehen ueber die Warteschlange (der Client bucht sie in claimPendingRewards).
+// Synchron und ohne eigenes saveDb(): Jeder Aufrufer sitzt in einer Route, die danach ohnehin
+// speichert. Im try, weil ein Fehler hier nie den Kampf oder den Handel kaputtmachen darf.
+function patenschaftMeilenstein(userId, key) {
+  try {
+    if (!PATENSCHAFT_AKTIV) return false;
+    const def = PATENSCHAFT_MEILENSTEINE.find(m => m.key === key);
+    const user = findUserById(userId);
+    if (!def || !user || !user.pate) return false;
+    const jetzt = Date.now();
+    if (!(user.pate.bis > jetzt)) return false;
+    if (!user.pate.meilensteine || typeof user.pate.meilensteine !== 'object') user.pate.meilensteine = {};
+    if (user.pate.meilensteine[key]) return false;
+    user.pate.meilensteine[key] = jetzt;
+    const pate = findUserById(user.pate.userId);
+    const eintrag = pate && pate.schuetzlinge && pate.schuetzlinge[userId];
+    if (eintrag) {
+      if (!eintrag.meilensteine || typeof eintrag.meilensteine !== 'object') eintrag.meilensteine = {};
+      eintrag.meilensteine[key] = jetzt;
+    }
+    staubGutschreiben(staubKonto(user), PATENSCHAFT_STAUB);
+    pushPendingReward(userId, { type: 'patenschaft', rolle: 'schuetzling', meilenstein: key, name: def.name,
+      partnerName: user.pate.name, credits: PATENSCHAFT_CREDITS.schuetzling, staub: PATENSCHAFT_STAUB });
+    if (pate) {
+      staubGutschreiben(staubKonto(pate), PATENSCHAFT_STAUB);
+      pushPendingReward(pate.userId, { type: 'patenschaft', rolle: 'pate', meilenstein: key, name: def.name,
+        partnerName: user.username, credits: PATENSCHAFT_CREDITS.pate, staub: PATENSCHAFT_STAUB });
+      pushNotificationEvent(pate.userId, 'patenschaft', { schuetzling: user.username, meilenstein: key, name: def.name,
+        credits: PATENSCHAFT_CREDITS.pate, staub: PATENSCHAFT_STAUB });
+    }
+    return true;
+  } catch (e) { console.error('[patenschaft] Meilenstein ' + key + ': ' + e.message); return false; }
+}
+
 // --- Wortfilter (13.07.2026, Feature-Wunsch: Moderation vorbereiten) ---
 // Moderate Liste eindeutig unangemessener Begriffe (gängige Beleidigungen, bekannte Hassbegriffe,
 // NS-Bezug) für Spieler-/Allianznamen. Bewusst kein Anspruch auf Vollständigkeit oder Perfektion -
@@ -1827,6 +1920,7 @@ function pushNotificationText(type, payload) {
     const label = payload.type === 'idee' ? 'Verbesserungsvorschlag' : 'Bug-Report';
     return { title: 'Neuer ' + label, body: (payload.username || 'Ein Spieler') + ': ' + (payload.text || '') };
   }
+  if (type === 'patenschaft') return { title: 'Dein Schützling hat einen Meilenstein geschafft', body: (payload.schuetzling || 'Dein Schützling') + ': „' + (payload.name || 'Meilenstein') + '" - +' + (payload.credits || 0) + ' Kredite und +' + (payload.staub || 0) + ' Sternenstaub für dich.' };
   if (type === 'referral-redeemed') return { title: 'Einladungs-Bonus erhalten', body: (payload.username || 'Ein Spieler') + ' hat deinen Einladungscode eingelöst - +50 Kredite für dich!' };
   if (type === 'referral-milestone') return { title: 'Werbe-Meilenstein erreicht!', body: 'Schon ' + (payload.count || '?') + ' Spieler geworben! Bonus: +' + (payload.credits || 0) + ' Kredite und +' + (payload.fragments || 0) + ' Modulfragmente.' };
   if (type === 'player-reported') return { title: 'Spieler gemeldet', body: (payload.reporterName||'Jemand') + ' hat ' + (payload.targetName||'einen Spieler') + ' gemeldet: ' + (payload.reason||'') };
@@ -1904,6 +1998,8 @@ function notificationTarget(type, payload) {
     case 'alliance-muster': return 'allianz:uebersicht';
     case 'alliance-base-attacked': return 'allianz:uebersicht';
     case 'alliance-base-ready': return 'allianz:uebersicht';
+    // Die Patenschafts-Karte steht in den Einstellungen bei "Freunde einladen".
+    case 'patenschaft': return 'einstellungen';
     case 'referral-redeemed': return 'fortschritt';
     case 'referral-milestone': return 'fortschritt';
     case 'job-complete': return {
@@ -5027,6 +5123,9 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
       attacker.battlePoints = (attacker.battlePoints || 0) + RACHE_KAMPFPUNKTE;
       racheVerbrauchen(attackerUser, targetUserId);
     }
+    // Patenschaft: der erste GEWONNENE Spielerangriff des Schuetzlings. Ein Sockel-Nadelstich
+    // zaehlt nicht - er zaehlt ja auch keine Kampfpunkte.
+    if (ertragStufe !== 'sockel') patenschaftMeilenstein(req.userId, 'erster-sieg');
 
     const mySaveVersion = setSaveValue(req.userId, JSON.stringify(attacker));
     setSaveValue(targetUserId, JSON.stringify(target));
@@ -5142,6 +5241,10 @@ app.post('/api/attack', attackRateLimit, authMiddleware, async (req, res) => {
     // Allianzkrieg (Feature C): +2 fuer die Allianz des geschlagenen Angreifers, +6 fuer die des Verteidigers
     // (Beitrag dem Verteidiger) - im Sockel nichts, siehe Siegzweig.
     const allianzkrieg = ertragStufe === 'sockel' ? null : allianzkriegWerten(req.userId, req.username, targetUserId, targetUser ? targetUser.username : '', 'niederlage');
+    // Patenschaft: die erste erfolgreiche Abwehr des Schuetzlings. Derselbe Grund wie beim
+    // Sternenstaub eine Zeile darueber: Der Kampf ist serverseitig ausgewuerfelt, der Verteidiger
+    // konnte ihn weder ausloesen noch beeinflussen - eine Quelle, die kein Client faelschen kann.
+    patenschaftMeilenstein(targetUserId, 'erste-abwehr');
 
     const angreiferBerichtId = addReport(req.userId, {
       type: 'attack-sent', result: 'loss', targetName: targetUser ? targetUser.username : 'Unbekannt', ...racheZielId,
@@ -5855,6 +5958,7 @@ app.post('/api/referral/redeem', authMiddleware, async (req, res) => {
   if (save.referralRedeemed) return res.status(400).json({ error: 'Du hast bereits einen Einladungs-Bonus eingelöst.' });
 
   let referrer;
+  let patenschaftNeu = null;   // nur beim ERSTEN Verknuepfen belegt - die Antwort nennt sie dann
   if (save.referredBy) {
     // Bereits verknüpft (aus einem früheren Aufruf) - Verknüpfung ist fest, referrerUsername aus
     // dieser Anfrage wird ignoriert. Das hier ist ein erneuter Versuch nach einem Level-Aufstieg.
@@ -5868,12 +5972,18 @@ app.post('/api/referral/redeem', authMiddleware, async (req, res) => {
     // Verknüpfung fest speichern - unabhängig davon, ob die Levelschwelle schon erreicht ist.
     save.referredBy = referrer.username;
     setSaveValue(req.userId, JSON.stringify(save));
+    // Patenschaft (Feature G): genau hier, beim ERSTEN Verknuepfen. Der Zweig oben (save.referredBy
+    // schon da) laeuft bei jedem weiteren Aufruf vor Level 5 - dort wird nicht neu verknuepft.
+    patenschaftNeu = patenschaftVerknuepfen(findUserById(req.userId), referrer);
   }
+  const patenschaftAntwort = patenschaftNeu
+    ? { patenschaft: { name: referrer.username, bis: patenschaftNeu.bis, tage: Math.round(PATENSCHAFT_DAUER_MS / 86400000) } }
+    : {};
 
   const myLevel = commanderLevelFromXp(save.xp || 0);
   if (myLevel < REFERRAL_LEVEL_THRESHOLD) {
     await saveDb();
-    return res.json({ ok: true, status: 'pending', referrerName: referrer.username, levelNeeded: REFERRAL_LEVEL_THRESHOLD, currentLevel: myLevel });
+    return res.json({ ok: true, status: 'pending', referrerName: referrer.username, levelNeeded: REFERRAL_LEVEL_THRESHOLD, currentLevel: myLevel, ...patenschaftAntwort });
   }
 
   // Levelschwelle erreicht - jetzt tatsächlich auszahlen.
@@ -5907,7 +6017,30 @@ app.post('/api/referral/redeem', authMiddleware, async (req, res) => {
   }
 
   await saveDb();
-  res.json({ ok: true, status: 'paid', referrerName: referrer.username, newResources: save.resources, saveVersion: mySaveVersion });
+  res.json({ ok: true, status: 'paid', referrerName: referrer.username, newResources: save.resources, saveVersion: mySaveVersion, ...patenschaftAntwort });
+});
+
+// Stand der eigenen Patenschaften fuer die Karte in den Einstellungen (Feature G). Namen, keine
+// Kennungen: Die Karte zeigt, wer der Pate ist und welche Meilensteine stehen - mehr braucht sie
+// nicht, und eine fremde userId hat auf dem Client nichts zu suchen. 404 bei ausgeschaltetem
+// Schalter, damit ein Client die Karte ersatzlos weglaesst (dieselbe Verabredung wie beim
+// Auftragsbuch: "Endpunkt fehlt" und "abgeschaltet" sehen fuer den Client gleich aus).
+app.get('/api/patenschaft', authMiddleware, (req, res) => {
+  if (!PATENSCHAFT_AKTIV) return res.status(404).json({ error: 'Patenschaften sind nicht aktiv.', inaktiv: true });
+  const user = findUserById(req.userId);
+  if (!user) return res.status(404).json({ error: 'Konto nicht gefunden.' });
+  const jetzt = Date.now();
+  const sicht = e => ({ name: e.name, seit: e.seit, bis: e.bis, aktiv: e.bis > jetzt, meilensteine: Object.assign({}, e.meilensteine || {}) });
+  const schuetzlinge = Object.values(user.schuetzlinge || {}).map(sicht).sort((a, b) => (b.seit || 0) - (a.seit || 0));
+  res.json({
+    aktiv: true,
+    dauerTage: Math.round(PATENSCHAFT_DAUER_MS / 86400000),
+    maxSchuetzlinge: PATENSCHAFT_MAX_SCHUETZLINGE,
+    pate: user.pate ? sicht(user.pate) : null,
+    schuetzlinge,
+    katalog: PATENSCHAFT_MEILENSTEINE.map(m => ({ key: m.key, name: m.name,
+      credits: { pate: PATENSCHAFT_CREDITS.pate, schuetzling: PATENSCHAFT_CREDITS.schuetzling }, staub: PATENSCHAFT_STAUB }))
+  });
 });
 
 // --- Server-Ereignis-Benachrichtigungen: Einstellungen, Postfach, Überfall-Terminierung ---
@@ -8484,6 +8617,7 @@ app.post('/api/market/trade', authMiddleware, async (req, res) => {
   market[resource] = priceAfter;
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
   auftragsbuchTat(req.userId, 'markt');   // Saison-Auftragsbuch: nur ein Handel, der zustande kam
+  patenschaftMeilenstein(req.userId, 'erster-handel');   // Patenschaft: der Handel ist durch
   saveDb();
 
   // Das Restkontingent reist in JEDER Antwort mit (auch beim Kauf, dort nur informativ) - das
@@ -13554,6 +13688,7 @@ app.post('/api/festung/angriff', authMiddleware, async (req, res) => {
     ' ziel=' + erg.ziel + ' rolle=' + erg.rollenFaktor.toFixed(2) +
     ' kernschaden=' + erg.schaden + ' teilschaden=' + erg.teilSchaden + (erg.zerstoert ? ' ZERSTOERT:' + erg.zerstoert : '') +
     ' kern=' + (erg.gefallen ? 'gefallen' : erg.kern) + '/' + erg.kernMax);
+  patenschaftMeilenstein(req.userId, 'erster-schlag');   // Patenschaft: der Schlag ist aufgeloest
   await saveDb();
   res.json({
     ok: true, schaden: erg.schaden, teilSchaden: erg.teilSchaden, ziel: erg.ziel, zerstoert: erg.zerstoert,
@@ -13896,6 +14031,7 @@ app.post('/api/alien/nest-angriff', authMiddleware, async (req, res) => {
     ' stufe=' + (erg.stufe === null ? 'gefallen' : erg.stufe) + ' schwaeche=' + trifftSchwaeche + ' schaden=' + schaden +
     ' lp=' + (gefallen ? 'gefallen' : erg.lp) + '/' + erg.lpMax +
     (schwarmGefallen ? ' SCHWARM ZERFALLEN (+' + mitgerissen + ')' : ''));
+  patenschaftMeilenstein(req.userId, 'erster-schlag');   // Patenschaft: der Schlag ist aufgeloest
   await saveDb();
   res.json({
     ok: true, schaden, gefallen,
@@ -16529,6 +16665,10 @@ function staubAnmeldungGutschreiben(user) {
   const menge = STAUB_ANMELDUNG + (k.serie - 1) * STAUB_SERIE_BONUS;
   staubGutschreiben(k, menge);
   k.letzterTag = heute;
+  // Patenschaft: fuenf Tage in Folge. Die Serie ist bei STAUB_SERIE_MAX (5) gedeckelt und bleibt
+  // dort stehen - der Meilenstein selbst ist ueber seinen Zeitstempel einmalig. Der Aufrufer
+  // (/api/me) speichert, weil menge > 0 ist.
+  if (k.serie >= 5) patenschaftMeilenstein(user.userId, 'serie-5');
   return menge;
 }
 // Gutschrift für einen abgewehrten Angriff. `angreiferId` wird mitgeführt, damit derselbe Gegner

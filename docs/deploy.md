@@ -108,6 +108,10 @@ Einführung ohne Stylesheet, und nichts hat es gemeldet, weil ein 200 wie Erfolg
 `*.css` in der Kopier- und in der gzip-Liste; `tests/test_deploy_gzip.js` erwartet `seiten.css` (am
 alten Stand fallen 1b und 1c).
 
+Aus demselben Grund steht seit dem 11.09.2026 auch `*.xml` in beiden Listen: `sitemap.xml` war bisher
+einzeln genannt, und der RSS-Feed der Patchnotes (`patchnotes.xml`, ein Erzeugnis von
+`build-patchnotes.js` im Frontend) wäre sonst die nächste Datei gewesen, die nie ankommt.
+
 **Prüffrage für jede neue Datei, die eine Seite per `href` oder `src` lädt:** Fällt sie unter ein Muster
 in `DEPLOY_WEB_COPY`? Wenn nicht, ist sie nach dem Merge nicht da – und der Beleg ist nie das Log,
 sondern `curl -sI https://www.gamegeeeeek.de/<datei>` mit dem richtigen `Content-Type`.

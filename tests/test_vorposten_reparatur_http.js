@@ -13,6 +13,11 @@
 //      (Abschnitt 2). Das ist die Stelle, an der ein Rechenfehler Rohstoffe erzeugt oder frisst.
 //   3. DER SERVER RECHNET DEN BETRAG - kein Kampf- oder Mengenparameter aus dem Request (2e).
 //
+// DAZU EINE REGEL UEBER DIE AUSKUNFT (seit 14.09.2026, Abschnitt 4d/4e): Ein Lager mit Inhalt wird
+// NIE als leer gemeldet. Weil jeder der drei Rohstoffe einzeln abgerundet wird, kann bei genau
+// einem fehlenden Lebenspunkt nichts entnehmbar sein, obwohl das Lager voll ist - die Antwort
+// nennt dann ihren eigenen Grund (`zuWenig`) statt „hier liegt nichts" (`leer`).
+//
 // Gegenprobe: siehe Fuss der Datei.
 const fs = require('fs');
 const path = require('path');
@@ -34,6 +39,12 @@ const SAB = process.env.KEPLER_VPREP_SABOTAGE || '';
      Riegel am ausfuehrenden Endpunkt.
    - `ohnesperre` reisst 5d mit, und das ist Folge, kein Nebenschaden: Ohne durchgesetzte Sperre ist
      der Kern schon bei 5a wieder voll, und 5d findet nichts mehr zu heilen.
+   - `ohnedeckel` und `leerdurch` reissen 4d mit, und beide zu Recht: Wer immer das GANZE Lager
+     nimmt, hat auch im knappen Fenster genug zusammen und repariert (200 statt 400); wer den
+     Riegel ganz herausnimmt, laesst die Reparatur mit heilung 0 durchlaufen. Beides ist genau der
+     Zustand, den 4d ausschliesst - eine Antwort, die nicht zum Lagerstand passt.
+   - `eingrund` faellt NUR auf 4d, nicht auf 4c oder 4e: Das ist der Beleg, dass die Trennung der
+     beiden Gruende gemessen wird und nicht der Riegel als solcher (den messen 4c und `leerdurch`).
    - `sperre` und `ohnesperre` sind ZWEI verschiedene Fehler und brauchen beide ihre Probe: Der eine
      rechnet die Frist falsch (5b/5c), der andere setzt sie gar nicht durch (5a). `sperre` allein
      laesst 5a gruen, weil auch seine 60 Sekunden im Messmoment noch nicht abgelaufen sind. */
@@ -43,13 +54,14 @@ const MUSS_FALLEN = {
   kostenlos: ['2c', '3b'],
   vollverbrauch: ['2c'],
   altstempel: ['2c', '3b'],
-  ohnedeckel: ['1b', '2b', '2c'],
+  ohnedeckel: ['1b', '2b', '2c', '4d'],
   griff: ['7a', '7b'],
   persistenz: ['6a'],
   ohnesperre: ['5a', '5b', '5c', '5d'],
   volldurch: ['4b'],
-  leerdurch: ['4c'],
-  betrag: ['1c', '2a', '2b', '2e']
+  leerdurch: ['4c', '4d'],
+  betrag: ['1c', '2a', '2b', '2e'],
+  eingrund: ['4d']
 };
 
 let fail = false;
@@ -157,12 +169,12 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
     .replace(/([a-z]+):/g, '"$1":'));
   const summeAnteile = anteile.erz + anteile.kristalle + anteile.deuterium;
   const abklingH = Number((roh.match(/const VORPOSTEN_ABKLING_MS = (\d+) \* 3600 \* 1000;/) || [])[1]);
-  const rateVon = (stufe) => {
-    const basis = leiter[stufe - 1].lager;
+  const rateAus = (lagerWert) => {
     const aus = {};
-    for (const k of Object.keys(anteile)) aus[k] = Math.round(basis * anteile[k] / summeAnteile);
+    for (const k of Object.keys(anteile)) aus[k] = Math.round(lagerWert * anteile[k] / summeAnteile);
     return aus;
   };
+  const rateVon = (stufe) => rateAus(leiter[stufe - 1].lager);
   const proStunde = (stufe) => Object.values(rateVon(stufe)).reduce((a, b) => a + b, 0);
   check('0a: Leiter, Deckel, Foerderanteile und Abklingzeit sind im Quelltext auffindbar',
     leiter.length === 8 && stundenDeckel > 0 && summeAnteile > 0 && abklingH > 0
@@ -231,6 +243,12 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
   // Der Schalter am AUSFUEHRENDEN Endpunkt faellt weg (die Anzeige behaelt ihren).
   if (SAB === 'griff') basis = basis.replace(
     "  if (!VORPOSTEN_REPARATUR_AKTIV || notAusGesetzt('vorposten')) {\n    return res.status(404).json({ error: 'Reparaturen sind derzeit nicht verfügbar.', inaktiv: true });\n  }\n", '');
+  /* DIE ZWEI GRUENDE WERDEN WIEDER EINER - der Stand vor dem 14.09.2026. Ein gefuelltes Lager, aus
+     dem sich gerade kein GANZER Punkt loesen laesst, meldete sich dann wieder als „hier liegt
+     nichts". Ohne diese Gegenprobe belegte 4d nichts: Sie ist die einzige Sabotage, die genau die
+     alte, widerspruechliche Auskunft wiederherstellt. */
+  if (SAB === 'eingrund') basis = basis.replace(
+    "    if (v.vorrat > 0) {\n      return res.status(400).json({ error: 'Im Lager dieser Station liegt gerade zu wenig für einen ganzen Lebenspunkt - in ein paar Sekunden ist wieder genug da.', zuWenig: true });\n    }\n", '');
   /* 0c belegt, dass die verlangte Sabotage WIRKLICH gegriffen hat. Eine Ersetzung, die ins Leere
      greift, meldet keinen Fehler und saehe aus wie eine bestandene Gegenprobe (Lehre aus
      test_vorposten_endprojekte_http). */
@@ -239,6 +257,21 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
       .replace(/const VP_LAGER_AKTIV = (true|false);/, 'const VP_LAGER_AKTIV = true;')
       .replace(/const VP_LAGER_AB = [^;]+;/, 'const VP_LAGER_AB = 0;'),
     { sabotage: SAB || '(keine)' });
+
+  /* DIE STUFE 5 BEKOMMT IN DER KOPIE EIN WINZIGES LAGER (4 statt 11500). Der Fall, den 4d/4e
+     messen, ist ein RUNDUNGSFENSTER: Es oeffnet und schliesst sich mit jeder Einheit Erz, die
+     nachlaeuft. Bei den ausgelieferten Raten dauert eine Einheit Bruchteile einer Sekunde bis
+     wenige Sekunden - ein HTTP-Test koennte den Zeitpunkt nicht zuverlaessig treffen und waere
+     eine Wackelpruefung. Mit vier Einheiten Lager je Stunde dauert dasselbe Fenster acht Minuten,
+     und der Test trifft es mit Minuten Reserve. Die REGEL haengt nicht an der Groesse der Rate:
+     Sie sagt, dass ein Lager mit Inhalt nie als leer gemeldet wird - bei jeder Rate. Dieselbe
+     Ueberlegung wie bei VP_LAGER_AB oben: Der Test stellt den Zustand her, den er messen will,
+     statt auf ihn zu warten. Die Stufe 5 kommt in keiner anderen Pruefung dieser Datei vor. */
+  const KNAPP_LAGER = 4;
+  basis = basis.replace(/(\{ stufe: 5,[^}]*?)lager: \d+,/, '$1lager: ' + KNAPP_LAGER + ',');
+  check('0e: das winzige Lager der Stufe 5 steht wirklich in der Kopie',
+    new RegExp('\\{ stufe: 5,[^}]*lager: ' + KNAPP_LAGER + ',').test(basis) && leiter[4].lager !== KNAPP_LAGER,
+    { ausgeliefert: leiter[4].lager, inDerKopie: KNAPP_LAGER });
 
   const an = basis.replace(/const VORPOSTEN_REPARATUR_AKTIV = (true|false);/, 'const VORPOSTEN_REPARATUR_AKTIV = true;');
   /* BEIDE STAENDE WERDEN SELBST HERGESTELLT (berichtigt 14.09.2026). Vorher las 7a den
@@ -280,6 +313,19 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
   db0.shared['vorposten:rep-voll'] = JSON.stringify(vpDoc('rep-voll', 8, lpMax8, { lagerSeit: jetzt0 - ALT }));
   // Leeres Lager: `lagerSeit` in der ZUKUNFT - die Stunden klemmen bei 0, der Stand ist leer.
   db0.shared['vorposten:rep-leer'] = JSON.stringify(vpDoc('rep-leer', 8, lpMax8 - SCHADEN, { lagerSeit: jetzt0 + 60000 }));
+  /* DER KNAPPE FALL - zwei Stationen der Stufe 5, GLEICH aufgebaut bis auf den Zeitpunkt. Beiden
+     fehlt genau EIN Lebenspunkt, beide haben ein gefuelltes Lager (27 bzw. 26 Einheiten). Bei
+     5,90 Stunden liegen alle drei Rohstoffe so dicht unter der naechsten ganzen Einheit, dass der
+     Schub von `lagerSeit` unter allen drei Abrundungen verschwindet - `genommen` faellt auf null.
+     Bei 5,45 Stunden tut er das nicht. GEMESSEN am 14.09.2026 an der echten Funktion: Das Fenster
+     reicht von 5,8667 bis 6,0 Stunden, der Test steht mit sechs Minuten Reserve darin; der
+     Gegenpunkt hat fuenf Minuten, bis das naechste Fenster beginnt. Beide liegen unter dem
+     Zwoelf-Stunden-Deckel - am Deckel selbst gibt es keine Bruchteile und damit auch den Fall
+     nicht. */
+  const KNAPP_H = 5.90, KNAPP_OK_H = 5.45;
+  const lpMax5 = leiter[4].kernLp;
+  db0.shared['vorposten:rep-knapp'] = JSON.stringify(vpDoc('rep-knapp', 5, lpMax5 - 1, { lagerSeit: jetzt0 - Math.round(KNAPP_H * 3600000) }));
+  db0.shared['vorposten:rep-knapp-ok'] = JSON.stringify(vpDoc('rep-knapp-ok', 5, lpMax5 - 1, { lagerSeit: jetzt0 - Math.round(KNAPP_OK_H * 3600000) }));
   /* Das Ziel des Fremd-Versuchs: BESCHAEDIGT und mit vollem Lager. Ein unversehrter waere die
      schwaechere Probe - dort scheiterte ein Versuch ohne Besitzerriegel schon am „unversehrt" und
      der Riegel bliebe ungemessen. So wuerde ein fehlender Riegel wirklich eine fremde Station
@@ -386,6 +432,30 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
   check('4c: bei leerem Lager passiert nichts - eigener Grund, und der Kern bleibt, wie er war',
     leer.status === 400 && leer.body.leer === true && leerNach.kern.lp === lpMax8 - SCHADEN,
     { status: leer.status, body: leer.body, kern: leerNach.kern });
+  /* 4d/4e SIND EIN PAAR und nur zusammen eine Aussage (Befund der Durchsicht, 14.09.2026). Die
+     Ablehnung bei 4d darf sich NICHT als „hier liegt nichts" ausgeben: Die Stationstafel zeigt
+     daneben ein gefuelltes Lager, und zwei Auskuenfte ueber dieselbe Station, die einander
+     widersprechen, sind fuer den Spieler ein Fehler - auch wenn beide Zahlen stimmen. 4e ist der
+     Beleg, dass die Ablehnung wirklich an der RUNDUNG haengt und nicht am Lager: dieselbe Stufe,
+     dasselbe fehlende eine LP, ein Lager derselben Groessenordnung - nur ein anderer Zeitpunkt,
+     und die Reparatur laeuft durch. Ohne 4e koennte 4d auch von einem kaputten Lager kommen. */
+  const knappVor = vpVon(await s.hole('/vorposten', tokA), 'rep-knapp');
+  const knappVorrat = Object.values(knappVor.lager || {}).reduce((a, b) => a + (b || 0), 0);
+  const knapp = await s.sende('/vorposten/reparieren', tokA, { system: 'rep-knapp' });
+  const knappNach = vpVon(await s.hole('/vorposten', tokA), 'rep-knapp');
+  check('4d: ein gefuelltes Lager, aus dem gerade kein GANZER Punkt faellt, wird nicht als leer gemeldet',
+    knapp.status === 400 && knapp.body.zuWenig === true && knapp.body.leer !== true
+    && !/liegt nichts/.test(String(knapp.body.error || ''))
+    && knappVorrat > 0 && knappNach.kern.lp === lpMax5 - 1,
+    { status: knapp.status, body: knapp.body, vorratVorher: knappVorrat, lager: knappVor.lager, kern: knappNach.kern });
+  const okVor = vpVon(await s.hole('/vorposten', tokA), 'rep-knapp-ok');
+  const okVorrat = Object.values(okVor.lager || {}).reduce((a, b) => a + (b || 0), 0);
+  const knappOk = await s.sende('/vorposten/reparieren', tokA, { system: 'rep-knapp-ok' });
+  const okNach = vpVon(await s.hole('/vorposten', tokA), 'rep-knapp-ok');
+  check('4e: dieselbe Station einen Moment frueher heilt den einen Punkt wirklich - die Ablehnung haengt an der Rundung, nicht am Lager',
+    knappOk.status === 200 && knappOk.body.geheilt === 1 && okNach.kern.lp === lpMax5
+    && okVorrat > 0 && Math.abs(okVorrat - knappVorrat) <= 3,
+    { status: knappOk.status, body: knappOk.body, vorratVorher: okVorrat, kern: okNach.kern });
 
   // ---- 5) Die Sperre - der einzige wirksame Hebel der Balance -----------------------------------
   const angriff = await s.sende('/vorposten/angriff', tokB, { system: 'rep-kampf', missionId: 'm-rep' });
@@ -523,6 +593,7 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
      KEPLER_VPREP_SABOTAGE=ohnesperre     die Sperre wird nicht mehr durchgesetzt (nur noch angezeigt)
      KEPLER_VPREP_SABOTAGE=volldurch      der Riegel „Kern unversehrt" faellt weg
      KEPLER_VPREP_SABOTAGE=leerdurch      der Riegel „Lager leer" faellt weg
+     KEPLER_VPREP_SABOTAGE=eingrund       die zwei Ablehnungsgruende werden wieder einer (Stand vor dem 14.09.2026)
      KEPLER_VPREP_SABOTAGE=betrag         der Heilbetrag kommt aus dem Request statt vom Server
 
    Ein Lauf OHNE Umgebungsvariable muss gruen sein (Exit 0); jeder Lauf MIT muss genau die

@@ -1345,6 +1345,43 @@ Besitzers aus.
 Gemessen wird der Reststand, nicht gerechnet (`2c`): Ein Lager am Deckel (12 h, 300.000) verliert
 bei 100.000 geheilten LP genau ein Drittel; danach stehen **acht** der zwölf Stunden, also 200.000.
 
+**Zwei Ablehnungsgründe, wo vorher einer stand** (Befund der Durchsicht, 14.09.2026). Genau weil
+jeder der drei Rohstoffe **einzeln** abgerundet wird, kann `genommen` auf null fallen, obwohl das
+Lager gefüllt ist: Fehlt nur ein einziger Lebenspunkt, verschwindet der Schub von `lagerSeit` unter
+allen drei Abrundungen. Die Route antwortete darauf mit „Im Lager dieser Station liegt nichts,
+woraus sich reparieren ließe" – während die Stationstafel daneben ein volles Lager zeigte. Für den
+Spieler ein Widerspruch, und das Frontend kann ihn nicht auflösen: Es gibt den Servergrund wörtlich
+wieder, damit es keine zweite Formulierung der Fehlerfälle gibt.
+
+**Gemessen, bevor etwas geändert wurde** (14.09.2026, an der echten `vorpostenReparaturVorschau`):
+
+- Der Fall tritt **ausschließlich** bei einem Wunsch von genau **einem** Punkt auf. Ab zwei müsste
+  der Bruchteil des größten Postens ≥ 1 sein, und der Erz-Anteil liegt über *alle* möglichen
+  Lagerwerte nie unter 0,5 (Minimum 0,5000 bei `lager = 3`) – arithmetisch ausgeschlossen.
+- Er hält **längstens 3,6 Sekunden** an (kleinstes Lager der Leiter, 600/h); bei den großen Stufen
+  sind es Hundertstelsekunden. Über alle Zeitpunkte gemessen betrifft er rund 25–32 % der Momente,
+  aber eben nur bei `fehlend = 1`.
+
+Damit ist er **kosmetisch**, und die Rechnung bleibt, wie sie ist. Eine Mindestentnahme („nimm
+wenigstens eine Einheit des größten Postens") hätte den Punkt **verschenkt**: Der Preis entsteht aus
+dem Schub von `lagerSeit`, nicht aus `kosten` – eine erfundene Einheit wäre nicht abgebucht worden,
+und „geheilt wird, was wirklich genommen wurde" wäre gebrochen. Getrennt wird deshalb nur die
+**Auskunft**, und zwar **abgeleitet** aus `vorrat` statt aus einer zweiten Rechnung:
+
+| Lage | Antwort | Marke |
+|---|---|---|
+| `vorrat === 0` | „Im Lager dieser Station liegt nichts, woraus sich reparieren ließe." | `leer` |
+| `vorrat > 0`, aber `heilung === 0` | „… liegt gerade zu wenig für einen ganzen Lebenspunkt – in ein paar Sekunden ist wieder genug da." | `zuWenig` |
+
+Gemessen wird das von `4d`/`4e`, und sie sind **ein Paar**: `4d` weist die Ablehnung bei gefülltem
+Lager nach, `4e` repariert dieselbe Stufe mit demselben fehlenden einen LP einen Moment früher
+erfolgreich – ohne `4e` könnte `4d` auch von einem kaputten Lager kommen. Damit der Test das
+Rundungsfenster überhaupt treffen kann, bekommt die **Stufe 5 in der Testkopie** ein winziges Lager
+(4 statt 11.500): Das Fenster wächst damit von Sekundenbruchteilen auf acht Minuten. Die Regel hängt
+nicht an der Größe der Rate – ein Lager mit Inhalt wird bei keiner Rate als leer gemeldet.
+Gegenprobe `eingrund` stellt den alten Stand her (eine Antwort für beide Lagen) und lässt genau
+`4d` fallen.
+
 ### Schalter und Auslieferung
 
 `VORPOSTEN_REPARATUR_AKTIV` steht auf **`false`** – Auslieferungs-Riegel wie bei jeder

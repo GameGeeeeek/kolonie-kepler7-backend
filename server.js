@@ -16406,7 +16406,25 @@ app.post('/api/vorposten/reparieren', authMiddleware, async (req, res) => {
     return res.status(403).json({ error: 'Diese Station steht noch unter Beschuss - reparieren lässt sie sich in ' +
       Math.ceil((v.gesperrtBis - jetzt) / 60000) + ' Minuten.', gesperrt: true, gesperrtBis: v.gesperrtBis });
   }
+  /* ZWEI VERSCHIEDENE GRUENDE, nicht einer (Befund der Durchsicht, 14.09.2026). „Nichts da" und
+     „gerade zu wenig fuer einen ganzen Punkt" fuehlen sich fuer den Spieler nicht gleich an, und
+     der zweite Fall tritt bei GEFUELLTEM Lager auf: `vorpostenLagerStand` rundet jeden der drei
+     Rohstoffe EINZELN ab, und wenn nur ein einziger Lebenspunkt fehlt, kann der Schub von
+     `lagerSeit` unter allen drei Abrundungen verschwinden - `genommen` faellt auf null, obwohl die
+     Stationstafel daneben ein volles Lager zeigt. Ein Spieler, dem der Server dann „hier liegt
+     nichts" sagt, liest einen Widerspruch.
+     GEMESSEN am 14.09.2026, nicht geschaetzt: Der Fall tritt AUSSCHLIESSLICH bei einem Wunsch von
+     genau einem Punkt auf - ab zwei muesste der Bruchteil des groessten Postens >= 1 sein, und der
+     Erz-Anteil liegt ueber alle moeglichen Lagerwerte nie unter 0,5. Er haelt laengstens 3,6
+     Sekunden an (kleinstes Lager der Leiter; bei den grossen Bruchteile davon). Deshalb bleibt die
+     RECHNUNG, wie sie ist - eine Mindestentnahme haette einen Punkt verschenkt, denn der Preis
+     ergibt sich aus dem Schub von `lagerSeit`, nicht aus `kosten` (siehe
+     vorpostenReparaturVorschau). Getrennt wird nur die AUSKUNFT, und zwar ABGELEITET aus `vorrat`
+     statt aus einer zweiten Rechnung. */
   if (!(v.heilung > 0)) {
+    if (v.vorrat > 0) {
+      return res.status(400).json({ error: 'Im Lager dieser Station liegt gerade zu wenig für einen ganzen Lebenspunkt - in ein paar Sekunden ist wieder genug da.', zuWenig: true });
+    }
     return res.status(400).json({ error: 'Im Lager dieser Station liegt nichts, woraus sich reparieren ließe.', leer: true });
   }
   /* db SYNCHRON vor saveDb() mutieren, nie im await-Rueckruf. `doc.kern` ist hier garantiert da:

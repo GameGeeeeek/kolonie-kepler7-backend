@@ -46,13 +46,25 @@ wohnt im Dokument) und ist mit dem Vorposten verloren, wenn er fällt.
 
 | Stufe | Kern-LP | Struktur-Verteidigung | Garnison max. | Schläge (Einsteiger / Mittelfeld / Endspiel) |
 |---|---|---|---|---|
-| Feldlager | 20.000 | 2.500 | 300 | 2,7 / 0,45 / 0,08 |
-| Stützpunkt | 90.000 | 12.000 | 800 | 12 / 2,0 / 0,4 |
-| Bastion | 400.000 | 60.000 | 2.000 | 53 / 9,1 / 1,7 |
+| 1 Ankerkern | 20.000 | 2.500 | 300 | 3,6 / 0,5 / 0,1 |
+| 2 Stützpunkt | 90.000 | 12.000 | 800 | 31 / 2,6 / 0,4 |
+| 3 Kernstation | 400.000 | 60.000 | 2.000 | 356 / 21,5 / 2,1 |
 
-Gegen die gemessenen 7.500 / 44.000 / 240.000 je Schlag (`docs/asteroidenfestungen.md`). Ein Feldlager
-ohne Garnison ist für sein Publikum ein Ziel von zwei bis drei Schlägen – eine gehaltene Präsenz, die
-man verteidigen MUSS. Die Verteidigung wirkt als **Durchschlag** auf den Wurf (`kraft / (kraft +
+Gegen die gemessenen 7.500 / 44.000 / 240.000 je Schlag (`docs/asteroidenfestungen.md`). Ein Ankerkern
+ohne Garnison ist für sein Publikum ein Ziel von drei bis vier Schlägen – eine gehaltene Präsenz, die
+man verteidigen MUSS.
+
+> **Diese Zahlen sind am 14.09.2026 berichtigt worden** (und mit ihnen die beiden Tabellen weiter
+> unten). Bis dahin stand hier `kernLp / kraft`, also eine Rechnung mit **durchschlag = 1** – aber
+> der Code multipliziert den Wurf zusätzlich mit `durchschlag = clamp(kraft / (kraft +
+> verteidigung), 0.15, 0.95)`. Ab Stufe 3 greift für den Einsteiger-Schlag der **Boden von 15 %**,
+> und genau dort lief die alte Rechnung aus dem Ruder: Aus „53 Schläge" wurden gemessene **356**.
+> Die neuen Werte sind der Erwartungswert `kernLp / (kraft * durchschlag)`, nachgeprüft an 400
+> vollständigen Fall-Reihen je Kombination; die gewürfelte Streuung von ±20 % hebt die wirkliche
+> Zahl bei kleinen Schlagzahlen noch leicht an (Stufe 1 gegen 7.500: 3,6 gerechnet, 4,0 gemessen).
+> **Geändert wurde nur die Beschreibung, keine Zahl der Leiter.** Ob die Leiter mit diesem Wissen
+> neu kalibriert gehört, ist eine offene Frage und ein eigener Auftrag – wer sie anfasst, fängt bei
+> dieser Messung an und nicht wieder bei `kernLp / kraft`. Die Verteidigung wirkt als **Durchschlag** auf den Wurf (`kraft / (kraft +
 verteidigung)`, 15–95 %): Eine Garnison lässt weniger ankommen UND kostet den Angreifer mehr
 (Grundverlust 6 % + bis zu 20 % aus dem Kräfteverhältnis + Streuung, gedeckelt bei 45 %).
 
@@ -142,9 +154,11 @@ Postfach-Zeile von selbst und nannte sie beim Namen (2b) – der Frontend-Eintra
 
 ## Der Allianz-Verband gegen einen Vorposten (02.09.2026)
 
-Derselbe Grund wie bei der Sternenfeste: Eine **Bastion** hat 400.000 Kern-LP und 60.000
-Verteidigung – bei der gemessenen Einsteiger-Schlagkraft von 7.500 sind das **53 Schläge** bei vier
-Stunden Abklingzeit. Solo ist sie nicht zu schleifen; genau dafür gibt es den Verband.
+Derselbe Grund wie bei der Sternenfeste: Eine **Kernstation** (Stufe 3) hat 400.000 Kern-LP und
+60.000 Verteidigung – bei der gemessenen Einsteiger-Schlagkraft von 7.500 sind das **356 Schläge**
+bei vier Stunden Abklingzeit, also rund 59 Tage (hier stand bis zum 14.09.2026 „53 Schläge", ohne
+den Durchschlag; siehe den Kasten unter „Kalibrierung"). Solo ist sie erst recht nicht zu schleifen;
+genau dafür gibt es den Verband.
 `zielArt: 'vorposten'` (mit `vorpostenSystem`, `vorpostenId`) läuft über **denselben Rechenkern**
 wie der Einzelangriff (`vorpostenSchlagAusfuehren`) – wie bei Nest und Festung, aus demselben Grund.
 
@@ -194,13 +208,15 @@ Die Balance ist damit an einer Stelle messbar; drei Tabellen wären in drei Rich
 
 | Stufe | Kern | Verteidigung | Garnison | Endspiel-Schläge (240k) |
 |---|---|---|---|---|
-| 1 Feldlager | 20.000 | 2.500 | 300 | 0,08 |
-| 3 Bastion | 400.000 | 60.000 | 2.000 | 1,7 |
-| 6 | 2.400.000 | 320.000 | 7.000 | 10 |
-| 8 | 6.500.000 | 850.000 | 14.000 | 27 |
+| 1 Ankerkern | 20.000 | 2.500 | 300 | 0,1 |
+| 3 Kernstation | 400.000 | 60.000 | 2.000 | 2,1 |
+| 6 Habitatkranz | 2.400.000 | 320.000 | 7.000 | 23,3 |
+| 8 Orbitalfeste | 6.500.000 | 850.000 | 14.000 | 123 |
 
-Stufe 8 ist bei 4 h Abklingzeit allein 4,5 Tage Arbeit, im Verband ein Abend – ein echtes
-Belagerungsziel, kein Selbstläufer.
+Stufe 8 ist bei 4 h Abklingzeit allein **20,5 Tage** Arbeit – ein echtes Belagerungsziel, kein
+Selbstläufer. „Im Verband ein Abend" stand hier bis zum 14.09.2026 zu Unrecht neben „4,5 Tage":
+Dafür braucht es rund **zwanzig gleichzeitige** Endspiel-Angreifer. Auch diese Spalte ist mit dem
+Durchschlag neu gerechnet (Kasten unter „Kalibrierung").
 
 **Die drei Zweige** (Werft, Handelsknoten, Festungsring) differenzieren ausschließlich über Kanäle,
 die im Frontend **heute schon wirken**: Flugzeit, Produktion, Aufklärung, Struktur, Garnison. Ein
@@ -291,7 +307,7 @@ beider Läufe per `diff` gegen den grünen Lauf verglichen: identisch, 64 Prüfu
 **Ein Nebenbefund in der Test-Vorrichtung:** Abschnitt 4 gab einem **Stufe-1**-Vorposten von Hand
 `kern.lpMax = 900.000`, damit er den Probeschlag übersteht. Mit der abgeleiteten Rechnung ist das
 eine stille Falschangabe — sein echtes Dach sind 20.000, er fiele beim ersten Schlag. Die
-Vorrichtung hebt jetzt die **Stufe** (3, Bastion, 400.000) und fragt den Ausgangswert **beim
+Vorrichtung hebt jetzt die **Stufe** (3, Kernstation, 400.000) und fragt den Ausgangswert **beim
 Server** ab, statt ihn aus der eigenen Annahme zu lesen.
 
 ## Die Vorwarnung beim Anflug (03.09.2026)
@@ -471,7 +487,7 @@ Sprungtor sind seither gebaut — diese beiden nicht. Bis hierher war die „Wer
 Flugzeit-Multiplikator mit dünnerem Kern: Sie baute nichts.
 
 **Der Kanal.** `werft` ist ein Anteil **ersparter Bauzeit** in der Werft. Er steht auf der Leiter
-(0,02 im Feldlager bis 0,16 auf Stufe 8) und bekommt ab der Wahlstufe den Zweig-Multiplikator:
+(0,02 im Ankerkern bis 0,16 auf Stufe 8) und bekommt ab der Wahlstufe den Zweig-Multiplikator:
 Werft 2,20, Handel und Festung je 0,50. Eine Sternenwerft kommt damit auf **35,2 %**, ein
 Sternenmarkt oder eine Sternenfestung auf 8 %.
 
@@ -830,7 +846,7 @@ nie die Grenze, und die Messung meldete grün, ohne etwas zu belegen.
 **4. Beim Umlegen von `VP_LAGER_AKTIV` stünde jeder Vorposten sofort am Deckel.**
 `vorpostenLagerStand` fällt mangels `doc.lagerSeit` auf `doc.seit` zurück — das Baudatum, oft Wochen
 alt —, und die Stunden werden nur nach *oben* geklemmt. In der Sekunde des Einschaltens läge für eine
-Bastion mit Handelsknoten sofort der volle Deckel bereit: 337.500 Erz, 112.500 Kristalle, 90.000
+Kernstation mit Handelsknoten sofort der volle Deckel bereit: 337.500 Erz, 112.500 Kristalle, 90.000
 Deuterium je Vorposten, bis zu drei je Konto. Genau die Fehlerklasse, die dieser Änderungssatz
 selbst in `PROJECT_MEMORY.md` notiert hat („Ein Zustand, der heute nur nutzlos aussieht, kann beim
 Einschalten rückwirkend wertvoll werden") — für das Sternendock wurde sie behandelt, für das Lager
@@ -1263,3 +1279,101 @@ Wer mehr schickt, als `meinPlatz` sagt, bekommt genau `meinPlatz` angenommen. La
 Annahme je auseinander, fällt das — egal, welche der beiden sich geirrt hat. Gegenprobe
 `meinplatz` (die Anzeige ignoriert den Fremdanteil) lässt `12b`, `12c` und `12d` fallen; `12d` ist
 Folge, kein Nebenschaden, und steht gemessen in der Pflichtliste.
+
+## V10: Der Kern lässt sich reparieren (14.09.2026)
+
+Bis hierher war jeder Treffer am Kern **endgültig**. Ein Besitzer, der eine Belagerung überstand,
+behielt den Schaden für immer; die einzige Erholung wäre der Ausbau gewesen, und der heilt
+ausdrücklich nicht. `POST /api/vorposten/reparieren` gibt ihm einen eigenen, **bezahlten** Weg.
+
+**Die Regeln „Ausbau heilt nicht" und „Einbau heilt nicht" bleiben unverändert.** Beide heben
+weiterhin nur das Dach und lassen die LP stehen. Die Reparatur weicht sie nicht auf – sie ist der
+Weg *daneben*, und sie kostet.
+
+### Der Zuschnitt ist gemessen, nicht gewählt
+
+Zwei Messungen haben ihn festgelegt (300 echte Schläge, plus die Leiter-Nachrechnung oben):
+
+**1. Ein fester Umrechnungsfaktor trägt nicht.** Bei 1 Rohstoff = 1 LP deckt ein volles Lager auf
+Stufe 1 noch 72 % des Kerns, auf Stufe 8 nur 4,6 % – die Leiter wächst um Faktor 325, das Lager nur
+um Faktor 21. Die **Heilrate gegen einen Angreifer** spreizt sich dabei um Faktor 90 in die
+Gegenrichtung: Je Abklingzeit-Fenster heilt Stufe 1 gegen einen Endspiel-Angreifer 2,1 % eines
+Schlages, Stufe 8 aber **189 %** – oben heilte die Station schneller, als geschlagen wird, und eine
+Belagerung wäre unendlich. Der größte Faktor, der auf *keiner* Stufe und gegen *keine* der drei
+gemessenen Schlagkräfte mehr heilt als ein Schlag schlägt, ist **0,011**; mit ihm repariert ein
+volles Lager auf Stufe 8 noch 0,05 % des Kerns – ein Knopf ohne Wirkung. Ein Faktor *je Stufe* wäre
+eine zweite Zahlenreihe neben der Leiter, also eine Kopie-Familie im eigenen Haus.
+
+**2. Die Sperre löst es vollständig, und zwar allein.** Gesperrt ist die Reparatur, solange der
+letzte **Treffer** weniger als `VORPOSTEN_ABKLING_MS` zurückliegt. Damit fällt der nächste erlaubte
+Schlag mit der ersten erlaubten Reparatur auf dieselbe Millisekunde: Ein belagerter Vorposten heilt
+während einer laufenden Belagerung **gar nicht**, und die Netto-Belagerungsdauer ist identisch mit
+der ohne Heilung (Stufe 8 solo gegen einen Endspiel-Angreifer: 123 Schläge, 20,5 Tage). Geheilt
+wird ausschließlich, was *nach* der Belagerung übrigbleibt – genau der Fall, um den es geht.
+
+**Die Sperre ist deshalb abgeleitet und keine zweite Zahl.** Sie steht nirgends als eigene
+Konstante; `vorpostenReparaturVorschau` rechnet `letzterTreffer + VORPOSTEN_ABKLING_MS`. Eine eigene
+Zahl daneben könnte sich beim nächsten Balance-Schritt von der Abklingzeit lösen, und in genau dem
+Moment wäre die Reparatur der Weg, eine Belagerung unendlich zu machen. Die Sperre **ist** die
+Balance dieser Etappe. `tests/test_vorposten_reparatur_http.js` prüft das in beide Richtungen: `0d`
+verbietet eine zweite Konstante im Quelltext, `5c` misst das Zusammenfallen der beiden Fristen gegen
+die Antwort des Angriffs-Endpunkts.
+
+### Was der Server rechnet
+
+Der Request trägt **nur das System**, keinen Betrag – wie `/api/attack` und die Festungs- und
+Nestschläge, aus demselben Grund: Der Kernstand ist PvP-relevant. Gerechnet wird in
+`vorpostenReparaturVorschau`, der **einen** Stelle, aus der auch `GET /api/vorposten` seine Vorschau
+nimmt: fehlende LP gegen den Wert des aktuellen Lagerstands, 1 Rohstoff = 1 LP, und es wird nur so
+viel genommen, wie gebraucht wird.
+
+**Der Lagerstand ist gerechnet, nicht gespeichert** (`doc.lagerSeit` ist der einzige Zustand).
+Teilverbrauch heißt deshalb: `lagerSeit` nach vorn schieben – und zwar gemessen an **jetzt**, nicht
+am alten Zeitstempel. Der Unterschied ist keine Feinheit: Liegt `lagerSeit` weiter zurück als der
+Deckel (`VP_LAGER_STUNDEN`), hängt der Stand am Deckel und nicht an der verstrichenen Zeit; ein
+Schieben des alten Wertes um die verbrauchten Stunden senkte ihn dann **überhaupt nicht**, und die
+Reparatur wäre gratis, beliebig oft. `restStunden` ist deshalb die verbleibende Zeit gegen jetzt –
+`lager/holen` setzt bei Vollverbrauch auf `jetzt`, das ist derselbe Fall mit `restStunden = 0`.
+Gegenprobe `altstempel` stellt genau diesen Fehler her; sie lässt `2c` und `3b` fallen.
+
+**Geheilt wird, was wirklich genommen wurde.** Die Kostenzeile wird aus dem Stand *vor* und *nach*
+dem Schieben gemessen, nicht aus dem Wunschbetrag gerechnet: `vorpostenLagerStand` rundet jeden der
+drei Rohstoffe einzeln ab. Die Differenz zwischen Wunsch und Genommenem bleibt dadurch unter drei
+Einheiten, und `heilung` nimmt den kleineren Wert – der Rundungsrest geht nie zugunsten des
+Besitzers aus.
+
+Gemessen wird der Reststand, nicht gerechnet (`2c`): Ein Lager am Deckel (12 h, 300.000) verliert
+bei 100.000 geheilten LP genau ein Drittel; danach stehen **acht** der zwölf Stunden, also 200.000.
+
+### Schalter und Auslieferung
+
+`VORPOSTEN_REPARATUR_AKTIV` steht auf **`false`** – Auslieferungs-Riegel wie bei jeder
+Vorposten-Etappe davor (Backend zuerst live, umgelegt wird im **Frontend-PR**). Bis dahin antwortet
+die Route 404 `inaktiv`, und `reparaturAktiv` im Katalog sagt dem Client, dass es sie noch nicht
+gibt. Der Notaus hängt am Schlüssel **`vorposten`** – wie bei Projekten, Umrüsten und Benennen; der
+Admin kann damit nur **ab**schalten, nie ein, denn die Konstante liegt im Code.
+
+### Was der Client bekommt
+
+`GET /api/vorposten` trägt je Vorposten ein `reparatur`-Objekt mit `aktiv`, `moeglich`, `gesperrt`,
+`gesperrtBis`, `fehlend`, `heilung`, `kosten` und `vorrat`. **Keine zweite Tabelle im Frontend:** Es
+reist die fertige Rechnung, nicht die Regel, aus der man sie nachbauen müsste – dieselbe
+Entscheidung wie bei `naechsteStufe` und den Ausbaukosten. Sichtbar ist das Objekt für jeden, wie
+Lager und Kernstand: Jeder Posten darin ist schon aus `kern` und `lager` ableitbar und `gesperrtBis`
+aus `letzterKampf`, das hier ebenfalls offen steht. Ein Angreifer erfährt also nichts Neues – er
+sieht es nur ausgerechnet.
+
+### Eine gemessene Folge für die Frontend-Hälfte
+
+`tests/test_vorposten_paritaet.js` **im Frontend-Repo** prüft in `1b`, dass das Frontend jede
+Vorposten-Route des Servers auch ruft („keine tote Fähigkeit"). Eine backend-zuerst ausgelieferte
+Route hat diesen Rufer naturgemäß noch nicht: Gegen den Stand **vor** dieser Etappe lief der Test
+grün (Exit 0), gegen den Stand **mit** der Route fällt genau `1b` mit
+`fehltImFrontend: ["/reparieren"]` – gemessen am 14.09.2026, beide Läufe.
+
+Das ist kein Fehler dieses Änderungssatzes, sondern der bekannte Preis der Reihenfolge „Backend
+zuerst live": Die beiden Regeln – *Notausschalter aus, bis das Frontend den Zweig kennt* und *keine
+tote Fähigkeit* – stoßen hier aufeinander. **Der Frontend-PR löst beides in einem Zug**: Er legt
+`VORPOSTEN_REPARATUR_AKTIV` auf `true` und ruft `backendFetch('/vorposten/reparieren')`; damit ist
+`1b` wieder grün. Bis dahin gehört die Zeile ausdrücklich in den PR-Text, damit der rote Lauf nicht
+als echter Befund missverstanden wird.

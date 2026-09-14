@@ -10165,9 +10165,12 @@ app.post('/api/musterattack/create', authMiddleware, async (req, res) => {
   }
 
   /* VORPOSTEN als Verbandsziel (02.09.2026). Der Grund ist derselbe wie bei der Sternenfeste:
-     Eine Bastion hat 400.000 Kern-LP und 60.000 Verteidigung - bei der gemessenen
-     Einsteiger-Schlagkraft von 7.500 sind das 53 Schlaege bei vier Stunden Abklingzeit, also
-     solo nicht zu schleifen. Genau dafuer gibt es den Verband.
+     Eine Kernstation (Stufe 3) hat 400.000 Kern-LP und 60.000 Verteidigung - bei der gemessenen
+     Einsteiger-Schlagkraft von 7.500 sind das 356 Schlaege bei vier Stunden Abklingzeit, also rund
+     59 Tage und solo erst recht nicht zu schleifen. Genau dafuer gibt es den Verband.
+     BERICHTIGT AM 14.09.2026: Hier stand „53 Schlaege" - dieselbe Rechnung ohne den Durchschlag,
+     die auch am Kommentar von VORPOSTEN_STUFEN stand. Die Begruendung und die neue Messung stehen
+     dort; geaendert wurde nur die Beschreibung, keine Zahl.
      ANDERS als Nest und Festung gehoert ein Vorposten einem SPIELER. Zwei Folgen, beide hier:
      den EIGENEN greift man auch im Verband nicht an (dieselbe Regel wie am Einzelendpunkt), und
      der Bauschutz gilt auch fuer den Verband - sonst waere der Verband der Weg, ihn zu umgehen. */
@@ -14332,8 +14335,8 @@ const VP_LAGER_STUNDEN = 12;
    Sekunde, in der VP_LAGER_AKTIV auf true kippt, JEDER bestehende Vorposten sofort am Deckel:
    `vorpostenLagerStand` faellt mangels `doc.lagerSeit` auf `doc.seit` zurueck - das Baudatum, oft
    Wochen alt -, und die Stunden werden nur nach OBEN gegen VP_LAGER_STUNDEN geklemmt. Fuer eine
-   Bastion mit Handelsknoten waeren das auf einen Schlag 337.500 Erz, 112.500 Kristalle und
-   90.000 Deuterium je Vorposten, bis zu drei je Konto.
+   Orbitalfeste mit Handelsknoten (den „Sternenmarkt", Stufe 8) waeren das auf einen Schlag
+   337.500 Erz, 112.500 Kristalle und 90.000 Deuterium je Vorposten, bis zu drei je Konto.
    Genau diese Fehlerklasse steht seit heute in PROJECT_MEMORY („Ein Zustand, der heute nur nutzlos
    aussieht, kann beim Einschalten rueckwirkend wertvoll werden") - fuer das Sternendock wurde sie
    behandelt, fuer das Lager nicht.
@@ -14341,8 +14344,8 @@ const VP_LAGER_STUNDEN = 12;
    Schreiben beim Lesen, keine Migration, nichts geloescht - die Zeit vor der Aktivierung zaehlt
    einfach nicht.
    GESETZT AM 05.09.2026 mit dem Umlegen des Schalters. Ohne diese Zahl haette in derselben
-   Sekunde jeder bestehende Vorposten am Deckel gestanden: fuer eine Bastion mit Handelsknoten
-   337.500 Erz, 112.500 Kristalle und 90.000 Deuterium, bis zu drei je Konto. */
+   Sekunde jeder bestehende Vorposten am Deckel gestanden: fuer einen Sternenmarkt (Stufe 8 mit
+   Handelsknoten) 337.500 Erz, 112.500 Kristalle und 90.000 Deuterium, bis zu drei je Konto. */
 const VP_LAGER_AB = Date.parse('2026-09-05T05:00:00Z');   // 1788584400000
 const VP_LAGER_ANTEILE = { erz: 0.225, kristalle: 0.075, deuterium: 0.06 };
 /* ETAPPE V5: DER VERBUENDETE DARF ETWAS (03.09.2026). Bis hierher stand an jeder Vorposten-Route
@@ -14391,6 +14394,49 @@ const VP_ENDPROJEKTE_AKTIV = true;   // umgelegt am 11.09.2026
 const VP_DOCK_STUNDEN = 24;
 const VP_DOCK_MAX = 7;
 const VP_DOCK_SCHIFF = 'cruisers';
+/* ETAPPE V10: DER VORPOSTEN LAESST SICH REPARIEREN (14.09.2026). Bis hierher war jeder Treffer am
+   Kern endgueltig: Wer eine Belagerung ueberstand, behielt den Schaden fuer immer - die einzige
+   Erholung war der Ausbau, und der heilt ausdruecklich NICHT (er hebt nur das Dach). Ein Besitzer
+   konnte also nichts tun als zusehen.
+
+   DER ZUSCHNITT IST GEMESSEN, NICHT GEWAEHLT. Zwei Messungen haben ihn festgelegt:
+
+   1. EIN FESTER UMRECHNUNGSFAKTOR TRAEGT NICHT. Bei 1 Rohstoff = 1 LP deckt ein volles Lager auf
+      Stufe 1 noch 72 % des Kerns, auf Stufe 8 nur 4,6 % - die Leiter waechst um Faktor 325, das
+      Lager nur um Faktor 21. Die Heilrate GEGEN EINEN ANGREIFER spreizt sich dabei um Faktor 90 in
+      die GEGENrichtung: Je Abklingzeit-Fenster heilt Stufe 1 gegen einen Endspiel-Angreifer 2,1 %
+      eines Schlages, Stufe 8 aber 189 % - oben heilte die Station schneller, als geschlagen wird,
+      und eine Belagerung waere unendlich. Der groesste Faktor, der auf KEINER Stufe und gegen
+      KEINE der drei gemessenen Schlagkraefte mehr heilt als ein Schlag schlaegt, ist 0,011 - mit
+      ihm repariert ein volles Lager auf Stufe 8 noch 0,05 % des Kerns. Das waere ein Knopf ohne
+      Wirkung. Ein Faktor je Stufe waere eine zweite Zahlenreihe neben der Leiter, also eine
+      Kopie-Familie im eigenen Haus.
+
+   2. DIE SPERRE LOEST ES VOLLSTAENDIG, und zwar allein. Ist die Reparatur gesperrt, solange der
+      letzte Treffer weniger als VORPOSTEN_ABKLING_MS zurueckliegt, dann faellt der naechste
+      erlaubte Schlag mit der ersten erlaubten Reparatur ZUSAMMEN: Ein belagerter Vorposten heilt
+      waehrend einer laufenden Belagerung gar nicht, und die Netto-Belagerungsdauer ist identisch
+      mit der ohne Heilung (Stufe 8 solo gegen einen Endspiel-Angreifer: 123 Schlaege, 20,5 Tage).
+      Geheilt wird ausschliesslich, was NACH der Belagerung uebrigbleibt - genau der Fall, um den
+      es geht.
+
+   DESHALB IST DIE SPERRE ABGELEITET UND KEINE ZWEITE ZAHL. Sie steht nirgends als eigene
+   Konstante: `vorpostenReparaturVorschau` rechnet `letzterTreffer + VORPOSTEN_ABKLING_MS`. Eine
+   eigene Zahl daneben koennte sich beim naechsten Balance-Schritt von der Abklingzeit loesen, und
+   in genau dem Moment waere die Reparatur der Weg, eine Belagerung unendlich zu machen. Die Sperre
+   IST die Balance dieser Etappe; sie traegt sie allein.
+
+   DIE REGEL „AUSBAU HEILT NICHT" BLEIBT, und „Einbau heilt nicht" ebenso. Die Reparatur weicht sie
+   nicht auf, sie ist der EIGENE, bezahlte Weg daneben: Ausbau und Modul-Einbau heben weiterhin nur
+   das Dach, die LP bleiben stehen. Wer Kern-LP zurueckhaben will, zahlt dafuer mit dem Lager
+   seiner Station - und wartet die Abklingzeit ab.
+
+   VORPOSTEN_REPARATUR_AKTIV STEHT AUF false - Auslieferungs-Riegel wie bei jeder Vorposten-Etappe
+   davor: Backend zuerst live, umgelegt wird im FRONTEND-PR. Bis dahin antwortet die Route 404;
+   `reparaturAktiv` sagt dem Client, ob es sie schon gibt. Der Admin kann sie zur Laufzeit nur
+   AB-schalten, nie ein: Der Notaus haengt am Schluessel `vorposten` (wie Projekte, Umruesten und
+   Benennen), und `spawnAktivImCode('vorposten')` liest die ausgelieferte Konstante. */
+const VORPOSTEN_REPARATUR_AKTIV = false;
 const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
 const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
 const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer, am Objekt
@@ -14421,12 +14467,26 @@ const VORPOSTEN_STUFEN = [
      Spezialisierungen", Entscheidung "8 Stufen + 3 Spezialisierungen ab Stufe 4").
 
      kernLp gegen die gemessenen Schlagkraefte 7.500 / 44.000 / 240.000 je Schlag (Festungs-
-     Kalibrierung, docs/asteroidenfestungen.md), Abklingzeit 4 h je Angreifer:
-       Feldlager      20.000 =  2,7 Einsteiger- / 0,45 Mittelfeld- / 0,08 Endspiel-Schlaege
-       Stuetzpunkt    90.000 = 12   / 2,0  / 0,4
-       Bastion       400.000 = 53   / 9,1  / 1,7
-       Stufe 6     2.400.000 =        55   / 10
-       Stufe 8     6.500.000 =       148   / 27   -> allein 4,5 Tage, im Verband ein Abend
+     Kalibrierung, docs/asteroidenfestungen.md), Abklingzeit 4 h je Angreifer.
+
+     BERICHTIGT AM 14.09.2026 - hier stand die Leiter jahrelang mit ZU KLEINEN Zahlen. Der alte
+     Block rechnete `kernLp / kraft`, also mit durchschlag = 1. Der Code multipliziert den Wurf
+     zusaetzlich mit `durchschlag = clamp(kraft / (kraft + verteidigung), 0.15, 0.95)`
+     (vorpostenSchlagAusfuehren). Ab Stufe 3 greift fuer den Einsteiger-Schlag der BODEN von 15 %,
+     und genau dort laeuft die alte Rechnung voellig aus dem Ruder. Neu gemessen mit der echten
+     Formel (400 vollstaendige Fall-Reihen je Kombination; hier steht der Erwartungswert
+     kernLp / (kraft * durchschlag), den man nachrechnen kann - die gewuerfelte Streuung
+     +-20 % hebt die wirkliche Zahl bei KLEINEN Schlagzahlen noch leicht an):
+       Ankerkern      20.000 =    3,6 Einsteiger- / 0,5 Mittelfeld- / 0,1 Endspiel-Schlaege
+       Stuetzpunkt    90.000 =   31   /  2,6 /  0,4
+       Kernstation   400.000 =  356   / 21,5 /  2,1
+       Habitatkranz 2.400.000 = 2133  / 364  / 23,3
+       Orbitalfeste 6.500.000 = 5778  / 985  / 123  -> allein 20,5 Tage, nicht 4,5
+     „Im Verband ein Abend" hiess frueher hier zu Unrecht: Dafuer braucht es rund zwanzig
+     gleichzeitige Endspiel-Angreifer.
+     NUR DIE BESCHREIBUNG WURDE WAHR GEMACHT, keine Zahl der Leiter ist angefasst worden. Ob die
+     Leiter mit diesem Wissen NEU KALIBRIERT gehoert, ist eine eigene Frage und ein eigener
+     Auftrag - wer sie anfasst, faengt bei dieser Messung an und nicht wieder bei kernLp / kraft.
      Die Leiter ist die EINE Zahlenreihe; die Zweige (VORPOSTEN_ZWEIGE) sind Multiplikatoren
      darauf. So bleibt die Balance an einer Stelle messbar, statt in drei parallelen Tabellen
      auseinanderzulaufen - dieselbe Ueberlegung wie bei den Festungsstufen.
@@ -14627,6 +14687,83 @@ function vorpostenLagerVoll(doc) {
   return vorpostenLagerSeit(doc) + VP_LAGER_STUNDEN * 3600000;
 }
 function vorpostenLagerLeer(stand) { return !stand || Object.values(stand).every(v => !(v > 0)); }
+
+/* V10: WAS EINE REPARATUR JETZT KOSTEN UND BRINGEN WUERDE - die EINE Stelle. Der Endpunkt und die
+   Anzeige in GET /api/vorposten rechnen aus DIESER Funktion; zwei Rechnungen ueber denselben
+   Betrag laufen auseinander, sobald eine von beiden angefasst wird (dieselbe Ueberlegung wie bei
+   `meinPlatz` und `garnisonMax`). Die Begruendung des Zuschnitts steht an VORPOSTEN_REPARATUR_AKTIV.
+
+   DER SERVER RECHNET DEN BETRAG. Es gibt keinen Parameter dafuer - wie bei /api/attack und den
+   Festungs- und Nestschlaegen. Der Aufrufer sagt nur, WELCHE Station.
+
+   DER LAGERSTAND IST GERECHNET, NICHT GESPEICHERT: `doc.lagerSeit` ist der einzige Zustand.
+   Teilverbrauch heisst deshalb, `lagerSeit` nach VORN zu schieben - und zwar gemessen an JETZT,
+   nicht am alten Zeitstempel. Der Unterschied ist keine Feinheit: Bei einem Lager UEBER dem Deckel
+   (`lagerSeit` liegt laenger als VP_LAGER_STUNDEN zurueck) haette ein Schieben des alten Wertes um
+   die verbrauchten Stunden den STAND gar nicht gesenkt - er haengt am Deckel, nicht an der
+   verstrichenen Zeit. Die Reparatur waere gratis gewesen, beliebig oft. `restStunden` ist deshalb
+   die verbleibende Zeit GEGEN JETZT, genau wie `lager/holen` bei Vollverbrauch auf `jetzt` setzt
+   (das ist derselbe Fall mit restStunden = 0).
+
+   GEHEILT WIRD, WAS WIRKLICH GENOMMEN WURDE. `kosten` wird aus dem Stand VOR und dem Stand NACH
+   dem Schieben GEMESSEN, nicht aus dem Wunschbetrag gerechnet: `vorpostenLagerStand` rundet jeden
+   der drei Rohstoffe EINZELN ab, und eine aus dem Wunsch abgeleitete Kostenzeile wuerde diese
+   Reste erfinden oder verschlucken. Die Differenz zwischen Wunsch und wirklich Genommenem liegt
+   dadurch unter drei Einheiten, und `heilung` nimmt davon den kleineren Wert - der Fehler geht
+   also nie zugunsten des Besitzers aus.
+
+   Ohne Lager keine Reparatur: Steht VP_LAGER_AKTIV auf false, ist `vorpostenLagerRate` ueberall 0,
+   der Vorrat ist 0 und `heilung` ebenfalls. Ein eigener Schalter-Zweig hier waere eine zweite
+   Stelle, die dasselbe entscheidet. */
+function vorpostenReparaturVorschau(doc, jetzt, werte) {
+  const t = jetzt || Date.now();
+  const st = werte || vorpostenWerte(doc);
+  const lpMax = st.kernLp;
+  /* Ein Dokument OHNE `kern` gilt als UNVERSEHRT - dieselbe Annahme wie in
+     vorpostenSchlagAusfuehren, das ein fehlendes Kernobjekt mit vollen LP anlegt. `vorpostenKernLp`
+     liefert dafuer 0; ohne diese Zeile waere so ein Vorposten fuer die Vorschau ein leerer Kern und
+     liesse sich aus dem Lager „heilen", ohne je getroffen worden zu sein. */
+  const lp = (doc && doc.kern) ? vorpostenKernLp(doc) : lpMax;
+  const fehlend = Math.max(0, lpMax - lp);
+  /* DER LETZTE TREFFER - aus dem Kampfvermerk, den vorpostenSchlagAusfuehren bei JEDEM Schlag
+     setzt (Einzelangriff wie Verband, ueber denselben Rechenkern). Nicht aus `doc.schlaege`: Das
+     ist die Abklingzeit JE ANGREIFER; hier zaehlt der letzte Treffer von IRGENDWEM, sonst heilte
+     eine Station zwischen zwei Angreifern durch. */
+  const letzterTreffer = (doc && doc.letzterKampf && doc.letzterKampf.zeit) || 0;
+  // ABGELEITET, keine zweite Zahl - die Begruendung steht an VORPOSTEN_REPARATUR_AKTIV.
+  const gesperrtBis = letzterTreffer ? letzterTreffer + VORPOSTEN_ABKLING_MS : 0;
+
+  const rate = vorpostenLagerRate(doc, st);
+  const proStunde = Object.values(rate).reduce((a, b) => a + (b > 0 ? b : 0), 0);
+  const seit = vorpostenLagerSeit(doc, t);
+  const stunden = Math.max(0, Math.min(VP_LAGER_STUNDEN, (t - seit) / 3600000));
+  const stand = {};
+  let vorrat = 0;
+  for (const k of Object.keys(rate)) { stand[k] = Math.floor(rate[k] * stunden); vorrat += stand[k]; }
+
+  // 1 Rohstoff = 1 LP, und es wird nur so viel genommen, wie gebraucht wird.
+  const wunsch = Math.min(fehlend, vorrat);
+  let restStunden = stunden;
+  const kosten = {};
+  let genommen = 0;
+  if (wunsch > 0 && proStunde > 0) {
+    restStunden = Math.max(0, stunden - wunsch / proStunde);
+    for (const k of Object.keys(rate)) {
+      const weg = stand[k] - Math.floor(rate[k] * restStunden);
+      if (weg > 0) { kosten[k] = weg; genommen += weg; }
+    }
+  }
+  const heilung = Math.min(fehlend, genommen);
+  return {
+    aktiv: VORPOSTEN_REPARATUR_AKTIV && !notAusGesetzt('vorposten'),
+    lp, lpMax, fehlend, vorrat, heilung, kosten,
+    gesperrtBis, gesperrt: gesperrtBis > t,
+    // Was der Client wissen will, ohne die drei Bedingungen selbst zu verknuepfen.
+    moeglich: VORPOSTEN_REPARATUR_AKTIV && !notAusGesetzt('vorposten') && gesperrtBis <= t && heilung > 0,
+    // Nur fuer den Endpunkt: der neue Zeitstempel ergibt sich daraus, nicht aus einer zweiten Rechnung.
+    restStunden
+  };
+}
 
 /* Was die eigenen Vorposten am MARKT bringen - die eine Stelle, die den Kanal zusammenzaehlt.
    Sie wird fuer den VERKAEUFER gerufen, nicht fuer den Anfragenden: Beim Kauf zahlt der Verkaeufer
@@ -15289,6 +15426,18 @@ function vorpostenFuerClient(doc, userId, jetzt, karte) {
     lager: vorpostenLagerStand(doc, jetzt, st),
     lagerRate: vorpostenLagerRate(doc, st),
     lagerVollAb: vorpostenLagerVoll(doc),
+    /* V10: WAS EINE REPARATUR HIER KOSTEN UND BRINGEN WUERDE, und ob sie gerade gesperrt ist.
+       KEINE ZWEITE TABELLE IM FRONTEND: Es reist die fertige Rechnung, nicht die Regel, aus der
+       man sie nachbauen muesste - dieselbe Entscheidung wie bei `naechsteStufe` und den
+       Ausbaukosten (VORPOSTEN_STUFEN hatte nie eine Kopie dort, und genau das soll so bleiben).
+       FUER JEDEN SICHTBAR, wie das Lager und der Kernstand: Jeder Posten darin ist schon aus
+       `kern` und `lager` ableitbar, und `gesperrtBis` aus `letzterKampf`, das hier ebenfalls
+       offen steht. Ein Angreifer erfaehrt also nichts Neues - er sieht es nur ausgerechnet. */
+    reparatur: (() => {
+      const v = vorpostenReparaturVorschau(doc, jetzt, st);
+      return { aktiv: v.aktiv, moeglich: v.moeglich, gesperrt: v.gesperrt, gesperrtBis: v.gesperrtBis,
+        fehlend: v.fehlend, heilung: v.heilung, kosten: v.kosten, vorrat: v.vorrat };
+    })(),
     /* V6: Was am Sternendock bereitliegt, und die Dominanz. `dominiert` ist bewusst ABGELEITET und
        kein neuer Zustand: Wer die Endstufe haelt, dominiert das System - sichtbar fuer alle. In
        `db.galaxy.controlledSystems` gehoert das NICHT; dort haengt die Eroberungsmechanik samt
@@ -15497,6 +15646,10 @@ app.get('/api/vorposten', authMiddleware, (req, res) => {
     werftDeckel: VP_WERFT_DECKEL, werftAktiv: VP_WERFT_AKTIV,
     marktAktiv: VP_MARKT_AKTIV, marktDeckel: VP_MARKT_DECKEL,
     lagerAktiv: VP_LAGER_AKTIV, lagerStunden: VP_LAGER_STUNDEN,
+    /* V10: Ob es die Reparatur schon gibt. Die Abklingzeit, aus der sich ihre Sperre ableitet,
+       steht bereits als `abklingMs` daneben - eine eigene Zahl dafuer gaebe es hier nicht zu
+       lesen, und genau das ist die Aussage. */
+    reparaturAktiv: VORPOSTEN_REPARATUR_AKTIV && !notAusGesetzt('vorposten'),
     allianzAktiv: VP_ALLIANZ_AKTIV,
     endprojekteAktiv: VP_ENDPROJEKTE_AKTIV, dockStunden: VP_DOCK_STUNDEN, dockMax: VP_DOCK_MAX, dockSchiff: VP_DOCK_SCHIFF,
     projektDefs: VP_PROJEKT_DEFS, projekteAktiv: VP_PROJEKTE_AKTIV && !notAusGesetzt('vorposten'),
@@ -16205,6 +16358,64 @@ app.post('/api/vorposten/lager/holen', authMiddleware, async (req, res) => {
     schiffe: schiffe ? { [VP_DOCK_SCHIFF]: schiffe } : null }, stand));
   await saveDb();
   res.json({ ok: true, geholt: stand, schiffe, vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
+});
+
+/* V10: DEN KERN REPARIEREN. Der einzige Weg, an einem Vorposten verlorene Kern-LP zurueckzubekommen
+   - und ausdruecklich KEIN Aufweichen der Regeln „Ausbau heilt nicht" und „Einbau heilt nicht":
+   Die beiden heben weiterhin nur das Dach und lassen die LP stehen. Dies hier ist der eigene,
+   BEZAHLTE Weg daneben; bezahlt wird mit dem Lager derselben Station.
+
+   DER SERVER RECHNET DEN BETRAG, der Request traegt keinen. Er nennt nur das System - wie bei
+   /api/attack und den Festungs- und Nestschlaegen, aus demselben Grund: Der Kernstand ist
+   PvP-relevant, und ueber PvP-Relevantes entscheidet der Server.
+
+   ES GIBT KEINE EIGENE ABKLINGZEIT FUER DIE REPARATUR. Gesperrt ist sie, solange der letzte
+   TREFFER weniger als VORPOSTEN_ABKLING_MS zurueckliegt - abgeleitet, nicht danebengestellt. Was
+   diese eine Ableitung traegt, steht an VORPOSTEN_REPARATUR_AKTIV: Sie ist der ganze Hebel dieser
+   Etappe. Ein Besitzer, der gerade belagert wird, heilt damit nicht; wer die Belagerung ueberstanden
+   hat, baut auf. Mehrmals hintereinander zu reparieren ist erlaubt und schadet nichts - das Lager
+   ist dann leer, und es fuellt sich nur mit der Zeit. */
+app.post('/api/vorposten/reparieren', authMiddleware, async (req, res) => {
+  if (!VORPOSTEN_AKTIV) return res.status(404).json({ error: 'Es gibt derzeit keine Vorposten.', inaktiv: true });
+  /* Der Schalter steht HIER, an der Stelle, die die Handlung AUSFUEHRT, nicht nur an der Anzeige -
+     die Lehre steht in PROJECT_MEMORY und ist am Projekt-Endpunkt teuer bezahlt worden. */
+  if (!VORPOSTEN_REPARATUR_AKTIV || notAusGesetzt('vorposten')) {
+    return res.status(404).json({ error: 'Reparaturen sind derzeit nicht verfügbar.', inaktiv: true });
+  }
+  const sys = String((req.body && req.body.system) || '');
+  if (!vorpostenSysOk(sys)) return res.status(400).json({ error: 'System fehlt.' });
+  const doc = vorpostenLies(sys);
+  if (!doc) return res.status(404).json({ error: 'In diesem System steht kein Vorposten.' });
+  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann hier reparieren.' });
+  const jetzt = Date.now();
+  const v = vorpostenReparaturVorschau(doc, jetzt);
+  /* DIE REIHENFOLGE DER DREI ABLEHNUNGEN IST ABSICHT: erst der Zustand des Kerns, dann die Sperre,
+     dann das Lager. Ein unversehrter Kern, der als „steht unter Beschuss" gemeldet wird, schickte
+     den Besitzer zum Warten auf etwas, das er gar nicht braucht - jede der drei Auskuenfte nennt
+     ihren eigenen Grund und traegt ihre eigene Marke (Lektion 7). */
+  if (!(v.fehlend > 0)) return res.status(400).json({ error: 'Der Kern dieser Station ist unversehrt.', voll: true });
+  if (v.gesperrt) {
+    return res.status(403).json({ error: 'Diese Station steht noch unter Beschuss - reparieren lässt sie sich in ' +
+      Math.ceil((v.gesperrtBis - jetzt) / 60000) + ' Minuten.', gesperrt: true, gesperrtBis: v.gesperrtBis });
+  }
+  if (!(v.heilung > 0)) {
+    return res.status(400).json({ error: 'Im Lager dieser Station liegt nichts, woraus sich reparieren ließe.', leer: true });
+  }
+  /* db SYNCHRON vor saveDb() mutieren, nie im await-Rueckruf. `doc.kern` ist hier garantiert da:
+     Fehlte es, gaelte die Station als unversehrt (siehe vorpostenReparaturVorschau) und waere eine
+     Zeile weiter oben mit `voll` abgewiesen worden. */
+  doc.kern.lp = Math.min(v.lpMax, v.lp + v.heilung);
+  /* DER TEILVERBRAUCH. `lagerSeit` wandert auf den Punkt, an dem genau die Reststunden noch offen
+     sind - gemessen an JETZT, nicht am alten Zeitstempel (die Begruendung steht ausfuehrlich an
+     vorpostenReparaturVorschau: sonst waere die Reparatur bei einem Lager ueber dem Deckel gratis).
+     Vollverbrauch ist derselbe Fall mit restStunden = 0 und ergibt `jetzt`, genau wie lager/holen. */
+  doc.lagerSeit = jetzt - Math.round(v.restStunden * 3600000);
+  vorpostenSchreib(doc);
+  await saveDb();
+  console.log('[vorposten-reparatur] userId=' + req.userId + ' sys=' + sys + ' geheilt=' + v.heilung +
+    ' lp=' + doc.kern.lp + '/' + v.lpMax + ' verbraucht=' + JSON.stringify(v.kosten));
+  res.json({ ok: true, geheilt: v.heilung, verbraucht: v.kosten,
+    vorposten: vorpostenFuerClient(doc, req.userId, jetzt) });
 });
 
 app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {

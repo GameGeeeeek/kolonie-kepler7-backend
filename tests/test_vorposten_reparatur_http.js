@@ -241,9 +241,22 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
     { sabotage: SAB || '(keine)' });
 
   const an = basis.replace(/const VORPOSTEN_REPARATUR_AKTIV = (true|false);/, 'const VORPOSTEN_REPARATUR_AKTIV = true;');
-  check('0b: der Reparatur-Schalter liess sich in der Kopie umlegen',
-    /const VORPOSTEN_REPARATUR_AKTIV = true;/.test(an) && /const VORPOSTEN_REPARATUR_AKTIV = false;/.test(roh),
-    { ausgeliefertAus: /const VORPOSTEN_REPARATUR_AKTIV = false;/.test(roh) });
+  /* BEIDE STAENDE WERDEN SELBST HERGESTELLT (berichtigt 14.09.2026). Vorher las 7a den
+     ausgelieferten Quelltext und setzte voraus, dass der Schalter dort auf `false` steht - die
+     Pruefung hielt damit den AUSLIEFERUNGSZUSTAND fest, nicht die Regel. Als der Schalter mit der
+     Frontend-Haelfte fiel, schlug sie auf richtigem Code an. Jetzt baut der Test sich den
+     Aus-Zustand selbst; die Regel „ausgeschaltet heisst 404" gilt unabhaengig davon, was gerade
+     ausgeliefert ist. */
+  const aus = basis.replace(/const VORPOSTEN_REPARATUR_AKTIV = (true|false);/, 'const VORPOSTEN_REPARATUR_AKTIV = false;');
+  check('0b: der Reparatur-Schalter liess sich in BEIDE Richtungen umlegen',
+    /const VORPOSTEN_REPARATUR_AKTIV = true;/.test(an) && /const VORPOSTEN_REPARATUR_AKTIV = false;/.test(aus) && an !== aus,
+    { anDa: /= true;/.test(an), ausDa: /= false;/.test(aus) });
+  /* Der ausgelieferte Zustand als eigene Aussage, getrennt von der Regel: Die Frontend-Haelfte
+     haengt daran. Faellt diese Pruefung, wurde der Schalter zurueckgedreht - und im Spiel stehen
+     dann zwei Texte, die eine Faehigkeit versprechen, die der Server mit 404 abweist. */
+  check('0c: der AUSGELIEFERTE Schalter steht auf true - die Frontend-Haelfte haengt daran',
+    /const VORPOSTEN_REPARATUR_AKTIV = true;/.test(roh),
+    { ausgeliefert: (roh.match(/const VORPOSTEN_REPARATUR_AKTIV = (true|false);/) || [])[1] });
 
   /* ---- Aufbau ---------------------------------------------------------------------------------
      ALLE Lager werden WEIT ueber den Deckel zurueckdatiert (30 h bei 12 h Deckel). Das macht den
@@ -442,11 +455,10 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
       stundenVorAbsturz: Math.round(stundenVorKill * 1000) / 1000 });
 
   // ---- 7) Die beiden Wege, sie abzuschalten -----------------------------------------------------
-  /* 7a: der ausgelieferte Stand. VORPOSTEN_REPARATUR_AKTIV steht auf false, bis das Frontend den
-     Zweig kennt - Hausregel „Backend zuerst live". Geprueft wird `basis`, also der Quelltext OHNE
-     das Umlegen aus 0b. */
-  fs.writeFileSync(QUELLE, basis);
-  check('7-vorab: im Pruefling steht der Schalter wirklich auf false', /const VORPOSTEN_REPARATUR_AKTIV = false;/.test(basis));
+  /* 7a: die REGEL, nicht der Auslieferungszustand. Geprueft wird die Kopie `aus`, in der der
+     Schalter ausdruecklich auf false steht - unabhaengig davon, was gerade ausgeliefert ist. */
+  fs.writeFileSync(QUELLE, aus);
+  check('7-vorab: im Pruefling steht der Schalter wirklich auf false', /const VORPOSTEN_REPARATUR_AKTIV = false;/.test(aus));
   const dbAus = grunddb();
   dbAus.shared['vorposten:rep-teil'] = JSON.stringify(vpDoc('rep-teil', 8, lpMax8 - SCHADEN, { lagerSeit: Date.now() - ALT }));
   fs.writeFileSync(dbPfad, JSON.stringify(dbAus, null, 1));

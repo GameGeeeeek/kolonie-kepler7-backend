@@ -14431,12 +14431,20 @@ const VP_DOCK_SCHIFF = 'cruisers';
    das Dach, die LP bleiben stehen. Wer Kern-LP zurueckhaben will, zahlt dafuer mit dem Lager
    seiner Station - und wartet die Abklingzeit ab.
 
-   VORPOSTEN_REPARATUR_AKTIV STEHT AUF false - Auslieferungs-Riegel wie bei jeder Vorposten-Etappe
-   davor: Backend zuerst live, umgelegt wird im FRONTEND-PR. Bis dahin antwortet die Route 404;
-   `reparaturAktiv` sagt dem Client, ob es sie schon gibt. Der Admin kann sie zur Laufzeit nur
-   AB-schalten, nie ein: Der Notaus haengt am Schluessel `vorposten` (wie Projekte, Umruesten und
-   Benennen), und `spawnAktivImCode('vorposten')` liest die ausgelieferte Konstante. */
-const VORPOSTEN_REPARATUR_AKTIV = false;
+   VORPOSTEN_REPARATUR_AKTIV STEHT SEIT DEM 14.09.2026 AUF true - die Frontend-Haelfte ist fertig
+   und wartet auf diesen Schalter. Er faellt BEWUSST VOR dem Frontend-Merge, nicht danach: Der
+   Hilfetext und die Ausbau-Rueckfrage im Spiel erwaehnen die Reparatur unbedingt (HELP_SECTIONS
+   ist ein Array-Literal, das beim Laden ausgewertet wird und `reparaturAktiv` gar nicht lesen
+   kann). Faellt der Schalter erst nach dem Merge, gibt es ein Fenster, in dem zwei Texte eine
+   Faehigkeit versprechen, die der Server mit 404 abweist - genau die Anzeigestellen-Luege, die
+   die Hausregel verbietet. Gemessen an der Vorgaenger-Etappe V7: Dort fiel der Schalter 69
+   Minuten VOR dem Frontend-Merge, aus demselben Grund.
+   Solange das Frontend nicht gemergt ist, ist das gefahrlos: Kein Client ruft die Route, und
+   `reparaturAktiv:true` liest niemand.
+   Der Admin kann sie zur Laufzeit weiterhin nur AB-schalten, nie ein: Der Notaus haengt am
+   Schluessel `vorposten` (wie Projekte, Umruesten und Benennen), und
+   `spawnAktivImCode('vorposten')` liest die ausgelieferte Konstante. */
+const VORPOSTEN_REPARATUR_AKTIV = true;
 const VORPOSTEN_MAX_JE_KONTO = 3;                 // E3-Rahmen (SPRUNGBAKEN_MAX = 3): der Vorposten IST der Sprungknoten
 const VORPOSTEN_SCHUTZ_MS = 12 * 3600 * 1000;      // Bauschutz nach dem Errichten
 const VORPOSTEN_ABKLING_MS = 4 * 3600 * 1000;      // je Vorposten UND Angreifer, am Objekt

@@ -49,6 +49,10 @@ const SAB = process.env.KEPLER_VPREP_SABOTAGE || '';
      rechnet die Frist falsch (5b/5c), der andere setzt sie gar nicht durch (5a). `sperre` allein
      laesst 5a gruen, weil auch seine 60 Sekunden im Messmoment noch nicht abgelaufen sind. */
 const MUSS_FALLEN = {
+  // 15.09.2026 - gemessen, nicht geschaetzt (siehe die drei Laeufe im Commit).
+  ohneabbau: ['4f'],
+  ohneumbau: ['4g'],
+  vorschaublind: ['4f', '4g'],
   besitzer: ['4a'],
   sperre: ['5b', '5c'],
   kostenlos: ['2c', '3b'],
@@ -198,6 +202,23 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
   basis = basis.replace(/const VP_LAGER_AB = [^;]+;/, 'const VP_LAGER_AB = 0;');
 
   /* ---- Die Sabotagen. Jede stellt genau EINEN plausiblen Fehler her. -------------------------- */
+  /* Die zwei Belegungs-Riegel am ENDPUNKT fallen weg - die Vorschau weiss sie noch. Damit trennt
+     die Gegenprobe die beiden Haelften: Faellt nur der Endpunkt, ist der Knopf im Spiel zwar
+     gesperrt, aber wer den Aufruf von Hand schickt, repariert trotzdem. */
+  /* AM EIGENEN SATZ VERANKERT, nicht am gemeinsamen Anfang (gemessen 15.09.2026): Die
+     Umruestungs-Route lehnt einen laufenden Abbau mit demselben Satzanfang ab ("Dieser Vorposten
+     wird abgebaut - ..."). Ein Muster darauf traf ihre Stelle zuerst, `replace` ersetzt nur die
+     ERSTE - der Stand sabotierte also eine fremde Route und liess die gepruefte in Ruhe. Ergebnis:
+     4f blieb gruen, der Stand belegte nichts. Ein Stand, durch den nichts faellt, ist keiner. */
+  if (SAB === 'ohneabbau') basis = basis.replace(
+    /  if \(vorpostenAbbauLaeuft\(doc\)\) \{\n    return res\.status\(400\)\.json\(\{ error: 'Dieser Vorposten wird abgebaut - was du jetzt[\s\S]*?\n  \}\n/, '');
+  if (SAB === 'ohneumbau') basis = basis.replace(
+    /  const umbauR = vorpostenUmruestenLaeuft\(doc\);\n  if \(umbauR\) \{[\s\S]*?\n  \}\n/, '');
+  /* Und die andere Haelfte: Die VORSCHAU verrechnet die zwei Gruende nicht mehr in `moeglich`.
+     Der Endpunkt lehnt dann zwar noch ab - aber der Knopf im Spiel bleibt bedienbar und laeuft in
+     die Ablehnung. Genau die tote Faehigkeit, die Paritaetspruefung 1b verhindern soll. */
+  if (SAB === 'vorschaublind') basis = basis.replace(
+    "      && !abbauLaeuft && !umbau,", "      ,");
   // Der Besitzerriegel faellt weg: jeder eingeloggte Nutzer repariert fremde Stationen.
   if (SAB === 'besitzer') basis = basis.replace(
     "  if (doc.besitzer !== req.userId) return res.status(403).json({ error: 'Nur der Besitzer kann hier reparieren.' });\n", '');
@@ -330,6 +351,14 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
      schwaechere Probe - dort scheiterte ein Versuch ohne Besitzerriegel schon am „unversehrt" und
      der Riegel bliebe ungemessen. So wuerde ein fehlender Riegel wirklich eine fremde Station
      reparieren (200), und genau das misst 4a. */
+  /* ZWEI BELEGTE STATIONEN (15.09.2026). Beide sind bis aufs Vorhaben GENAU wie rep-teil: gleiche
+     Stufe, gleicher Schaden, gleiches Lager. Nur so ist die Ablehnung eine Aussage ueber das
+     Vorhaben und nicht ueber irgendeinen anderen Unterschied - rep-teil ist damit zugleich die
+     Gegenrichtung (dieselbe Lage OHNE Vorhaben heilt, siehe Pruefung 4a). */
+  db0.shared['vorposten:rep-abbau'] = JSON.stringify(vpDoc('rep-abbau', 8, lpMax8 - SCHADEN,
+    { lagerSeit: jetzt0 - ALT, abbauAb: jetzt0 + 3 * 3600000 }));
+  db0.shared['vorposten:rep-umbau'] = JSON.stringify(vpDoc('rep-umbau', 8, lpMax8 - SCHADEN,
+    { lagerSeit: jetzt0 - ALT, umruestenAb: jetzt0 + 3 * 3600000, umruestenZiel: 'festung' }));
   db0.shared['vorposten:rep-fremd'] = JSON.stringify(vpDoc('rep-fremd', 8, lpMax8 - SCHADEN, { lagerSeit: jetzt0 - ALT }));
   // Das Belagerungsziel: voller Kern, volles Lager, wird gleich wirklich beschossen.
   db0.shared['vorposten:rep-kampf'] = JSON.stringify(vpDoc('rep-kampf', 8, lpMax8, { lagerSeit: jetzt0 - ALT }));
@@ -456,6 +485,36 @@ const schreibSave = (d, uid, sv) => { const r = d.private[uid]['kepler7-save-v3'
     knappOk.status === 200 && knappOk.body.geheilt === 1 && okNach.kern.lp === lpMax5
     && okVorrat > 0 && Math.abs(okVorrat - knappVorrat) <= 3,
     { status: knappOk.status, body: knappOk.body, vorratVorher: okVorrat, kern: okNach.kern });
+
+  /* ---- 4f/4g: Vorhaben, die die Station belegen (15.09.2026, Entscheidung Sascha) -------------
+     Die uebrigen Vorposten-Routen fragen laengst nach Abbau und Umruestung; die Reparatur tat es
+     als einzige nicht. Geprueft wird DREIFACH, weil zwei Drittel davon allein nichts belegen:
+       (1) der Endpunkt lehnt ab, MIT eigener Marke - nicht nur "ging nicht" (Lektion 7),
+       (2) der Kern bleibt unangetastet - eine Ablehnung, die trotzdem heilt, waere keine,
+       (3) die VORSCHAU sagt `moeglich:false` - sonst bliebe der Knopf im Spiel bedienbar und der
+           Server antwortete mit einer Ablehnung: genau die tote Faehigkeit, die Paritaetspruefung
+           1b verhindern soll.
+     Die Gegenrichtung steht schon da: rep-teil ist dieselbe Station ohne Vorhaben und heilt in
+     Pruefung 4a. Ohne sie waere "immer ablehnen" eine erlaubte Antwort. */
+  {
+    const vorA = vpVon(await s.hole('/vorposten', tokA), 'rep-abbau');
+    const abbau = await s.sende('/vorposten/reparieren', tokA, { system: 'rep-abbau' });
+    const nachA = vpVon(await s.hole('/vorposten', tokA), 'rep-abbau');
+    check('4f: eine Station im Abbau wird abgewiesen, der Kern bleibt, und die Vorschau sagt es vorher',
+      abbau.status === 400 && abbau.body.abbau === true
+      && nachA.kern.lp === lpMax8 - SCHADEN
+      && vorA.reparatur && vorA.reparatur.moeglich === false && vorA.reparatur.abbau === true,
+      { status: abbau.status, body: abbau.body, kern: nachA.kern, vorschau: vorA.reparatur });
+
+    const vorU = vpVon(await s.hole('/vorposten', tokA), 'rep-umbau');
+    const umbau = await s.sende('/vorposten/reparieren', tokA, { system: 'rep-umbau' });
+    const nachU = vpVon(await s.hole('/vorposten', tokA), 'rep-umbau');
+    check('4g: eine Station in der Umruestung ebenso - mit eigener Marke, nicht derselben wie beim Abbau',
+      umbau.status === 400 && umbau.body.umruestung === true && umbau.body.abbau !== true
+      && nachU.kern.lp === lpMax8 - SCHADEN
+      && vorU.reparatur && vorU.reparatur.moeglich === false && vorU.reparatur.umruestung === true,
+      { status: umbau.status, body: umbau.body, kern: nachU.kern, vorschau: vorU.reparatur });
+  }
 
   // ---- 5) Die Sperre - der einzige wirksame Hebel der Balance -----------------------------------
   const angriff = await s.sende('/vorposten/angriff', tokB, { system: 'rep-kampf', missionId: 'm-rep' });

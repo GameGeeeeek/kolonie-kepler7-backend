@@ -14762,12 +14762,32 @@ function vorpostenReparaturVorschau(doc, jetzt, werte) {
     }
   }
   const heilung = Math.min(fehlend, genommen);
+  /* ZWEI VORHABEN, DIE DIE STATION BELEGEN (15.09.2026, Entscheidung Sascha). Die uebrigen
+     Vorposten-Routen fragen laengst nach Abbau und Umruestung; die Reparatur tat es als einzige
+     nicht.
+       ABBAU  Die Station verschwindet. Vorrat in einen Kern zu stecken, der mit ihr weggeht, ist
+              ein reiner Verlust - derselbe Gedanke wie bei der Umruestung, die den Abbau ebenfalls
+              abweist ("eine Station, die verschwindet, wird nicht umgebaut").
+       UMBAU  Die Ausrichtung entscheidet mit, welche Projektboni zaehlen (vpProjektBoni haengt an
+              Projekt UND Ausrichtung), und die gehen in kernLp ein. Die Kernobergrenze kann sich
+              mit dem Umbau also VERSCHIEBEN. Faellt sie, verpufft alles, was darueber geheilt
+              wurde. Kein Datenverlust, aber verbrannter Vorrat - und genau mit dieser Begruendung
+              weist der Projekt-Endpunkt zweiggebundene Vorhaben waehrend eines Umbaus ab.
+     Beide gehoeren in die VORSCHAU und nicht nur an den Endpunkt: Sonst bliebe der Knopf im Spiel
+     bedienbar und der Server antwortete mit einer Ablehnung - genau die tote Faehigkeit, die
+     Paritaetspruefung 1b verhindern soll. */
+  const abbauLaeuft = !!vorpostenAbbauLaeuft(doc);
+  const umbau = vorpostenUmruestenLaeuft(doc);
   return {
     aktiv: VORPOSTEN_REPARATUR_AKTIV && !notAusGesetzt('vorposten'),
     lp, lpMax, fehlend, vorrat, heilung, kosten,
     gesperrtBis, gesperrt: gesperrtBis > t,
-    // Was der Client wissen will, ohne die drei Bedingungen selbst zu verknuepfen.
-    moeglich: VORPOSTEN_REPARATUR_AKTIV && !notAusGesetzt('vorposten') && gesperrtBis <= t && heilung > 0,
+    abbau: abbauLaeuft,
+    umruestung: !!umbau,
+    umruestenAb: umbau ? umbau.ab : 0,
+    // Was der Client wissen will, ohne die fuenf Bedingungen selbst zu verknuepfen.
+    moeglich: VORPOSTEN_REPARATUR_AKTIV && !notAusGesetzt('vorposten') && gesperrtBis <= t && heilung > 0
+      && !abbauLaeuft && !umbau,
     // Nur fuer den Endpunkt: der neue Zeitstempel ergibt sich daraus, nicht aus einer zweiten Rechnung.
     restStunden
   };
@@ -15444,7 +15464,8 @@ function vorpostenFuerClient(doc, userId, jetzt, karte) {
     reparatur: (() => {
       const v = vorpostenReparaturVorschau(doc, jetzt, st);
       return { aktiv: v.aktiv, moeglich: v.moeglich, gesperrt: v.gesperrt, gesperrtBis: v.gesperrtBis,
-        fehlend: v.fehlend, heilung: v.heilung, kosten: v.kosten, vorrat: v.vorrat };
+        fehlend: v.fehlend, heilung: v.heilung, kosten: v.kosten, vorrat: v.vorrat,
+        abbau: v.abbau, umruestung: v.umruestung, umruestenAb: v.umruestenAb };
     })(),
     /* V6: Was am Sternendock bereitliegt, und die Dominanz. `dominiert` ist bewusst ABGELEITET und
        kein neuer Zustand: Wer die Endstufe haelt, dominiert das System - sichtbar fuer alle. In
@@ -16401,6 +16422,22 @@ app.post('/api/vorposten/reparieren', authMiddleware, async (req, res) => {
      dann das Lager. Ein unversehrter Kern, der als „steht unter Beschuss" gemeldet wird, schickte
      den Besitzer zum Warten auf etwas, das er gar nicht braucht - jede der drei Auskuenfte nennt
      ihren eigenen Grund und traegt ihre eigene Marke (Lektion 7). */
+  /* DIE ZWEI BELEGUNGEN ZUERST (15.09.2026). Sie stehen VOR dem Kernzustand, und das ist Absicht:
+     Wer eine Station abbaut, dem ist mit „der Kern ist unversehrt" nicht geholfen - die Station
+     geht weg, das ist die Auskunft, die er braucht. Die drei Ablehnungen darunter behalten ihre
+     Reihenfolge und ihre Begruendung unveraendert.
+     Jede traegt ihre eigene Marke, damit das Spiel den Grund benennen kann statt nur „ging nicht"
+     (Lektion 7) - und dieselben Gruende stehen schon in der Vorschau, sodass der Knopf gar nicht
+     erst bedienbar ist. */
+  if (vorpostenAbbauLaeuft(doc)) {
+    return res.status(400).json({ error: 'Dieser Vorposten wird abgebaut - was du jetzt in den Kern steckst, geht mit ihm verloren.', abbau: true });
+  }
+  const umbauR = vorpostenUmruestenLaeuft(doc);
+  if (umbauR) {
+    return res.status(400).json({ error: 'Diese Station wird gerade umgerüstet - noch ' +
+      Math.ceil((umbauR.ab - jetzt) / 60000) + ' Minuten. Mit der neuen Ausrichtung kann sich die Kernobergrenze ändern; was darüber geheilt würde, wäre verbrannt.',
+      umruestung: true, umruestenAb: umbauR.ab, umruestenZiel: umbauR.ziel });
+  }
   if (!(v.fehlend > 0)) return res.status(400).json({ error: 'Der Kern dieser Station ist unversehrt.', voll: true });
   if (v.gesperrt) {
     return res.status(403).json({ error: 'Diese Station steht noch unter Beschuss - reparieren lässt sie sich in ' +

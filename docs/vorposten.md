@@ -12,6 +12,19 @@ Konzept-Empfehlung (i): Der Flugzeit-Bonus wirkt im Frontend nur auf Nicht-PvP-M
 das Reaktionsfenster eines Verteidigers nicht verschiebt und keine Backend-Parität für Flugzeiten
 entsteht. Wer das ändern will, ändert eine Sascha-Entscheidung.
 
+> **Geändert am 15.09.2026 — von Sascha selbst** („sprungtore sollen boni nicht nur auf pve
+> missionen geben"). Der Flugzeit-Bonus wirkt seit Frontend-v8.737.0 auf **jede** Mission mit einem
+> Zielsystem, Angriffe eingeschlossen; der Faktor steht dort in `missionDurationFor` neben den
+> Ortsboni von Allianzbasis, Sektor und Wurmloch. **Für dieses Repo ändert sich nichts an der
+> Mechanik**: Der Server liefert weiterhin nur `flug` und `flugDeckel` (0.20 / 0.75 beim
+> Sprungtor), und es entsteht weiterhin keine Backend-Parität für Flugzeiten. Angepasst sind nur
+> zwei Beschreibungstexte, die als `projektDefs`/`modulDefs` ins Spiel reisen: das Projekt
+> **Sprungtor** und das Modul **Sprungrechner** — beide nannten die alte Regel und versprachen dem
+> Spieler damit weniger, als das Spiel tut.
+>
+> Der damalige Grund („das Reaktionsfenster eines Verteidigers") trägt nicht mehr: `projekte` geht
+> in `vorpostenFuerClient` an **jeden** Client, das fertige Tor steht für jeden auf der Karte.
+
 ## Wo er wohnt, und warum der Server so viel selbst führt
 
 **Ein Vorposten je System, `db.shared['vorposten:<sysId>']`.** Die generische Storage-Route schreibt

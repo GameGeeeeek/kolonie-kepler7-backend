@@ -15049,7 +15049,7 @@ const VP_MODUL_DEFS = [
   { key: 'kernpanzer',   name: 'Kernpanzerung',    icon: 'ti-shield',              wirkung: 'kern',        basis: 0.08, desc: 'Verstärkt den Kern der Station: mehr Lebenspunkte, bevor sie fällt.' },
   { key: 'geschuetz',    name: 'Geschützbank',     icon: 'ti-sword',               wirkung: 'verteidigung', basis: 0.10, desc: 'Zusätzliche Geschütze: die Station wehrt sich stärker, unabhängig von der Garnison.' },
   { key: 'hangar',       name: 'Hangarerweiterung',icon: 'ti-rocket',              wirkung: 'garnison',     basis: 0.12, desc: 'Mehr Liegeplätze: die Garnison fasst mehr Schiffe.' },
-  { key: 'sprungrechner',name: 'Sprungrechner',    icon: 'ti-atom-2',              wirkung: 'flug',         basis: 0.15, desc: 'Rechnet Sprungbahnen vor: eigene Nicht-PvP-Missionen hierher fliegen kürzer.' },
+  { key: 'sprungrechner',name: 'Sprungrechner',    icon: 'ti-atom-2',              wirkung: 'flug',         basis: 0.15, desc: 'Rechnet Sprungbahnen vor: eigene Missionen hierher fliegen kürzer - Angriffe eingeschlossen.' },
   { key: 'raffinerie',   name: 'Umlaufraffinerie', icon: 'ti-building-factory-2',  wirkung: 'prod',         basis: 0.15, desc: 'Verarbeitet im Orbit: erhöht den Produktionsbonus dieses Vorpostens.' },
   { key: 'horchposten',  name: 'Horchposten',      icon: 'ti-antenna-bars-5',      wirkung: 'scan',         basis: 1,    desc: 'Lauscht weiter ins System: erhöht die Aufklärungsstufe um eine Stufe.' }
 ];

@@ -15180,7 +15180,7 @@ const VP_PROJEKT_DEFS = [
     kosten: { erz: 7000000, kristalle: 5000000, deuterium: 3200000, nanolegierungen: 4000, quantenchips: 2000, metamaterial: 600, singularitaetskern: 60 } },
   { key: 'sprungtor', name: 'Sprungtor', icon: 'ti-atom-2', zweig: null, stufeAb: 7,
     dauerMs: 24 * 3600 * 1000, wirkung: { flug: 0.20, flugDeckel: 0.75 },
-    desc: 'Ein durchgehend offenes Tor im Orbit: eigene Nicht-PvP-Missionen hierher fliegen bis zu drei Viertel kuerzer statt hoechstens der Haelfte.',
+    desc: 'Ein durchgehend offenes Tor im Orbit: eigene Missionen hierher fliegen bis zu drei Viertel kuerzer statt hoechstens der Haelfte - Angriffe eingeschlossen.',
     kosten: { erz: 6000000, kristalle: 4500000, deuterium: 3000000, nanolegierungen: 3500, quantenchips: 1800, metamaterial: 500, singularitaetskern: 40 } }
 ];
 const VP_FLUG_DECKEL = 0.5;   // ohne Sprungtor; Kopie im Frontend (vorpostenFlugMult)

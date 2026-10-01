@@ -22,9 +22,10 @@ Client-Ziehung wäre in fünf Sekunden gefälscht — und ein Boss-Set-Teil ist 
 Herkunfts-Schloss aus jedem regulären Fundtopf heraushält.
 
 **Der Wurf reist auf einer VORHANDENEN Belohnung mit** (`bossset` als Feld an
-`pushPendingReward`), nicht als eigener Eintrag. Der Grund ist gemessen: Die Warteschlange hält
-`list.slice(-20)`, und der Client holt je Start höchstens zehn. Ein zweiter Eintrag je Fall
-verdrängte im Grenzfall einen Hort — also ausgerechnet die größere Belohnung.
+`pushPendingReward`), nicht als eigener Eintrag. Der damalige Grund war gemessen: Der frühere
+20er-Deckel der Warteschlange verdrängte durch einen zweiten Eintrag je Fall im Grenzfall einen
+Hort — also ausgerechnet die größere Belohnung. Seit 01.10.2026 bleiben alle offenen Gaben
+erhalten; die gemeinsame Auslieferung von Grundbeute und Boss-Set-Teil bleibt unverändert.
 
 ### Die Kalibrierung — und der Kommentar, der zuerst das Gegenteil behauptete
 

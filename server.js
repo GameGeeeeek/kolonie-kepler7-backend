@@ -5590,7 +5590,14 @@ app.get('/api/pending-rewards', authMiddleware, (req, res) => {
 app.post('/api/pending-rewards/claim', authMiddleware, async (req, res) => {
   const list = (db.private[req.userId] && db.private[req.userId].__pendingRewards) || [];
   if (!list.length) return res.json({ reward: null });
-  const reward = list.shift();
+  // Backend wird zuerst ausgeliefert. Alte Clients buchen bei Stimmen nur die flachen Gaben und
+  // wuerden Schiffe/Fragmente nach der sofortigen Entfernung unwiederbringlich verlieren. Neue
+  // Stimmenpakete bleiben bis zu einem faehigen Client im Fach, blockieren aber andere Gaben
+  // nicht: Wir holen den aeltesten fuer diesen Client kompatiblen Eintrag ab.
+  const kannStimmenpaket = req.body && req.body.stimmePaketVersion === 1;
+  const index = list.findIndex(r => kannStimmenpaket || r.type !== 'verzeichnis-stimme' || !(r.schiffe || r.fragmente));
+  if (index < 0) return res.json({ reward: null, updateRequired: true });
+  const [reward] = list.splice(index, 1);
   db.private[req.userId].__pendingRewards = list;
   await saveDb();
   res.json({ reward });
@@ -7249,7 +7256,9 @@ function pushPendingReward(userId, reward) {
   if (reward.type === 'galaxie-ziel' && list.some(r => r.type === 'galaxie-ziel' && r.woche === reward.woche)) return;
   reward.id = crypto.randomUUID();
   list.push(reward);
-  db.private[userId].__pendingRewards = list.slice(-20);
+  // Offene Gaben sind noch nicht gutgeschriebenes Eigentum, kein Ereignisprotokoll. Auch bei
+  // laengerer Abwesenheit/Client-Update darf eine neue Gabe keine aeltere still verdraengen.
+  db.private[userId].__pendingRewards = list;
 }
 function resolveWeeklyLeagueServer() {
   const g = loadOrInitGalaxy();
@@ -9030,8 +9039,9 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
   // Je SCHLAG, nicht je Kill - zwei Gruende, beide gemessen. (a) Der letzte Schlag ist Zufall; ihn
   // allein zu belohnen ist genau die Kritik, die beim Hort der Festung zum anteiligen Modell
   // gefuehrt hat. (b) Der `resolve`-Weg erreicht bauartbedingt nur den Anfragenden - "an alle
-  // Beitragenden" braeuchte die Warteschlange, und die haelt nur 20 Eintraege (`slice(-20)`), ein
-  // zweiter Eintrag je Fall verdraengte dort im Grenzfall einen Hort.
+  // Beitragenden" braeuchte die Warteschlange. Deren damaliger 20er-Deckel haette im Grenzfall
+  // einen Hort verdraengt. Seit 01.10.2026 bleiben offene Gaben erhalten; das etablierte
+  // Belohnungsmodell je Schlag bleibt davon unberuehrt.
   //
   // `contributions[uid]` ist ein OBJEKT { name, dmg } - der erste Entwurf las `Number(b2)` und
   // bekam damit NaN, also Summe 0 und Anteil IMMER 0: der Anteilsfaktor waere still auf seinem
@@ -16605,8 +16615,8 @@ app.post('/api/vorposten/angriff', authMiddleware, async (req, res) => {
 //      OHNE Belohnung mit Grund, damit die fremde Maschine nicht wiederholt (ein 4xx koennte sie dazu
 //      bringen). Fuer "unbekannt" und "kein Spielstand" gilt dasselbe.
 //   3. Die Belohnung geht ueber pushPendingReward mit EIGENEM Typ 'verzeichnis-stimme'; das Spiel
-//      hat den Zweig dazu (claimPendingRewards). Ihre Hoehe kommt aus STIMME_BELOHNUNG_KREDITE
-//      (Vorgabe 25) und laeuft durch bonuscodeGabenPruefen - dieselben Deckel wie bei Bonuscodes.
+//      hat den Zweig dazu (claimPendingRewards). Das feste Paket und seine Zufallsgrenze stehen
+//      in stimmeBelohnungVorschau; gewuerfelt wird ausschliesslich beim erfolgreichen Rueckruf.
 //
 // Der Betreiber kann das Ganze per Notaus `stimme` abschalten (db.notAus, ohne Deploy).
 // Waechter: tests/test_stimme_rueckruf_http.js. Doku: docs/verzeichnis-stimme.md.
@@ -16615,10 +16625,22 @@ const STIMME_SPERRE_MS = 6 * 3600 * 1000;
 // Der Rueckruf kommt Sekunden NACH der Stimme; wer punktgenau alle sechs Stunden abstimmt, soll nicht
 // an diesen Sekunden scheitern. Die Sperre gilt deshalb "sechs Stunden minus eine Viertelstunde".
 const STIMME_SPERRE_TOLERANZ_MS = 15 * 60 * 1000;
-function stimmeBelohnung() {
-  const n = Math.floor(Number(process.env.STIMME_BELOHNUNG_KREDITE || 25));
-  const geprueft = bonuscodeGabenPruefen({ credits: n });
-  return geprueft.gaben || { credits: 25 };
+function stimmeBelohnungVorschau() {
+  // Festes Stimmenpaket (01.10.2026). Die alte ENV STIMME_BELOHNUNG_KREDITE wird bewusst nicht
+  // mehr gelesen: Ein liegen gebliebenes "25" darf die neue Zusage von 2000 nicht aufheben.
+  // Je Aufruf frische Objekte; weder Vorschau noch Auszahlung teilen veraenderbare Nutzlasten.
+  return { credits: 2000, schiffe: { schlachtschiff: 10 }, fragmente: 4,
+    zufallsRohstoff: { arten: ['erz', 'kristalle', 'deuterium'], max: 20000 } };
+}
+function stimmeBelohnung(zufall = Math.random) {
+  const gaben = stimmeBelohnungVorschau();
+  const { arten, max } = gaben.zufallsRohstoff;
+  delete gaben.zufallsRohstoff;
+  // Genau EINE gewoehnliche Rohstoffart und eine ganze Menge von 1 bis einschliesslich 20000.
+  // Der Wurf steht fertig im Belohnungsfach; /me, erneutes Lesen und Claim wuerfeln nicht neu.
+  const art = arten[Math.floor(zufall() * arten.length)];
+  gaben[art] = 1 + Math.floor(zufall() * max);
+  return gaben;
 }
 function stimmeAktiv() { return !!STIMME_RUECKRUF_KEY && !notAusGesetzt('stimme'); }
 // Wann die naechste belohnte Stimme moeglich ist - fuer /api/me, damit das Spiel seine Erinnerung
@@ -16631,7 +16653,7 @@ function stimmeNaechsteAb(user) {
   return Math.max(letzte, erstellt) + STIMME_SPERRE_MS;
 }
 function stimmeInfoFuer(user) {
-  return { belohnung: stimmeAktiv() ? stimmeBelohnung() : null, naechsteAb: stimmeNaechsteAb(user) };
+  return { belohnung: stimmeAktiv() ? stimmeBelohnungVorschau() : null, naechsteAb: stimmeNaechsteAb(user) };
 }
 // Die Bremse zaehlt nur FEHLVERSUCHE je Herkunft (Codex-Review #265, 11.09.2026): Alle echten
 // Rueckrufe kommen von der EINEN Adresse des Verzeichnisses. Ein Zaehler ueber alle Aufrufe
@@ -18236,8 +18258,8 @@ app.get('/api/admin/aktivitaet', authMiddleware, (req, res) => {
    Empfaenger sind alle Konten MIT Spielstand: Ein Konto ohne hat nie gespielt, und
    pushPendingReward legte ihm sonst ein db.private-Objekt an, das nie jemand liest. Gesperrte
    Konten bleiben aussen vor. `nurAktiveTage` (0 = alle) grenzt auf Konten ein, die sich binnen
-   N Tagen angemeldet haben: Das Belohnungsfach haelt zwanzig Eintraege, ein Geschenk an ein seit
-   Monaten stilles Konto verdraengte dort im Grenzfall etwas Wertvolleres.
+   N Tagen angemeldet haben; so laesst sich eine Aktion gezielt an aktive Spieler richten. Offene
+   Gaben bleiben unabhaengig von der Laenge des Belohnungsfachs erhalten.
    Die Belohnung traegt EINEN EIGENEN type ('geschenk'), sonst faellt sie im Client in den
    Rueckfall-Zweig und meldet woertlich "+500 Kredite fuer deinen Bug-Report" (dieselbe Lehre
    wie beim Bonuscode). Die Gaben liegen flach im Eintrag wie dort - der Frontend-Zweig kann

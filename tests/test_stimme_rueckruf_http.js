@@ -22,10 +22,20 @@
 //
 // Gegenprobe beidseitig: am alten server.js (ohne Route) antwortet 1a mit 404 statt 503 - rot.
 // Abschnitt 9: am Stand, der nur GET kannte, antworten 9a/9c/9d/9e mit 404 - rot.
+// Stimmenpaket (01.10.2026), gemessene Gegenproben mit denselben 44 Pruefnamen:
+//   * im gestarteten Server credits:2000 -> credits:25: genau 3d, 6a, 10a rot;
+//   * im gestarteten Server Claim-Faehigkeitsschutz entfernt: genau 3f, 4b, 4d, 5b rot.
+// Unveraenderter Server: alle 44 gruen. Die Grenztests 0 verwenden die Originalfunktionen mit
+// injiziertem Zufall; HTTP prueft den kompletten Callback-/Fach-/Claim-Weg mit temporaerer DB.
+// Folgekorrektur Belohnungsfach: jetzt 50 Pruefnamen, in allen drei Laeufen identisch verglichen.
+//   * pushPendingReward wieder mit list.slice(-20): genau 11b, 11c, 11d, 11e rot;
+//   * inkompatibles erstes Paket blockiert wieder die ganze Liste: genau 11c, 11d, 11f rot.
+// Unveraenderter Server: alle 50 gruen. Abschnitt 11 nutzt die echten Geschenk-/Claim-Endpunkte.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawn } = require('child_process');
+const vm = require('vm');
 
 const WURZEL = path.resolve(__dirname, '..');
 // Gemessen frei in BEIDEN Repos am 11.09.2026 (grep -hoE "\b3[12][0-9][0-9]\b" tests/*.js ../kolonie-kepler7/tests/*.js | sort -un).
@@ -135,8 +145,41 @@ const rueckruf = (query) => s.j('/stimme/rueckruf?' + new URLSearchParams(query)
 const rueckrufPost = (query, body, typ) => s.j('/stimme/rueckruf' + (query ? '?' + new URLSearchParams(query).toString() : ''),
   { method: 'POST', headers: typ ? { 'Content-Type': typ } : {}, body });
 const fach = async (tok) => (await s.j('/pending-rewards', { headers: kopf(tok) })).body.rewards || [];
+const rohstoffArten = ['erz', 'kristalle', 'deuterium'];
+const erwarteteVorschau = { credits: 2000, schiffe: { schlachtschiff: 10 }, fragmente: 4,
+  zufallsRohstoff: { arten: rohstoffArten, max: 20000 } };
+const gleich = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+function istStimmenpaket(r) {
+  if (!r || r.credits !== 2000 || r.fragmente !== 4 || !gleich(r.schiffe, { schlachtschiff: 10 })) return false;
+  const rohstoffe = rohstoffArten.filter(k => Object.prototype.hasOwnProperty.call(r, k));
+  return rohstoffe.length === 1 && Number.isInteger(r[rohstoffe[0]]) && r[rohstoffe[0]] >= 1 && r[rohstoffe[0]] <= 20000 &&
+    !r.zufallsRohstoff && Object.keys(r).every(k => ['type', 'zeit', 'id', 'credits', 'schiffe', 'fragmente', ...rohstoffArten].includes(k));
+}
+function pruefeWuerfelGrenzen() {
+  const code = fs.readFileSync(path.join(WURZEL, 'server.js'), 'utf8');
+  const kontext = vm.createContext({ Math: Object.assign(Object.create(Math), {
+    random: () => { throw new Error('Eine Vorschau darf nicht wuerfeln.'); }
+  }) });
+  for (const name of ['stimmeBelohnungVorschau', 'stimmeBelohnung']) {
+    const treffer = code.match(new RegExp('^function ' + name + '\\([^]*?^\\}', 'm'));
+    if (!treffer) throw new Error('Produktionsfunktion fehlt: ' + name);
+    vm.runInContext(treffer[0], kontext);
+  }
+  const v1 = kontext.stimmeBelohnungVorschau(), v2 = kontext.stimmeBelohnungVorschau();
+  check('0a: Vorschau ist das feste Paket mit Obergrenze und ohne Zufallsaufruf', gleich(v1, erwarteteVorschau), v1);
+  v1.schiffe.schlachtschiff = 999;
+  v1.zufallsRohstoff.arten.pop();
+  check('0b: Vorschauen teilen keine veraenderbaren Objekte', gleich(v2, erwarteteVorschau), v2);
+  const klein = kontext.stimmeBelohnung(() => 0);
+  check('0c: unterer Wuerfelrand -> genau 1 Erz und das volle feste Paket', istStimmenpaket(klein) && klein.erz === 1, klein);
+  const gross = kontext.stimmeBelohnung(() => 1 - Number.EPSILON);
+  check('0d: oberer Wuerfelrand -> genau 20000 Deuterium und das volle feste Paket', istStimmenpaket(gross) && gross.deuterium === 20000, gross);
+  const mitte = kontext.stimmeBelohnung(() => 0.5);
+  check('0e: mittlerer Wurf -> genau 10001 Kristalle, keine zweite Rohstoffart', istStimmenpaket(mitte) && mitte.kristalle === 10001, mitte);
+}
 
 (async () => {
+  pruefeWuerfelGrenzen();
   fs.writeFileSync(dbPfad, JSON.stringify(grunddb(), null, 1));
 
   // ---------------------------------------------------------------- 1. Ohne Schluessel: fail-closed
@@ -172,8 +215,13 @@ const fach = async (tok) => (await s.j('/pending-rewards', { headers: kopf(tok) 
   check('3c: bekannter Spieler (Gross-/Kleinschreibung egal) -> belohnt',
     r.status === 200 && r.body && r.body.belohnt === true && typeof r.body.naechsteAb === 'number', r.body);
   let liste = await fach(tokA);
-  check('3d: genau EINE Belohnung im Fach, eigener Typ, 25 Kredite',
-    liste.length === 1 && liste[0].type === 'verzeichnis-stimme' && liste[0].credits === 25, liste);
+  check('3d: genau EINE vollstaendige Stimmenbelohnung, trotz alter Kredit-ENV 25',
+    liste.length === 1 && liste[0].type === 'verzeichnis-stimme' && istStimmenpaket(liste[0]), liste);
+  const ersterWurf = JSON.stringify(liste[0]);
+  const alteAbholung = await s.j('/pending-rewards/claim', { method: 'POST', headers: kopf(tokA) });
+  check('3f: alter Client darf das neue Paket nicht aus dem Fach entfernen',
+    alteAbholung.status === 200 && alteAbholung.body.reward === null && alteAbholung.body.updateRequired === true &&
+    gleich(await fach(tokA), liste), alteAbholung.body);
   r = await rueckruf({ key: SCHLUESSEL, username: 'Anna' });
   check('3e: "username" ist ein zugelassener Zweitname fuer den Spieler-Parameter (Sperre greift, kein 4xx)',
     r.status === 200 && r.body && r.body.belohnt === false && r.body.grund === 'sperre', r.body);
@@ -184,6 +232,7 @@ const fach = async (tok) => (await s.j('/pending-rewards', { headers: kopf(tok) 
     r.status === 200 && r.body && r.body.belohnt === false && r.body.grund === 'sperre' && r.body.naechsteAb > Date.now(), r.body);
   liste = await fach(tokA);
   check('4b: das Fach hat weiterhin genau eine Belohnung', liste.length === 1, liste.length);
+  check('4d: gesperrter Rueckruf und wiederholtes Lesen veraendern den gespeicherten Wurf nicht', JSON.stringify(liste[0]) === ersterWurf, liste[0]);
   await stoppeServer();
   let d = liesDb();
   check('4c: die Sperre liegt am KONTO (user.stimmeBelohntZuletzt), nicht im Spielstand',
@@ -199,7 +248,12 @@ const fach = async (tok) => (await s.j('/pending-rewards', { headers: kopf(tok) 
 
   // ---------------------------------------------------------------- 6. Was der Spieler vorher sieht
   const me = await s.j('/me', { headers: kopf(tokA) });
-  check('6a: /api/me nennt die Belohnung (25 Kredite) ...', me.body && me.body.stimme && me.body.stimme.belohnung && me.body.stimme.belohnung.credits === 25, me.body && me.body.stimme);
+  check('6a: /api/me nennt das feste Paket mit Rohstoff-Obergrenze, keinen Wurf',
+    me.body && me.body.stimme && gleich(me.body.stimme.belohnung, erwarteteVorschau), me.body && me.body.stimme);
+  const vorVorschau = await fach(tokA);
+  const meNochmal = await s.j('/me', { headers: kopf(tokA) });
+  check('6e: wiederholtes /api/me bleibt identisch und wuerfelt das Fach nicht neu',
+    gleich(meNochmal.body.stimme, me.body.stimme) && gleich(await fach(tokA), vorVorschau), meNochmal.body.stimme);
   check('6b: ... und naechsteAb rund sechs Stunden nach der letzten Belohnung',
     me.body && me.body.stimme && Math.abs(me.body.stimme.naechsteAb - (Date.now() + SECHS_STUNDEN)) < 120000, me.body && me.body.stimme && me.body.stimme.naechsteAb);
   // Ein frisches Konto sieht die erste Erinnerung erst sechs Stunden nach der Registrierung
@@ -262,6 +316,50 @@ const fach = async (tok) => (await s.j('/pending-rewards', { headers: kopf(tok) 
   r = await rueckrufPost(null, new URLSearchParams({ key: 'z'.repeat(SCHLUESSEL.length), spieler: 'Anna' }).toString(), 'application/x-www-form-urlencoded');
   check('9e: falscher Schluessel per POST -> 401 mit Laenge, wie bei GET',
     r.status === 401 && new RegExp(SCHLUESSEL.length + ' Zeichen').test(String(r.body && r.body.error)), r.body);
+
+  // ---------------------------------------------------------------- 10. Abholung ohne neuen Wurf, kompatibler Rollout
+  const vorAbholung = await fach(tokA);
+  const abholung = await s.j('/pending-rewards/claim', {
+    method: 'POST', headers: kopf(tokA), body: JSON.stringify({ stimmePaketVersion: 1 })
+  });
+  check('10a: neuer Client erhaelt exakt das gelagerte Stimmenpaket, ohne neuen Wurf',
+    abholung.status === 200 && istStimmenpaket(abholung.body.reward) && gleich(abholung.body.reward, vorAbholung[0]), abholung.body);
+  check('10b: erfolgreiche Abholung entfernt genau dieses eine Paket', gleich(await fach(tokA), vorAbholung.slice(1)));
+  await aendereDb(db => {
+    db.private[ANNA].__pendingRewards = [{ type: 'verzeichnis-stimme', credits: 25, id: 'alt-vor-paket' }];
+  }, { STIMME_RUECKRUF_KEY: SCHLUESSEL, STIMME_BELOHNUNG_KREDITE: '25' });
+  const alt = await s.j('/pending-rewards/claim', { method: 'POST', headers: kopf(tokA) });
+  check('10c: alte reine Kredit-Belohnung bleibt ohne neue Client-Faehigkeit abholbar',
+    alt.status === 200 && alt.body.reward && alt.body.reward.credits === 25 && alt.body.reward.id === 'alt-vor-paket' && (await fach(tokA)).length === 0, alt.body);
+
+  // ---------------------------------------------------------------- 11. Wartendes Paket darf weder verloren gehen noch andere Gaben blockieren
+  await aendereDb(db => { db.users.anna.stimmeBelohntZuletzt = 0; }, { STIMME_RUECKRUF_KEY: SCHLUESSEL });
+  const neueStimme = await rueckruf({ key: SCHLUESSEL, spieler: 'Anna' });
+  const wartendesPaket = (await fach(tokA))[0];
+  const geschenke = [];
+  for (let i = 1; i <= 20; i++) {
+    geschenke.push(await s.j('/admin/geschenk-konto', { method: 'POST', headers: kopf(tokAdmin),
+      body: JSON.stringify({ targetUsername: 'anna', gaben: { credits: i }, grund: 'Stimmenfach-Test ' + i }) }));
+  }
+  check('11a: echte Rueckruf- und Geschenk-Endpunkte stellen ein Paket plus 20 weitere Gaben aus',
+    neueStimme.status === 200 && neueStimme.body.belohnt === true && geschenke.every(g => g.status === 200));
+  const grossesFach = await fach(tokA);
+  check('11b: alle 21 offenen Gaben bleiben unveraendert erhalten, insbesondere der erste Stimmenwurf',
+    grossesFach.length === 21 && gleich(grossesFach[0], wartendesPaket) &&
+    grossesFach.slice(1).every((g, i) => g.type === 'geschenk' && g.credits === i + 1 && g.text === 'Stimmenfach-Test ' + (i + 1)),
+    { anzahl: grossesFach.length, erstes: grossesFach[0] });
+  const nebenGeschenk = await s.j('/pending-rewards/claim', { method: 'POST', headers: kopf(tokA) });
+  check('11c: alter Client holt das erste kompatible Geschenk hinter dem geschuetzten Stimmenpaket ab',
+    nebenGeschenk.status === 200 && nebenGeschenk.body.reward && nebenGeschenk.body.reward.type === 'geschenk' &&
+    nebenGeschenk.body.reward.credits === 1 && gleich(nebenGeschenk.body.reward, grossesFach[1]), nebenGeschenk.body);
+  check('11d: nach altem Claim bleibt das Stimmenpaket samt uebrigen Gaben identisch im Fach',
+    gleich(await fach(tokA), [wartendesPaket, ...grossesFach.slice(2)]));
+  const paketClaim = await s.j('/pending-rewards/claim', { method: 'POST', headers: kopf(tokA),
+    body: JSON.stringify({ stimmePaketVersion: 1 }) });
+  check('11e: neuer Client erhaelt nach 20 spaeteren Gaben immer noch exakt den urspruenglichen Stimmenwurf',
+    paketClaim.status === 200 && istStimmenpaket(paketClaim.body.reward) && gleich(paketClaim.body.reward, wartendesPaket), paketClaim.body);
+  check('11f: beide Claims entfernen nur ihre Gaben, alle anderen bleiben erhalten',
+    gleich(await fach(tokA), grossesFach.slice(2)));
 
   await stoppeServer();
   console.log(fail ? '\nFEHLGESCHLAGEN' : '\nAlles gruen.');

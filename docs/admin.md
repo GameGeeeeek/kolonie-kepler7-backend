@@ -548,8 +548,9 @@ beim Bonuscode, damit der Frontend-Zweig dieselben Felder lesen kann. Geprüft �
 **`bonuscodeGabenPruefen`**, also `BONUSCODE_GABEN`: Ein Tippfehler (1000000 statt 1000) wäre hier
 ein Wirtschaftsereignis für jedes Konto auf einmal, und ein zu großer Wert risse beim Beschenkten
 `SAVE_SANITY_LIMITS`. `nurAktiveTage` (0 = alle) grenzt auf Konten ein, die sich binnen N Tagen
-angemeldet haben – das Belohnungsfach hält zwanzig Einträge, ein Geschenk an ein seit Monaten
-stilles Konto verdrängte dort im Grenzfall etwas Wertvolleres. **Ein nie angemeldetes Konto ist
+angemeldet haben, um Aktionen gezielt an aktive Spieler zu richten. Seit 01.10.2026 werden offene
+Belohnungen unabhängig von ihrer Anzahl erhalten; der frühere 20er-Deckel entfällt.
+**Ein nie angemeldetes Konto ist
 dabei nicht aktiv** (5f/5f2: carl nach 40 Tagen und dora ohne jede Anmeldung fallen heraus –
 die erste Fassung der Prüfung hatte dora vergessen und war rot). Der Verlauf liegt in
 `db.geschenke` (letzte 20), `GET /api/admin/geschenke` nennt ihn samt Deckel-Tabelle.

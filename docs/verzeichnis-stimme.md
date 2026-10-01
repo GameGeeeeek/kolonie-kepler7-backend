@@ -20,9 +20,10 @@ pay players for voting".
    Die Route nimmt GET und POST, liest die Parameter erst aus der Adresse, dann aus dem Body
    (Formular oder JSON), und den Spieler unter `spieler`, `username` oder `user` – wie das
    Verzeichnis den Parameter nennt, steht in dessen Konto und ist dort abzulesen, nicht zu raten.
-4. Der Server prüft Schlüssel, Konto und Sperre, legt `{ type:'verzeichnis-stimme', credits:25 }`
-   über `pushPendingReward` ins Belohnungsfach; das Spiel holt es im Takt ab, bucht die Kredite und
-   schreibt einen Bericht „Danke für deine Stimme".
+4. Der Server prüft Schlüssel, Konto und Sperre und legt das Stimmenpaket über `pushPendingReward`
+   ins Belohnungsfach: **2.000 Kredite, 10 Schlachtschiffe, 4 Modulfragmente und insgesamt 1–20.000
+   Einheiten genau einer zufällig gewählten Rohstoffart (Erz, Kristalle oder Deuterium)**.
+   Das Spiel holt es im Takt ab, bucht das Paket und schreibt einen Bericht „Danke für deine Stimme".
 
 ## Die Regeln der Route
 
@@ -41,11 +42,16 @@ pay players for voting".
   einen Adresse des Verzeichnisses, und ein Zähler über alle Aufrufe hätte ab dem 61. Voter in einer
   Viertelstunde die Belohnung verweigert (Codex-Review am PR, 11.09.2026). Was ein einzelner
   Aufruf bewirken kann, begrenzt die Sperre je Konto.
-- **Höhe:** `STIMME_BELOHNUNG_KREDITE` (Vorgabe 25), geprüft durch `bonuscodeGabenPruefen` – dieselben
-  Deckel wie bei Bonuscodes. Wer eine andere Gabe will, erweitert `stimmeBelohnung()`.
+- **Höhe:** das feste Paket und die Rohstoffgrenze stehen in `stimmeBelohnungVorschau()`. Die frühere
+  ENV `STIMME_BELOHNUNG_KREDITE` wird seit 01.10.2026 bewusst nicht mehr ausgewertet: Ein altes `25`
+  im Container darf die neue feste Zusage von 2.000 Krediten nicht überschreiben. Die Nutzlast ist
+  serverdefiniert; `bonuscodeGabenPruefen` bleibt unverändert für Bonuscodes/Geschenke und wird hier
+  nicht verwendet, weil seine flache Gabenliste keine Schiffe/Fragmente unterstützt.
 - **Notaus `stimme`** (`POST /api/admin/schalter`): Rückruf antwortet 200 ohne Belohnung, `/api/me`
   liefert `belohnung: null` – das Fenster im Spiel verspricht dann keine Kredite mehr.
-- **`/api/me` → `stimme`:** `{ belohnung: {credits} | null, naechsteAb }`. `naechsteAb` ist
+- **`/api/me` → `stimme`:** `{ belohnung: {credits:2000, schiffe:{schlachtschiff:10}, fragmente:4,
+  zufallsRohstoff:{arten:['erz','kristalle','deuterium'], max:20000}} | null, naechsteAb }`.
+  Die Vorschau würfelt nie. `naechsteAb` ist
   `max(stimmeBelohntZuletzt, createdAt) + 6 h` – ein frisches Konto sieht die erste Erinnerung sechs
   Stunden nach der Registrierung („nach 6 Stunden ein Popup"). Der Rückruf selbst hängt **nicht** an
   `createdAt`: Wer früher abstimmt, wird belohnt.
@@ -101,8 +107,32 @@ Aus `browsermmorpg.com/info_updates` und `/info_pricing`, ohne Anmeldung lesbar 
 
 ## Wächter
 
-`tests/test_stimme_rueckruf_http.js` (33 Prüfungen): fail-closed, Längenmeldung, unbekannt/ohne
+`tests/test_stimme_rueckruf_http.js` (50 Prüfungen): fail-closed, Längenmeldung, unbekannt/ohne
 Spielstand, Belohnung genau einmal je sechs Stunden, Sperre am Konto statt im Spielstand, `/api/me`
 und `/api/health`, Notaus, Bremse nur für Fehlversuche, **POST** mit Parametern in der Adresse, als
 Formular und als JSON (Abschnitt 9). Gegenproben: am alten `server.js` antwortet 1a mit 404 – rot;
 am Stand, der nur GET kannte, antworten 9a/9c/9d/9e mit 404 – rot.
+
+## Stimmenpaket und sichere Abholung (01.10.2026)
+
+- `stimmeBelohnung()` würfelt erst nach erfolgreicher Schlüssel-, Konto-, Notaus- und Sperrprüfung.
+  Ein Wurf wählt eine der drei Rohstoffarten gleichverteilt, der zweite eine ganze Menge von 1 bis
+  einschließlich 20.000. Es gibt weder Premium-Rohstoffe noch Forschungspunkte oder Items im Zufallspool.
+- Der gespeicherte Reward enthält `type:'verzeichnis-stimme'`, `credits:2000`,
+  `schiffe:{schlachtschiff:10}`, `fragmente:4` und genau eines der flachen Felder `erz`, `kristalle`
+  oder `deuterium`. `zufallsRohstoff` gehört nur zur Vorschau, nicht zur Auszahlung. Lesen, erneuter
+  Rückruf innerhalb der Sperre und Claim verändern den gespeicherten Wurf nicht.
+- **Backend-first-Rollout:** Der neue Client sendet beim Claim `{stimmePaketVersion:1}`. Ohne diese
+  Fähigkeit bleiben Stimmenpakete mit Schiffen/Fragmenten unverändert im Fach, und der Claim holt
+  die älteste kompatible Gabe ab. Andere Belohnungen werden also nicht blockiert. Nur wenn keine
+  kompatible Gabe wartet, lautet die Antwort `{reward:null,updateRequired:true}`. Alte Stimmen-Rewards,
+  die nur Kredite enthalten, bleiben ohne diese Fähigkeit abholbar. Der neue Client muss Vorschau,
+  Buchung und Bericht zusammen unterstützen.
+- **Kein Verlust durch Warteschlangenlänge:** `pushPendingReward` schneidet offene Gaben nicht mehr
+  auf die letzten 20 zurück. Die bestehenden Doppelsperren für Wochenliga, Saison und Galaxieziel
+  bleiben unverändert. Insbesondere darf ein beim alten Client wartendes Stimmenpaket nicht durch
+  spätere Gaben verdrängt werden: Noch nicht gebuchte Belohnungen sind kein kürzbares Protokoll.
+- Der Wächter prüft mit injiziertem Zufall die Grenzen 1/20.000 und alle drei Rohstoffarten; über
+  echte HTTP-Aufrufe das ganze Paket trotz alter ENV `25`, die unveränderte Vorschau, gespeicherte
+  Würfe, Sperre, Notaus und Abholung durch alte/neue Clients. Abschnitt 11 stellt über echte
+  Endpunkte ein Stimmenpaket plus 20 Geschenke aus und prüft Erhalt sowie kompatible Abholung.

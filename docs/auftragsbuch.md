@@ -54,9 +54,9 @@ Sternenstaub 5/8/12/20 und Modulfragmente 2/4/6/10; Stufe 20 den Titel `Chronist
 Beim ersten Kontakt in einem neuen Monat (Tat, GET oder POST) schließt `auftragsbuchVon(user)` das
 alte Buch: erreichte, nicht abgeholte Stufen werden eingereiht, danach wird neu angelegt. Idempotent,
 weil `abgeholt` am alten Buch vor dem Austausch fortgeschrieben wird. Wer im ganzen Monat nicht
-vorbeikommt, bekommt die Stufen beim nächsten Besuch – nichts verfällt. Grenze: Die Warteschlange
-hält 20 Einträge (`slice(-20)` in `pushPendingReward`); wer eine Saison mit allen 20 Stufen komplett
-liegen lässt, füllt sie damit ganz.
+vorbeikommt, bekommt die Stufen beim nächsten Besuch – nichts verfällt. Seit 01.10.2026 schneidet
+`pushPendingReward` offene Gaben nicht mehr auf 20 zurück. Auch alle 20 nachträglich eingereihten
+Saisonstufen bleiben zusammen mit vorher wartenden Belohnungen erhalten.
 
 ## Schalter
 

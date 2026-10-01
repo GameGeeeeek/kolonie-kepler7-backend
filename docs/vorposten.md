@@ -93,8 +93,10 @@ Festungs-Entscheidung. Beim Fall geht die Beute anteilig an ALLE Beitragenden ü
 mit eigenem `type:'vorposten'` (Kampfpunkte/XP/Credits je Stufe, klein und flach – nie aus der
 Produktion des Besitzers abgeleitet, Konzept §6). Der Besitzer bekommt `type:'vorposten-verlust'` mit
 der verlorenen Restgarnison. **Jeder Schlag davor steht als Kampfvermerk im Dokument**
-(`letzterKampf`, `kampfverlauf` bis 10), nicht in seiner Warteschlange: Die hält 20 Einträge und
-verdrängte sonst Wertvolleres (die Boss-Set-Lehre aus `docs/beute.md`). Der Frontend-Zweig für beide
+(`letzterKampf`, `kampfverlauf` bis 10), nicht in seiner Warteschlange. Der damalige 20er-Deckel
+der Warteschlange drohte sonst Wertvolleres zu verdrängen (die Boss-Set-Lehre aus `docs/beute.md`);
+seit 01.10.2026 bleiben offene Gaben erhalten, Kampfvermerke bleiben weiterhin im Dokument.
+Der Frontend-Zweig für beide
 Typen gehört zwingend zum Frontend-Auftrag (sonst der „Bug-Report"-Rückfall).
 
 **Aufgeben: keine Rückerstattung** (Konzept §9, Empfehlung a) – der Bau ist eine verbindliche Ortswahl,

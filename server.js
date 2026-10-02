@@ -183,6 +183,14 @@ function saveDb() {
   });
 }
 
+// GameGeeeeek private operations bridge v1
+let operationsAdminBridge = null;
+require('./operations-admin').installOperationsAdmin({
+  dbFile: DB_FILE, getDb: () => db, saveDb, opsHealth,
+  deployBackend: () => starteDeploy('kolonie-kepler7-backend', DEPLOY_TARGETS['kolonie-kepler7-backend'].command, DEPLOY_TARGETS['kolonie-kepler7-backend'].dir)
+}).then(server => { operationsAdminBridge = server; })
+  .catch(() => { console.error('[operations-admin] Private bridge unavailable.'); });
+
 const app = express();
 // WICHTIG hinter nginx (Reverse Proxy): ohne trust proxy würde req.ip für ALLE Spieler dieselbe
 // interne nginx-Adresse zeigen statt der echten Client-IP - ein IP-basierter Rate-Limiter würde dann
@@ -5491,7 +5499,7 @@ function gitKopfJetzt() {
 
 app.get('/api/health', (req, res) => res.json({
   ok: true,
-  ...opsHealth.snapshot({ announcement: db.ankuendigung, attacksPaused: notAusGesetzt('angriffe') }),
+  ...opsHealth.snapshot({ announcement: ankuendigungAktuell(), attacksPaused: notAusGesetzt('angriffe') }),
   contentVersion: LAUFENDER_COMMIT,
   users: Object.keys(db.users).length,
   commit: LAUFENDER_COMMIT,
@@ -11707,7 +11715,7 @@ function starteDeploy(repoName, command, dir) {
   try {
     for (const zeile of deployAufraeumen(repoName, dir)) console.warn('Deploy-Aufraeumen (' + repoName + '): ' + zeile);
   } catch (e) { console.error('Deploy-Aufraeumen (' + repoName + ') fehlgeschlagen:', e.message); }
-  exec(command, { timeout: DEPLOY_TIMEOUT_MS }, (err, stdout, stderr) => {
+  require('./operations-release-guard').exec(repoName, command, { timeout: DEPLOY_TIMEOUT_MS }, (err, stdout, stderr) => {
     deploySperreFreigeben(repoName);
     // Eine Zeitueberschreitung bekommt eine EIGENE Meldung: Sie bedeutet etwas anderes als ein
     // gescheiterter Befehl - der git-Prozess darunter kann weiterlaufen und muss von Hand geprueft
@@ -18593,10 +18601,13 @@ app.post('/api/admin/feedback/antwort', authMiddleware, async (req, res) => {
    mit schiefer Uhr den Countdown trotzdem richtig rechnet. */
 const ANKUENDIGUNG_TEXT_MAX = 200;
 function ankuendigungAktuell(jetzt) {
-  const a = db.ankuendigung;
-  if (!a || !a.ab) return null;
   const t = jetzt || Date.now();
-  if (t > a.ab + (a.dauerMinuten || 0) * 60000) return null;
+  // Preserve the owner's manual announcement and add the next dashboard window.
+  // Select the earliest non-expired advisory; neither source pauses gameplay.
+  const a = [db.ankuendigung, operationsAdminBridge && operationsAdminBridge.announcement(t)]
+    .filter(a => a && a.ab && t <= a.ab + (a.dauerMinuten || 0) * 60000)
+    .sort((a, b) => a.ab - b.ab)[0];
+  if (!a) return null;
   return { text: a.text || '', ab: a.ab, dauerMinuten: a.dauerMinuten || 0, gesetzt: a.gesetzt || 0, jetzt: t };
 }
 app.get('/api/ankuendigung', (req, res) => res.json({ ankuendigung: ankuendigungAktuell() }));

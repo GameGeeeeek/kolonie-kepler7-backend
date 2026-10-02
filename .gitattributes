@@ -1,0 +1,7 @@
+# Operations modules must match the private helper's exact file hashes.
+operations-admin.js text eol=lf
+operations-release-guard.js text eol=lf
+operations-release-engine.cjs text eol=lf
+tests/test_operations_*.mjs text eol=lf
+deploy/autodeploy.sh text eol=lf
+.github/workflows/operations.yml text eol=lf

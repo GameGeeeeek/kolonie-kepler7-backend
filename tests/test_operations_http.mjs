@@ -1,0 +1,48 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import http from 'node:http';
+import net from 'node:net';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
+import jwt from 'jsonwebtoken';
+
+test('private operations bridge changes live HTTP authorization, preserves fixture state and publishes advisory', {skip:process.platform==='win32',timeout:25000}, async t => {
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'kepler-ops-http-'));
+  const secret='fixture-only-kepler-test-signing-key';
+  const owner=randomUUID(),player=randomUUID(),legacy=randomUUID();
+  const accounts={gamegeeeeek:{userId:owner,username:'GameGeeeeek'},fixture:{userId:player,username:'FixturePlayer',activeSessionId:'fixture-active-id',tokenVersion:0},legacyfixture:{userId:legacy,username:'LegacyFixture',tokenVersion:0}};
+  fs.writeFileSync(path.join(directory,'db.json'),JSON.stringify({users:accounts,private:{[player]:{fixtureMarker:'keep-me'}},shared:{fixtureMarker:'keep-shared'}}),{mode:0o600});
+  fs.writeFileSync(path.join(directory,'jwt.txt'),secret,{mode:0o600});
+  const probe=net.createServer();probe.listen(0,'127.0.0.1');await once(probe,'listening');const port=probe.address().port;await new Promise(resolve=>probe.close(resolve));
+  const root=path.resolve(import.meta.dirname,'..');
+  const child=spawn(process.execPath,[path.join(root,'server.js')],{cwd:root,env:{PATH:process.env.PATH,DB_FILE:path.join(directory,'db.json'),SECRET_FILE:path.join(directory,'jwt.txt'),PORT:String(port),VAPID_PUBLIC_FILE:path.join(directory,'vapid-public.txt'),VAPID_PRIVATE_FILE:path.join(directory,'vapid-private.txt')},stdio:['ignore','ignore','ignore']});
+  t.after(async()=>{if(child.exitCode===null){child.kill('SIGTERM');await Promise.race([once(child,'exit'),new Promise(resolve=>setTimeout(resolve,4000))]);if(child.exitCode===null)child.kill('SIGKILL');}fs.rmSync(directory,{recursive:true,force:true});});
+  const base='http://127.0.0.1:'+port,socket=path.join(directory,'operations-admin.sock');
+  const bridge=value=>new Promise((resolve,reject)=>{const request=http.request({socketPath:socket,path:'/v1',method:'POST',headers:{'Content-Type':'application/json'}},response=>{let raw='';response.on('data',data=>raw+=data);response.on('end',()=>resolve({status:response.statusCode,value:JSON.parse(raw)}));});request.setTimeout(2000,()=>request.destroy());request.on('error',reject);request.end(JSON.stringify(value));});
+  for(let attempt=0;attempt<100;attempt++){try{if((await fetch(base+'/api/health')).ok&&fs.existsSync(socket))break;}catch{}await new Promise(resolve=>setTimeout(resolve,50));}
+  assert.equal(fs.statSync(socket).mode&0o777,0o600);
+  const token=(id,tv=0,sid)=>jwt.sign({userId:id,username:id===legacy?'LegacyFixture':'FixturePlayer',tv,...(sid?{sid}:{})},secret,{expiresIn:'1h'});
+  const get=jwtToken=>fetch(base+'/api/messages',{headers:{Authorization:'Bearer '+jwtToken}});
+  const current=token(player,0,'fixture-active-id'),oldLegacy=token(legacy);
+  assert.equal((await get(current)).status,200);assert.equal((await get(oldLegacy)).status,200);
+  const listing=(await bridge({action:'players',search:'Fixture',page:0})).value;
+  assert.equal(listing.accounts.length,2);assert.equal(/fixture-active-id|passwordHash|email|activeSessionId/.test(JSON.stringify(listing)),false);
+  const mutate=async(action,accountId)=>{const cap=(await bridge({action:'status'})).value.capabilities;return bridge({action,accountId,confirmed:true,reason:'Isolated HTTP test',requestId:randomUUID(),expectedSnapshot:cap.snapshot});};
+  assert.equal((await mutate('player-revoke',player)).status,200);assert.equal((await get(current)).status,401);
+  assert.equal((await mutate('player-revoke',legacy)).status,200);assert.equal((await get(oldLegacy)).status,401);
+  const protectedOwner=await mutate('player-block',owner);assert.equal(protectedOwner.status,409);assert.equal(protectedOwner.value.error,'protected_account');
+  const fresh=token(player,1);assert.equal((await get(fresh)).status,200);
+  assert.equal((await mutate('player-block',player)).status,200);assert.equal((await get(fresh)).status,403);
+  assert.equal((await mutate('player-unblock',player)).status,200);assert.equal((await get(fresh)).status,401);
+  assert.equal((await get(token(player,2))).status,200);
+  const startsAt=Date.now()+1000;
+  const notice=await bridge({action:'maintenance-publish',windows:[{id:randomUUID(),startsAt,endsAt:startsAt+60000,message:'Fixture maintenance advisory'}]});assert.equal(notice.value.readback,true);
+  assert.match(JSON.stringify(await (await fetch(base+'/api/ankuendigung')).json()),/Fixture maintenance advisory/);
+  const flushed=await bridge({action:'backup-prepare'});assert.equal(flushed.value.persistence,true);
+  const persisted=JSON.parse(fs.readFileSync(path.join(directory,'db.json')));assert.equal(persisted.private[player].fixtureMarker,'keep-me');assert.equal(persisted.shared.fixtureMarker,'keep-shared');assert.equal(persisted.users.gamegeeeeek.banned,undefined);
+  assert.equal(fs.statSync(path.join(directory,'gg-ops-maintenance.json')).mode&0o777,0o600);
+});

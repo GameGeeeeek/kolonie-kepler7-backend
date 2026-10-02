@@ -1,0 +1,21 @@
+name: Private operations checks
+on:
+  pull_request:
+  push:
+    branches: [master]
+permissions:
+  contents: read
+jobs:
+  operations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: node --check server.js
+      - run: node tests/test_serverstart.js
+      - run: node --test tests/test_operations_admin.mjs tests/test_operations_guard.mjs tests/test_operations_releases.mjs tests/test_operations_http.mjs

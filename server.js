@@ -5603,7 +5603,11 @@ app.post('/api/pending-rewards/claim', authMiddleware, async (req, res) => {
   // Stimmenpakete bleiben bis zu einem faehigen Client im Fach, blockieren aber andere Gaben
   // nicht: Wir holen den aeltesten fuer diesen Client kompatiblen Eintrag ab.
   const kannStimmenpaket = req.body && req.body.stimmePaketVersion === 1;
-  const index = list.findIndex(r => kannStimmenpaket || r.type !== 'verzeichnis-stimme' || !(r.schiffe || r.fragmente));
+  const kannIdeenpaket = req.body && req.body.k7IdeasVersion === 1;
+  const ideenTypen = ['expedition-choice', 'set-pity', 'story-campaign', 'alliance-operation'];
+  const index = list.findIndex(r =>
+    (kannStimmenpaket || r.type !== 'verzeichnis-stimme' || !(r.schiffe || r.fragmente)) &&
+    (kannIdeenpaket || !ideenTypen.includes(r.type)));
   if (index < 0) return res.json({ reward: null, updateRequired: true });
   const [reward] = list.splice(index, 1);
   db.private[req.userId].__pendingRewards = list;
@@ -7253,7 +7257,10 @@ function leagueIndexForRankServer(rank, total) {
   }
   return Math.min(Math.max(0, rank - 1), 3);
 }
+var k7Ideas;
+const {k7BossPhase}=require('./boss-phases');
 function pushPendingReward(userId, reward) {
+  if(k7Ideas)k7Ideas.onReward(userId,reward);
   if (!db.private[userId]) db.private[userId] = {};
   const list = db.private[userId].__pendingRewards || [];
   // Idempotenz: dieselbe Wochenliga-/Saison-Belohnung nie doppelt einreihen.
@@ -9059,6 +9066,8 @@ app.post('/api/worldboss/resolve', authMiddleware, async (req, res) => {
     const summe = Object.values(boss.contributions).reduce((a, c) => a + (Number(c && c.dmg) || 0), 0);
     const meinAnteilWb = summe > 0 ? (Number((boss.contributions[req.userId] || {}).dmg) || 0) / summe : 0;
     bosssetWb = bosssetPveWurf(BOSSSET_PVE_CHANCE.weltboss, meinAnteilWb, bLevel);
+    k7Ideas.onCombat(req.userId,'worldboss:'+bLevel);
+    await saveDb();
   }
 
   res.json({
@@ -9793,16 +9802,18 @@ app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
     doc.hp = Math.max(0, doc.hp - brandSchaden);
   }
   const hatSchwaeche = statusVorher.schock ? true : (!raidBoss.schwaeche || (comp[raidBoss.schwaeche] || 0) > 0);
-  const schadenMult = hatSchwaeche ? 1 : raidBoss.ohneMult;
+  const phase = k7BossPhase(doc,comp);
+  const operationEffects = k7Ideas.operationEffects(tag,doc);
+  const schadenMult = (hatSchwaeche ? 1 : raidBoss.ohneMult) * (phase ? phase.damage : 1);
   const damage = Math.min(doc.hp, Math.round(power * schadenMult));
   const newHp = Math.max(0, doc.hp - damage);
   const destroyed = newHp <= 0;
-  const counterRoh = allianceRaidCounterFor(doc.level);
+  const counterRoh = allianceRaidCounterFor(doc.level) * (phase ? phase.counter : 1) * operationEffects.counter;
   const counter = statusVorher.frost ? Math.round(counterRoh * (1 - ALLIANCE_RAID_STATUS.frost.wirkung)) : counterRoh;
   // Verlustquote mit dem Boss-Faktor, die alte Spanne [0,05; 0,60] bleibt aussen: Auch der haerteste
   // Boss kann den Verband nicht ueber die bisherige Obergrenze hinaus abraeumen.
   const rawLossPct = Math.max(0.05, Math.min(0.6, (counter / (counter + power)) * raidBoss.verlustMult));
-  const lossPct = allianceRaidDampenLoss(rawLossPct);
+  const lossPct = allianceRaidDampenLoss(rawLossPct) * operationEffects.loss;
   const now = Date.now();
 
   // Neue Status aus DIESER Welle fuer die naechste: Anteile an der Gesamtschiffszahl des Verbands.
@@ -9817,7 +9828,7 @@ app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
   const hpVorher = hpVorBrand;
   doc.hp = newHp;
   const waveResult = {
-    waveNumber: doc.waveNumber, damage: Math.round(damage), destroyed, lossPct,
+    waveNumber: doc.waveNumber, damage: Math.round(damage), destroyed, lossPct, bossPhase:phase, operationEffects,
     // ===== Kampfdaten fuer den klassischen Bericht (07.08.2026, Frontend v8.430.0) =====
     // Reine Durchreichung bereits berechneter Groessen ins Wellen-Ergebnis - /claim liest NUR
     // dieses Dokument (doc.dispatch kann dort schon der naechsten Welle gehoeren, siehe den
@@ -9838,7 +9849,7 @@ app.post('/api/allianceraid/resolve', authMiddleware, async (req, res) => {
   };
   doc.lastWaveResult = waveResult;
   doc.lastWaveEndedAt = now;
-  if (destroyed) { doc.phase = 'resolved'; doc.result = waveResult; } else { doc.phase = 'idle'; }
+  if (destroyed) { doc.phase = 'resolved'; doc.result = waveResult; k7Ideas.operationComplete(tag,doc); } else { doc.phase = 'idle'; }
   setAllianceRaidDoc(tag, doc);
   await saveDb();
   res.json({ ok: true, doc });
@@ -9948,6 +9959,7 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
   // Definitionen samt Herkunfts-Filtern hierher waere eine zweite Kopie, die stillschweigend
   // veraltet. Balancerelevant ist, OB und WIE SELTEN etwas faellt, und das steht jetzt hier.
   const modulSeltenheit = allianceRaidModuleDrop(level, platz, anzahl, res_.destroyed);
+  if(res_.destroyed){k7Ideas.recordRaidVictory(req.userId,lohnBoss.key,doc.id+':'+res_.waveNumber);k7Ideas.onCombat(req.userId,'raid:'+doc.id);} 
   join.claimed = true;
   db.shared[joinKey] = JSON.stringify(join);
   const mySaveVersion = setSaveValue(req.userId, JSON.stringify(save));
@@ -9973,7 +9985,7 @@ app.post('/api/allianceraid/claim', authMiddleware, async (req, res) => {
     // Welcher Gegner es war - die Meldung im Spiel nennt ihn, und die Beute haengt an ihm.
     boss: { key: lohnBoss.key, name: lohnBoss.name, schwerpunkt: lohnBoss.schwerpunkt || null },
     resources: lohn.resources, fragmente: lohn.fragments,
-    modulSeltenheit,
+    modulSeltenheit, bossPhase:res_.bossPhase||null, operationEffects:res_.operationEffects||null,
     // Die ganze Tafel mit - so kann das Spiel zeigen, wer wo stand, ohne 20 Profile nachzuladen.
     ranking: rangListe.map((e, i) => ({ platz: i + 1, name: e.name, power: e.power, ich: e.id === req.userId })),
     saveVersion: mySaveVersion, newCredits: save.credits, newBattlePoints: save.battlePoints
@@ -20409,3 +20421,6 @@ function kampftextHealth() {
 // Startlauf in setImmediate (Todeszone, siehe tests/test_serverstart.js), Wiederholung im Takt.
 setImmediate(takt('kampftextPruefung-start', kampftextPruefe));
 setInterval(takt('kampftextPruefung', kampftextPruefe), KAMPFTEXT_PRUEF_TAKT_MS);
+
+// Registered only after all adapters have initialized; startup ticks run via setImmediate.
+k7Ideas=require('./k7-ideas')({app,authMiddleware,db,findUserById,getSaveValue,setSaveValue,saveDb,pushPendingReward,addReport,allianceRoleOf,getAllianceRaidDoc,setAllianceRaidDoc});

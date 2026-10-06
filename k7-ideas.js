@@ -40,7 +40,9 @@ module.exports=function registerIdeas(ctx){
     events[key]=event;progress.lastEncounterAt=now();return encounterView(event);
   }
   function chooseEncounter(id,eventId,choice){
-    const event=eventsOf(id)[eventId];if(!event)fail(404,'Ereignis nicht gefunden.');
+    const events=eventsOf(id);
+    if(typeof eventId!=='string'||!Object.prototype.hasOwnProperty.call(events,eventId))fail(404,'Ereignis nicht gefunden.');
+    const event=events[eventId];
     if(!['salvage','inspect','return'].includes(choice))fail(400,'Ungültige Entscheidung.');
     resolveEncounter(id,event);if(event.status==='resolved'||event.decidedAt)return encounterView(event);
     event.choice=choice;event.decidedAt=now();return encounterView(event);

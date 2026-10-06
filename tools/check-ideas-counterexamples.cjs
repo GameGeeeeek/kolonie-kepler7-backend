@@ -1,7 +1,7 @@
 'use strict';
 const assert=require('node:assert/strict'),{spawnSync}=require('child_process'),path=require('path'),fs=require('fs');
 const test=path.resolve(__dirname,'../tests/test_k7_ideas_http.js');
-for(const [mutation,mustFail]of Object.entries({gate:'old clients retain new rewards',pity:'pity grants targeted part once',phase:'actual shield damage includes existing weakness'})){
+for(const [mutation,mustFail]of Object.entries({gate:'old clients retain new rewards',pity:'pity grants targeted part once',phase:'actual shield damage includes existing weakness',encounter:'inherited encounter key __proto__ rejected'})){
   const result=spawnSync(process.execPath,[test],{encoding:'utf8',env:{...process.env,KEPLER_K7_SABOTAGE:mutation},timeout:60000});
   const output=result.stdout+result.stderr;assert.equal(result.status,1,mutation+' must fail');assert.ok(output.includes('AssertionError')&&output.includes(mustFail),output);console.log('RED CONFIRMED - '+mutation+' → '+mustFail);
 }

@@ -12,6 +12,8 @@ Alle Routen unter `/api/k7/` benötigen die normale Kontoanmeldung. Wertvoller F
 
 `POST /expedition/choose` sperrt die erste Auswahl. `salvage`: 120 Erz/60 Kristalle; `inspect`: 80% auf 500 Erz/250 Kristalle, sonst null; `return`: null. Das zusätzliche Wrack verändert weder den gewöhnlichen Expeditionsfund noch deren Schiffsverluste. Auflösung frühestens nach einer Serverminute und am gespeicherten Rückkehrzeitpunkt, auch ohne aktiven Client. Ohne Wahl gilt sichere Bergung. Der Zufallswert bleibt vor der Auflösung verborgen. Belohnungstyp `expedition-choice`, normale Lagerdeckel im Client. Eine spätere Kampagne übernimmt keine vor ihrem Start registrierten Wracks.
 
+Ereigniskennungen müssen Zeichenketten und eigene gespeicherte Archivschlüssel sein. Geerbte Objektschlüssel und Arrays werden zurückgewiesen, ohne Gaben zu erzeugen. Die HTTP-Gegenprobe entfernt genau diese Eigentumsprüfung.
+
 ## Panzerhüllen-Pilot
 
 `POST /pity/target` akzeptiert ausschließlich `panzer_platte`, `panzer_niete`, `panzer_kiel`, `panzer_kammer`. Nur der vorhandene, erfolgreiche finale Raid-Claim gegen Panzerhülle zählt. Jede Welle zählt einmal. Nach zwölf Siegen gibt `/pity/claim` genau ein gewähltes **seltenes** Teil über `set-pity`; Zähler danach null. Kein Übertrag mehrfacher Auszahlungen durch Ansparen oberhalb zwölf, keine Änderung gewöhnlicher Zufallsfunde oder höherer Seltenheiten.
@@ -30,4 +32,4 @@ Angriff bleibt der echte Raid. Noch zugehörige Aufklärungsbeiträge senken Geg
 
 **Backend vor Frontend**, beide nur nach Freigabe mergen. Alte Clients dürfen die vier neuen Pending-Typen erst mit `k7IdeasVersion:1` abholen; andere kompatible Belohnungen bleiben erreichbar. Ohne neue Backend-Routen zeigt das Frontend die fehlende Server-Unterstützung.
 
-Geprüft: Syntax, Start, bestehender Shared-Storage-HTTP-Test, 56 neue HTTP-Prüfungen, Balance und vier absichtlich rote Gegenproben. Neue HTTP-Prüfungen verwenden gemessene freie Ports, eigene DB/Secret-Dateien, beide Save-Formen und SIGKILL-Neustarts. Keine Produktionsdaten verwendet.
+Geprüft: Syntax, Start, bestehender Shared-Storage-HTTP-Test, 61 neue HTTP-Prüfungen, Balance und fünf absichtlich rote Gegenproben. Neue HTTP-Prüfungen verwenden gemessene freie Ports, eigene DB/Secret-Dateien, beide Save-Formen und SIGKILL-Neustarts. Keine Produktionsdaten verwendet.

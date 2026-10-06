@@ -6,9 +6,9 @@ const root=path.resolve(__dirname,'..'),dir=fs.mkdtempSync(path.join(os.tmpdir()
 const sabotage=process.env.KEPLER_K7_SABOTAGE||'';
 let serverFile=path.join(root,'server.js'),mutatedFiles=[];
 if(sabotage){
-  const mutations={gate:["(kannIdeenpaket || !ideenTypen.includes(r.type))","true"],pity:["p.victories=0;p.claims++","p.victories=12;p.claims++"],phase:["shield?(pierces?0.9:0.65)","shield?(pierces?0.9:1)"]};
+  const mutations={gate:["(kannIdeenpaket || !ideenTypen.includes(r.type))","true"],pity:["p.victories=0;p.claims++","p.victories=12;p.claims++"],phase:["shield?(pierces?0.9:0.65)","shield?(pierces?0.9:1)"],encounter:["typeof eventId!=='string'||!Object.prototype.hasOwnProperty.call(events,eventId)","!events[eventId]"]};
   assert.ok(mutations[sabotage],'known sabotage');let source=fs.readFileSync(serverFile,'utf8');
-  const target=sabotage==='gate'?'server.js':sabotage==='pity'?'k7-ideas.js':'boss-phases.js';
+  const target=sabotage==='gate'?'server.js':sabotage==='phase'?'boss-phases.js':'k7-ideas.js';
   let moduleSource=fs.readFileSync(path.join(root,target),'utf8');const [before,after]=mutations[sabotage];assert.equal(moduleSource.split(before).length,2,'unique mutation');moduleSource=moduleSource.replace(before,after);
   if(target==='server.js')source=moduleSource;else{const moduleFile='k7-mutation-'+process.pid+'.js';fs.writeFileSync(path.join(root,moduleFile),moduleSource);mutatedFiles.push(path.join(root,moduleFile));source=source.replace("require('./"+target.replace('.js','')+"')","require('./"+moduleFile+"')");}
   serverFile=path.join(root,'server-k7-mutation-'+process.pid+'.js');fs.writeFileSync(serverFile,source);mutatedFiles.push(serverFile);
@@ -55,6 +55,10 @@ const post=(url,body={},who)=>request('/k7/'+url,body,who);
   check('retry registration reuses exact event',(await post('expedition/register',{missionId:'active'})).body.event.id===e.id);
   check('invented expedition rejected',(await post('expedition/register',{missionId:'fiction'})).status===409);
   check('missing mission ID rejected',(await post('expedition/register',{})).status===400);
+  for(const id of ['__proto__','constructor','toString'])check('inherited encounter key '+id+' rejected',
+    (await post('expedition/choose',{id,choice:'salvage'},'outsider')).status===404);
+  check('unknown encounter keys create no rewards',(await request('/pending-rewards',undefined,'outsider')).body.rewards.length===0);
+  check('array cannot impersonate a real event ID',(await post('expedition/choose',{id:[e.id],choice:'salvage'})).status===404);
   check('invalid option rejected',(await post('expedition/choose',{id:e.id,choice:'rich'})).status===400);
   check('choice saved once',(await post('expedition/choose',{id:e.id,choice:'inspect'})).body.event.choice==='inspect');
   check('retry cannot change decision',(await post('expedition/choose',{id:e.id,choice:'salvage'})).body.event.choice==='inspect');

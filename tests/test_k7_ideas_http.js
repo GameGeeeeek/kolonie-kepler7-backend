@@ -6,7 +6,7 @@ const root=path.resolve(__dirname,'..'),dir=fs.mkdtempSync(path.join(os.tmpdir()
 const sabotage=process.env.KEPLER_K7_SABOTAGE||'';
 let serverFile=path.join(root,'server.js'),mutatedFiles=[];
 if(sabotage){
-  const mutations={report:['if(addReport)addReport(id,report);','if(false)addReport(id,report);'],cancel:["op.phase='cancelled';op.cancelledAt=now();","op.cancelledAt=now();"],membership:['.filter(([id])=>allianceRoleOf(tag,id))','.filter(()=>true)'],gate:["(kannIdeenpaket || !ideenTypen.includes(r.type))","true"],pity:["p.victories=0;p.claims++","p.victories=12;p.claims++"],phase:["shield?(pierces?0.9:0.65)","shield?(pierces?0.9:1)"],encounter:["typeof eventId!=='string'||!Object.prototype.hasOwnProperty.call(events,eventId)","!events[eventId]"]};
+  const mutations={expiry:['!(doc.expiresAt>now())','false'],report:['if(addReport)addReport(id,report);','if(false)addReport(id,report);'],cancel:["op.phase='cancelled';op.cancelledAt=now();","op.cancelledAt=now();"],membership:['.filter(([id])=>allianceRoleOf(tag,id))','.filter(()=>true)'],gate:["(kannIdeenpaket || !ideenTypen.includes(r.type))","true"],pity:["p.victories=0;p.claims++","p.victories=12;p.claims++"],phase:["shield?(pierces?0.9:0.65)","shield?(pierces?0.9:1)"],encounter:["typeof eventId!=='string'||!Object.prototype.hasOwnProperty.call(events,eventId)","!events[eventId]"]};
   assert.ok(mutations[sabotage],'known sabotage');let source=fs.readFileSync(serverFile,'utf8');
   const target=sabotage==='gate'?'server.js':sabotage==='phase'?'boss-phases.js':'k7-ideas.js';
   let moduleSource=fs.readFileSync(path.join(root,target),'utf8');const [before,after]=mutations[sabotage];assert.equal(moduleSource.split(before).length,2,'unique mutation');moduleSource=moduleSource.replace(before,after);
@@ -20,7 +20,7 @@ for(const [name,id]of Object.entries(ids)){users[name]={userId:id,username:name,
 users.anna.k7Progress={story:{stage:0,startedAt:now-100000,choice:null,claimed:false,history:[]},encounters:{safe:{id:'safe',missionId:'past',startedAt:now-90000,readyAt:now-1000,status:'pending',choice:null,decidedAt:null,inspectionSuccess:false}},pity:{part:null,victories:11,claims:0,seen:{}}};
 users.ben.k7Progress={story:{stage:3,startedAt:now-100000,choice:null,claimed:false,history:[]},encounters:{failed:{id:'failed',missionId:'past',startedAt:now-90000,readyAt:now-1000,status:'pending',choice:'inspect',decidedAt:now-50000,inspectionSuccess:false}}};
 const role=(id,role)=>JSON.stringify({playerId:id,role,name:'fixture'});
-for(const tag of ['OP','FINAL','SHIELD','VULN','CANCEL','LEFT']){shared['alliance:'+tag+':role:'+ids.anna]=role(ids.anna,'admin');shared['alliance:'+tag+':role:'+ids.ben]=role(ids.ben,'member');}
+for(const tag of ['OP','FINAL','SHIELD','VULN','CANCEL','LEFT','EXPIRED','EXPIRED_PAID']){shared['alliance:'+tag+':role:'+ids.anna]=role(ids.anna,'admin');shared['alliance:'+tag+':role:'+ids.ben]=role(ids.ben,'member');}
 function raid(id,hp=1000,maxHp=1000){return {id,level:1,bossKey:'panzerhuelle',hp,maxHp,phase:'gathering',waveNumber:1,gatherEndsAt:now+120000,expiresAt:now+3600000,status:{}};}
 const op=raid('op'),final=raid('final',0),shield=raid('shield'),vuln=raid('vuln',499);
 final.phase='resolved';final.result={waveNumber:1,destroyed:true,totalPower:100,topParticipantId:ids.anna,resolvedAt:now-1000,lossPct:0.05,bossKey:'panzerhuelle',ranking:[{id:ids.anna,name:'anna',power:100}],totalComposition:{bomber:5},totalShips:5,participantCount:1};
@@ -28,6 +28,7 @@ shared['alliance:FINAL:raidjoin:final-w1:'+ids.anna]=JSON.stringify({originPlane
 for(const doc of [shield,vuln]){doc.variant='shield-cycle';doc.phase='enroute';doc.dispatch={arrivalAt:now-1,totalPower:100,totalShips:10,totalComposition:{jaeger:10},participantCount:1,participantIds:[ids.anna],topParticipantId:ids.anna,ranking:[{id:ids.anna,power:100}]};}
 for(const [tag,doc]of Object.entries({OP:op,FINAL:final,SHIELD:shield,VULN:vuln}))shared['alliance:'+tag+':raid']=JSON.stringify(doc);
 shared['alliance:CANCEL:raid']=JSON.stringify(raid('cancel'));
+for(const tag of ['EXPIRED','EXPIRED_PAID']){const expired=raid(tag);expired.phase='idle';expired.expiresAt=now-1;if(tag==='EXPIRED_PAID')expired.operation={phase:'scout',members:{}};shared['alliance:'+tag+':raid']=JSON.stringify(expired);}
 const left=raid('left',1);left.phase='enroute';left.operation={id:'left:operation',phase:'attack',members:{[ids.ben]:{scout:{at:now,cost:{energie:100}}},[ids.anna]:{supply:{at:now,cost:{erz:250,kristalle:100}}}}};left.dispatch={arrivalAt:now-1,totalPower:10000,totalShips:5,totalComposition:{bomber:5},participantCount:1,participantIds:[ids.anna],topParticipantId:ids.anna,ranking:[{id:ids.anna,power:10000}]};shared['alliance:LEFT:raid']=JSON.stringify(left);delete shared['alliance:LEFT:role:'+ids.ben];
 fs.writeFileSync(dbFile,JSON.stringify({users,private:priv,shared,galaxy:{lastTick:now,alienNester:[],wrackKonvois:[],news:[],factions:{}}}));
 let srv,origin,tokens={},checks=0,log='';
@@ -92,6 +93,8 @@ const post=(url,body={},who)=>request('/k7/'+url,body,who);
   check('only three expected rewards',rewards.length===3&&rewards.some(r=>r.type==='set-pity'&&r.bossset.defKey==='panzer_platte')&&rewards.filter(r=>r.type==='story-campaign').length===1,rewards);
   check('outsider cannot see operation',(await request('/k7/operation?tag=OP',undefined,'outsider')).status===403);
   check('member cannot start operation',(await post('operation/start',{tag:'OP'},'ben')).status===403);
+  check('expired raid rejects operation start',(await post('operation/start',{tag:'EXPIRED'})).status===409);
+  check('expired raid rejects paid contributions',(await post('operation/contribute',{tag:'EXPIRED_PAID',role:'scout'})).status===409);
   check('leader can start operation',(await post('operation/start',{tag:'OP'})).body.doc.operation.phase==='scout');
   check('out-of-order supply rejected',(await post('operation/contribute',{tag:'OP',role:'supply'},'ben')).status===409);
   check('researcher already away cannot scout',(await post('operation/contribute',{tag:'OP',role:'scout'},'ben')).status===409);

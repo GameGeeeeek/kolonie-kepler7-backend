@@ -25,7 +25,13 @@ module.exports=function registerIdeas(ctx){
     return true;
   }
   function encounterView(event){const {inspectionSuccess,...view}=event;return view;}
-  function state(id){let changed=false;for(const event of Object.values(eventsOf(id)))changed=resolveEncounter(id,event)||changed;if(changed)saveDb();return {story:storyOf(id),encounters:Object.values(eventsOf(id)).sort((a,b)=>b.startedAt-a.startedAt).slice(0,25).map(encounterView),pity:{...pityOf(id),required:PITY_REQUIRED,parts:PITY_PARTS}};}
+  async function state(id){
+    const before=JSON.stringify(findUserById(id).k7Progress);
+    for(const event of Object.values(eventsOf(id)))resolveEncounter(id,event);
+    const result={story:storyOf(id),encounters:Object.values(eventsOf(id)).sort((a,b)=>b.startedAt-a.startedAt).slice(0,25).map(encounterView),pity:{...pityOf(id),required:PITY_REQUIRED,parts:PITY_PARTS}};
+    if(JSON.stringify(account(id))!==before)await saveDb();
+    return result;
+  }
   function registerEncounter(id,missionId){
     if(!['string','number'].includes(typeof missionId)||!String(missionId)||String(missionId).length>120||typeof missionId==='number'&&!Number.isFinite(missionId))fail(400,'Ungültige Expeditionskennung.');
     const save=saveOf(id),missions=[save.fleet,...Object.values(save.colonies||{}).map(c=>c.fleet)].filter(Boolean).flatMap(f=>Array.isArray(f.missions)?f.missions:[]);
@@ -58,13 +64,15 @@ module.exports=function registerIdeas(ctx){
     const part=p.part;p.victories=0;p.claims++;pushPendingReward(id,{type:'set-pity',claim:p.claims,bossset:{bossKey:'panzerhuelle',seltenheit:'selten',defKey:part}});return {ok:true,pity:{...p,required:PITY_REQUIRED,parts:PITY_PARTS}};
   }
   function operationDoc(id,tag){if(typeof tag!=='string'||!allianceRoleOf(tag,id))fail(403,'Nur Mitglieder dieser Allianz.');const doc=getAllianceRaidDoc(tag);if(!doc)fail(404,'Kein Allianz-Raid vorhanden.');return doc;}
+  function requireOpenRaid(doc){if(!Number.isFinite(doc.expiresAt)||!(doc.expiresAt>now()))fail(409,'Der Allianz-Raid ist bereits abgelaufen.');}
   function operationStart(id,tag){const role=allianceRoleOf(tag,id);if(!['admin','officer'].includes(role))fail(403,'Nur Allianzleitung oder Offiziere.');
-    const doc=operationDoc(id,tag);if(doc.operation)return doc;
+    const doc=operationDoc(id,tag);requireOpenRaid(doc);if(doc.operation)return doc;
     if(!['gathering','idle'].includes(doc.phase)||doc.hp<=0)fail(409,'Operation vor dem nächsten Abflug beginnen.');
     doc.operation={id:doc.id+':operation',phase:'scout',startedAt:now(),members:{},completedAt:null,rewarded:false};setAllianceRaidDoc(tag,doc);return doc;
   }
   function contribute(id,tag,role){
     const doc=operationDoc(id,tag),op=doc.operation;if(!op||op.completedAt||op.cancelledAt)fail(409,'Keine offene Operation.');
+    requireOpenRaid(doc);
     if(!['scout','supply'].includes(role))fail(400,'Unbekannter Beitrag.');
     const member=op.members[id]||{};
     if(member[role])return {ok:true,doc,duplicate:true};
@@ -90,10 +98,10 @@ module.exports=function registerIdeas(ctx){
     for(const [id,member]of Object.entries(op.members))if(allianceRoleOf(tag,id)&&(member.scout||member.supply))pushPendingReward(id,{type:'alliance-operation',operationId:op.id,credits:40});
     return true;
   }
-  function onReward(id,reward){if(['festung','alien-nest','wrackkonvoi'].includes(reward.type))moveStory(id,3,reward.type+':'+now());}
+  function onReward(id,reward){if(!findUserById(id))return false;if(['festung','alien-nest','wrackkonvoi'].includes(reward.type))moveStory(id,3,reward.type+':'+now());}
   function onCombat(id,evidence){moveStory(id,3,evidence);}
-  const route=(method,url,handler)=>app[method](url,authMiddleware,async(req,res)=>{
-    try{const result=handler(req.userId,req.body||{},req);await saveDb();res.json(result);}catch(error){res.status(error.status||500).json({error:error.status?error.message:'Die Aktion konnte nicht gespeichert werden.'});}
+  const route=(method,url,handler,persist=method!=='get')=>app[method](url,authMiddleware,async(req,res)=>{
+    try{const result=await handler(req.userId,req.body||{},req);if(persist)await saveDb();res.json(result);}catch(error){res.status(error.status||500).json({error:error.status?error.message:'Die Aktion konnte nicht gespeichert werden.'});}
   });
   route('get','/api/k7/progress',id=>state(id));
   route('post','/api/k7/story/start',id=>{const s=storyOf(id);if(!s.startedAt){s.startedAt=now();s.history.push({stage:0,at:now(),evidence:'start'});}return {ok:true,story:s};});

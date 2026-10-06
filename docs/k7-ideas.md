@@ -34,8 +34,12 @@ Fortführung 06.10.2026: Jede Wrack-Auflösung schreibt genau einen serverseitig
 
 `POST /operation/cancel`: nur Leitung/Offiziere in `idle`/`gathering`, vor Abflug. Die Zusatzoperation wird dauerhaft `cancelled`, weitere Beiträge sind gesperrt; Wiederholungen ändern nichts. Verbrauchte Beiträge werden nicht erstattet, es gibt keine Teilnehmergabe. Der normale Raid bleibt bestehen. Eine laufende Welle kann darüber nicht abgebrochen werden. Austritt entfernt Beitragswirkung und Teilnehmeranspruch.
 
-Aktueller Nachweis: Syntax, Start, geteilter Speicher, 72 neue echte HTTP-Prüfungen, Balance und acht gezielt rote Gegenproben grün. Die folgende 61-Prüfungen-Angabe dokumentiert den früheren Ausgangsstand.
+Aktueller Nachweis: Syntax, Start, geteilter Speicher, 74 neue echte HTTP-Prüfungen, Balance und zwölf gezielt rote Gegenproben grün. Die folgende 61-Prüfungen-Angabe dokumentiert den früheren Ausgangsstand.
 
 **Backend vor Frontend**, beide nur nach Freigabe mergen. Alte Clients dürfen die vier neuen Pending-Typen erst mit `k7IdeasVersion:1` abholen; andere kompatible Belohnungen bleiben erreichbar. Ohne neue Backend-Routen zeigt das Frontend die fehlende Server-Unterstützung.
 
 Geprüft: Syntax, Start, bestehender Shared-Storage-HTTP-Test, 61 neue HTTP-Prüfungen, Balance und fünf absichtlich rote Gegenproben. Neue HTTP-Prüfungen verwenden gemessene freie Ports, eigene DB/Secret-Dateien, beide Save-Formen und SIGKILL-Neustarts. Keine Produktionsdaten verwendet.
+
+## Veröffentlichungskontrolle
+
+Gelöschte Empfängerkonten werden im Kampagnen-Hook übersprungen. Die Integration mit der echten pushPendingReward-Funktion prüft Beuteverteilung an weiterhin vorhandene Konten vor und nach einem gelöschten Beitragenden. Fortschrittsabfragen speichern nur wirkliche Änderungen (neue Standardwerte oder aufgelöste Ereignisse); reine Operationsabfragen schreiben keine Datenbank. Abgelaufene Raids akzeptieren weder Operationsstart noch kostenpflichtige Beiträge. Nachweise: test_k7_release_guards.js, zwei zusätzliche echte HTTP-Prüfungen und vier zusätzliche Gegenproben.

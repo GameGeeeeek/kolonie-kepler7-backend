@@ -6,7 +6,7 @@ const root=path.resolve(__dirname,'..'),dir=fs.mkdtempSync(path.join(os.tmpdir()
 const sabotage=process.env.KEPLER_K7_SABOTAGE||'';
 let serverFile=path.join(root,'server.js'),mutatedFiles=[];
 if(sabotage){
-  const mutations={gate:["(kannIdeenpaket || !ideenTypen.includes(r.type))","true"],pity:["p.victories=0;p.claims++","p.victories=12;p.claims++"],phase:["shield?(pierces?0.9:0.65)","shield?(pierces?0.9:1)"],encounter:["typeof eventId!=='string'||!Object.prototype.hasOwnProperty.call(events,eventId)","!events[eventId]"]};
+  const mutations={report:['if(addReport)addReport(id,report);','if(false)addReport(id,report);'],cancel:["op.phase='cancelled';op.cancelledAt=now();","op.cancelledAt=now();"],membership:['.filter(([id])=>allianceRoleOf(tag,id))','.filter(()=>true)'],gate:["(kannIdeenpaket || !ideenTypen.includes(r.type))","true"],pity:["p.victories=0;p.claims++","p.victories=12;p.claims++"],phase:["shield?(pierces?0.9:0.65)","shield?(pierces?0.9:1)"],encounter:["typeof eventId!=='string'||!Object.prototype.hasOwnProperty.call(events,eventId)","!events[eventId]"]};
   assert.ok(mutations[sabotage],'known sabotage');let source=fs.readFileSync(serverFile,'utf8');
   const target=sabotage==='gate'?'server.js':sabotage==='phase'?'boss-phases.js':'k7-ideas.js';
   let moduleSource=fs.readFileSync(path.join(root,target),'utf8');const [before,after]=mutations[sabotage];assert.equal(moduleSource.split(before).length,2,'unique mutation');moduleSource=moduleSource.replace(before,after);
@@ -20,13 +20,15 @@ for(const [name,id]of Object.entries(ids)){users[name]={userId:id,username:name,
 users.anna.k7Progress={story:{stage:0,startedAt:now-100000,choice:null,claimed:false,history:[]},encounters:{safe:{id:'safe',missionId:'past',startedAt:now-90000,readyAt:now-1000,status:'pending',choice:null,decidedAt:null,inspectionSuccess:false}},pity:{part:null,victories:11,claims:0,seen:{}}};
 users.ben.k7Progress={story:{stage:3,startedAt:now-100000,choice:null,claimed:false,history:[]},encounters:{failed:{id:'failed',missionId:'past',startedAt:now-90000,readyAt:now-1000,status:'pending',choice:'inspect',decidedAt:now-50000,inspectionSuccess:false}}};
 const role=(id,role)=>JSON.stringify({playerId:id,role,name:'fixture'});
-for(const tag of ['OP','FINAL','SHIELD','VULN']){shared['alliance:'+tag+':role:'+ids.anna]=role(ids.anna,'admin');shared['alliance:'+tag+':role:'+ids.ben]=role(ids.ben,'member');}
+for(const tag of ['OP','FINAL','SHIELD','VULN','CANCEL','LEFT']){shared['alliance:'+tag+':role:'+ids.anna]=role(ids.anna,'admin');shared['alliance:'+tag+':role:'+ids.ben]=role(ids.ben,'member');}
 function raid(id,hp=1000,maxHp=1000){return {id,level:1,bossKey:'panzerhuelle',hp,maxHp,phase:'gathering',waveNumber:1,gatherEndsAt:now+120000,expiresAt:now+3600000,status:{}};}
 const op=raid('op'),final=raid('final',0),shield=raid('shield'),vuln=raid('vuln',499);
 final.phase='resolved';final.result={waveNumber:1,destroyed:true,totalPower:100,topParticipantId:ids.anna,resolvedAt:now-1000,lossPct:0.05,bossKey:'panzerhuelle',ranking:[{id:ids.anna,name:'anna',power:100}],totalComposition:{bomber:5},totalShips:5,participantCount:1};
 shared['alliance:FINAL:raidjoin:final-w1:'+ids.anna]=JSON.stringify({originPlanet:'home',composition:{bomber:5},power:100,arrivesAtBaseAt:now-2000,gatherEndsAt:now-1000});
 for(const doc of [shield,vuln]){doc.variant='shield-cycle';doc.phase='enroute';doc.dispatch={arrivalAt:now-1,totalPower:100,totalShips:10,totalComposition:{jaeger:10},participantCount:1,participantIds:[ids.anna],topParticipantId:ids.anna,ranking:[{id:ids.anna,power:100}]};}
 for(const [tag,doc]of Object.entries({OP:op,FINAL:final,SHIELD:shield,VULN:vuln}))shared['alliance:'+tag+':raid']=JSON.stringify(doc);
+shared['alliance:CANCEL:raid']=JSON.stringify(raid('cancel'));
+const left=raid('left',1);left.phase='enroute';left.operation={id:'left:operation',phase:'attack',members:{[ids.ben]:{scout:{at:now,cost:{energie:100}}},[ids.anna]:{supply:{at:now,cost:{erz:250,kristalle:100}}}}};left.dispatch={arrivalAt:now-1,totalPower:10000,totalShips:5,totalComposition:{bomber:5},participantCount:1,participantIds:[ids.anna],topParticipantId:ids.anna,ranking:[{id:ids.anna,power:10000}]};shared['alliance:LEFT:raid']=JSON.stringify(left);delete shared['alliance:LEFT:role:'+ids.ben];
 fs.writeFileSync(dbFile,JSON.stringify({users,private:priv,shared,galaxy:{lastTick:now,alienNester:[],wrackKonvois:[],news:[],factions:{}}}));
 let srv,origin,tokens={},checks=0,log='';
 function check(name,condition,detail){assert.ok(condition,name+(detail?' '+JSON.stringify(detail):''));checks++;console.log('OK - '+name);}
@@ -65,6 +67,10 @@ const post=(url,body={},who)=>request('/k7/'+url,body,who);
   check('outsider cannot choose another account event',(await post('expedition/choose',{id:e.id,choice:'inspect'},'outsider')).status===404);
   p=(await request('/k7/progress',undefined,'ben')).body;
   check('failed inspection grants no resources',Object.keys(p.encounters[0].result.resources).length===0);
+  const failedReports=(await request('/reports',undefined,'ben')).body.reports;
+  check('empty inspection has one authoritative outcome report',failedReports.filter(r=>r.type==='expedition-choice'&&r.encounterId==='failed'&&r.choice==='inspect'&&r.inspectionSuccess===false&&Object.keys(r.resources).length===0).length===1);
+  await request('/k7/progress',undefined,'ben');
+  check('reloading does not duplicate outcome reports',(await request('/reports',undefined,'ben')).body.reports.filter(r=>r.encounterId==='failed').length===1);
   check('unknown pity part rejected',(await post('pity/target',{part:'mine'})).status===400);
   check('pity unavailable at eleven victories',(await post('pity/claim')).status===409);
   const claim=await request('/allianceraid/claim',{tag:'FINAL',raidId:'final',waveNumber:1});check('confirmed final raid claim succeeds',claim.status===200,claim);
@@ -111,6 +117,16 @@ const post=(url,body={},who)=>request('/k7/'+url,body,who);
   await request('/allianceraid/resolve',{tag:'OP'});
   for(const who of ['anna','ben']){const reward=(await request('/pending-rewards/claim',{k7IdeasVersion:1},who)).body.reward;check('offline contributor '+who+' reward once',reward&&reward.type==='alliance-operation'&&reward.credits===40,reward);}
   check('duplicate completion pays nothing',(await request('/pending-rewards/claim',{k7IdeasVersion:1})).body.reward===null);
+  await post('operation/start',{tag:'CANCEL'});
+  check('member cannot cancel operation',(await post('operation/cancel',{tag:'CANCEL'},'ben')).status===403);
+  check('leader cancels operation before launch',(await post('operation/cancel',{tag:'CANCEL'})).body.doc.operation.phase==='cancelled');
+  check('cancel retry changes nothing',(await post('operation/cancel',{tag:'CANCEL'})).body.duplicate===true);
+  check('cancelled operation accepts no further costs',(await post('operation/contribute',{tag:'CANCEL',role:'scout'})).status===409);
+  check('in-flight operation cannot be cancelled',(await post('operation/cancel',{tag:'LEFT'})).status===409);
+  r=await request('/allianceraid/resolve',{tag:'LEFT'});check('departed scout has no combat effect',r.body.doc.result.operationEffects.counter===1&&r.body.doc.result.operationEffects.loss===0.9);
+  check('remaining contributor receives one operation reward',(await request('/pending-rewards/claim',{k7IdeasVersion:1})).body.reward.operationId==='left:operation');
+  check('departed contributor receives no reward',(await request('/pending-rewards/claim',{k7IdeasVersion:1},'ben')).body.reward===null);
+  check('departed member cannot read operation',(await request('/k7/operation?tag=LEFT',undefined,'ben')).status===403);
   await stop();await start();check('restart retains fixed choice',(await request('/k7/progress')).body.encounters.find(x=>x.id===e.id).choice==='inspect');
   check('no runtime errors',!/ReferenceError|TypeError/.test(log));console.log('PASS '+checks+' HTTP checks');
-}finally{await stop();for(const file of mutatedFiles)fs.unlinkSync(file);fs.rmSync(dir,{recursive:true,force:true});}})().catch(e=>{console.error(e);process.exitCode=1;});
+}finally{await stop();for(const file of mutatedFiles)fs.unlinkSync(file);assert.equal(path.dirname(path.resolve(dir)),path.resolve(os.tmpdir()));assert.ok(path.basename(dir).startsWith('k7-ideas-'));fs.rmSync(dir,{recursive:true,force:true});}})().catch(e=>{console.error(e);process.exitCode=1;});

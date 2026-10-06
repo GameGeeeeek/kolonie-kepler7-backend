@@ -20423,4 +20423,4 @@ setImmediate(takt('kampftextPruefung-start', kampftextPruefe));
 setInterval(takt('kampftextPruefung', kampftextPruefe), KAMPFTEXT_PRUEF_TAKT_MS);
 
 // Registered only after all adapters have initialized; startup ticks run via setImmediate.
-k7Ideas=require('./k7-ideas')({app,authMiddleware,db,findUserById,getSaveValue,setSaveValue,saveDb,pushPendingReward,allianceRoleOf,getAllianceRaidDoc,setAllianceRaidDoc});
+k7Ideas=require('./k7-ideas')({app,authMiddleware,db,findUserById,getSaveValue,setSaveValue,saveDb,pushPendingReward,addReport,allianceRoleOf,getAllianceRaidDoc,setAllianceRaidDoc});

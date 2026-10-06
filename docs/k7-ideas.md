@@ -1,4 +1,4 @@
-# Kepler-Ideen: erster vollständiger Inhaltsschritt
+# Kepler-Ideen: Kampagne, Wrack, Pechschutz und Allianzoperation
 
 Frontend: https://github.com/GameGeeeeek/kolonie-kepler7/pull/646
 
@@ -29,6 +29,12 @@ Angriff bleibt der echte Raid. Noch zugehörige Aufklärungsbeiträge senken Geg
 `POST /raid/variant`: Leitung/Offiziere, ausschließlich Panzerhülle vor Welle 1. Optionaler Schildzyklus: ab 50% Rest-Hülle Schaden ×0,65 oder mit Bombern ×0,90, darunter Schaden ×1,20 und Gegenwehr ×0,80. Bestehende Schwäche und Status gelten zusätzlich. Brand wird vor der Phasenwahl gebucht. Phase gilt für die ganze Welle und steht im Ergebnis/Claim. `boss-phases.js` und Frontend-Helfer werden auf Parität geprüft.
 
 ## Auslieferung und Prüfungen
+
+Fortführung 06.10.2026: Jede Wrack-Auflösung schreibt genau einen serverseitigen Bericht vom Typ `expedition-choice`, einschließlich Umkehr/Untersuchung ohne Beute. Auswahl, Ressourcen, Automatik und Untersuchungsergebnis entsprechen dem Kontofortschritt. Nur positive Funde erzeugen eine Pending-Gabe; leere Fälle keine unnötige Abholung. Rückkehrberichte filtern nach dem tatsächlichen Offlinezeitraum.
+
+`POST /operation/cancel`: nur Leitung/Offiziere in `idle`/`gathering`, vor Abflug. Die Zusatzoperation wird dauerhaft `cancelled`, weitere Beiträge sind gesperrt; Wiederholungen ändern nichts. Verbrauchte Beiträge werden nicht erstattet, es gibt keine Teilnehmergabe. Der normale Raid bleibt bestehen. Eine laufende Welle kann darüber nicht abgebrochen werden. Austritt entfernt Beitragswirkung und Teilnehmeranspruch.
+
+Aktueller Nachweis: Syntax, Start, geteilter Speicher, 72 neue echte HTTP-Prüfungen, Balance und acht gezielt rote Gegenproben grün. Die folgende 61-Prüfungen-Angabe dokumentiert den früheren Ausgangsstand.
 
 **Backend vor Frontend**, beide nur nach Freigabe mergen. Alte Clients dürfen die vier neuen Pending-Typen erst mit `k7IdeasVersion:1` abholen; andere kompatible Belohnungen bleiben erreichbar. Ohne neue Backend-Routen zeigt das Frontend die fehlende Server-Unterstützung.
 

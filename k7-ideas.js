@@ -5,7 +5,7 @@ const PITY_PARTS=Object.freeze(['panzer_platte','panzer_niete','panzer_kiel','pa
 const PITY_REQUIRED=12;
 function fail(status,message){throw Object.assign(new Error(message),{status});}
 module.exports=function registerIdeas(ctx){
-  const {app,authMiddleware,findUserById,getSaveValue,setSaveValue,saveDb,pushPendingReward,allianceRoleOf,getAllianceRaidDoc,setAllianceRaidDoc}=ctx;
+  const {app,authMiddleware,findUserById,getSaveValue,setSaveValue,saveDb,pushPendingReward,addReport,allianceRoleOf,getAllianceRaidDoc,setAllianceRaidDoc}=ctx;
   const now=()=>Date.now();
   function account(id){const user=findUserById(id);if(!user)fail(401,'Konto nicht gefunden.');if(!user.k7Progress)user.k7Progress={};return user.k7Progress;}
   function saveOf(id){try{const value=JSON.parse(getSaveValue(id)||'null');if(value&&typeof value==='object'&&!Array.isArray(value))return value;}catch(_){}fail(409,'Kein gültiger Spielstand vorhanden.');}
@@ -17,7 +17,9 @@ module.exports=function registerIdeas(ctx){
     const choice=event.choice||'salvage';
     const amount=choice==='return'?0:choice==='inspect'?(event.inspectionSuccess?500:0):120;
     event.status='resolved';event.choice=choice;event.resolvedAt=now();event.result={resources:amount?{erz:amount,kristalle:Math.floor(amount/2)}:{},inspectionSuccess:choice==='inspect'?event.inspectionSuccess:null,automatic:!event.decidedAt};
-    if(amount)pushPendingReward(id,{type:'expedition-choice',encounterId:event.id,choice,resources:event.result.resources});
+    const report={type:'expedition-choice',encounterId:event.id,choice,...event.result};
+    if(addReport)addReport(id,report);
+    if(amount)pushPendingReward(id,report);
     const story=storyOf(id);
     if(choice!=='return'&&event.startedAt>=story.startedAt)moveStory(id,1,event.id);
     return true;
@@ -62,7 +64,7 @@ module.exports=function registerIdeas(ctx){
     doc.operation={id:doc.id+':operation',phase:'scout',startedAt:now(),members:{},completedAt:null,rewarded:false};setAllianceRaidDoc(tag,doc);return doc;
   }
   function contribute(id,tag,role){
-    const doc=operationDoc(id,tag),op=doc.operation;if(!op||op.completedAt)fail(409,'Keine offene Operation.');
+    const doc=operationDoc(id,tag),op=doc.operation;if(!op||op.completedAt||op.cancelledAt)fail(409,'Keine offene Operation.');
     if(!['scout','supply'].includes(role))fail(400,'Unbekannter Beitrag.');
     const member=op.members[id]||{};
     if(member[role])return {ok:true,doc,duplicate:true};
@@ -104,6 +106,14 @@ module.exports=function registerIdeas(ctx){
   route('post','/api/k7/pity/claim',id=>claimPity(id));
   route('get','/api/k7/operation',(id,body,req)=>({ok:true,doc:operationDoc(id,req.query.tag)}));
   route('post','/api/k7/operation/start',(id,body)=>({ok:true,doc:operationStart(id,body.tag)}));
+  route('post','/api/k7/operation/cancel',(id,body)=>{
+    const doc=operationDoc(id,body.tag),op=doc.operation;
+    if(!['admin','officer'].includes(allianceRoleOf(body.tag,id)))fail(403,'Nur Allianzleitung oder Offiziere.');
+    if(!op||op.completedAt)fail(409,'Keine offene Operation.');
+    if(op.cancelledAt)return {ok:true,doc,duplicate:true};
+    if(!['idle','gathering'].includes(doc.phase))fail(409,'Abbruch nur vor dem Abflug.');
+    op.phase='cancelled';op.cancelledAt=now();setAllianceRaidDoc(body.tag,doc);return {ok:true,doc};
+  });
   route('post','/api/k7/operation/contribute',(id,body)=>contribute(id,body.tag,body.role));
   route('post','/api/k7/raid/variant',(id,body)=>{
     const doc=operationDoc(id,body.tag),role=allianceRoleOf(body.tag,id);

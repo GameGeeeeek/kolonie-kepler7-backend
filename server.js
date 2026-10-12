@@ -11299,10 +11299,10 @@ const DEPLOY_WEBHOOK_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
 // Themenseiten sowie patchnotes.html liefen ohne Stylesheet. Als MUSTER, aus demselben Grund wie
 // *.html und *.png: Ein zweites Stylesheet soll nicht wieder in einer Liste fehlen. Anders als bei
 // *.js gibt es keine .css-Bauartefakte, die dadurch versehentlich auf den Server kaemen.
-const DEPLOY_WEB_GZIP_DATEIEN = '*.html *.css *.xml robots.txt manifest.json service-worker.js version.txt patchnotes-archiv.json';
+const DEPLOY_WEB_GZIP_DATEIEN = '*.html *.css *.xml robots.txt manifest.json service-worker.js version.txt patchnotes-archiv.json kepler-english.json';
 const DEPLOY_WEB_GZIP = '(cd /deploy/web && for f in ' + DEPLOY_WEB_GZIP_DATEIEN +
   '; do if [ -f "$f" ]; then gzip -9 -kf "$f" || exit 1; fi; done)';
-const DEPLOY_WEB_COPY = 'cp -f *.html /deploy/web/ && (cp -f *.png /deploy/web/ || true) && (cp -f *.css /deploy/web/ || true) && (cp -f robots.txt *.xml /deploy/web/ || true) && (cp -f manifest.json service-worker.js /deploy/web/ || true) && (cp -f version.txt patchnotes-archiv.json /deploy/web/ || true) && ' + DEPLOY_WEB_GZIP;
+const DEPLOY_WEB_COPY = 'cp -f *.html /deploy/web/ && (cp -f *.png /deploy/web/ || true) && (cp -f *.css /deploy/web/ || true) && (cp -f robots.txt *.xml /deploy/web/ || true) && (cp -f manifest.json service-worker.js /deploy/web/ || true) && (cp -f version.txt patchnotes-archiv.json /deploy/web/ || true) && (if [ -e kepler-english.json ] || [ -L kepler-english.json ]; then [ -f kepler-english.json ] && [ ! -d /deploy/web/kepler-english.json ] && cp -f kepler-english.json /deploy/web/ || exit 1; fi) && ' + DEPLOY_WEB_GZIP;
 // Das VERZEICHNIS steht seit der Selbstheilung (28.08.2026) benannt daneben, statt nur im
 // Befehlsstring: deployAufraeumen() arbeitet darin, und ein aus dem String geparster Pfad waere
 // genau die Sorte Ableitung, die beim naechsten Umbau still danebengreift. Der `command` bleibt

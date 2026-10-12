@@ -24,4 +24,8 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin dda5d5d3c1dbfb5eeef9ecf5c88227014415c1ef
           node tests/check_deploy_language_counterexamples.cjs
+      - name: Native optional WebP graphics deployment
+        run: node tests/test_deploy_webp.js
+      - name: Controlled WebP deployment failures
+        run: node tests/check_deploy_webp_counterexamples.cjs
       - run: node --test tests/test_operations_admin.mjs tests/test_operations_guard.mjs tests/test_operations_releases.mjs tests/test_operations_http.mjs

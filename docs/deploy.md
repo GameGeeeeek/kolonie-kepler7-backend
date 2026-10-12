@@ -147,3 +147,18 @@ Ausführlich mit allen Messungen: `docs/deploy-historie.md`.
    ```
    In diesem Verzeichnis nie `git clean -x`, `git stash -a` oder `git reset --hard`: dort liegen `db.json`,
    `jwt-secret.txt` und die VAPID-Schlüssel.
+
+## Optionale WebP-Grafiken (12.10.2026)
+
+`DEPLOY_WEB_COPY` liefert zusätzlich ausschließlich `kepler-gfx-*.webp` aus. Ein älteres Frontend
+ohne solche Dateien bleibt deploybar. Jeder vorhandene Treffer muss eine nichtleere reguläre Datei
+sein; ein Verzeichnis am Bildziel oder ein tatsächlicher Kopierfehler bricht die geschützte Kette ab.
+Vorhandene reguläre Bilddateien werden ersetzt. Die Original-PNGs bleiben in der bisherigen Kopierliste
+als Fallback erhalten. WebP ist bereits komprimiert und wird nicht in `DEPLOY_WEB_GZIP_DATEIEN` aufgenommen.
+
+`tests/test_deploy_webp.js` führt den tatsächlichen nativen Befehl in isolierten Verzeichnissen aus:
+bytegenaue Kopie und Aktualisierung, mehrere Bilder, alter Frontendbestand, PNG-Fallback, begrenztes
+Dateimuster, keine Bild-gzip-Dateien sowie Kopierfehler, leere Quellen und Verzeichnispfade.
+`tests/check_deploy_webp_counterexamples.cjs` verlangt das vollständige gleiche 26-Prüfnamen-Manifest
+am normalen Befehl und an sieben kontrollierten Quellkopien mit exakt benannten Fehlern. Bestehende
+Katalog-/gzip- und Operations-Prüfungen behalten ihre bisherigen Erwartungen.

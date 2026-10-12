@@ -11282,7 +11282,7 @@ const DEPLOY_WEBHOOK_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
 //     das Original fuer Clients ohne gzip und fuer Content-Length/ETag-Fallbacks).
 //   - Komprimiert wird GENAU das, was zuvor kopiert wurde. Wer eine neue Textdatei in die
 //     Kopierliste aufnimmt, nimmt sie hier mit auf; tests/test_deploy_gzip.js faellt sonst.
-// Binaerdateien (*.png, Font) bleiben draussen: schon komprimiert, gzip macht sie nur groesser.
+// Binaerdateien (*.png, *.webp, Font) bleiben draussen: schon komprimiert, gzip macht sie nur groesser.
 // Subshell, damit das `cd` das Arbeitsverzeichnis der Kette nicht verschleppt; ihr Exit-Code
 // wandert trotzdem nach aussen, die Kette bricht bei einem echten Fehler also weiterhin ab.
 //
@@ -11302,7 +11302,10 @@ const DEPLOY_WEBHOOK_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
 const DEPLOY_WEB_GZIP_DATEIEN = '*.html *.css *.xml robots.txt manifest.json service-worker.js version.txt patchnotes-archiv.json kepler-english.json';
 const DEPLOY_WEB_GZIP = '(cd /deploy/web && for f in ' + DEPLOY_WEB_GZIP_DATEIEN +
   '; do if [ -f "$f" ]; then gzip -9 -kf "$f" || exit 1; fi; done)';
-const DEPLOY_WEB_COPY = 'cp -f *.html /deploy/web/ && (cp -f *.png /deploy/web/ || true) && (cp -f *.css /deploy/web/ || true) && (cp -f robots.txt *.xml /deploy/web/ || true) && (cp -f manifest.json service-worker.js /deploy/web/ || true) && (cp -f version.txt patchnotes-archiv.json /deploy/web/ || true) && (if [ -e kepler-english.json ] || [ -L kepler-english.json ]; then [ -f kepler-english.json ] && [ ! -d /deploy/web/kepler-english.json ] && cp -f kepler-english.json /deploy/web/ || exit 1; fi) && ' + DEPLOY_WEB_GZIP;
+// Optionale WebP-Grafiken (12.10.2026): Alt-Frontends ohne Treffer bleiben deploybar. Jede vorhandene
+// Grafik muss dagegen eine nichtleere Datei sein und erfolgreich kopiert werden. `cp` ersetzt
+// regulaere alte Zieldateien standardmaessig; ein Fehler darf nicht als Erfolg weiterlaufen.
+const DEPLOY_WEB_COPY = 'cp -f *.html /deploy/web/ && (cp -f *.png /deploy/web/ || true) && (cp -f *.css /deploy/web/ || true) && (cp -f robots.txt *.xml /deploy/web/ || true) && (cp -f manifest.json service-worker.js /deploy/web/ || true) && (cp -f version.txt patchnotes-archiv.json /deploy/web/ || true) && (if [ -e kepler-english.json ] || [ -L kepler-english.json ]; then [ -f kepler-english.json ] && [ ! -d /deploy/web/kepler-english.json ] && cp -f kepler-english.json /deploy/web/ || exit 1; fi) && (for f in kepler-gfx-*.webp; do if [ -e "$f" ] || [ -L "$f" ]; then [ -f "$f" ] && [ -s "$f" ] && [ ! -d "/deploy/web/$f" ] && cp -- "$f" "/deploy/web/$f" || exit 1; fi; done) && ' + DEPLOY_WEB_GZIP;
 // Das VERZEICHNIS steht seit der Selbstheilung (28.08.2026) benannt daneben, statt nur im
 // Befehlsstring: deployAufraeumen() arbeitet darin, und ein aus dem String geparster Pfad waere
 // genau die Sorte Ableitung, die beim naechsten Umbau still danebengreift. Der `command` bleibt

@@ -226,6 +226,11 @@ function createReleaseEngine({ roots = { backend: '/app', frontend: '/deploy/kol
     return info;
   };
   const makeDirectory = (directory, mode) => {
+    if (fs.existsSync(directory)) {
+      noLinks(directory);
+      if (!fs.lstatSync(directory).isDirectory()) fail('unsafe_release_file');
+      return;
+    }
     let parent = directory;
     while (!fs.existsSync(parent) && parent !== path.dirname(parent)) parent = path.dirname(parent);
     noLinks(parent);
@@ -473,7 +478,7 @@ function createReleaseEngine({ roots = { backend: '/app', frontend: '/deploy/kol
     const operations = operationsProof(serverSource, liveFiles);
     const important = new Set([currentState.current, currentState.previous]);
     const releases = fs.readdirSync(store).filter(name => ID.test(name)).sort((a, b) => Number(important.has(b)) - Number(important.has(a)) || fs.lstatSync(path.join(store, b)).mtimeMs - fs.lstatSync(path.join(store, a)).mtimeMs).slice(0, 40).map(id => {
-      try { const archive = load(id); const compatible = !!operations && !!archive.operationsProof && operations.engine === engineHash && archive.runtimeProof === runtimeProof &&
+      try { const archive = current?.id === id ? current : load(id); const compatible = !!operations && !!archive.operationsProof && operations.engine === engineHash && archive.runtimeProof === runtimeProof &&
           canonical(archive.proof) === canonical(proof) && canonical(archive.operationsProof) === canonical(operations);
         return { id, commit: archive.backendCommit, version: archive.frontendVersion, current: id === currentState.current,
           compatible, reason: compatible ? null : !operations || !archive.operationsProof ? 'Die private Verwaltung oder gemeinsame Releasesperre fehlt im Quellstand.' :

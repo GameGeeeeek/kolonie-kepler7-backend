@@ -226,6 +226,11 @@ function createReleaseEngine({ roots = { backend: '/app', frontend: '/deploy/kol
     return info;
   };
   const makeDirectory = (directory, mode) => {
+    if (fs.existsSync(directory)) {
+      noLinks(directory);
+      if (!fs.lstatSync(directory).isDirectory()) fail('unsafe_release_file');
+      return;
+    }
     let parent = directory;
     while (!fs.existsSync(parent) && parent !== path.dirname(parent)) parent = path.dirname(parent);
     noLinks(parent);
@@ -382,6 +387,36 @@ function createReleaseEngine({ roots = { backend: '/app', frontend: '/deploy/kol
     // Publication, including the first capture, requires full private readback.
     return load(id);
   };
+  // Historical rows with a different contract can be displayed without reading
+  // payloads. This verifies only the private manifest and identity; it never
+  // establishes source-byte validity or permits restoration.
+  const readManifest = id => {
+    if (!ID.test(id)) fail('invalid_release');
+    const directory = path.join(store, id); noLinks(directory); privateCheck(directory, true);
+    const archive = JSON.parse(boundedRead(path.join(directory, 'manifest.json'), INDEX_BYTES, true));
+    if (!archive || archive.version !== 1 || archive.id !== id || !Array.isArray(archive.files) || archive.files.length > 30000) fail('invalid_release_archive');
+    const validProof = (value, format, fields) => value && typeof value === 'object' && !Array.isArray(value) &&
+      value.format === format && Object.keys(value).sort().join(',') === ['format', ...fields].sort().join(',') &&
+      fields.every(field => typeof value[field] === 'string' && HASH.test(value[field]));
+    if (!validProof(archive.proof, 'kepler-json-users-private-shared-v1', ['loader', 'save', 'auth', 'lookup']) ||
+        archive.operationsProof != null && !validProof(archive.operationsProof, 'kepler-private-operations-v1', ['bridge', 'guard', 'health', 'engine', 'installation', 'deployment', 'announcement'])) fail('invalid_release_archive');
+    let logical = 0, uniqueBytes = 0; const seen = new Set(), unique = new Map();
+    for (const file of archive.files) {
+      if (!file || typeof file !== 'object') fail('invalid_release_archive');
+      const key = file.area + '/' + file.name;
+      if (!Object.hasOwn(roots, file.area) || !safeName(file.name) || excluded(file.name) || seen.has(key) || !HASH.test(file.sha256 ?? '') ||
+          Object.keys(file).sort().join(',') !== 'area,bytes,name,sha256' || !Number.isSafeInteger(file.bytes) || file.bytes < 0 || file.bytes > FILE_BYTES) fail('invalid_release_archive');
+      seen.add(key); logical += file.bytes;
+      if (unique.has(file.sha256) && unique.get(file.sha256) !== file.bytes) fail('invalid_release_archive');
+      if (!unique.has(file.sha256)) { unique.set(file.sha256, file.bytes); uniqueBytes += file.bytes; }
+      if (logical > LOGICAL_BYTES || uniqueBytes > MAX_BYTES) fail('invalid_release_archive');
+    }
+    const identity = { backendCommit: archive.backendCommit, frontendCommit: archive.frontendCommit, runtimeProof: archive.runtimeProof, proof: archive.proof,
+      ...(Object.hasOwn(archive, 'operationsProof') ? { operationsProof: archive.operationsProof } : {}), files: archive.files };
+    if (!HASH.test(archive.runtimeProof ?? '') || !/^[a-f0-9]{40}$/.test(archive.backendCommit ?? '') || !/^[a-f0-9]{40}$/.test(archive.frontendCommit ?? '') ||
+        archive.backendCommit + '-' + sha(canonical(identity)) !== id) fail('invalid_release_archive');
+    return archive;
+  };
   const load = id => {
     if (!ID.test(id)) fail('invalid_release');
     const directory = path.join(store, id); noLinks(directory); privateCheck(directory, true);
@@ -471,10 +506,14 @@ function createReleaseEngine({ roots = { backend: '/app', frontend: '/deploy/kol
       catch { /* Missing or unsafe hooks make switching unavailable. */ }
     }
     const operations = operationsProof(serverSource, liveFiles);
+    const compatibleMetadata = archive => !!operations && !!archive.operationsProof && operations.engine === engineHash && archive.runtimeProof === runtimeProof &&
+      canonical(archive.proof) === canonical(proof) && canonical(archive.operationsProof) === canonical(operations);
     const important = new Set([currentState.current, currentState.previous]);
     const releases = fs.readdirSync(store).filter(name => ID.test(name)).sort((a, b) => Number(important.has(b)) - Number(important.has(a)) || fs.lstatSync(path.join(store, b)).mtimeMs - fs.lstatSync(path.join(store, a)).mtimeMs).slice(0, 40).map(id => {
-      try { const archive = load(id); const compatible = !!operations && !!archive.operationsProof && operations.engine === engineHash && archive.runtimeProof === runtimeProof &&
-          canonical(archive.proof) === canonical(proof) && canonical(archive.operationsProof) === canonical(operations);
+      try {
+        let archive = current?.id === id ? current : readManifest(id);
+        if (archive !== current && compatibleMetadata(archive)) archive = load(id);
+        const compatible = compatibleMetadata(archive);
         return { id, commit: archive.backendCommit, version: archive.frontendVersion, current: id === currentState.current,
           compatible, reason: compatible ? null : !operations || !archive.operationsProof ? 'Die private Verwaltung oder gemeinsame Releasesperre fehlt im Quellstand.' :
             'Der Daten-, Sitzungs- oder Verwaltungsvertrag unterscheidet sich.', createdAt: archive.createdAt };

@@ -32,7 +32,7 @@ jobs:
       - name: Bounded content addressed archives and protected local upgrade
         run: |
           git fetch --no-tags --depth=1 origin f5d26daecce85d6a85fde3baa8a4d4c8d81ada52
-          node --test tests/test_operations_archive_blobs.mjs tests/test_operations_archive_upgrade.mjs
+          node --test tests/test_operations_archive_blobs.mjs tests/test_operations_archive_upgrade.mjs tests/test_operations_archive_readonly.mjs
       - name: Real legacy archive size failure and bounded candidate heap
         env:
           GG_RELEASE_EVIDENCE_DIR: ${{ runner.temp }}/kepler-release-archive-evidence

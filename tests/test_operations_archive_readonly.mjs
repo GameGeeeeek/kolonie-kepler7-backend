@@ -50,8 +50,9 @@ test('complete v2 and warmed legacy inventories work with actual filesystem writ
       fs.writeFileSync(path.join(f.store, first, 'source.json.gz'), legacyBytes, { mode: 0o600 });
     }
     const before = snapshot(f.base), candidate = engineFile();
-    const flags = ['--permission', '--allow-child-process', '--allow-fs-read=' + f.base, '--allow-fs-read=' + path.dirname(candidate)];
-    const nodeOptions = flags.map(flag => flag.startsWith('--allow-fs-read=') ? '--allow-fs-read=' + JSON.stringify(flag.slice(16)) : flag).join(' ');
+    // noLinks checks ancestor metadata as well; forbid writes, not those reads.
+    const flags = ['--permission', '--allow-child-process', '--allow-fs-read=*'];
+    const nodeOptions = flags.join(' ');
     const result = spawnSync(process.execPath, [...flags, '-e', observer,
       JSON.stringify({ engine: candidate, roots: f.roots, store: f.store, dbFile: f.dbFile })],
     { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024, env: { ...process.env, NODE_OPTIONS: nodeOptions } });

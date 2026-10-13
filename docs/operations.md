@@ -149,7 +149,8 @@ node tests/check_operations_archive_blob_counterexamples.cjs
 
 These checks include complete format-2/legacy validation, crash/receipt/pair
 recovery and a controlled old-engine size failure. The bounded-heap comparison
-sets both the parent CLI flag and inherited `NODE_OPTIONS` so the real legacy
-index worker receives the same heap limit. It does not claim a measured total
+sets the 128 MiB old-space and 8 MiB semi-space flags in both the parent CLI
+and inherited `NODE_OPTIONS` so the real legacy index worker receives the same
+limits. The measured total V8 heap must stay below 160 MiB. It does not claim a measured total
 process RSS. Windows skips of POSIX checks are not a successful Linux validation;
 deployment still requires the actual completed Linux CI results and raw logs.

@@ -29,7 +29,7 @@ else{
  const invoke=(name,file,heap)=>{
   // NODE_OPTIONS is inherited by the engine's real streaming-index worker;
   // the CLI option alone would constrain only this parent fixture process.
-  const argv=['--max-old-space-size='+heap,child],env={...process.env,GG_RELEASE_ENGINE:file,NODE_OPTIONS:[process.env.NODE_OPTIONS,'--max-old-space-size='+heap].filter(Boolean).join(' ')};
+  const argv=['--max-old-space-size='+heap,'--max-semi-space-size=8',child],env={...process.env,GG_RELEASE_ENGINE:file,NODE_OPTIONS:[process.env.NODE_OPTIONS,'--max-old-space-size='+heap,'--max-semi-space-size=8'].filter(Boolean).join(' ')};
   const started=Date.now(),result=cp.spawnSync(process.execPath,argv,{cwd:root,env,encoding:'utf8',timeout:300000,maxBuffer:32*1024*1024});
   fs.writeFileSync(path.join(evidence,name+'.stdout.log'),result.stdout||'',{mode:0o600});fs.writeFileSync(path.join(evidence,name+'.stderr.log'),result.stderr||'',{mode:0o600});
   const records=(result.stdout||'').split(/\r?\n/).filter(line=>line.startsWith('ARCHIVE_RECORD ')).map(line=>JSON.parse(line.slice(15)));

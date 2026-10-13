@@ -101,8 +101,27 @@ function fixture(t) {
   };
   select('a');
   const engine = createReleaseEngine({ roots, store, dbFile, clock: () => now, run });
-  const archive = id => JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(store, id, 'source.json.gz'))));
-  const writeArchive = (id, value) => fs.writeFileSync(path.join(store, id, 'source.json.gz'), zlib.gzipSync(Buffer.from(JSON.stringify(value))), { mode: 0o600 });
+  const rawArchive = id => JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(store, id, 'source.json.gz'))));
+  // Existing byte/proof assertions keep their legacy data contract. Only this
+  // fixture reads one real v2 blob at a time; the stored index stays metadata-only.
+  const archive = id => {
+    const value = rawArchive(id);
+    return value.version === 2 ? { ...value, files: value.files.map(file => ({ ...file,
+      data: zlib.gunzipSync(fs.readFileSync(path.join(store, 'blobs', file.sha256 + '.gz'))).toString('base64') })) } : value;
+  };
+  const writeArchive = (id, value) => {
+    if (value.version !== 2) {
+      fs.writeFileSync(path.join(store, id, 'source.json.gz'), zlib.gzipSync(Buffer.from(JSON.stringify(value))), { mode: 0o600 });
+      return;
+    }
+    // The original content/forged-proof mutations now hit actual blob bytes,
+    // rather than adding an unused inline data field to a v2 metadata entry.
+    for (const file of value.files) fs.writeFileSync(path.join(store, 'blobs', file.sha256 + '.gz'),
+      zlib.gzipSync(Buffer.from(file.data, 'base64')), { mode: 0o600 });
+    const files = value.files.map(({ data: _data, ...file }) => file);
+    fs.writeFileSync(path.join(store, id, 'source.json.gz'), zlib.gzipSync(Buffer.from(JSON.stringify({ ...value, files }))), { mode: 0o600 });
+    fs.writeFileSync(path.join(store, id, 'manifest.json'), JSON.stringify({ ...value, version:1, files }), { mode:0o600 });
+  };
   const state = () => JSON.parse(fs.readFileSync(path.join(store, 'state.json')));
   const twoReleases = () => { const a = engine.initialize().id; now += 1000; select('b'); const b = engine.initialize().id; return { a, b }; };
   return { base, roots, store, dbFile, database, versions, calls, run, engine, select, archive, writeArchive, state, twoReleases,

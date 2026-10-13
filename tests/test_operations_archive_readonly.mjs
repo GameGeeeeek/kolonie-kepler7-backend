@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const { fixture, engineFile, sha } = require('./lib/release-archive-fixture.cjs');
@@ -20,6 +21,18 @@ const snapshot = root => {
     }
   };
   visit(root); return rows;
+};
+const observeReads = (targets, callback) => {
+  const watched = new Set(targets), touched = [], originals = new Map();
+  for (const name of ['existsSync', 'lstatSync', 'statSync', 'openSync', 'readFileSync']) {
+    const original = fs[name]; originals.set(name, original);
+    fs[name] = function(...args) {
+      if (watched.has(String(args[0]))) touched.push({ name, file: String(args[0]) });
+      return Reflect.apply(original, this, args);
+    };
+  }
+  try { return { value: callback(), touched }; }
+  finally { for (const [name, original] of originals) fs[name] = original; }
 };
 
 // The actual Node permission model refuses filesystem writes in the parent and
@@ -72,4 +85,47 @@ test('complete v2 and warmed legacy inventories work with actual filesystem writ
     if (legacy) assert.ok(fs.readFileSync(path.join(f.store, first, 'source.json.gz')).equals(legacyBytes), 'original v1 gzip bytes remain unchanged');
     f.assertDatabase();
   });
+});
+
+test('an incompatible historical manifest displays its version without touching payloads or enabling restore', posix, t => {
+  const f = fixture(t), candidate = engineFile();
+  const oldEngine = execFileSync('git', ['show', 'f5d26daecce85d6a85fde3baa8a4d4c8d81ada52:operations-release-engine.cjs'],
+    { cwd: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), maxBuffer: 2 * 1024 * 1024 });
+  assert.notEqual(sha(oldEngine), sha(fs.readFileSync(candidate)), 'actual historical engine has a different operations contract');
+  f.versions.a.backend['operations-release-engine.cjs'] = oldEngine; f.select('a');
+  const historical = f.engine.initialize().id;
+  f.select('b'); const current = f.engine.initialize().id;
+  const index = path.join(f.store, historical, 'source.json.gz'), oldBlob = path.join(f.store, 'blobs', sha(oldEngine) + '.gz');
+  const indexBytes = fs.readFileSync(index), blobBytes = fs.readFileSync(oldBlob);
+  fs.unlinkSync(index); fs.unlinkSync(oldBlob);
+  const before = snapshot(f.base), actual = observeReads([index, oldBlob], () => f.engine.inventory());
+  const row = actual.value.releases.find(row => row.id === historical);
+  assert.equal(row.version, 'test-a'); assert.equal(row.compatible, false); assert.equal(row.current, false);
+  assert.match(row.reason, /vertrag unterscheidet/);
+  assert.equal(actual.value.current.id, current); assert.equal(actual.value.releaseSwitch, true);
+  assert.deepEqual(actual.touched, [], 'no index, blob or even payload-path stat is required for a contract mismatch');
+  assert.deepEqual(snapshot(f.base), before, 'the metadata-only inventory writes no files');
+  fs.writeFileSync(index, indexBytes, { mode: 0o600 }); fs.writeFileSync(oldBlob, blobBytes, { mode: 0o600 });
+  assert.throws(() => f.engine.prepare({ requestId: '09f2d00d-9b25-4d6c-9ba5-dda976e9dc35', target: historical, mode: 'deploy' }),
+    error => error.code === 'release_incompatible');
+  assert.equal(fs.existsSync(path.join(f.store, 'backups')), false, 'incompatible historical source never starts a DB backup');
+  assert.equal(fs.existsSync(path.join(f.store, 'deployment.lock')), false);
+  assert.equal(f.state().current, current); assert.equal(f.state().phase, 'complete'); f.assertDatabase();
+});
+
+test('potentially compatible historical metadata still requires actual index and blob verification', posix, t => {
+  const f = fixture(t), historical = f.engine.initialize().id;
+  f.select('b'); const current = f.engine.initialize().id;
+  const archive = f.raw(historical), server = archive.files.find(file => file.area === 'backend' && file.name === 'server.js');
+  const index = path.join(f.store, historical, 'source.json.gz'), blob = path.join(f.store, 'blobs', server.sha256 + '.gz');
+  fs.writeFileSync(blob, Buffer.from('damaged actual payload'), { mode: 0o600 });
+  const before = snapshot(f.base), actual = observeReads([index, blob], () => f.engine.inventory());
+  const row = actual.value.releases.find(row => row.id === historical);
+  assert.equal(row.compatible, false); assert.equal(row.version, null); assert.match(row.reason, /nicht verifiziert/);
+  assert.ok(actual.touched.some(call => call.name === 'openSync' && call.file === index), 'the real historical index was read');
+  assert.ok(actual.touched.some(call => call.name === 'openSync' && call.file === blob), 'the real historical blob was read');
+  assert.equal(actual.value.current.id, current); assert.equal(actual.value.releaseSwitch, true);
+  assert.deepEqual(snapshot(f.base), before); f.assertDatabase();
+  assert.throws(() => f.engine.prepare({ requestId: '91f7b87d-a6ef-4eaa-a550-367573db4bf8', target: historical, mode: 'deploy' }));
+  assert.equal(fs.existsSync(path.join(f.store, 'backups')), false); assert.equal(fs.existsSync(path.join(f.store, 'deployment.lock')), false);
 });

@@ -95,14 +95,16 @@ untracked operational files must be preserved separately by the operator before
 the bootstrap, which requires clean repositories. Quarantine uses metadata and
 same-filesystem moves; it does not inspect file contents or delete them.
 
-Run the stages in order:
+The old checkout does not yet contain the new helper. Stage the approved helper
+as `/data/operations-releases/archive-upgrade/upgrade.cjs` before running these
+commands inside the fixed backend container. Run the stages in order:
 
-1. `node tools/upgrade-release-archive.cjs prepare` preserves the old engine,
+1. `node /data/operations-releases/archive-upgrade/upgrade.cjs prepare` preserves the old engine,
    contract and state, and fsyncs a preparation intent with its next UUID. It
    marks only the identified failed old transaction unconfirmed through its
    native API, flushes the authoritative process and uses format 2 to archive
    the actual current source plus a fresh verified private database backup.
-2. `node tools/upgrade-release-archive.cjs apply` requires that same reservation,
+2. `node /data/operations-releases/archive-upgrade/upgrade.cjs apply` requires that same reservation,
    the unchanged source pins and the approved limited diff. It fast-forwards
    the backend and replaces the retained engine and runtime contract with
    separate fsynced file renames and readback checks. The old pair stays private
@@ -111,7 +113,7 @@ Run the stages in order:
    Pin and update the installed GG helper's adjacent engine bytes separately;
    its own hash check must agree with the retained engine. Preserve that
    mirror's old bytes for recovery. Then run
-   `node tools/upgrade-release-archive.cjs finalize`. It independently verifies
+   `node /data/operations-releases/archive-upgrade/upgrade.cjs finalize`. It independently verifies
    running commit, checkout, server blob, all three health checks and zero tick
    errors before the final capture and release of its own reservation. Check
    the private bridge, inventory and public deployment proof afterwards.
@@ -119,10 +121,10 @@ Run the stages in order:
 Preparation, final capture and rollback have narrow crash-replay checks tied to
 the receipt, expected UUID and real state. They do not adopt a foreign lock or
 fabricate a completed state. If applying the source or pair fails, run
-`node tools/upgrade-release-archive.cjs rollback`, restore the separately
+`node /data/operations-releases/archive-upgrade/upgrade.cjs rollback`, restore the separately
 preserved GG mirror, and restart the fixed container. Only after verified old
 process health run
-`node tools/upgrade-release-archive.cjs finish-rollback-healthy`.
+`node /data/operations-releases/archive-upgrade/upgrade.cjs finish-rollback-healthy`.
 The source and old pair are restored; the database is never restored. Because
 the old retained engine cannot consume the new checkpoint format, this result
 is honestly `external-unconfirmed` with `archiveCompatible:false`, rather than
